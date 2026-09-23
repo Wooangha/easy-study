@@ -14,9 +14,10 @@ import { initialProviderState } from '../server/context.ts';
 import { startServer } from '../server/index.ts';
 import type { RunningServer } from '../server/index.ts';
 import { createCourse, updateCourse } from '../server/courses.ts';
-import type { BuildTurnInput, ProviderState } from '../server/internal-types.ts';
+import type { BuildTurnInput, BuildTurnOutput, ProviderState } from '../server/internal-types.ts';
 import { docPaths, slideFileName, textFileName } from '../server/library.ts';
 import type { StoredDocMeta } from '../server/library.ts';
+import { ProviderError } from '../server/providers/types.ts';
 import type { Part, Provider, ProviderRunInput, ProviderRunResult } from '../server/providers/types.ts';
 import { createSession, getSession, saveSession } from '../server/sessions.ts';
 
@@ -525,6 +526,252 @@ describe('runTurn', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Recovery: a lost or overflowing provider conversation (DESIGN §14)
+// ---------------------------------------------------------------------------
+
+describe('runTurn recovery', () => {
+  const DOC = 'recovery-deck-eee555';
+  before(() => makeReadyDoc(DOC));
+
+  /**
+   * A stand-in for context.buildTurn that follows the contract closely enough to test the
+   * orchestrator alone: a new conversation when unprimed or forced, else continue `resume`.
+   */
+  function stubBuildTurn(seen: BuildTurnInput[]) {
+    return (input: BuildTurnInput): BuildTurnOutput => {
+      seen.push(structuredClone({ ...input, doc: undefined }) as unknown as BuildTurnInput);
+      const state = input.session.providerState;
+      const forced = input.forceNewConversation;
+      const fresh = forced !== undefined || !state.primed || state.resume === null;
+      const prior = input.session.messages.filter((m) => m.role === 'user' && m.kind === 'question').map((m) => m.text);
+      return {
+        systemPrompt: 'SYSTEM',
+        parts: [
+          { type: 'text', text: fresh ? `PRIMING${forced ? ` RECAP[${prior.join('|')}]` : ''}` : 'CONTINUE' },
+          { type: 'text', text: `QUESTION ${input.question}` },
+        ],
+        resume: fresh ? null : state.resume,
+        history: fresh ? [] : state.history,
+        context: {
+          primed: fresh,
+          rollover: false,
+          attachedSlides: fresh ? [input.slide] : [],
+          reusedSlides: fresh ? [] : [input.slide],
+          overviewImages: fresh ? 3 : 0,
+          ...(forced ? { recoveredFrom: forced } : {}),
+        },
+        readDirs: [],
+        nextState: {
+          resume: null,
+          primed: true,
+          imagesSent: fresh ? 4 : state.imagesSent,
+          recentSlides: [input.slide],
+          generation: fresh ? state.generation + 1 : state.generation,
+          history: fresh ? [] : state.history,
+        },
+      };
+    };
+  }
+
+  /** Answers like streamingAnswer, but continuing a conversation whose handle is in `dead` fails. */
+  function expiringProvider(id: ProviderId, dead: Set<string>, kind: 'resume_invalid' | 'context_overflow' = 'resume_invalid') {
+    return fakeProvider(id, async (input, call) => {
+      const handle = input.resume === null ? null : (input.resume.cliSessionId ?? '');
+      if (handle !== null && (dead.has(handle) || dead.has('*'))) {
+        throw new ProviderError(kind === 'resume_invalid' ? `No conversation found with session ID ${handle}` : 'prompt is too long', kind);
+      }
+      return streamingAnswer((n) => `answer ${n}`)(input, call);
+    });
+  }
+
+  test('a lost conversation is re-primed with a recap and the turn retried once', async () => {
+    const dead = new Set<string>();
+    const provider = expiringProvider('claude-code', dead);
+    const seen: BuildTurnInput[] = [];
+    const deps = depsFor(provider, { buildTurn: stubBuildTurn(seen) });
+    const session = await createSession(DOC, { provider: 'claude-code', model: '' });
+
+    await turn(deps, { docId: DOC, sessionId: session.id, kind: 'prime', slide: 1 });
+    await turn(deps, { docId: DOC, sessionId: session.id, kind: 'question', text: 'first question', slide: 2 });
+    assert.deepEqual((await getSession(DOC, session.id))?.providerState.resume, { cliSessionId: 'cli-2' });
+
+    dead.add('cli-2'); // e.g. Claude Code deleted the transcript after 30 days
+    const { events, assistant } = await turn(deps, { docId: DOC, sessionId: session.id, kind: 'question', text: 'after a month', slide: 3 });
+    assert.deepEqual(
+      events.map((e) => e.type),
+      ['start', 'status', 'delta', 'status', 'delta', 'done'],
+    );
+    assert.deepEqual(events[1], { type: 'status', text: '이전 대화를 이어갈 수 없어 새 대화로 다시 시작해요' });
+    const start = events[0] as Extract<StreamEvent, { type: 'start' }>;
+    assert.equal(start.userMessage.context?.primed, false, '`start` shows the turn as first built');
+
+    // One failed call, one retry in a brand-new conversation.
+    assert.equal(provider.calls.length, 4);
+    assert.deepEqual(provider.calls[2].resume, { cliSessionId: 'cli-2' });
+    assert.equal(provider.calls[3].resume, null);
+    assert.equal(textOf(provider.calls[3].parts), 'PRIMING RECAP[first question]\nQUESTION after a month');
+    const retryInput = seen.at(-1);
+    assert.equal(retryInput?.forceNewConversation, 'resume_invalid');
+    assert.equal(retryInput?.session.messages.length, 4, 'the session before this turn (no new question in the recap)');
+    assert.equal(seen.at(-2)?.forceNewConversation, undefined);
+
+    assert.equal(assistant.status, 'complete');
+    assert.equal(assistant.text, 'answer 4', 'only the retried answer');
+    assert.equal(assistant.error, undefined);
+
+    // `done` carries the messages, with the user message's context replaced by the retry's.
+    const done = events.at(-1) as Extract<StreamEvent, { type: 'done' }>;
+    const doneMessages = (done.session as Session).messages;
+    assert.equal(doneMessages.length, 6);
+    assert.equal(done.session.messageCount, 6);
+    const recoveredContext = { primed: true, rollover: false, attachedSlides: [3], reusedSlides: [], overviewImages: 3, recoveredFrom: 'resume_invalid' };
+    assert.deepEqual(doneMessages[4].context, recoveredContext);
+    assert.deepEqual(doneMessages[5], done.assistantMessage);
+
+    const stored = await getSession(DOC, session.id);
+    assert.deepEqual(stored?.messages[4].context, recoveredContext);
+    assert.deepEqual(stored?.providerState.resume, { cliSessionId: 'cli-4' });
+    assert.equal(stored?.providerState.generation, 2, 'a second provider conversation');
+
+    // The next turn simply continues the new conversation.
+    await turn(deps, { docId: DOC, sessionId: session.id, kind: 'question', text: 'and then?', slide: 3 });
+    assert.deepEqual(provider.calls[4].resume, { cliSessionId: 'cli-4' });
+    assert.equal(provider.calls.length, 5);
+  });
+
+  test('context overflow of a stateless conversation starts a new history', async () => {
+    const dead = new Set<string>();
+    const provider = expiringProvider('anthropic-api', dead, 'context_overflow');
+    const deps = depsFor(provider, { buildTurn: stubBuildTurn([]) });
+    const session = await createSession(DOC, { provider: 'anthropic-api', model: '' });
+    await turn(deps, { docId: DOC, sessionId: session.id, kind: 'prime', slide: 1 });
+    await turn(deps, { docId: DOC, sessionId: session.id, kind: 'question', text: 'q1', slide: 1 });
+    assert.equal((await getSession(DOC, session.id))?.providerState.history.length, 4);
+
+    dead.add('*'); // every continued request is now too large (HTTP 413)
+    const { events, assistant } = await turn(deps, { docId: DOC, sessionId: session.id, kind: 'question', text: 'q2', slide: 1 });
+    assert.ok(events.some((e) => e.type === 'status' && e.text === '대화가 너무 길어져 새 대화로 이어가요'));
+    assert.equal(assistant.status, 'complete');
+    assert.equal(provider.calls.at(-1)?.resume, null);
+    assert.deepEqual(provider.calls.at(-1)?.history, []);
+    const stored = await getSession(DOC, session.id);
+    assert.equal(stored?.messages.at(-2)?.context?.recoveredFrom, 'context_overflow');
+    assert.deepEqual(
+      stored?.providerState.history.map((h) => h.role),
+      ['user', 'assistant'],
+      'the history restarts with the retried turn',
+    );
+    assert.equal(textOf(stored?.providerState.history[0].parts ?? []), 'PRIMING RECAP[q1]\nQUESTION q2');
+  });
+
+  test('no retry for other errors, fresh conversations, streamed text or aborts; a failing retry ends the turn', async () => {
+    const seen: BuildTurnInput[] = [];
+    let script: Script = streamingAnswer(() => 'ok');
+    const provider = fakeProvider('claude-code', (input, call) => script(input, call));
+    const deps = depsFor(provider, { buildTurn: stubBuildTurn(seen) });
+    const session = await createSession(DOC, { provider: 'claude-code', model: '' });
+    const ask = async (text: string) => turn(deps, { docId: DOC, sessionId: session.id, kind: 'question', text, slide: 1 });
+    const stateNow = async () => structuredClone((await getSession(DOC, session.id))?.providerState);
+
+    // A failure while starting a conversation: a new one would be identical, so no retry.
+    script = async () => {
+      throw new ProviderError('No conversation found', 'resume_invalid');
+    };
+    let result = await ask('first');
+    assert.equal(result.assistant.status, 'error');
+    assert.equal(provider.calls.length, 1);
+    assert.ok(!result.events.some((e) => e.type === 'status'));
+
+    script = streamingAnswer(() => 'primed');
+    await ask('prime it');
+    const primedState = await stateNow();
+    assert.equal(provider.calls.length, 2);
+
+    // Other kinds are not recovered.
+    script = async () => {
+      throw new ProviderError('로그인이 필요합니다', 'auth');
+    };
+    result = await ask('auth');
+    assert.equal(result.assistant.error, '로그인이 필요합니다');
+    assert.equal(provider.calls.length, 3);
+
+    // Text already shown cannot be taken back: the partial answer stays, no retry.
+    script = async (input) => {
+      input.onDelta('partial ');
+      throw new ProviderError('prompt is too long', 'context_overflow');
+    };
+    result = await ask('streamed');
+    assert.equal(result.assistant.status, 'error');
+    assert.equal(result.assistant.text, 'partial ');
+    assert.equal(provider.calls.length, 4);
+
+    // Aborted: never retried.
+    script = (input) =>
+      new Promise((_resolve, reject) => {
+        input.signal.addEventListener('abort', () => reject(new ProviderError('No conversation found', 'resume_invalid')), { once: true });
+      });
+    const events: StreamEvent[] = [];
+    const running = runTurn({ docId: DOC, sessionId: session.id, kind: 'question', text: 'abort me', slide: 1, onEvent: (e) => events.push(e) }, deps);
+    await waitFor(() => provider.calls.length === 5);
+    abortTurn(DOC, session.id);
+    assert.equal((await running).assistantMessage.status, 'aborted');
+    assert.equal(provider.calls.length, 5);
+
+    // The retry fails too: one retry only, the turn fails with the retry's error, state not advanced.
+    script = async (input) => {
+      throw input.resume ? new ProviderError('No conversation found', 'resume_invalid') : new Error('network down');
+    };
+    result = await ask('twice');
+    assert.equal(provider.calls.length, 7);
+    assert.equal(result.assistant.status, 'error');
+    assert.equal(result.assistant.error, 'network down');
+    assert.equal(result.assistant.text, '');
+    assert.deepEqual(await stateNow(), primedState);
+    const stored = await getSession(DOC, session.id);
+    assert.equal(stored?.messages.at(-2)?.context?.recoveredFrom, 'resume_invalid', 'the context says what was tried');
+
+    // If the new conversation cannot even be built, the turn fails with the provider's error.
+    const build = stubBuildTurn([]);
+    const brokenDeps = depsFor(provider, {
+      buildTurn: (input: BuildTurnInput) => {
+        if (input.forceNewConversation) throw new Error('context bug');
+        return build(input);
+      },
+    });
+    script = async () => {
+      throw new ProviderError('No conversation found', 'resume_invalid');
+    };
+    const broken = await turn(brokenDeps, { docId: DOC, sessionId: session.id, kind: 'question', text: 'rebuild fails', slide: 1 });
+    assert.equal(broken.assistant.status, 'error');
+    assert.equal(broken.assistant.error, 'No conversation found');
+    assert.ok(!broken.events.some((e) => e.type === 'status'));
+    assert.equal(provider.calls.length, 8);
+  });
+
+  test('with the real context builder the retry re-primes the deck and recaps the earlier Q&A', async () => {
+    const dead = new Set<string>();
+    const provider = expiringProvider('claude-code', dead);
+    const deps = depsFor(provider);
+    const session = await createSession(DOC, { provider: 'claude-code', model: '' });
+    await turn(deps, { docId: DOC, sessionId: session.id, kind: 'prime', slide: 1 });
+    await turn(deps, { docId: DOC, sessionId: session.id, kind: 'question', text: 'What is on slide 4?', slide: 4 });
+
+    dead.add('cli-2');
+    const { assistant } = await turn(deps, { docId: DOC, sessionId: session.id, kind: 'question', text: 'Explain slide 6', slide: 6 });
+    assert.equal(assistant.status, 'complete');
+    const retry = provider.calls[3];
+    assert.equal(retry.resume, null);
+    const text = textOf(retry.parts);
+    assert.match(text, /Slide 9 text/, 'the whole deck is fed again');
+    assert.match(text, /What is on slide 4\?/, 'the earlier Q&A is recapped');
+    assert.match(text, /Explain slide 6/);
+    const stored = await getSession(DOC, session.id);
+    assert.equal(stored?.messages.at(-2)?.context?.recoveredFrom, 'resume_invalid');
+    assert.equal(stored?.messages.at(-2)?.context?.primed, true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // HTTP smoke test
 // ---------------------------------------------------------------------------
 
@@ -802,6 +1049,47 @@ describe('HTTP server', () => {
       req.end();
     });
     assert.equal(status, 403);
+  });
+
+  test('a document cannot be deleted while one of its sessions is answering', async () => {
+    const doomed = 'doomed-deck-fff666';
+    await makeReadyDoc(doomed, 'ready', 'Doomed');
+    const session = (await (await postJson(`/docs/${doomed}/sessions`, { provider: 'claude-code' })).json()) as Session;
+    const running = await postJson(`/docs/${doomed}/sessions/${session.id}/messages`, { text: 'BLOCK', slide: 1 });
+    const reader = running.body!.getReader();
+    const decoder = new TextDecoder();
+    let raw = '';
+    while (!raw.includes('event: delta')) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      raw += decoder.decode(value, { stream: true });
+    }
+    const refused = await expectError(await api(`/docs/${doomed}`, { method: 'DELETE' }), 409);
+    assert.match(refused, /답변을 생성하는 중/);
+    assert.equal((await api(`/docs/${doomed}`)).status, 200);
+
+    assert.equal((await api(`/docs/${doomed}/sessions/${session.id}/abort`, { method: 'POST' })).status, 204);
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      raw += decoder.decode(value, { stream: true });
+    }
+    // `done` carries the session with its messages.
+    const done = parseSse(raw).at(-1)?.data as Extract<StreamEvent, { type: 'done' }>;
+    assert.deepEqual(
+      (done.session as Session).messages.map((m) => [m.role, m.status]),
+      [
+        ['user', 'complete'],
+        ['assistant', 'aborted'],
+      ],
+    );
+
+    assert.equal((await api(`/docs/${doomed}`, { method: 'DELETE' })).status, 204);
+    await expectError(await api(`/docs/${doomed}`), 404);
+    await expectError(await api(`/docs/${doomed}/sessions/${session.id}`), 404);
+    await expectError(await api(`/docs/${doomed}`, { method: 'DELETE' }), 404);
+    await expectError(await api('/docs/BAD%20ID', { method: 'DELETE' }), 404);
+    await assert.rejects(fs.access(docPaths(doomed).dir));
   });
 
   test('without web/dist the SPA routes explain how to build', async () => {

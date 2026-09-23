@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DocMeta } from '../../../shared/types.ts';
-import { errorMessage, getDoc, listDocs, uploadPdf } from '../api.ts';
+import { ApiError, deleteDoc, errorMessage, getDoc, listDocs, retryDoc, uploadPdf } from '../api.ts';
 import { toast } from '../lib/toast.ts';
 
 export interface UploadItem {
@@ -111,10 +111,41 @@ export function useDocs() {
     [],
   );
 
+  /** Re-run the conversion of a failed document. Resolves true when it restarted (the list then polls it). */
+  const retry = useCallback(async (docId: string): Promise<boolean> => {
+    try {
+      const doc = await retryDoc(docId);
+      setDocs((prev) => prev && prev.map((d) => (d.id === docId ? doc : d)));
+      return true;
+    } catch (e) {
+      toast(`다시 변환하지 못했어요: ${errorMessage(e)}`, 'error');
+      void refresh();
+      return false;
+    }
+  }, [refresh]);
+
+  /** Delete a document (after the caller confirmed). Resolves true when it is gone. */
+  const remove = useCallback(async (docId: string): Promise<boolean> => {
+    try {
+      await deleteDoc(docId);
+    } catch (e) {
+      const busy = e instanceof ApiError && e.status === 409;
+      toast(
+        busy
+          ? '변환·정리본 만들기·답변이 진행 중이라 지금은 삭제할 수 없어요. 끝난 뒤에 다시 시도해 주세요.'
+          : `삭제하지 못했어요: ${errorMessage(e)}`,
+        'error',
+      );
+      return false;
+    }
+    setDocs((prev) => prev && prev.filter((d) => d.id !== docId));
+    return true;
+  }, []);
+
   /** Locally patch one document (e.g. its digest status) without waiting for the next refresh. */
   const patchDoc = useCallback((docId: string, patch: Partial<DocMeta>) => {
     setDocs((prev) => prev && prev.map((d) => (d.id === docId ? { ...d, ...patch } : d)));
   }, []);
 
-  return { docs, loadError, uploads, refresh, upload, patchDoc };
+  return { docs, loadError, uploads, refresh, upload, patchDoc, retry, remove };
 }

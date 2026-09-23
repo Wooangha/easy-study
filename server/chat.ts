@@ -7,15 +7,20 @@
 // Errors thrown *before* `start` is emitted are HttpErrors (the HTTP layer answers them with a JSON
 // error instead of opening the SSE stream). After `start`, provider failures never throw: they end
 // the turn with an assistant message in status 'error' / 'aborted'.
+//
+// Recovery (DESIGN §14): when the provider lost the conversation ('resume_invalid': expired CLI
+// session, unknown thread or previous_response_id) or it became too large ('context_overflow'), the
+// turn is rebuilt as a new conversation (re-prime + recap) and retried once within the same request.
 import { randomUUID } from 'node:crypto';
-import type { ChatMessage, ProviderId, SessionSummary, StreamEvent } from '../shared/types.ts';
+import type { ChatMessage, ProviderId, Session, StreamEvent } from '../shared/types.ts';
 import { HttpError } from './config.ts';
 import { appendHistory, buildTurn, defaultContextSettings } from './context.ts';
 import type { BuildTurnInput, BuildTurnOutput, ContextSettings, ProviderState, SessionRecord } from './internal-types.ts';
 import { loadDocAssets } from './library.ts';
 import { getProvider, providerInfos } from './providers/index.ts';
-import type { Part, Provider } from './providers/types.ts';
-import { getSession, repairInterruptedMessages, saveSession, toSummary, writeNotes } from './sessions.ts';
+import { providerErrorKind } from './providers/types.ts';
+import type { Part, Provider, ProviderRunResult } from './providers/types.ts';
+import { getSession, repairInterruptedMessages, saveSession, toSession, writeNotes } from './sessions.ts';
 
 const MAX_QUESTION_CHARS = 20_000;
 /** Neighbor slides fed before/after the focused one are clamped to 0..MAX_NEIGHBORS (DESIGN §10). */
@@ -24,6 +29,15 @@ const FALLBACK_NEIGHBORS = 1;
 
 /** Stateless providers get the conversation history re-sent every turn (see appendHistory). */
 const STATELESS_PROVIDERS: ReadonlySet<ProviderId> = new Set<ProviderId>(['anthropic-api']);
+
+/** Provider failures that a new provider conversation can fix (BuildTurnInput.forceNewConversation). */
+type RecoverableKind = NonNullable<BuildTurnInput['forceNewConversation']>;
+
+/** Status line shown while a turn is retried in a new provider conversation. */
+const RECOVERY_STATUS: Readonly<Record<RecoverableKind, string>> = {
+  resume_invalid: '이전 대화를 이어갈 수 없어 새 대화로 다시 시작해요',
+  context_overflow: '대화가 너무 길어져 새 대화로 이어가요',
+};
 
 export interface ProviderCheck {
   available: boolean;
@@ -75,7 +89,8 @@ export interface TurnRequest {
 
 export interface TurnResult {
   assistantMessage: ChatMessage;
-  session: SessionSummary;
+  /** The session after the turn, with its messages (the user message may carry a replaced context). */
+  session: Session;
 }
 
 interface RunningTurn {
@@ -105,6 +120,13 @@ export function abortAllTurns(): number {
 
 export function isTurnRunning(docId: string, sessionId: string): boolean {
   return runningTurns.has(turnKey(docId, sessionId));
+}
+
+/** True while a turn of any session of the document is running. */
+export function hasRunningTurns(docId: string): boolean {
+  const prefix = turnKey(docId, '');
+  for (const key of runningTurns.keys()) if (key.startsWith(prefix)) return true;
+  return false;
 }
 
 function withTimeout(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
@@ -215,7 +237,7 @@ async function executeTurn(request: TurnRequest, deps: ChatDeps, signal: AbortSi
   // We hold the session's turn lock, so any 'streaming' message is a leftover of a crash.
   repairInterruptedMessages(session);
   const settings = deps.contextSettings();
-  const built = deps.buildTurn({
+  const turnInput: BuildTurnInput = {
     doc,
     session,
     kind,
@@ -224,7 +246,10 @@ async function executeTurn(request: TurnRequest, deps: ChatDeps, signal: AbortSi
     neighbors: resolveNeighbors(request.neighbors, settings),
     settings,
     maxImagesPerConversation: provider.maxImagesPerConversation,
-  });
+  };
+  let built = deps.buildTurn(turnInput);
+  // BuildTurnInput.session is the session *before* this turn (a retry must not recap the new question).
+  const messagesBefore = session.messages.slice();
 
   const createdAt = new Date().toISOString();
   const userMessage: ChatMessage = {
@@ -252,57 +277,105 @@ async function executeTurn(request: TurnRequest, deps: ChatDeps, signal: AbortSi
   await saveSession(session);
   emit({ type: 'start', userMessage: structuredClone(userMessage), assistantMessage: structuredClone(assistantMessage) });
 
-  // 3. Run the provider ------------------------------------------------------------------------
-  let streamed = '';
-  let settled = false; // ignore callbacks that arrive after run() settled
+  // 3. Run the provider (retried once in a new conversation when the old one is lost / too large) --
+  const runAttempt = async (turn: BuildTurnOutput): Promise<Attempt> => {
+    let streamed = '';
+    let settled = false; // ignore callbacks that arrive after run() settled
+    try {
+      const result = await provider.run({
+        cwd: doc.dir,
+        systemPrompt: turn.systemPrompt,
+        parts: turn.parts,
+        resume: turn.resume,
+        history: turn.history,
+        model: session.model,
+        // Other lectures of the course, so agentic CLIs can open their DIGEST.md / slides.
+        extraReadDirs: turn.readDirs,
+        signal,
+        onDelta: (text) => {
+          if (settled || !text) return;
+          streamed += text;
+          emit({ type: 'delta', text });
+        },
+        onStatus: (text) => {
+          if (!settled && text) emit({ type: 'status', text });
+        },
+      });
+      settled = true;
+      return { ok: true, result, streamed };
+    } catch (error) {
+      settled = true;
+      return { ok: false, error, streamed };
+    }
+  };
+
   const startedAt = Date.now();
-  try {
-    const result = await provider.run({
-      cwd: doc.dir,
-      systemPrompt: built.systemPrompt,
-      parts: built.parts,
-      resume: built.resume,
-      history: built.history,
-      model: session.model,
-      // Other lectures of the course, so agentic CLIs can open their DIGEST.md / slides.
-      extraReadDirs: built.readDirs,
-      signal,
-      onDelta: (text) => {
-        if (settled || !text) return;
-        streamed += text;
-        emit({ type: 'delta', text });
-      },
-      onStatus: (text) => {
-        if (!settled && text) emit({ type: 'status', text });
-      },
-    });
-    settled = true;
+  let attempt = await runAttempt(built);
+  const recovery = attempt.ok ? null : recoveryKind(attempt, built, signal);
+  if (!attempt.ok && recovery !== null) {
+    console.warn(`[chat] ${docId}/${sessionId}: ${recovery}, retrying in a new provider conversation: ${errorText(attempt.error)}`);
+    let retry: BuildTurnOutput | null = null;
+    try {
+      retry = deps.buildTurn({ ...turnInput, session: { ...session, messages: messagesBefore }, forceNewConversation: recovery });
+    } catch (err) {
+      // Never leave the turn half done: it simply fails with the provider's error.
+      console.error(`[chat] could not rebuild the turn of ${sessionId}:`, err);
+    }
+    if (retry !== null) {
+      emit({ type: 'status', text: RECOVERY_STATUS[recovery] });
+      built = retry;
+      // The user message describes what the model was actually given: the retry's context.
+      userMessage.context = { ...built.context, recoveredFrom: recovery };
+      await saveSession(session).catch((err: unknown) => console.error(`[chat] could not save session ${sessionId}:`, err));
+      attempt = await runAttempt(built);
+    }
+  }
+
+  if (attempt.ok) {
     // 4a. Success: advance the provider conversation.
-    const answer = result.text.trim() ? result.text : streamed;
+    const { result } = attempt;
+    const answer = result.text.trim() ? result.text : attempt.streamed;
     assistantMessage.text = answer;
     assistantMessage.status = 'complete';
     let nextState: ProviderState = { ...built.nextState, resume: result.resume ?? {} };
     if (STATELESS_PROVIDERS.has(session.provider)) nextState = deps.appendHistory(nextState, built.parts, answer);
     session.providerState = nextState;
-  } catch (err) {
-    settled = true;
+  } else {
     // 4b. Failure / abort: keep the partial text; the provider state is NOT advanced, so a
     // failed priming turn is simply re-primed next time.
-    assistantMessage.text = streamed;
+    assistantMessage.text = attempt.streamed;
     if (signal.aborted) {
       assistantMessage.status = 'aborted';
       assistantMessage.error = abortReason(signal);
     } else {
       assistantMessage.status = 'error';
-      assistantMessage.error = errorText(err);
+      assistantMessage.error = errorText(attempt.error);
     }
   }
   assistantMessage.durationMs = Date.now() - startedAt;
 
   // 5. Persist, regenerate notes, finish --------------------------------------------------------
+  // `done` carries the whole session (a Session is a SessionSummary plus its messages) so the client
+  // also gets the final user message, whose context a recovery may have replaced.
   await persistOutcome(session);
-  emit({ type: 'done', assistantMessage: structuredClone(assistantMessage), session: toSummary(session) });
-  return { assistantMessage, session: toSummary(session) };
+  emit({ type: 'done', assistantMessage: structuredClone(assistantMessage), session: structuredClone(toSession(session)) });
+  return { assistantMessage, session: toSession(session) };
+}
+
+type Attempt =
+  | { ok: true; result: ProviderRunResult; streamed: string }
+  | { ok: false; error: unknown; streamed: string };
+
+/**
+ * Whether a failed attempt is retried in a new provider conversation (DESIGN §14), and why. Only when
+ * the provider says the conversation is gone or too large, the attempt continued an existing
+ * conversation (a new one would be rebuilt identically), nothing was shown to the student yet (streamed
+ * text cannot be taken back) and the turn was not aborted.
+ */
+function recoveryKind(attempt: Extract<Attempt, { ok: false }>, turn: BuildTurnOutput, signal: AbortSignal): RecoverableKind | null {
+  if (signal.aborted || turn.resume === null || attempt.streamed !== '') return null;
+  const kind = providerErrorKind(attempt.error);
+  return kind === 'resume_invalid' || kind === 'context_overflow' ? kind : null;
 }
 
 /** Saves the finished turn unless the session was deleted meanwhile. Never throws. */

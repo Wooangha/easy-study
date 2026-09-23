@@ -39,11 +39,23 @@ export function isTypingTarget(target: EventTarget | null): boolean {
   return target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName);
 }
 
+/** The right pane (chat / 정리본 / notes) scrolls with the keyboard on its own. */
+const OTHER_PANE_SELECTOR = '.split-right';
+
+/** Keys with a native scrolling meaning; they move slides only while the keyboard "belongs" to the viewer. */
+const SCROLL_KEYS = new Set(['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', 'Home', 'End']);
+
+function inOtherPane(target: EventTarget | null): boolean {
+  return target instanceof Element && target.closest(OTHER_PANE_SELECTOR) !== null;
+}
+
 export function SlideViewer({ doc, qaCounts, pinnedSlide, onFocusChange, onOpenNotes, ref }: SlideViewerProps) {
   const pageCount = Math.max(0, doc.pageCount);
   const aspect = Number.isFinite(doc.aspectRatio) && doc.aspectRatio > 0 ? doc.aspectRatio : 16 / 9;
 
   const scrollerRef = useRef<HTMLDivElement>(null);
+  /** The last pointer press was in the right pane: its scroll keys (↑↓, PageUp/Down, Home/End) stay native. */
+  const pointerInOtherPaneRef = useRef(false);
   const slideEls = useRef<(HTMLDivElement | null)[]>([]);
   const [focused, setFocused] = useState(() =>
     clamp(Math.round(readStorage(storageKeys.slide(doc.id), 1, isNumber)), 1, Math.max(1, pageCount)),
@@ -93,8 +105,8 @@ export function SlideViewer({ doc, qaCounts, pinnedSlide, onFocusChange, onOpenN
     let best = idx;
     const rect = els[idx]?.getBoundingClientRect();
     if (rect && rect.top > centerY && idx > 0 && visible(idx - 1) > visible(idx)) best = idx - 1;
-    // At the very top the first slide is what the user is looking at, even when zoomed out.
-    if (scroller.scrollTop < 4) best = 0;
+    // No special case at the ends: the track's padding (styles.css) makes the first slide cross the center
+    // line at the top and lets every other slide scroll to it, even when zoomed out.
 
     const bestRect = els[best]?.getBoundingClientRect();
     if (bestRect && bestRect.height > 0) {
@@ -189,10 +201,20 @@ export function SlideViewer({ doc, qaCounts, pinnedSlide, onFocusChange, onOpenN
     writeStorage(storageKeys.slide(doc.id), focused);
   }, [doc.id, focused]);
 
-  // Keyboard navigation (ignored while typing).
+  // Keyboard navigation (ignored while typing). j/k work anywhere else. The scroll keys belong to what the
+  // student last clicked: in the chat, 정리본 or notes pane they scroll that pane natively instead of
+  // moving the slides (which would also silently change the slide the next question is about).
   useEffect(() => {
+    const onPointerDown = (e: PointerEvent) => {
+      pointerInOtherPaneRef.current = inOtherPane(e.target);
+    };
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || isTypingTarget(e.target)) return;
+      if (SCROLL_KEYS.has(e.key)) {
+        const target = e.target instanceof Element ? e.target : null;
+        const unfocused = !target || target === document.body || target === document.documentElement;
+        if (inOtherPane(target) || (unfocused && pointerInOtherPaneRef.current)) return;
+      }
       let target: number;
       const now = performance.now();
       const base = navRef.current && now - navRef.current.at < 700 ? navRef.current.target : focusedRef.current;
@@ -221,8 +243,12 @@ export function SlideViewer({ doc, qaCounts, pinnedSlide, onFocusChange, onOpenN
       navRef.current = { target, at: now };
       scrollToSlide(target, 'smooth');
     };
+    document.addEventListener('pointerdown', onPointerDown, true);
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown, true);
+      window.removeEventListener('keydown', onKey);
+    };
   }, [pageCount, scrollToSlide]);
 
   const zoomIndex = ZOOM_LEVELS.indexOf(zoom);
@@ -303,8 +329,14 @@ export function SlideViewer({ doc, qaCounts, pinnedSlide, onFocusChange, onOpenN
           </button>
         </div>
       </div>
-      <div className="viewer-scroll" ref={scrollerRef} onScroll={scheduleFocus}>
-        <div className="slides-track" style={{ '--zoom': zoom } as CSSProperties}>
+      <div
+        className="viewer-scroll"
+        ref={scrollerRef}
+        onScroll={scheduleFocus}
+        tabIndex={0}
+        aria-label="슬라이드 (j/k 또는 ↑/↓ 로 이동)"
+      >
+        <div className="slides-track" style={{ '--zoom': zoom, '--aspect': aspect } as CSSProperties}>
           {slides}
         </div>
       </div>

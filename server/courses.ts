@@ -261,6 +261,16 @@ export async function addDocToCourse(courseId: string, docId: string): Promise<C
   return course;
 }
 
+/**
+ * Takes a (deleted) document out of every course that lists it and regenerates their COURSE.md.
+ * Returns the ids of the courses that changed.
+ */
+export async function removeDocFromCourses(docId: string): Promise<string[]> {
+  const touched = await mutationQueue(MUTATIONS, () => removeFromOtherCourses([docId], ''));
+  await refreshMarkdown(touched);
+  return touched;
+}
+
 // ---------------------------------------------------------------------------
 // COURSE.md
 // ---------------------------------------------------------------------------

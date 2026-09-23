@@ -33,8 +33,10 @@ const DEFAULT_DIGEST_CONCURRENCY = 2;
 const MAX_DIGEST_CONCURRENCY = 8;
 
 /**
- * Provider calls a digest job runs at the same time (EASY_STUDY_DIGEST_CONCURRENCY, default 2,
- * clamped to 1..8). Each call carries a few full-resolution slide images, so keep it small.
+ * Digest provider calls that run at the same time, across ALL digest jobs of the process
+ * (EASY_STUDY_DIGEST_CONCURRENCY, default 2, clamped to 1..8): opening several lectures queues their
+ * digests instead of multiplying the load. Each call carries a few full-resolution slide images, so
+ * keep it small.
  */
 export function digestConcurrency(): number {
   const raw = process.env.EASY_STUDY_DIGEST_CONCURRENCY?.trim();

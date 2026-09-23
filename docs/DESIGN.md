@@ -205,11 +205,26 @@ maxImagesPerConversation: 90.
 ### codex (ChatGPT subscription via Codex CLI) — verified with codex-cli 0.154
 
 ```
-new:    codex exec --json --skip-git-repo-check --sandbox read-only -C <cwd> [-m <model>] [-i <img> ...]
+new:    codex exec --json --skip-git-repo-check [--ephemeral] -C <cwd> <policy> <hardening> [-m <model>] [-i <img> ...]
         (prompt on stdin, no positional prompt)
-resume: codex exec resume <threadId> - --json --skip-git-repo-check -c sandbox_mode="read-only"
+resume: codex exec resume <threadId> - --json --skip-git-repo-check <policy> <hardening>
         [-m <model>] [-i <img> ...]          (the positional "-" = read prompt from stdin)
+policy: -c sandbox_mode="read-only"          (fallback for CLIs without permission profiles)
+        -c default_permissions="easy_study_readonly"
+        -c permissions.easy_study_readonly.filesystem={":minimal"="read","<cwd>"="read","<extraReadDir>"="read",…}
+        -c approval_policy="never" -c approvals_reviewer="user" -c project_root_markers=[]
+hardening: -c features.<plugins|apps|browser_use|computer_use|in_app_browser>=false,
+        -c mcp_servers.<name>.enabled=false per MCP server of config.toml; allowTools=false (digest) also
+        -c features.<shell_tool|unified_exec|view_image|code_mode_host|multi_agent|image_generation>=false
 ```
+Read confinement: the legacy read-only sandbox can read every file of the user, so reads are confined by a
+permissions profile to the document dir + the course's other lectures (`extraReadDirs`) + the platform's
+minimal system paths; no writes (Codex still allows /tmp), no network, escalation requests rejected (a user
+config with `approvals_reviewer = "auto_review"` would otherwise let `codex exec` ask to run commands outside
+the sandbox). The CLI is spawned by its real path (it re-executes itself inside the sandbox, which fails
+through a symlink outside the readable roots) and `project_root_markers=[]` stops the AGENTS.md walk up to a
+repository root the sandbox cannot read. `EASY_STUDY_CODEX_CONFINE=0` (and Windows) → the old
+`--sandbox read-only` without the profile. Verified with codex-cli 0.154 (`codex sandbox`, `codex debug prompt-input`).
 Images cannot be interleaved with text, so the adapter replaces each image part with a marker
 `[Attached image #k: <label>]` in the text and passes the files with `-i` in the same order.
 On a new conversation the system prompt is prepended to the text (`<instructions>…</instructions>`).
@@ -442,3 +457,19 @@ Recap/rollover behaviour is unchanged.
   sessions, abort; content mode "현재 슬라이드" (default: the focused slide's entry, follows scrolling) or "전체"
   (lecture summary + all entries, auto-scrolls to the focused slide); link to DIGEST.md. Failed entries show a warning.
 - DocMeta.digestStatus badge in pickers (✓ 정리본 / ⏳).
+
+## 14. Round 3 (review fixes) — contract additions
+
+- `ProviderError` / `ProviderErrorKind` / `providerErrorKind()` in `server/providers/types.ts`. Providers classify
+  failures; `chat.ts` recovers from `resume_invalid` and `context_overflow` by rebuilding the turn with
+  `BuildTurnInput.forceNewConversation = kind` (behaves like a rollover: re-prime + recap) and retrying **once** within
+  the same request (the client sees a `status` event, then the new answer; the user message's `context` is replaced
+  by the retry's ContextInfo with `recoveredFrom` set, sent in the final `done` event's session/messages).
+- `ProviderRunInput.allowTools` (digest passes `false`).
+- `recentWindow` default 16.
+- `DigestRecord.summaryStale`.
+- New document routes: `DELETE /api/docs/:docId` → 204 (refuses 409 while an ingest, digest job or turn runs; removes
+  the doc from its course, rewrites COURSE.md, deletes library/<docId>), `POST /api/docs/:docId/retry` → 202 `DocMeta`
+  (re-runs the ingest for a doc whose status is 'error'; 409 otherwise).
+- Single-instance guard: `library/.server.lock` with `{pid, port, startedAt}`; startup refuses (clear message) when the
+  lock's pid is alive, and replaces a stale lock; removed on shutdown.

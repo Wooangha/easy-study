@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
-import type { ChatMessage, ProviderInfo } from '../../../shared/types.ts';
+import type { ChatMessage, MessageStatus, ProviderInfo } from '../../../shared/types.ts';
 import { PENDING_ASSISTANT_ID, PENDING_USER_ID } from '../hooks/useStudySession.ts';
-import { describeContext, formatDuration, formatTime, providerWithModel } from '../lib/format.ts';
+import { describeContext, formatDuration, formatTime, primeCardState, providerWithModel } from '../lib/format.ts';
 import { toast } from '../lib/toast.ts';
 import { Markdown } from './Markdown.tsx';
 
@@ -18,6 +18,11 @@ interface MessageListProps {
   scrollKey: string;
   onGoToSlide: (slide: number) => void;
   onRetry: (text: string, slide: number) => void;
+  /**
+   * Feed the deck again. Given when the session is not primed and nothing runs; offered on the last
+   * priming turn if it failed or was aborted.
+   */
+  onRetryPrime?: () => void;
   empty?: ReactNode;
 }
 
@@ -35,6 +40,7 @@ export function MessageList({
   scrollKey,
   onGoToSlide,
   onRetry,
+  onRetryPrime,
   empty,
 }: MessageListProps) {
   const listRef = useRef<HTMLDivElement>(null);
@@ -80,11 +86,18 @@ export function MessageList({
     return () => ro.disconnect();
   }, []);
 
-  // Pair each failed/aborted answer with its question for the retry button.
+  // Pair each failed/aborted answer with its question for the retry button, and each priming card with
+  // the answer that says whether the deck actually reached the model.
+  let lastPrimeAnswer: ChatMessage | undefined;
+  for (const m of messages) if (m.role === 'assistant' && m.kind === 'prime') lastPrimeAnswer = m;
   const items: ReactNode[] = [];
   let lastUser: ChatMessage | null = null;
-  for (const m of messages) {
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
     if (m.role === 'user') lastUser = m;
+    const next = messages[i + 1];
+    const pairStatus =
+      m.role === 'user' && next?.role === 'assistant' && next.kind === m.kind ? next.status : undefined;
     const canRetry =
       !running &&
       m.role === 'assistant' &&
@@ -92,6 +105,8 @@ export function MessageList({
       (m.status === 'error' || m.status === 'aborted') &&
       lastUser !== null &&
       lastUser.kind === 'question';
+    const canRetryPrime =
+      onRetryPrime !== undefined && m === lastPrimeAnswer && (m.status === 'error' || m.status === 'aborted');
     items.push(
       <MessageItem
         key={m.id}
@@ -101,10 +116,12 @@ export function MessageList({
         live={m.id === liveAssistantId}
         status={m.id === liveAssistantId ? liveStatus : null}
         stopping={m.id === liveAssistantId && stopping}
+        pairStatus={pairStatus}
         retryText={canRetry && lastUser ? lastUser.text : null}
         retrySlide={canRetry && lastUser ? lastUser.slide : 0}
         onGoToSlide={onGoToSlide}
         onRetry={onRetry}
+        onRetryPrime={canRetryPrime ? onRetryPrime : undefined}
       />,
     );
   }
@@ -130,10 +147,13 @@ interface MessageItemProps {
   live: boolean;
   status: string | null;
   stopping: boolean;
+  /** For a user message: status of the answer paired with it (undefined when there is none yet). */
+  pairStatus: MessageStatus | undefined;
   retryText: string | null;
   retrySlide: number;
   onGoToSlide: (slide: number) => void;
   onRetry: (text: string, slide: number) => void;
+  onRetryPrime?: () => void;
 }
 
 const MessageItem = memo(function MessageItem(props: MessageItemProps) {
@@ -150,7 +170,7 @@ function ContextLine({ message }: { message: ChatMessage }) {
   return (
     <div className="context-line" title="이 질문과 함께 LLM에게 전달된 내용">
       {chips.map((c) => (
-        <span key={c.kind} className={`context-chip chip-${c.kind}`}>
+        <span key={c.kind} className={`context-chip chip-${c.kind}`} title={c.title}>
           {c.text}
         </span>
       ))}
@@ -174,18 +194,18 @@ function UserBubble({ message: m, onGoToSlide }: MessageItemProps) {
   );
 }
 
-function PrimeCard({ message: m, pageCount }: MessageItemProps) {
-  const pending = m.id === PENDING_USER_ID || !m.context;
-  const extra = describeContext(m.context)
-    .filter((c) => c.kind !== 'primed')
-    .map((c) => c.text);
+function PrimeCard({ message: m, pageCount, pairStatus }: MessageItemProps) {
+  const state = primeCardState(pageCount, m.id === PENDING_USER_ID || !m.context, pairStatus);
+  // What was attached is only worth listing once it actually reached the model.
+  const extra = state.delivered
+    ? describeContext(m.context)
+        .filter((c) => c.kind !== 'primed')
+        .map((c) => c.text)
+    : [];
+  const cls = state.tone === 'normal' ? 'msg system-card' : `msg system-card is-${state.tone}`;
   return (
-    <div className="msg system-card">
-      <div className="system-card-title">
-        {pending
-          ? `📚 전체 슬라이드 ${pageCount}장을 LLM에게 전달하는 중…`
-          : `📚 전체 슬라이드 ${pageCount}장을 LLM에게 전달했어요`}
-      </div>
+    <div className={cls}>
+      <div className="system-card-title">{state.title}</div>
       {extra.length > 0 && <div className="system-card-detail">{extra.join(' · ')}</div>}
     </div>
   );
@@ -200,6 +220,7 @@ function AssistantMessage({
   retryText,
   retrySlide,
   onRetry,
+  onRetryPrime,
 }: MessageItemProps) {
   const pending = m.id === PENDING_ASSISTANT_ID;
   const streaming = m.status === 'streaming';
@@ -260,6 +281,16 @@ function AssistantMessage({
       {retryText !== null && (
         <button type="button" className="ghost-btn small" onClick={() => onRetry(retryText, retrySlide)}>
           ↻ 다시 질문하기
+        </button>
+      )}
+      {onRetryPrime && (
+        <button
+          type="button"
+          className="ghost-btn small"
+          onClick={onRetryPrime}
+          title="슬라이드를 LLM에게 다시 전달해요 (바로 질문해도 첫 질문과 함께 전달돼요)"
+        >
+          📚 다시 전달하기
         </button>
       )}
     </div>

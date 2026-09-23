@@ -12,6 +12,7 @@ import { createCourse, updateCourse } from '../server/courses.ts';
 import {
   DEFAULT_DIGEST_PROMPTS,
   abortDigest,
+  digestCallsInFlight,
   digestMarkdown,
   getDigestInfo,
   isDigestRunning,
@@ -483,7 +484,7 @@ describe('digest job', () => {
     await makeDoc(docId, 5);
     const provider = fakeProvider(wellBehaved);
     await startDigest(docId, { provider: 'claude-code' }, depsFor(provider));
-    await finish(docId);
+    const first = await finish(docId);
     assert.equal(provider.calls.length, 3); // [1-4], [5], summary
 
     // Complete with a summary: nothing to do.
@@ -492,11 +493,250 @@ describe('digest job', () => {
     assert.equal(provider.calls.length, 3);
 
     const forced = await startDigest(docId, { provider: 'claude-code', force: true }, depsFor(provider));
-    assert.equal(forced.done, 0, 'force starts from scratch');
-    assert.equal(forced.summary, null);
+    assert.equal(forced.done, 0, 'the progress of a redo counts the redone slides');
+    assert.equal(forced.slides.length, 5, 'the old entries stay until they are replaced');
+    assert.equal(forced.summary, first.summary, 'the old summary stays until a new one is written');
     const info = await finish(docId);
     assert.equal(info.status, 'ready');
+    assert.equal(info.done, 5);
     assert.equal(provider.calls.length, 6);
+    assert.equal(provider.calls.at(-1)?.systemPrompt, SUMMARY_SYSTEM, 'the redone slides get a new summary');
+    assert.equal((await readRecord(docId)).summaryStale, undefined);
+  });
+
+  test('an aborted redo keeps the previous digest (entries, summary, DIGEST.md, COURSE.md)', async () => {
+    const docId = 'force-abort-000001';
+    await makeDoc(docId, 12, 'Redo');
+    const course = await createCourse('Redo course');
+    await updateCourse(course.id, { docIds: [docId] });
+    const original = fakeProvider(wellBehaved);
+    await startDigest(docId, { provider: 'claude-code' }, depsFor(original));
+    const before = await finish(docId);
+    assert.equal(before.status, 'ready');
+    assert.match(before.summary ?? '', /^SUMMARY of/);
+
+    // The redo writes new text for its first batch, then hangs until it is aborted.
+    const redo = fakeProvider(async ({ slides, input, call }) => {
+      if (call === 1) return digestOutput(slides).replaceAll('**Body**', '**New body**');
+      return untilAborted(input);
+    });
+    await startDigest(docId, { provider: 'claude-code', force: true }, depsFor(redo, { concurrency: () => 1 }));
+    await waitFor(() => redo.calls.length === 2);
+
+    // While the redo runs, everything that reads the digest still sees a complete one.
+    const running = await getDigestInfo(docId);
+    assert.equal(running.status, 'running');
+    assert.equal(running.done, 4, 'the first batch was redone');
+    assert.equal(running.total, 12);
+    assert.equal(running.slides.length, 12);
+    assert.equal(running.summary, before.summary);
+    const assets = await loadDocAssets(docId);
+    assert.equal(assets.digestComplete, true);
+    assert.equal(assets.digest?.length, 12);
+    assert.match(await fs.readFile(docPaths(docId).digestMd, 'utf8'), /## 강의 요약[\s\S]*\*\*Body\*\* of slide 12/);
+    assert.match(await fs.readFile(coursePaths(course.id).courseMd, 'utf8'), /SUMMARY of/);
+
+    assert.equal(abortDigest(docId), true);
+    const aborted = await finish(docId);
+    assert.equal(aborted.status, 'aborted');
+    assert.equal(aborted.done, 12, 'every slide still has an entry');
+    assert.deepEqual(
+      aborted.slides.map((s) => s.markdown.startsWith('**New body**')),
+      range(1, 12).map((n) => n <= 4),
+      'redone slides are new, the others are the old entries',
+    );
+    assert.equal(aborted.summary, before.summary, 'the old summary is kept');
+    const record = await readRecord(docId);
+    assert.equal(record.summaryStale, true, 'the summary no longer matches the entries');
+    assert.match(await fs.readFile(coursePaths(course.id).courseMd, 'utf8'), /SUMMARY of/);
+
+    // "이어서 만들기": no slide is missing, but the stale summary is made again.
+    const resume = fakeProvider(wellBehaved);
+    await startDigest(docId, { provider: 'claude-code' }, depsFor(resume));
+    const resumed = await finish(docId);
+    assert.equal(resumed.status, 'ready');
+    assert.equal(resumed.error, undefined);
+    assert.deepEqual(
+      resume.calls.map((c) => c.systemPrompt),
+      [SUMMARY_SYSTEM],
+    );
+    assert.equal((await readRecord(docId)).summaryStale, undefined);
+  });
+
+  test('a redo whose calls fail keeps the old entries instead of failed placeholders', async () => {
+    const docId = 'force-fail-000001';
+    await makeDoc(docId, 4);
+    await startDigest(docId, { provider: 'claude-code' }, depsFor(fakeProvider(wellBehaved)));
+    const before = await finish(docId);
+
+    const failing = fakeProvider(({ slides, summary }) => {
+      if (summary) return 'new summary';
+      if (slides.includes(3)) throw new Error('usage limit reached');
+      return digestOutput(slides).replaceAll('**Body**', '**New body**');
+    });
+    await startDigest(docId, { provider: 'claude-code', force: true }, depsFor(failing));
+    const info = await finish(docId);
+    assert.equal(info.status, 'ready');
+    assert.deepEqual(
+      info.slides.map((s) => [s.slide, s.failed ?? false, s.markdown.startsWith('**New body**')]),
+      [
+        [1, false, true],
+        [2, false, true],
+        [3, false, false],
+        [4, false, true],
+      ],
+    );
+    assert.equal(info.slides[2].markdown, before.slides[2].markdown);
+    assert.equal(info.summary, 'new summary');
+  });
+
+  test('a summary interrupted after new slides is made by the next run (summaryStale)', async () => {
+    const docId = 'stale-summary-000001';
+    await makeDoc(docId, 4);
+    // Run 1: slide 4 cannot be digested; the summary is made from slides 1–3.
+    const first = fakeProvider(({ slides, summary, input }) => {
+      if (summary) return `SUMMARY of ${textOf(input.parts)}`;
+      return digestOutput(slides.filter((n) => n !== 4));
+    });
+    await startDigest(docId, { provider: 'claude-code' }, depsFor(first));
+    const run1 = await finish(docId);
+    assert.equal(run1.status, 'ready');
+    assert.match(run1.summary ?? '', /slides=1,2,3$/);
+    assert.equal((await readRecord(docId)).summaryStale, undefined);
+
+    // Run 2: slide 4 works now, but the summary call is aborted.
+    const second = fakeProvider(async ({ slides, summary, input }) => {
+      if (summary) return untilAborted(input);
+      return digestOutput(slides);
+    });
+    await startDigest(docId, { provider: 'claude-code' }, depsFor(second));
+    await waitFor(() => second.calls.some((c) => c.systemPrompt === SUMMARY_SYSTEM));
+    abortDigest(docId);
+    const run2 = await finish(docId);
+    assert.equal(run2.status, 'aborted');
+    assert.match(run2.summary ?? '', /slides=1,2,3$/, 'the old summary is kept meanwhile');
+    assert.equal((await readRecord(docId)).summaryStale, true);
+
+    // Run 3: nothing is missing, yet the summary is regenerated from every slide.
+    const third = fakeProvider(wellBehaved);
+    await startDigest(docId, { provider: 'claude-code' }, depsFor(third));
+    const run3 = await finish(docId);
+    assert.equal(third.calls.length, 1);
+    assert.equal(run3.status, 'ready');
+    assert.match(run3.summary ?? '', /slides=1,2,3,4$/);
+    assert.equal(run3.error, undefined);
+    assert.equal((await readRecord(docId)).summaryStale, undefined);
+  });
+
+  test('a failed summary keeps its note and the stale flag until it is made', async () => {
+    const docId = 'stale-fail-000001';
+    await makeDoc(docId, 2);
+    await startDigest(docId, { provider: 'claude-code' }, depsFor(fakeProvider(wellBehaved)));
+    const original = (await finish(docId)).summary;
+
+    const paths = docPaths(docId);
+    const record = await readRecord(docId);
+    record.slides[1] = { slide: 2, title: '', markdown: 'x', failed: true };
+    await fs.writeFile(paths.digestJson, JSON.stringify(record));
+
+    const flaky = fakeProvider(({ slides, summary }) => {
+      if (summary) throw new Error('rate limited');
+      return digestOutput(slides);
+    });
+    await startDigest(docId, { provider: 'claude-code' }, depsFor(flaky));
+    const failed = await finish(docId);
+    assert.equal(failed.status, 'ready');
+    assert.equal(failed.summary, original);
+    assert.equal(failed.error, '강의 요약을 만들지 못했습니다: rate limited');
+    assert.equal((await readRecord(docId)).summaryStale, true);
+
+    const retry = fakeProvider(({ summary }) => (summary ? 'fixed summary' : 'unused'));
+    await startDigest(docId, { provider: 'claude-code' }, depsFor(retry));
+    const fixed = await finish(docId);
+    assert.equal(retry.calls.length, 1, 'only the summary');
+    assert.equal(fixed.error, undefined);
+    assert.equal(fixed.summary, 'fixed summary');
+    assert.equal((await readRecord(docId)).summaryStale, undefined);
+  });
+
+  test('a summary failure recorded before summaryStale existed is also redone by a plain run', async () => {
+    // What the UI offers "📘 강의 요약 다시 만들기" for: ready, no failed slide, an old summary and its failure note.
+    const docId = 'legacy-stale-000001';
+    await makeDoc(docId, 2);
+    const paths = docPaths(docId);
+    await fs.mkdir(paths.digestDir, { recursive: true });
+    const legacy: DigestRecord = {
+      version: 1,
+      status: 'ready',
+      slides: [
+        { slide: 1, title: 'A', markdown: 'a' },
+        { slide: 2, title: 'B', markdown: 'b' },
+      ],
+      summary: 'OLD summary from slide 1 only',
+      error: '강의 요약을 만들지 못했습니다: rate limited',
+    };
+    await fs.writeFile(paths.digestJson, JSON.stringify(legacy));
+    const provider = fakeProvider(wellBehaved);
+    await startDigest(docId, { provider: 'claude-code' }, depsFor(provider));
+    const info = await finish(docId);
+    assert.equal(provider.calls.length, 1);
+    assert.equal(provider.calls[0].systemPrompt, SUMMARY_SYSTEM);
+    assert.equal(info.status, 'ready');
+    assert.equal(info.error, undefined);
+    assert.match(info.summary ?? '', /slides=1,2$/);
+    assert.equal((await readRecord(docId)).summaryStale, undefined);
+
+    // A ready digest without a note is left alone (nothing to do, no call).
+    const idle = fakeProvider(wellBehaved);
+    await startDigest(docId, { provider: 'claude-code' }, depsFor(idle));
+    assert.equal((await finish(docId)).summary, info.summary);
+    assert.equal(idle.calls.length, 0);
+  });
+
+  test('digest calls run without tools', async () => {
+    const docId = 'no-tools-000001';
+    await makeDoc(docId, 3);
+    const provider = fakeProvider(wellBehaved);
+    await startDigest(docId, { provider: 'claude-code' }, depsFor(provider));
+    await finish(docId);
+    assert.equal(provider.calls.length, 2);
+    for (const call of provider.calls) assert.equal(call.allowTools, false);
+  });
+
+  test('the concurrency limit holds across all jobs; a queued job can be aborted at once', async () => {
+    const release = gate();
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const shared = fakeProvider(async ({ slides, summary, input }) => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      try {
+        await Promise.race([release.promise, untilAborted(input)]);
+        return summary ? 'sum' : digestOutput(slides);
+      } finally {
+        inFlight--;
+      }
+    });
+    const deps = depsFor(shared, { concurrency: () => 2 });
+    const docs = ['global-a-000001', 'global-b-000001', 'global-c-000001'];
+    for (const docId of docs) await makeDoc(docId, 8);
+    for (const docId of docs) await startDigest(docId, { provider: 'claude-code' }, deps);
+    await waitFor(() => inFlight === 2);
+    await delay(30);
+    assert.equal(inFlight, 2, 'three jobs, but only two calls at a time');
+    assert.equal(shared.calls.length, 2);
+
+    // The last job only waits for a slot: aborting it ends it right away, without any call.
+    const callsBefore = shared.calls.length;
+    assert.equal(abortDigest('global-c-000001'), true);
+    assert.equal(await waitForDigest('global-c-000001', 1_000), true);
+    assert.equal((await getDigestInfo('global-c-000001')).status, 'aborted');
+    assert.equal(shared.calls.length, callsBefore);
+
+    release.open();
+    for (const docId of docs.slice(0, 2)) assert.equal((await finish(docId)).status, 'ready');
+    assert.equal(maxInFlight, 2);
+    assert.equal(digestCallsInFlight(), 0);
   });
 
   test('all slides done but no summary: only the summary is made', async () => {
@@ -812,6 +1052,23 @@ describe('HTTP routes', () => {
     await makeDoc('http-pending-000001', 3, 'Pending', 'processing');
     assert.equal((await postJson('/docs/http-pending-000001/sessions', { provider: 'claude-code' })).status, 201);
     assert.equal(isDigestRunning('http-pending-000001'), false);
+  });
+
+  test('a document cannot be deleted while its digest is being made', async () => {
+    const docId = 'http-delete-000001';
+    await makeDoc(docId, 4, 'Blocking');
+    release.current = gate();
+    assert.equal((await postJson(`/docs/${docId}/digest`, { provider: 'claude-code' })).status, 202);
+    const refused = await expectError(await api(`/docs/${docId}`, { method: 'DELETE' }), 409);
+    assert.match(refused, /정리본을 만드는 중/);
+    assert.equal((await postJson(`/docs/${docId}/digest/abort`)).status, 204);
+    await finish(docId);
+    assert.equal((await api(`/docs/${docId}`, { method: 'DELETE' })).status, 204);
+    await expectError(await api(`/docs/${docId}/digest`), 404);
+    // A ready document has nothing to retry.
+    await makeDoc('http-ready-000001', 2);
+    await expectError(await postJson('/docs/http-ready-000001/retry'), 409);
+    await expectError(await postJson('/docs/missing-000000/retry'), 404);
   });
 
   test('server shutdown aborts running digest jobs (resumable)', async () => {

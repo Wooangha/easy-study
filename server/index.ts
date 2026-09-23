@@ -19,7 +19,16 @@ import type {
   StartDigestRequest,
   StreamEvent,
 } from '../shared/types.ts';
-import { MAX_NEIGHBORS, abortAllTurns, abortTurn, defaultChatDeps, runTurn, waitForIdle, waitForTurn } from './chat.ts';
+import {
+  MAX_NEIGHBORS,
+  abortAllTurns,
+  abortTurn,
+  defaultChatDeps,
+  hasRunningTurns,
+  runTurn,
+  waitForIdle,
+  waitForTurn,
+} from './chat.ts';
 import type { ChatDeps } from './chat.ts';
 import { HttpError, autoDigestEnabled, host, libraryDir, port, webDir, webDistDir } from './config.ts';
 import {
@@ -28,6 +37,7 @@ import {
   deleteCourse,
   getCourse,
   listCourses,
+  removeDocFromCourses,
   updateCourse,
   writeCourseMarkdown,
 } from './courses.ts';
@@ -36,13 +46,28 @@ import {
   abortDigest,
   defaultDigestDeps,
   getDigestInfo,
+  isDigestRunning,
   readDigestMarkdown,
   recoverInterruptedDigests,
   startDigest,
   waitForDigestsIdle,
 } from './digest.ts';
 import type { DigestDeps } from './digest.ts';
-import { coursePaths, docPaths, getDoc, importPdf, listDocs, resumePendingIngests, slideFileName } from './library.ts';
+import {
+  LibraryLockedError,
+  acquireServerLock,
+  coursePaths,
+  deleteDoc,
+  docPaths,
+  getDoc,
+  importPdf,
+  listDocs,
+  removeDeletedLeftovers,
+  resumePendingIngests,
+  retryIngest,
+  slideFileName,
+} from './library.ts';
+import type { ServerLock } from './library.ts';
 import { providerInfos } from './providers/index.ts';
 import {
   buildNotes,
@@ -273,6 +298,33 @@ export function createApiRouter(options: AppOptions = {}): express.Router {
 
   api.get('/docs/:docId', async (req, res) => {
     res.json(await requireDoc(req.params.docId));
+  });
+
+  /**
+   * Deletes a document with its slides, sessions, notes and digest (DESIGN §14). 409 while its PDF is
+   * converted, its digest is made or one of its sessions is answering.
+   */
+  api.delete('/docs/:docId', async (req, res) => {
+    const docId = req.params.docId;
+    // Checked synchronously right before the deletion starts, so nothing can start in between.
+    await deleteDoc(docId, () => {
+      if (isDigestRunning(docId)) return '정리본을 만드는 중에는 지울 수 없습니다. 정리본 만들기를 먼저 중단해 주세요';
+      if (hasRunningTurns(docId)) return '답변을 생성하는 중에는 지울 수 없습니다. 답변이 끝난 뒤에 다시 시도해 주세요';
+      return null;
+    });
+    try {
+      // The course files still list the lecture: take it out and rewrite COURSE.md.
+      await removeDocFromCourses(docId);
+    } catch (err) {
+      // The document is gone either way (course reads skip missing lectures).
+      console.error(`[courses] could not remove ${docId} from its course:`, err);
+    }
+    res.status(204).end();
+  });
+
+  /** Converts a document whose conversion failed again (e.g. after installing poppler). 409 otherwise. */
+  api.post('/docs/:docId/retry', async (req, res) => {
+    res.status(202).json(await retryIngest(req.params.docId));
   });
 
   api.get('/docs/:docId/slides/:file', async (req, res) => {
@@ -554,54 +606,87 @@ function listen(server: http.Server, portNumber: number, hostname: string): Prom
   });
 }
 
+/**
+ * Starts the server. Throws LibraryLockedError when another live server uses the same library
+ * (library/.server.lock, DESIGN §14): nothing in the library is touched then.
+ */
 export async function startServer(options: ServerOptions = {}): Promise<RunningServer> {
   const log = options.log ?? true;
-  // Before accepting requests: mark answers and digest jobs interrupted by a previous crash as aborted.
-  const repaired = await recoverInterruptedSessions();
-  if (log && repaired > 0) console.log(`[chat] marked unfinished answers of ${repaired} session(s) as aborted`);
-  const interruptedDigests = await recoverInterruptedDigests();
-  if (log && interruptedDigests > 0) console.log(`[digest] marked ${interruptedDigests} unfinished digest(s) as aborted`);
+  // First of all: one server per library. The startup sweeps below and resumed ingests rewrite files
+  // that a running server may be working on.
+  const lock: ServerLock = await acquireServerLock(options.port ?? port());
 
   const app = express();
   app.disable('x-powered-by');
   const server = http.createServer(app);
-  app.use('/api', createApiRouter(options));
-
   let closeVite: (() => Promise<void>) | undefined;
-  if (options.dev) {
-    const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      configFile: path.join(webDir(), 'vite.config.ts'),
-      // HMR websocket shares our HTTP server (Vite 8: server.ws.server, formerly server.hmr.server).
-      server: { middlewareMode: true, ws: { server } },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
-    closeVite = () => vite.close();
-  } else {
-    mountProductionClient(app, log);
-  }
+  let url: string;
+  try {
+    // Before accepting requests: mark answers and digest jobs interrupted by a previous crash as aborted.
+    const repaired = await recoverInterruptedSessions();
+    if (log && repaired > 0) console.log(`[chat] marked unfinished answers of ${repaired} session(s) as aborted`);
+    const interruptedDigests = await recoverInterruptedDigests();
+    if (log && interruptedDigests > 0) console.log(`[digest] marked ${interruptedDigests} unfinished digest(s) as aborted`);
+    const leftovers = await removeDeletedLeftovers();
+    if (log && leftovers > 0) console.log(`[library] removed ${leftovers} leftover folder(s) of deleted documents`);
 
-  await listen(server, options.port ?? port(), host());
-  const { port: actualPort } = server.address() as AddressInfo;
-  const url = `http://${host()}:${actualPort}`;
+    app.use('/api', createApiRouter(options));
+    if (options.dev) {
+      const { createServer: createViteServer } = await import('vite');
+      const vite = await createViteServer({
+        configFile: path.join(webDir(), 'vite.config.ts'),
+        // HMR websocket shares our HTTP server (Vite 8: server.ws.server, formerly server.hmr.server).
+        server: { middlewareMode: true, ws: { server } },
+        appType: 'spa',
+      });
+      app.use(vite.middlewares);
+      closeVite = () => vite.close();
+    } else {
+      mountProductionClient(app, log);
+    }
+
+    await listen(server, options.port ?? port(), host());
+    const { port: actualPort } = server.address() as AddressInfo;
+    url = `http://${host()}:${actualPort}`;
+    await lock.setPort(actualPort);
+  } catch (err) {
+    await closeVite?.().catch(() => {});
+    await lock.release();
+    throw err;
+  }
 
   if (options.resumeIngests ?? true) {
     resumePendingIngests().catch((err: unknown) => console.error('[library] resuming ingests failed:', err));
   }
 
-  const close = async () => {
-    abortAllTurns();
-    abortAllDigests();
-    // Let aborted turns and digest jobs persist their partial results.
-    await Promise.all([waitForIdle(4_000), waitForDigestsIdle(4_000)]);
-    await closeVite?.();
-    await new Promise<void>((resolve) => {
-      server.close(() => resolve());
-      server.closeAllConnections();
-    });
-  };
+  let closing: Promise<void> | undefined;
+  const close = () =>
+    (closing ??= (async () => {
+      abortAllTurns();
+      abortAllDigests();
+      // Let aborted turns and digest jobs persist their partial results.
+      await Promise.all([waitForIdle(4_000), waitForDigestsIdle(4_000)]);
+      await closeVite?.();
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections();
+      });
+      await lock.release();
+    })());
   return { server, url, close };
+}
+
+/** Why the server did not start because another one uses the library, and what to do about it. */
+function libraryLockedMessage(err: LibraryLockedError, dev: boolean): string {
+  const { holder } = err;
+  return [
+    `easy-study가 이미 이 라이브러리로 실행 중입니다 (pid ${holder.pid}): http://${host()}:${holder.port}`,
+    `  라이브러리: ${libraryDir()}`,
+    '  같은 라이브러리에 서버를 두 개 띄우면 서로의 작업(PDF 변환, 정리본, 답변)을 망가뜨리므로 시작하지 않았습니다.',
+    '  - 이미 실행 중인 서버를 그대로 쓰거나, 그 서버를 먼저 종료하세요 (Ctrl+C).',
+    `  - 다른 라이브러리로 하나 더 띄우려면: EASY_STUDY_LIBRARY=<다른 폴더> PORT=${holder.port + 1} npm run ${dev ? 'dev' : 'serve'}`,
+    `  - 실행 중인 easy-study가 없는데도 이 메시지가 나오면 잠금 파일을 지우세요: ${err.lockFile}`,
+  ].join('\n');
 }
 
 async function main(): Promise<void> {
@@ -610,8 +695,14 @@ async function main(): Promise<void> {
   try {
     running = await startServer({ dev });
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'EADDRINUSE') {
-      console.error(`포트 ${port()}이(가) 이미 사용 중입니다. 다른 포트로 실행하세요: PORT=5181 npm run ${dev ? 'dev' : 'serve'}`);
+    if (err instanceof LibraryLockedError) {
+      console.error(libraryLockedMessage(err, dev));
+    } else if ((err as NodeJS.ErrnoException).code === 'EADDRINUSE') {
+      // Not an easy-study on this library (the library lock would have said so).
+      console.error(
+        `포트 ${port()}을(를) 다른 프로그램(또는 다른 라이브러리로 실행 중인 easy-study)이 쓰고 있습니다. ` +
+          `다른 포트로 실행하세요: PORT=${port() + 1} npm run ${dev ? 'dev' : 'serve'}`,
+      );
     } else {
       console.error('서버를 시작하지 못했습니다:', err);
     }

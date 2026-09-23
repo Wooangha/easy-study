@@ -101,6 +101,11 @@ export interface ContextInfo {
   reusedSlides: number[];
   /** Number of overview contact-sheet images attached this turn (only when primed). */
   overviewImages: number;
+  /**
+   * Set when this turn had to start a new provider conversation because the previous one was lost
+   * ('resume_invalid') or became too large ('context_overflow'); the turn was retried automatically.
+   */
+  recoveredFrom?: 'resume_invalid' | 'context_overflow';
 }
 
 export interface ChatMessage {

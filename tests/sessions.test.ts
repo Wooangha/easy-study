@@ -304,6 +304,23 @@ describe('notes', () => {
     assert.equal(await deleteSession(NOTES_DOC, second.id), false);
   });
 
+  test('a long single-line question is written in full below its shortened heading', async () => {
+    const docId = 'long-question-000222';
+    await makeDoc(docId, 'Long');
+    const question = `${'이 슬라이드의 예제에서 각 프로세스의 대기 시간을 어떻게 계산하는지 단계별로 알려 주세요. '.repeat(3)}END-MARKER`;
+    assert.ok(question.length > 120 && !question.includes('\n'));
+    const record = await createSession(docId, { provider: 'claude-code', model: '', title: '긴 질문' });
+    record.messages.push(...qa(2, question, { text: '답변' }, [17, 0]), ...qa(2, '짧은 질문', { text: '짧은 답' }, [17, 5]));
+    await saveSession(record);
+    await writeNotes(docId);
+
+    const md = await fs.readFile(docPaths(docId).studyNotes, 'utf8');
+    assert.ok(md.includes(`### Q. ${question.slice(0, 120)}…\n`), 'the heading stays short');
+    assert.ok(md.includes(`\n\n${question}\n\n답변\n`), 'the full question follows the heading');
+    // A question that fits in the heading is not repeated.
+    assert.ok(md.includes('### Q. 짧은 질문\n> 긴 질문 · Claude Code · 2026-09-23 17:05\n\n짧은 답\n'));
+  });
+
   test('an empty document still gets a STUDY_NOTES.md', async () => {
     await makeDoc('empty-doc-000111', 'Empty');
     const notes = await buildNotes('empty-doc-000111');

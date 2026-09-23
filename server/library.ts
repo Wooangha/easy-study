@@ -11,8 +11,12 @@
 // Course and digest files are *read* here (DocMeta.courseId / digestStatus and DocAssets are derived
 // from them) but written only by courses.ts and digest.ts, which import this module — never the
 // other way round.
+//
+// Also: deleting a document / retrying a failed ingest (DESIGN §14), and the single-instance lock
+// library/.server.lock that keeps a second server away from a library another one is using.
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { readFileSync, unlinkSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import sharp from 'sharp';
@@ -34,6 +38,15 @@ const MAX_TITLE_CHARS = 200;
 
 /** Directory of library/ that holds the courses; never a document (DOC_ID_RE would accept the name). */
 export const COURSES_DIR_NAME = 'courses';
+
+/** library/.server.lock: `{ pid, port, startedAt }` of the server using the library (DESIGN §14). */
+export const SERVER_LOCK_FILE_NAME = '.server.lock';
+
+/**
+ * A deleted document's folder is first renamed to `.deleted-<docId>-<hex>` (it disappears at once),
+ * then removed. The dot keeps it out of every listing (DOC_ID_RE needs a letter or digit first).
+ */
+const DELETED_PREFIX = '.deleted-';
 
 const DIGEST_STATUSES: ReadonlySet<DigestStatus> = new Set<DigestStatus>(['none', 'running', 'ready', 'error', 'aborted']);
 
@@ -261,6 +274,8 @@ export type StoredDocMeta = Omit<DocMeta, 'courseId' | 'digestStatus'>;
 
 const metaQueue = createKeyedQueue();
 const activeIngests = new Map<string, Promise<void>>();
+/** Documents being deleted: every read already treats them as missing. */
+const deletingDocs = new Set<string>();
 
 function isPresent<T>(value: T | null | undefined): value is T {
   return value !== null && value !== undefined;
@@ -278,8 +293,9 @@ function toStoredMeta(value: StoredDocMeta & Partial<DocMeta>, docId: string): S
  * title / page count. Null when the id is invalid or the document does not exist.
  */
 export async function readStoredDoc(docId: string): Promise<StoredDocMeta | null> {
-  if (!isDocId(docId)) return null;
+  if (!isDocId(docId) || deletingDocs.has(docId)) return null;
   const meta = await readJsonFile<StoredDocMeta & Partial<DocMeta>>(docPaths(docId).docJson);
+  if (deletingDocs.has(docId)) return null; // deleted while reading
   return typeof meta === 'object' && meta !== null ? toStoredMeta(meta, docId) : null;
 }
 
@@ -491,6 +507,7 @@ function normalizeDigestRecord(value: unknown): DigestRecord | null {
   if (typeof raw.startedAt === 'string') record.startedAt = raw.startedAt;
   if (typeof raw.updatedAt === 'string') record.updatedAt = raw.updatedAt;
   if (typeof raw.error === 'string' && raw.error) record.error = raw.error;
+  if (raw.summaryStale === true) record.summaryStale = true;
   return record;
 }
 
@@ -628,14 +645,92 @@ export function waitForIngest(docId: string): Promise<void> {
   return activeIngests.get(docId) ?? Promise.resolve();
 }
 
+/** True while the document's PDF is being converted by this process. */
+export function isIngestRunning(docId: string): boolean {
+  return activeIngests.has(docId);
+}
+
 /** Re-processes documents left in `processing` (e.g. the server stopped mid-ingest). */
 export async function resumePendingIngests(): Promise<void> {
   const pending = (await listStoredDocs()).filter((doc) => doc.status === 'processing');
   // One at a time: rendering is CPU heavy and this runs while the server starts.
   for (const doc of pending) {
+    // The list is a snapshot: the document may have been deleted meanwhile.
+    if ((await readStoredDoc(doc.id))?.status !== 'processing') continue;
     console.log(`[library] resuming ingest of ${doc.id}`);
     await startIngest(doc.id);
   }
+}
+
+/**
+ * Converts a document whose conversion failed (status 'error') again, e.g. after installing poppler
+ * (POST /api/docs/:docId/retry). Resolves with the document in status 'processing'; the ingest runs in
+ * the background. Throws 404 (unknown document) or 409 (not in status 'error').
+ */
+export async function retryIngest(docId: string): Promise<DocMeta> {
+  const stored = await readStoredDoc(docId);
+  if (!stored) throw new HttpError(404, '문서를 찾을 수 없습니다');
+  // Check and start without an await in between (startIngest registers the ingest synchronously).
+  if (deletingDocs.has(docId)) throw new HttpError(404, '문서를 찾을 수 없습니다');
+  if (stored.status !== 'error' || activeIngests.has(docId)) {
+    throw new HttpError(409, stored.status === 'ready' ? '이미 변환이 끝난 문서입니다' : '문서를 이미 변환하고 있습니다');
+  }
+  void startIngest(docId);
+  // ingest() first marks the document 'processing' (through the same queue): answer with that state.
+  await metaQueue(docId, async () => undefined);
+  const meta = await getDoc(docId);
+  if (!meta) throw new HttpError(404, '문서를 찾을 수 없습니다');
+  return meta;
+}
+
+/**
+ * Deletes a document and everything stored with it (library/<docId>: slides, sessions, notes, digest).
+ * `busyReason` is asked right before the point of no return, with no await in between, so nothing can
+ * start in the gap; a non-null answer (or a running ingest) refuses with 409. From then on every read
+ * treats the document as missing; its folder is renamed away, then removed. Course membership is not
+ * touched here (courses.ts owns the course files). Throws 404 for unknown documents.
+ */
+export async function deleteDoc(docId: string, busyReason: () => string | null = () => null): Promise<void> {
+  if ((await readStoredDoc(docId)) === null) throw new HttpError(404, '문서를 찾을 수 없습니다');
+  if (deletingDocs.has(docId)) throw new HttpError(404, '문서를 찾을 수 없습니다');
+  const reason = activeIngests.has(docId) ? 'PDF를 변환하는 중에는 지울 수 없습니다. 변환이 끝난 뒤에 다시 시도해 주세요' : busyReason();
+  if (reason) throw new HttpError(409, reason);
+  deletingDocs.add(docId);
+  try {
+    const dir = docPaths(docId).dir;
+    const trash = path.join(libraryDir(), `${DELETED_PREFIX}${docId}-${randomBytes(3).toString('hex')}`);
+    try {
+      await fs.rename(dir, trash);
+    } catch (err) {
+      if (isNotFound(err)) return; // removed by hand meanwhile
+      throw err;
+    }
+    await fs.rm(trash, { recursive: true, force: true }).catch((err: unknown) => {
+      // Invisible already; the startup sweep (removeDeletedLeftovers) tries again.
+      console.warn(`[library] could not remove ${trash}: ${(err as Error).message}`);
+    });
+    console.log(`[library] ${docId}: deleted`);
+  } finally {
+    deletingDocs.delete(docId);
+  }
+}
+
+/** Removes folders of deleted documents that could not be removed at the time (startup sweep). */
+export async function removeDeletedLeftovers(): Promise<number> {
+  let entries;
+  try {
+    entries = await fs.readdir(libraryDir(), { withFileTypes: true });
+  } catch (err) {
+    if (isNotFound(err)) return 0;
+    throw err;
+  }
+  let removed = 0;
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith(DELETED_PREFIX)) continue;
+    await fs.rm(path.join(libraryDir(), entry.name), { recursive: true, force: true });
+    removed++;
+  }
+  return removed;
 }
 
 async function ingest(docId: string): Promise<void> {
@@ -658,7 +753,8 @@ async function ingest(docId: string): Promise<void> {
     await extractTexts(paths, info.pageCount);
     await buildContactSheets(paths, info.pageCount, aspectRatio);
 
-    await updateMeta(docId, { status: 'ready', progress: info.pageCount, pageCount: info.pageCount, aspectRatio });
+    // `error: undefined` drops the message of a failed attempt that another process may have left.
+    await updateMeta(docId, { status: 'ready', progress: info.pageCount, pageCount: info.pageCount, aspectRatio, error: undefined });
     console.log(`[library] ${docId}: ready (${info.pageCount} slides)`);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -853,4 +949,165 @@ async function buildContactSheets(paths: DocPaths, pageCount: number, aspectRati
   }
 
   await writeJsonAtomic(paths.sheetsJson, entries);
+}
+
+// ---------------------------------------------------------------------------
+// Single-instance lock (library/.server.lock, DESIGN §14)
+// ---------------------------------------------------------------------------
+
+/** Content of library/.server.lock. */
+export interface ServerLockInfo {
+  pid: number;
+  port: number;
+  startedAt: string;
+}
+
+/** Another live process holds the library lock. */
+export class LibraryLockedError extends Error {
+  lockFile: string;
+  holder: ServerLockInfo;
+
+  constructor(lockFile: string, holder: ServerLockInfo) {
+    super(`easy-study가 이미 이 라이브러리로 실행 중입니다 (pid ${holder.pid}, http://127.0.0.1:${holder.port})`);
+    this.name = 'LibraryLockedError';
+    this.lockFile = lockFile;
+    this.holder = holder;
+  }
+}
+
+export interface ServerLock {
+  readonly file: string;
+  /** Records the port the server actually listens on (e.g. after listening on port 0). */
+  setPort(port: number): Promise<void>;
+  /** Gives the lock up (idempotent); the file is removed once no server of this process holds it. */
+  release(): Promise<void>;
+}
+
+/** Lock files this process holds, with the number of servers holding each (tests may run several). */
+const heldLocks = new Map<string, { holders: number; onExit: () => void }>();
+/** Serializes acquisitions within this process (two concurrent starts must not both "replace" the lock). */
+const lockQueue = createKeyedQueue();
+
+export function serverLockPath(): string {
+  return path.join(libraryDir(), SERVER_LOCK_FILE_NAME);
+}
+
+function isProcessAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM: the process exists but belongs to someone else.
+    return isErrnoException(err) && err.code === 'EPERM';
+  }
+}
+
+function parseLockInfo(raw: string): ServerLockInfo | null {
+  try {
+    const value = JSON.parse(raw) as Partial<ServerLockInfo> | null;
+    if (typeof value !== 'object' || value === null || typeof value.pid !== 'number') return null;
+    return {
+      pid: value.pid,
+      port: typeof value.port === 'number' ? value.port : 0,
+      startedAt: typeof value.startedAt === 'string' ? value.startedAt : '',
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Creates `file` with `content` only if it does not exist yet. A hard link of a complete temporary
+ * file makes creation and content one atomic step (a reader never sees an empty lock); filesystems
+ * without hard links fall back to an exclusive create.
+ */
+async function createExclusive(file: string, content: string): Promise<boolean> {
+  const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+  await fs.writeFile(tmp, content);
+  try {
+    await fs.link(tmp, file);
+    return true;
+  } catch (err) {
+    if (isErrnoException(err) && err.code === 'EEXIST') return false;
+    try {
+      await fs.writeFile(file, content, { flag: 'wx' });
+      return true;
+    } catch (fallbackErr) {
+      if (isErrnoException(fallbackErr) && fallbackErr.code === 'EEXIST') return false;
+      throw fallbackErr;
+    }
+  } finally {
+    await fs.rm(tmp, { force: true });
+  }
+}
+
+/** Removes the lock file if this process still owns it. */
+function removeOwnLockSync(file: string): void {
+  try {
+    if (parseLockInfo(readFileSync(file, 'utf8'))?.pid === process.pid) unlinkSync(file);
+  } catch {
+    // Already gone.
+  }
+}
+
+/**
+ * Takes library/.server.lock before the server touches the library (startup sweeps, ingests, jobs).
+ * Throws LibraryLockedError when another live process holds it; a lock left behind by a process that
+ * no longer runs (crash, kill -9) is replaced.
+ */
+export function acquireServerLock(port: number): Promise<ServerLock> {
+  const file = serverLockPath();
+  return lockQueue(file, () => lockLibrary(file, port));
+}
+
+async function lockLibrary(file: string, port: number): Promise<ServerLock> {
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  const info: ServerLockInfo = { pid: process.pid, port, startedAt: new Date().toISOString() };
+
+  let held = heldLocks.get(file);
+  if (!held) {
+    for (let attempt = 0; ; attempt++) {
+      if (attempt >= 5) throw new Error(`서버 잠금 파일을 만들 수 없습니다: ${file}`);
+      if (await createExclusive(file, `${JSON.stringify(info, null, 2)}\n`)) break;
+      let raw: string;
+      try {
+        raw = await fs.readFile(file, 'utf8');
+      } catch (err) {
+        if (isNotFound(err)) continue; // released in the meantime: try again
+        throw err;
+      }
+      const holder = parseLockInfo(raw);
+      if (holder && holder.pid !== process.pid && isProcessAlive(holder.pid)) throw new LibraryLockedError(file, holder);
+      // Stale: its process is gone (or it is unreadable, or an earlier process had our pid).
+      console.warn(`[library] replacing a stale lock ${file}${holder ? ` (pid ${holder.pid} is not running)` : ''}`);
+      await fs.rm(file, { force: true });
+    }
+    // Safety net: a forced exit (second Ctrl+C, shutdown timeout) still removes the lock.
+    held = { holders: 0, onExit: () => removeOwnLockSync(file) };
+    heldLocks.set(file, held);
+    process.on('exit', held.onExit);
+  }
+  held.holders++;
+  const entry = held;
+
+  let released = false;
+  return {
+    file,
+    async setPort(actualPort: number) {
+      if (released) return;
+      const current = parseLockInfo(await fs.readFile(file, 'utf8').catch(() => ''));
+      if (current?.pid !== process.pid || current.port === actualPort) return;
+      await writeJsonAtomic(file, { ...current, port: actualPort } satisfies ServerLockInfo);
+    },
+    async release() {
+      if (released) return;
+      released = true;
+      entry.holders--;
+      if (entry.holders > 0) return;
+      if (heldLocks.get(file) === entry) heldLocks.delete(file);
+      process.off('exit', entry.onExit);
+      removeOwnLockSync(file);
+    },
+  };
 }

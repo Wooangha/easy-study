@@ -18,6 +18,7 @@ import {
   getCourse,
   insertionIndex,
   listCourses,
+  removeDocFromCourses,
   updateCourse,
   writeCourseMarkdown,
 } from '../server/courses.ts';
@@ -211,6 +212,23 @@ describe('course storage', () => {
     await fs.rm(docPaths(gone).dir, { recursive: true });
     assert.deepEqual((await getCourse(course.id))?.docIds, [kept]);
     assert.deepEqual((await listCourses()).find((c) => c.id === course.id)?.docIds, [kept]);
+  });
+
+  test('removeDocFromCourses takes a lecture out of the course files and rewrites COURSE.md', async () => {
+    const stays = await makeDoc('Stays');
+    const leaves = await makeDoc('Leaves');
+    const course = await createCourse('Shrinking', tick());
+    const other = await createCourse('Untouched', tick());
+    await updateCourse(course.id, { docIds: [stays, leaves] });
+    await updateCourse(other.id, { docIds: [] });
+    assert.match(await fs.readFile(coursePaths(course.id).courseMd, 'utf8'), /Leaves/);
+
+    assert.deepEqual(await removeDocFromCourses(leaves), [course.id]);
+    const record = JSON.parse(await fs.readFile(coursePaths(course.id).courseJson, 'utf8')) as { docIds: string[] };
+    assert.deepEqual(record.docIds, [stays]);
+    assert.doesNotMatch(await fs.readFile(coursePaths(course.id).courseMd, 'utf8'), /Leaves/);
+    assert.equal((await getDoc(leaves))?.courseId, null);
+    assert.deepEqual(await removeDocFromCourses(leaves), [], 'nothing left to remove');
   });
 
   test('concurrent updates are serialized (no lost writes)', async () => {
@@ -432,5 +450,51 @@ describe('HTTP routes', () => {
     uploaded.push(plainMeta.id);
     assert.equal(plainMeta.courseId, null);
     assert.equal((await listDocs()).find((d) => d.id === plainMeta.id)?.courseId, null);
+  });
+
+  test('DELETE /docs/:docId removes the lecture from its course and rewrites COURSE.md', async () => {
+    const l1 = await makeDoc('Del L1');
+    const l2 = await makeDoc('Del L2');
+    const l3 = await makeDoc('Del L3');
+    await writeSummary(l2, 'SUMMARY OF L2');
+    const course = (await (await sendJson('POST', '/courses', { title: 'Deleting' })).json()) as Course;
+    await sendJson('PATCH', `/courses/${course.id}`, { docIds: [l1, l2, l3] });
+    assert.match(await fs.readFile(coursePaths(course.id).courseMd, 'utf8'), /## 2\. Del L2\n\nSUMMARY OF L2/);
+
+    assert.equal((await api(`/docs/${l2}`, { method: 'DELETE' })).status, 204);
+    await expectError(await api(`/docs/${l2}`), 404);
+    await assert.rejects(fs.access(docPaths(l2).dir));
+    const record = JSON.parse(await fs.readFile(coursePaths(course.id).courseJson, 'utf8')) as { docIds: string[] };
+    assert.deepEqual(record.docIds, [l1, l3], 'course.json no longer lists it');
+    assert.deepEqual((await getCourse(course.id))?.docIds, [l1, l3]);
+    const md = await fs.readFile(coursePaths(course.id).courseMd, 'utf8');
+    assert.doesNotMatch(md, /Del L2|SUMMARY OF L2/);
+    assert.match(md, /## 1\. Del L1[\s\S]*## 2\. Del L3/);
+
+    await expectError(await api(`/docs/${l2}`, { method: 'DELETE' }), 404);
+    await expectError(await api('/docs/courses', { method: 'DELETE' }), 404);
+    assert.ok(await getCourse(course.id), 'the course itself stays');
+  });
+
+  test('POST /docs/:docId/retry converts a failed lecture again', async () => {
+    const docId = await makeDoc('Broken L8');
+    const paths = docPaths(docId);
+    const broken = JSON.parse(await fs.readFile(paths.docJson, 'utf8')) as StoredDocMeta;
+    await fs.writeFile(paths.docJson, JSON.stringify({ ...broken, status: 'error', error: 'poppler is not installed (brew install poppler)' }));
+    await fs.copyFile(path.join(repoRoot(), 'samples', 'sample-lecture.pdf'), paths.sourcePdf);
+
+    const res = await api(`/docs/${docId}/retry`, { method: 'POST' });
+    assert.equal(res.status, 202);
+    const meta = (await res.json()) as DocMeta;
+    assert.equal(meta.status, 'processing');
+    assert.equal(meta.error, undefined);
+    await expectError(await api(`/docs/${docId}/retry`, { method: 'POST' }), 409);
+    await waitForIngest(docId);
+    const ready = (await (await api(`/docs/${docId}`)).json()) as DocMeta;
+    assert.equal(ready.status, 'ready');
+    assert.equal(ready.pageCount, 9);
+    assert.equal(ready.error, undefined);
+    await expectError(await api(`/docs/${docId}/retry`, { method: 'POST' }), 409);
+    await expectError(await api('/docs/missing-000000/retry', { method: 'POST' }), 404);
   });
 });

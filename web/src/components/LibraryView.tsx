@@ -27,6 +27,19 @@ interface LibraryViewProps {
   /** Move a lecture into a course (appended) or out of its course (null). */
   onMoveLecture: (docId: string, courseId: string | null) => void;
   onRetryLoad: () => void;
+  /** Re-run the conversion of a document whose conversion failed. */
+  onRetryDoc: (docId: string) => void;
+  /** Delete a document (asks for confirmation). */
+  onDeleteDoc: (doc: DocMeta) => void;
+  /** A provider is available for making 정리본. */
+  canDigest: boolean;
+  /** Make the 정리본 of these lectures (asks for confirmation). */
+  onDigestLectures: (docs: DocMeta[]) => void;
+}
+
+/** Ready lectures without a finished (or running) 정리본 — their summaries are missing from the course context. */
+function lecturesWithoutDigest(lectures: DocMeta[]): DocMeta[] {
+  return lectures.filter((d) => d.status === 'ready' && d.digestStatus !== 'ready' && d.digestStatus !== 'running');
 }
 
 const hasFiles = (e: DragEvent) => Array.from(e.dataTransfer.types).includes('Files');
@@ -152,7 +165,8 @@ export function LibraryView(props: LibraryViewProps) {
             {courses !== null && courseList.length === 0 && !creating && !coursesError && (
               <p className="course-hint muted small">
                 강의를 과목으로 묶어 두면 LLM이 이전 강의들을 알고 설명해요. 예: ‘Compiler’ 과목에 Lecture 1, 2, 3 … 을
-                순서대로 넣어 두면, Lecture 8을 공부할 때 1–7강의 요약을 함께 받고 필요하면 그 강의 파일도 열어 봐요.
+                순서대로 넣어 두면, Lecture 8을 공부할 때 1–7강 중 정리본이 있는 강의의 요약을 함께 받고, Claude Code·Codex는
+                필요하면 그 강의 파일도 열어 봐요.
               </p>
             )}
             {courseList.map((c) => (
@@ -167,6 +181,10 @@ export function LibraryView(props: LibraryViewProps) {
                 onRename={(title) => props.onRenameCourse(c.id, title)}
                 onDelete={() => props.onDeleteCourse(c.id)}
                 onSetLectures={(ids) => props.onSetLectures(c.id, ids)}
+                onRetryDoc={props.onRetryDoc}
+                onDeleteDoc={props.onDeleteDoc}
+                canDigest={props.canDigest}
+                onDigestLectures={props.onDigestLectures}
               />
             ))}
           </>
@@ -181,7 +199,15 @@ export function LibraryView(props: LibraryViewProps) {
             </div>
             <div className="doc-list">
               {uncategorized.map((d) => (
-                <DocCard key={d.id} doc={d} courses={courseList} onOpen={props.onOpen} onMove={props.onMoveLecture} />
+                <DocCard
+                  key={d.id}
+                  doc={d}
+                  courses={courseList}
+                  onOpen={props.onOpen}
+                  onMove={props.onMoveLecture}
+                  onRetry={props.onRetryDoc}
+                  onDelete={props.onDeleteDoc}
+                />
               ))}
             </div>
           </>
@@ -268,6 +294,10 @@ interface CourseCardProps {
   onRename: (title: string) => void;
   onDelete: () => void;
   onSetLectures: (docIds: string[]) => void;
+  onRetryDoc: (docId: string) => void;
+  onDeleteDoc: (doc: DocMeta) => void;
+  canDigest: boolean;
+  onDigestLectures: (docs: DocMeta[]) => void;
 }
 
 function CourseCard({
@@ -280,10 +310,15 @@ function CourseCard({
   onRename,
   onDelete,
   onSetLectures,
+  onRetryDoc,
+  onDeleteDoc,
+  canDigest,
+  onDigestLectures,
 }: CourseCardProps) {
   const [over, setOver] = useState(false);
   const [editing, setEditing] = useState(false);
   const ids = lectures.map((d) => d.id);
+  const withoutDigest = lecturesWithoutDigest(lectures);
 
   const move = (index: number, dir: -1 | 1) => {
     const next = ids.slice();
@@ -344,6 +379,21 @@ function CourseCard({
         <span className="course-count">강의 {lectures.length}개</span>
         <span className="spacer" />
         <div className="course-actions">
+          {withoutDigest.length > 0 && lectures.length > 1 && (
+            <button
+              type="button"
+              className="ghost-btn small"
+              onClick={() => onDigestLectures(withoutDigest)}
+              disabled={!canDigest}
+              title={
+                canDigest
+                  ? '정리본이 있는 강의만 요약이 다음 강의를 공부할 때 LLM에게 전달돼요 — 없는 강의의 정리본을 한 번에 만들어요'
+                  : '사용할 수 있는 LLM이 없어요'
+              }
+            >
+              📝 정리본 없는 강의 {withoutDigest.length}개 만들기
+            </button>
+          )}
           <a
             className="ghost-btn small"
             href={courseSummaryUrl(course.id)}
@@ -375,6 +425,8 @@ function CourseCard({
               onMoveUp={() => move(i, -1)}
               onMoveDown={() => move(i, 1)}
               onRemove={() => onSetLectures(ids.filter((id) => id !== d.id))}
+              onRetry={onRetryDoc}
+              onDelete={onDeleteDoc}
             />
           ))}
           {uploads.map((u) => (
@@ -445,9 +497,22 @@ interface LectureRowProps {
   onMoveUp: () => void;
   onMoveDown: () => void;
   onRemove: () => void;
+  onRetry: (docId: string) => void;
+  onDelete: (doc: DocMeta) => void;
 }
 
-function LectureRow({ doc, index, first, last, onOpen, onMoveUp, onMoveDown, onRemove }: LectureRowProps) {
+function LectureRow({
+  doc,
+  index,
+  first,
+  last,
+  onOpen,
+  onMoveUp,
+  onMoveDown,
+  onRemove,
+  onRetry,
+  onDelete,
+}: LectureRowProps) {
   const ready = doc.status === 'ready';
   return (
     <li className={`lecture-row status-${doc.status}`}>
@@ -471,6 +536,7 @@ function LectureRow({ doc, index, first, last, onOpen, onMoveUp, onMoveDown, onR
         </span>
       </button>
       <div className="lecture-actions">
+        {doc.status === 'error' && <FailedDocActions doc={doc} onRetry={onRetry} onDelete={onDelete} />}
         <button type="button" className="icon-btn small" onClick={onMoveUp} disabled={first} title="위로" aria-label="위로">
           ▲
         </button>
@@ -525,16 +591,47 @@ function UploadCard({ upload: u }: { upload: UploadItem }) {
   );
 }
 
+/** "다시 변환" / "삭제" for a document whose conversion failed (the PDF is kept, so it can be re-run). */
+function FailedDocActions({
+  doc,
+  onRetry,
+  onDelete,
+}: {
+  doc: DocMeta;
+  onRetry: (docId: string) => void;
+  onDelete: (doc: DocMeta) => void;
+}) {
+  return (
+    <>
+      <button
+        type="button"
+        className="ghost-btn small"
+        onClick={() => onRetry(doc.id)}
+        title="업로드한 PDF로 변환을 다시 해요 (예: poppler를 설치한 뒤)"
+      >
+        ↻ 다시 변환
+      </button>
+      <button type="button" className="ghost-btn small danger" onClick={() => onDelete(doc)} title="이 문서를 삭제해요">
+        삭제
+      </button>
+    </>
+  );
+}
+
 function DocCard({
   doc,
   courses,
   onOpen,
   onMove,
+  onRetry,
+  onDelete,
 }: {
   doc: DocMeta;
   courses: Course[];
   onOpen: (id: string) => void;
   onMove: (docId: string, courseId: string | null) => void;
+  onRetry: (docId: string) => void;
+  onDelete: (doc: DocMeta) => void;
 }) {
   const ready = doc.status === 'ready';
   return (
@@ -562,23 +659,26 @@ function DocCard({
           {doc.status === 'error' && <div className="doc-error">{doc.error ?? '처리 중 오류가 발생했어요'}</div>}
         </div>
       </button>
-      {courses.length > 0 && (
+      {(courses.length > 0 || doc.status === 'error') && (
         <div className="doc-card-foot">
-          <select
-            className="picker"
-            aria-label={`${doc.title}을(를) 과목으로 이동`}
-            value=""
-            onChange={(e) => {
-              if (e.target.value) onMove(doc.id, e.target.value);
-            }}
-          >
-            <option value="">📁 과목으로 이동…</option>
-            {courses.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.title}
-              </option>
-            ))}
-          </select>
+          {doc.status === 'error' && <FailedDocActions doc={doc} onRetry={onRetry} onDelete={onDelete} />}
+          {courses.length > 0 && (
+            <select
+              className="picker"
+              aria-label={`${doc.title}을(를) 과목으로 이동`}
+              value=""
+              onChange={(e) => {
+                if (e.target.value) onMove(doc.id, e.target.value);
+              }}
+            >
+              <option value="">📁 과목으로 이동…</option>
+              {courses.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.title}
+                </option>
+              ))}
+            </select>
+          )}
         </div>
       )}
     </div>
@@ -606,7 +706,17 @@ export function DocProgress({ doc, compact = false }: { doc: DocMeta; compact?: 
 }
 
 /** Shown in place of the split view while the selected doc is processing or failed. */
-export function DocStatusView({ doc, onBack }: { doc: DocMeta; onBack: () => void }) {
+export function DocStatusView({
+  doc,
+  onBack,
+  onRetry,
+  onDelete,
+}: {
+  doc: DocMeta;
+  onBack: () => void;
+  onRetry: () => void;
+  onDelete: () => void;
+}) {
   return (
     <div className="library">
       <div className="library-inner status-view">
@@ -624,7 +734,20 @@ export function DocStatusView({ doc, onBack }: { doc: DocMeta; onBack: () => voi
               </p>
             </>
           ) : (
-            <div className="doc-error">{doc.error ?? '처리 중 오류가 발생했어요'}</div>
+            <>
+              <div className="doc-error">{doc.error ?? '처리 중 오류가 발생했어요'}</div>
+              <p className="muted small">
+                업로드한 PDF는 남아 있어요. 원인을 해결했다면(예: <code>brew install poppler</code>) 다시 변환할 수 있어요.
+              </p>
+              <div className="status-actions">
+                <button type="button" className="primary-btn small" onClick={onRetry}>
+                  ↻ 다시 변환
+                </button>
+                <button type="button" className="ghost-btn danger" onClick={onDelete}>
+                  삭제
+                </button>
+              </div>
+            </>
           )}
           <button type="button" className="ghost-btn" onClick={onBack}>
             ← 라이브러리

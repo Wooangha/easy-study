@@ -1,14 +1,19 @@
-// Context strategy: decides what is sent to the LLM on every turn (DESIGN §5, §10–§12).
+// Context strategy: decides what is sent to the LLM on every turn (DESIGN §5, §10–§12, §14).
 //
 // - The first turn of a provider conversation "primes" it with the whole deck: course context
 //   (when the deck is a lecture of a course), overview contact sheets (unless a complete digest
 //   makes them unnecessary), the per-slide material of every slide (digest entry, else extracted
-//   text) and the focus window at full resolution.
+//   text) and the focus window at full resolution. When the material exceeds its size cap, every
+//   slide keeps a shorter entry (a digest entry keeps at least its title and "핵심:" line) instead of
+//   the last slides being dropped.
 // - Every turn feeds a focus window: the focused slide plus `neighbors` slides before and after it.
 //   Window slides whose image is among the slides sent recently (LRU window) are only pointed back
 //   to; the others are attached, so reading sequentially costs about one image per step.
-// - When the conversation would exceed the provider's image budget, a fresh conversation is started
-//   (rollover): the deck is primed again and a text recap of the latest Q&A is included.
+// - When the conversation would exceed the provider's image budget, or the orchestrator reports that
+//   the provider lost the conversation / found it too large (BuildTurnInput.forceNewConversation), a
+//   fresh conversation is started (rollover): the deck is primed again and a text recap of the
+//   latest Q&A is included. Request sizes in bytes and tokens are enforced by the providers, which
+//   see the encoded request (they fail with ProviderError 'context_overflow', which leads here).
 //
 // Everything in this file is pure: no filesystem access, no clock, no randomness. Paths and texts
 // come from DocAssets; identical inputs always produce identical outputs.
@@ -26,7 +31,7 @@ import type { HistoryTurn, Part, ResumeHandle } from './providers/types.ts';
 import * as prompts from './prompts.ts';
 
 export const DEFAULT_CONTEXT_SETTINGS: Readonly<ContextSettings> = Object.freeze({
-  recentWindow: 8,
+  recentWindow: 16,
   neighborWindow: 1,
   primeWithImages: 'auto',
   maxPrimeTextChars: 120_000,
@@ -47,8 +52,17 @@ const RECAP_CHARS = 600;
  */
 const FOCUS_IMAGE_RESERVE = 16;
 
-/** Do not bother with a partial section shorter than this when a text cap is hit. */
+/** Do not bother with a partial course summary shorter than this when its cap is hit. */
 const MIN_PARTIAL_SECTION_CHARS = 200;
+
+/** A capped priming dump never cuts a slide's material below about this many characters. */
+const MIN_BODY_CHARS = 120;
+/** A digest entry is only cut before its "핵심:" line when at least this much of the text before it fits. */
+const MIN_HEAD_CHARS = 80;
+/** Longest "핵심:" takeaway kept when a digest entry is cut. */
+const MAX_KEY_CHARS = 400;
+/** What shortenBody may add beyond its limit: the truncation mark and a closing code fence. */
+const SHORTEN_SLACK = prompts.TRUNCATED_MARK.length + 4;
 
 /** Digest titles are single short lines. */
 const MAX_TITLE_CHARS = 200;
@@ -56,14 +70,36 @@ const MAX_TITLE_CHARS = 200;
 type ImagePart = Extract<Part, { type: 'image' }>;
 type Sheet = DocAssets['sheets'][number];
 type PrimeImagesMode = ContextSettings['primeWithImages'];
+type RecoveryKind = NonNullable<BuildTurnInput['forceNewConversation']>;
 
 /** Material of one slide: its digest entry when usable, otherwise its extracted text. */
 interface SlideMaterial {
   kind: 'digest' | 'extracted';
   /** Digest title ('' for extracted text). */
   title: string;
-  /** Cleaned body, capped at maxSlideTextChars. */
+  /** Cleaned body, capped at maxSlideTextChars (NO_TEXT_PLACEHOLDER when the slide has no text). */
   body: string;
+  /** The slide has neither a usable digest entry nor extracted text. */
+  empty: boolean;
+}
+
+/** Summaries of the earlier lectures of the course, ready for the priming turn. */
+interface EarlierLectures {
+  /** "### Lecture i: <title>\n<summary>" per earlier lecture, oldest first. */
+  sections: string[];
+  /** At least one earlier lecture has a summary (even if it was omitted for length). */
+  anySummary: boolean;
+  /** Earlier lectures whose summary is actually included (in full or truncated). */
+  included: number;
+}
+
+/** What the priming dump contains (see planDump). */
+interface DumpPlan {
+  kind: prompts.MaterialKind;
+  /** "### Slide N" sections of the slides that have an entry, in slide order. */
+  sections: string[];
+  /** First slide whose material did not fit at all (it and every later slide are left out); null = none. */
+  firstOmitted: number | null;
 }
 
 /** The course of the document, resolved around the current lecture. */
@@ -125,14 +161,18 @@ export function buildTurn(input: BuildTurnInput): BuildTurnOutput {
   const state = normalizeState(session.providerState, pageCount);
   const materialOf = materialLookup(doc, pageCount, settings.maxSlideTextChars);
   const course = resolveCourse(doc);
+  const earlier = course ? earlierLectureSections(course.lectures.slice(0, course.position), settings.maxCourseContextChars) : null;
   const agenticCli = isAgenticCli(session.provider);
+  const forced = recoveryKind(input.forceNewConversation);
 
   const windowSlides = focusWindow(slide, pageCount, resolveNeighbors(input.neighbors, settings.neighborWindow), maxImages);
 
   // A primed conversation without a resume handle cannot be continued, so treat it as unprimed.
   const needsPrime = !state.primed || state.resume === null;
   const cost = needsPrime ? windowSlides.length : windowSlides.filter((s) => !state.recentSlides.includes(s)).length;
-  const rollover = !needsPrime && state.imagesSent + cost > maxImages;
+  const overBudget = !needsPrime && state.imagesSent + cost > maxImages;
+  // The orchestrator forces a new conversation when the provider lost the old one or it grew too large.
+  const rollover = overBudget || forced !== null;
   const startsConversation = needsPrime || rollover;
 
   // Slides whose image the provider conversation already has (none in a fresh conversation).
@@ -147,10 +187,21 @@ export function buildTurn(input: BuildTurnInput): BuildTurnOutput {
   let nextState: ProviderState;
 
   if (startsConversation) {
-    const allDigest = countDigestSlides(materialOf, pageCount) === pageCount;
-    sheets = useOverviewSheets(settings.primeWithImages, allDigest) ? selectSheets(doc.sheets, maxImages, windowSlides.length) : [];
-    appendPriming(out, { doc, pageCount, sheets, settings, agenticCli, course, materialOf });
-    if (rollover) appendRecap(out, Array.isArray(session.messages) ? session.messages : [], settings.recapTurns);
+    sheets = appendPriming(out, {
+      doc,
+      pageCount,
+      settings,
+      agenticCli,
+      course,
+      earlier,
+      materialOf,
+      windowSlides,
+      maxImages,
+    });
+    // Recap the Q&A so far whenever a conversation starts in a session that already has some
+    // (after a rollover, a recovery, or a provider state that was reset).
+    const reason: prompts.RestartReason = forced ?? (overBudget ? 'budget' : 'restart');
+    appendRecap(out, Array.isArray(session.messages) ? session.messages : [], settings.recapTurns, reason);
     nextState = {
       resume: null, // filled in by the orchestrator from the provider result
       primed: true,
@@ -169,9 +220,10 @@ export function buildTurn(input: BuildTurnInput): BuildTurnOutput {
     };
   }
 
-  appendFocus(out, doc, slide, pageCount, windowSlides, new Set(attached), materialOf);
+  appendFocus(out, doc, slide, pageCount, windowSlides, new Set(attached), materialOf, agenticCli);
   if (kind === 'prime') {
-    out.text(prompts.primeInstruction(course !== null && course.position > 0));
+    // Only ask how the lecture builds on earlier ones when their summaries are actually in context.
+    out.text(prompts.primeInstruction((earlier?.included ?? 0) > 0));
   } else {
     out.text(prompts.questionBlock(slide, String(input.question ?? '').trim()));
   }
@@ -183,6 +235,7 @@ export function buildTurn(input: BuildTurnInput): BuildTurnOutput {
     reusedSlides: reused,
     overviewImages: startsConversation ? sheets.length : 0,
   };
+  if (forced !== null) context.recoveredFrom = forced;
 
   return {
     systemPrompt: prompts.tutorSystemPrompt(),
@@ -202,19 +255,51 @@ export function buildTurn(input: BuildTurnInput): BuildTurnOutput {
 interface PrimingInput {
   doc: DocAssets;
   pageCount: number;
-  sheets: Sheet[];
   settings: ContextSettings;
   agenticCli: boolean;
   course: ResolvedCourse | null;
+  earlier: EarlierLectures | null;
   materialOf: (slide: number) => SlideMaterial;
+  /** Focus window of this turn (attached in full resolution right after the priming). */
+  windowSlides: number[];
+  maxImages: number;
 }
 
-/** PRIMING(doc): header, course context, overview sheets (each preceded by its label line), all slide material. */
-function appendPriming(out: PartsBuilder, input: PrimingInput): void {
-  const { doc, pageCount, sheets, settings, agenticCli, course, materialOf } = input;
+/**
+ * PRIMING(doc): header, course context, overview sheets (each preceded by its label line), all slide
+ * material. Returns the overview sheets that were attached.
+ */
+function appendPriming(out: PartsBuilder, input: PrimingInput): Sheet[] {
+  const { doc, pageCount, settings, agenticCli, course, earlier, materialOf, windowSlides, maxImages } = input;
   const digestSlides = countDigestSlides(materialOf, pageCount);
   const material: prompts.MaterialKind =
     digestSlides === 0 ? 'extracted' : digestSlides === pageCount ? 'digest' : 'mixed';
+
+  // Overview sheets: 'always', or 'auto' without a complete digest (capped for huge decks).
+  let sheets = useOverviewSheets(settings.primeWithImages, material === 'digest')
+    ? selectSheets(doc.sheets, maxImages, windowSlides.length)
+    : [];
+  // Slides whose image the model gets in this turn; a slide without text may only say "see the image" then.
+  const shown = new Set<number>(windowSlides);
+  for (const sheet of sheets) for (let s = sheet.fromSlide; s <= sheet.toSlide; s++) shown.add(s);
+  const placeholderFor = (slide: number) =>
+    shown.has(slide)
+      ? prompts.NO_TEXT_PLACEHOLDER
+      : agenticCli
+        ? prompts.NO_TEXT_FILE_PLACEHOLDER
+        : prompts.NO_TEXT_NO_IMAGE_PLACEHOLDER;
+  const dump = planDump(pageCount, settings.maxPrimeTextChars, material, materialOf, placeholderFor);
+
+  // A complete digest normally replaces the sheets ('auto'), but slides whose material did not fit
+  // at all would then be unknown to the model: attach the sheets of those slides instead.
+  if (sheets.length === 0 && settings.primeWithImages === 'auto' && dump.firstOmitted !== null) {
+    const first = dump.firstOmitted;
+    sheets = selectSheets(
+      doc.sheets.filter((sheet) => sheet.toSlide >= first),
+      maxImages,
+      windowSlides.length,
+    );
+  }
 
   out.text(
     prompts.primingHeader({
@@ -224,10 +309,11 @@ function appendPriming(out: PartsBuilder, input: PrimingInput): void {
       overviewImages: sheets.length,
       material,
       courseContext: course !== null,
+      earlierSummaries: (earlier?.included ?? 0) > 0,
     }),
   );
 
-  if (course) appendCourseContext(out, doc, course, settings.maxCourseContextChars, agenticCli);
+  if (course && earlier) appendCourseContext(out, doc, course, earlier, agenticCli);
 
   for (const sheet of sheets) {
     out.text(prompts.overviewLine(sheet.fromSlide, sheet.toSlide));
@@ -239,28 +325,47 @@ function appendPriming(out: PartsBuilder, input: PrimingInput): void {
     });
   }
   // Only possible for very long decks whose sheets exceed the image budget (see selectSheets).
-  if (sheets.length > 0 && sheets.length < doc.sheets.length) {
+  if (sheets.length > 0 && sheets.length < doc.sheets.length && sheets[0] === doc.sheets[0]) {
     const lastCovered = sheets[sheets.length - 1].toSlide;
-    if (lastCovered < pageCount) out.text(prompts.overviewLimitedNote(lastCovered, pageCount));
+    if (lastCovered < pageCount) out.text(prompts.overviewLimitedNote(lastCovered, pageCount, dump.firstOmitted === null));
   }
 
-  out.text(materialDump(pageCount, settings.maxPrimeTextChars, material, materialOf));
+  const dumpParts = [prompts.materialHeading(material), ...dump.sections];
+  if (dump.firstOmitted !== null) {
+    dumpParts.push(
+      prompts.textOmittedNote(dump.firstOmitted, pageCount, {
+        overviewUpTo: coveredUpTo(sheets, dump.firstOmitted),
+        slideFiles: agenticCli,
+      }),
+    );
+  }
+  out.text(dumpParts.join('\n\n'));
 
   if (agenticCli) {
     out.text(prompts.slideFilesNote(slideFileRef(doc, 1), slideFileRef(doc, pageCount), pageCount));
   }
+  return sheets;
+}
+
+/** Last slide such that every slide from `from` up to it is on one of `sheets`; null when `from` is not. */
+function coveredUpTo(sheets: Sheet[], from: number): number | null {
+  const covered = new Set<number>();
+  for (const sheet of sheets) for (let s = sheet.fromSlide; s <= sheet.toSlide; s++) covered.add(s);
+  let last = from - 1;
+  while (covered.has(last + 1)) last++;
+  return last >= from ? last : null;
 }
 
 /**
  * COURSE CONTEXT (DESIGN §12): the lecture list, summaries of the earlier lectures (oldest first,
- * capped by dropping the oldest summaries first) and, for agentic CLIs, where the other lectures'
- * files are.
+ * capped by dropping the oldest summaries first; left out when none of them has a summary) and, for
+ * agentic CLIs, where the other lectures' files are.
  */
 function appendCourseContext(
   out: PartsBuilder,
   doc: DocAssets,
   course: ResolvedCourse,
-  maxChars: number,
+  earlier: EarlierLectures,
   agenticCli: boolean,
 ): void {
   const { lectures, position } = course;
@@ -277,8 +382,9 @@ function appendCourseContext(
     ].join('\n'),
   );
 
-  const earlier = earlierLectureSections(lectures.slice(0, position), maxChars);
-  if (earlier.length > 0) out.text([prompts.EARLIER_LECTURES_HEADING, ...earlier].join('\n\n'));
+  if (earlier.anySummary && earlier.sections.length > 0) {
+    out.text([prompts.EARLIER_LECTURES_HEADING, ...earlier.sections].join('\n\n'));
+  }
   if (position < lectures.length - 1) out.text(prompts.LATER_LECTURES_NOTE);
 
   if (agenticCli) {
@@ -295,7 +401,7 @@ function appendCourseContext(
  * `maxChars`, the oldest summaries are replaced by a short note first (titles are always kept); the
  * newest remaining summary is truncated rather than dropped when it alone is too long.
  */
-function earlierLectureSections(earlier: CourseLectureRef[], maxChars: number): string[] {
+function earlierLectureSections(earlier: CourseLectureRef[], maxChars: number): EarlierLectures {
   const titles = earlier.map((l) => lectureTitle(l));
   const summaries = earlier.map((l) => (typeof l.summary === 'string' ? prepareMarkdown(l.summary) : ''));
   const bodies = summaries.map((s) => s || prompts.NO_SUMMARY_PLACEHOLDER);
@@ -314,7 +420,11 @@ function earlierLectureSections(earlier: CourseLectureRef[], maxChars: number): 
       bodies[i] = prompts.SUMMARY_OMITTED_NOTE;
     }
   }
-  return bodies.map((_, i) => section(i));
+  return {
+    sections: bodies.map((_, i) => section(i)),
+    anySummary: withSummary.length > 0,
+    included: withSummary.filter((i) => bodies[i] !== prompts.SUMMARY_OMITTED_NOTE).length,
+  };
 }
 
 /** Paths (relative to this document's directory) of another lecture's files. */
@@ -334,15 +444,15 @@ function courseFileRef(doc: DocAssets, lecture: CourseLectureRef, index: number)
   };
 }
 
-/** RECAP: the latest complete Q&A pairs of this session, as text (only after a rollover). */
-function appendRecap(out: PartsBuilder, messages: ChatMessage[], recapTurns: number): void {
+/** RECAP: the latest complete Q&A pairs of this session, as text, and why the conversation restarted. */
+function appendRecap(out: PartsBuilder, messages: ChatMessage[], recapTurns: number, reason: prompts.RestartReason): void {
   if (recapTurns <= 0) return;
   const pairs = completedPairs(messages).slice(-recapTurns);
   if (pairs.length === 0) return;
   const lines = pairs.map((p) =>
     prompts.recapLine(p.slide, squeeze(p.question, RECAP_CHARS), squeeze(p.answer, RECAP_CHARS)),
   );
-  out.text([prompts.RECAP_HEADING, ...lines, '', prompts.ROLLOVER_NOTE].join('\n'));
+  out.text([prompts.RECAP_HEADING, ...lines, '', prompts.restartNote(reason)].join('\n'));
 }
 
 /** FOCUS(window) (DESIGN §10): every window slide in ascending order, attached or pointed back to. */
@@ -354,6 +464,7 @@ function appendFocus(
   windowSlides: number[],
   attached: ReadonlySet<number>,
   materialOf: (slide: number) => SlideMaterial,
+  agenticCli: boolean,
 ): void {
   out.text(prompts.focusLine(slide, pageCount));
   if (windowSlides.length > 1) {
@@ -362,7 +473,8 @@ function appendFocus(
   for (const s of windowSlides) {
     const label = prompts.windowSlideLabel(s, s === slide);
     if (!attached.has(s)) {
-      out.text(`${label}\n${prompts.focusReusedLine(s)}`);
+      // Agentic CLIs may have compacted old images away: tell them where the file is.
+      out.text(`${label}\n${prompts.focusReusedLine(s, agenticCli ? slideFileRef(doc, s) : undefined)}`);
       continue;
     }
     // The line right before the image names it (keeps image parts next to their label).
@@ -373,38 +485,80 @@ function appendFocus(
   }
 }
 
-/** "### Slide N" sections for every slide, capped per slide (by materialOf) and as a whole. */
-function materialDump(
+/**
+ * The "### Slide N" sections of the priming dump, within `cap` characters (sections plus the blank
+ * lines between them).
+ *
+ * When everything does not fit, the slides share the cap: each keeps its material up to a common
+ * per-slide limit, chosen as large as the cap allows (short entries stay whole, long ones are cut; a
+ * digest entry keeps its "핵심:" line and loses text before it). Only when not even a minimal entry
+ * per slide fits are the last slides left out (DumpPlan.firstOmitted).
+ */
+function planDump(
   pageCount: number,
   cap: number,
   kind: prompts.MaterialKind,
   materialOf: (slide: number) => SlideMaterial,
-): string {
-  const sections: string[] = [];
-  let used = 0;
+  placeholderFor: (slide: number) => string,
+): DumpPlan {
+  interface Entry {
+    n: number;
+    kind: SlideMaterial['kind'];
+    opts: { title: string; pdfTextMark: boolean };
+    body: string;
+    /** Heading line, its newline and the blank line separating the section from the next one. */
+    fixed: number;
+  }
+  const entries: Entry[] = [];
   for (let n = 1; n <= pageCount; n++) {
     const m = materialOf(n);
     const opts = { title: m.kind === 'digest' ? m.title : '', pdfTextMark: kind === 'mixed' && m.kind === 'extracted' };
-    const section = prompts.slideTextSection(n, m.body, opts);
-    const cost = section.length + 2; // sections are joined by a blank line
-    if (used + cost <= cap) {
-      sections.push(section);
-      used += cost;
-      continue;
-    }
-    // The whole-dump cap is reached: keep a truncated piece of this slide if it is worth it,
-    // then summarise the remaining slides in a single line.
-    let firstOmitted = n;
-    const heading = prompts.slideTextSection(n, '', opts);
-    const room = cap - used - 2 - heading.length;
-    if (room >= MIN_PARTIAL_SECTION_CHARS) {
-      sections.push(heading + (m.kind === 'digest' ? truncateMarkdown(m.body, room) : truncateText(m.body, room)));
-      firstOmitted = n + 1;
-    }
-    if (firstOmitted <= pageCount) sections.push(prompts.textOmittedNote(firstOmitted, pageCount));
-    break;
+    const body = m.empty ? placeholderFor(n) : m.body;
+    entries.push({ n, kind: m.kind, opts, body, fixed: prompts.slideTextSection(n, '', opts).length + 2 });
   }
-  return [prompts.materialHeading(kind), ...sections].join('\n\n');
+  const section = (e: Entry, body: string) => prompts.slideTextSection(e.n, body, e.opts);
+  /** The body cut to about `limit` characters (never below MIN_BODY_CHARS, never longer than the body). */
+  const cut = (e: Entry, limit: number) => {
+    const short = shortenBody(e.kind, e.body, Math.max(limit, MIN_BODY_CHARS));
+    return short.length < e.body.length ? short : e.body;
+  };
+
+  const fixedTotal = entries.reduce((sum, e) => sum + e.fixed, 0);
+  if (fixedTotal + entries.reduce((sum, e) => sum + e.body.length, 0) <= cap) {
+    return { kind, sections: entries.map((e) => section(e, e.body)), firstOmitted: null };
+  }
+
+  const minLength = entries.map((e) => cut(e, 0).length);
+  if (fixedTotal + minLength.reduce((sum, n) => sum + n, 0) > cap) {
+    // Not even a minimal entry per slide fits: keep minimal entries in order and leave out the rest.
+    const sections: string[] = [];
+    let used = 0;
+    for (const [i, e] of entries.entries()) {
+      if (used + e.fixed + minLength[i] > cap) return { kind, sections, firstOmitted: e.n };
+      sections.push(section(e, cut(e, 0)));
+      used += e.fixed + minLength[i];
+    }
+    return { kind, sections, firstOmitted: null };
+  }
+
+  // Upper bound of the dump's size when every body is cut at `limit` (monotone in `limit`).
+  const bound = (limit: number) =>
+    entries.reduce((sum, e, i) => {
+      const l = Math.max(limit, MIN_BODY_CHARS);
+      return sum + e.fixed + Math.min(e.body.length, Math.max(l + SHORTEN_SLACK, minLength[i]));
+    }, 0);
+  let lo = 0;
+  let hi = entries.reduce((max, e) => Math.max(max, e.body.length), 0);
+  if (bound(lo) > cap) {
+    // The minimal entries fit, but the bound is not tight enough to allow more.
+    return { kind, sections: entries.map((e) => section(e, cut(e, 0))), firstOmitted: null };
+  }
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (bound(mid) <= cap) lo = mid;
+    else hi = mid - 1;
+  }
+  return { kind, sections: entries.map((e) => section(e, cut(e, lo))), firstOmitted: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -428,13 +582,55 @@ function materialLookup(doc: DocAssets, pageCount: number, maxChars: number): (s
     const entry = digest.get(slide);
     const body = entry ? prepareMarkdown(entry.markdown) : '';
     if (entry && body) {
-      m = { kind: 'digest', title: cleanTitle(entry.title), body: truncateMarkdown(body, maxChars) };
+      m = { kind: 'digest', title: cleanTitle(entry.title), body: shortenBody('digest', body, maxChars), empty: false };
     } else {
       const text = cleanExtractedText(doc.texts[slide - 1] ?? '');
-      m = { kind: 'extracted', title: '', body: text ? truncateText(text, maxChars) : prompts.NO_TEXT_PLACEHOLDER };
+      m = text
+        ? { kind: 'extracted', title: '', body: shortenBody('extracted', text, maxChars), empty: false }
+        : { kind: 'extracted', title: '', body: prompts.NO_TEXT_PLACEHOLDER, empty: true };
     }
     cache.set(slide, m);
     return m;
+  };
+}
+
+/**
+ * `body` cut to about `max` characters: at most max + SHORTEN_SLACK, except that a digest entry always
+ * keeps its "핵심:" takeaway (the text before it is cut first, down to just the truncation mark).
+ * Other bodies are cut at the end (closing a code fence the cut leaves open).
+ */
+function shortenBody(kind: SlideMaterial['kind'], body: string, max: number): string {
+  if (body.length <= max) return body;
+  if (kind === 'digest') {
+    const split = splitKeyLine(body);
+    if (split) {
+      if (!split.head) return split.key;
+      const room = max - split.key.length - 1;
+      const head = room >= MIN_HEAD_CHARS ? truncateMarkdown(split.head, room) : prompts.TRUNCATED_MARK;
+      return `${head}\n${split.key}`;
+    }
+    return truncateMarkdown(body, max);
+  }
+  return truncateText(body, max);
+}
+
+/** A digest takeaway line: "핵심: …", also decorated ("**핵심:**", "- **핵심**: …"). */
+const KEY_LINE_RE = /^\s{0,3}(?:[-*+>]\s+)?(?:\*\*|__)?\s*핵심\s*(?:\*\*|__)?\s*[:：]/;
+
+/** Splits a digest body at its last "핵심:" line outside code fences (the takeaway runs to the end). */
+function splitKeyLine(body: string): { head: string; key: string } | null {
+  const lines = body.split('\n');
+  let inFence = false;
+  let at = -1;
+  lines.forEach((line, i) => {
+    if (FENCE_RE.test(line)) inFence = !inFence;
+    else if (!inFence && KEY_LINE_RE.test(line)) at = i;
+  });
+  if (at < 0) return null;
+  const key = lines.slice(at).join('\n').trim();
+  return {
+    head: lines.slice(0, at).join('\n').trim(),
+    key: key.length > MAX_KEY_CHARS ? truncateMarkdown(key, MAX_KEY_CHARS) : key,
   };
 }
 
@@ -580,6 +776,11 @@ function slideFileRef(doc: DocAssets, slide: number): string {
 /** Same naming rule as the library: 3 digits, more when the deck has > 999 pages. */
 function pageBaseName(n: number, pageCount: number): string {
   return String(n).padStart(Math.max(3, String(pageCount).length), '0');
+}
+
+/** BuildTurnInput.forceNewConversation, validated (null = not forced). */
+function recoveryKind(value: unknown): RecoveryKind | null {
+  return value === 'resume_invalid' || value === 'context_overflow' ? value : null;
 }
 
 function isAgenticCli(provider: string): boolean {

@@ -1,9 +1,10 @@
 import { memo, useCallback, useLayoutEffect, useRef, type MouseEvent } from 'react';
-import type { DigestInfo, DigestSlide, DocMeta, ProviderInfo } from '../../../shared/types.ts';
+import type { DigestSlide, DocMeta, ProviderInfo } from '../../../shared/types.ts';
 import { digestMarkdownUrl } from '../api.ts';
 import type { DigestState } from '../hooks/useDigest.ts';
 import type { ProviderChoice } from '../hooks/useProviderChoice.ts';
-import { clamp, formatTime, providerWithModel } from '../lib/format.ts';
+import { digestContinueLabel, digestNote, digestStatusLabel, digestView } from '../lib/digestState.ts';
+import { formatTime, providerWithModel } from '../lib/format.ts';
 import { toast } from '../lib/toast.ts';
 import { Markdown } from './Markdown.tsx';
 
@@ -26,18 +27,6 @@ interface DigestPanelProps {
   onGoToSlide: (slide: number) => void;
 }
 
-/** What the digest looks like right now, derived once for the toolbar, status block and content. */
-function summarize(info: DigestInfo, pageCount: number) {
-  const total = info.total > 0 ? info.total : pageCount;
-  const failed = info.slides.filter((s) => s.failed).length;
-  const done = clamp(info.done, 0, total);
-  const hasAny = info.slides.length > 0;
-  const complete = info.status === 'ready' && failed === 0 && done >= total;
-  // Every slide is there but the summary call failed: a plain (non-force) run only writes the summary.
-  const needsSummary = complete && !info.summary;
-  return { total, failed, done, hasAny, complete, needsSummary, running: info.status === 'running' };
-}
-
 export function DigestPanel({
   doc,
   digest,
@@ -51,7 +40,8 @@ export function DigestPanel({
   onGoToSlide,
 }: DigestPanelProps) {
   const { info, error, loading, pending } = digest;
-  const s = info ? summarize(info, doc.pageCount) : null;
+  // What the digest looks like right now, derived once for the toolbar, status block and content.
+  const s = info ? digestView(info, doc.pageCount) : null;
   const bySlide = new Map((info?.slides ?? []).map((e) => [e.slide, e]));
 
   const start = (force: boolean) => {
@@ -121,6 +111,11 @@ export function DigestPanel({
   );
 
   // ---- Render --------------------------------------------------------------------------------------
+  const continueLabel = info && s ? digestContinueLabel(info, s) : null;
+  const note = info && s ? digestNote(info, s) : null;
+  const outdatedNote = s?.summaryOutdated ? (
+    <p className="muted small">⚠️ 슬라이드 정리가 바뀌기 전에 만든 요약이에요. 위의 ‘📘 강의 요약 다시 만들기’로 새로 만들 수 있어요.</p>
+  ) : null;
   let content;
   if (!info || !s) {
     content = error ? (
@@ -193,7 +188,8 @@ export function DigestPanel({
         </div>
         {info.summary && (
           <details className="digest-summary compact">
-            <summary>📘 강의 전체 요약</summary>
+            <summary>📘 강의 전체 요약{s.summaryOutdated ? ' (이전 요약)' : ''}</summary>
+            {outdatedNote}
             <Markdown text={info.summary} />
           </details>
         )}
@@ -223,6 +219,7 @@ export function DigestPanel({
         {info.summary ? (
           <section className="digest-summary">
             <h3>📘 강의 요약</h3>
+            {outdatedNote}
             <Markdown text={info.summary} />
           </section>
         ) : (
@@ -259,7 +256,7 @@ export function DigestPanel({
       {info && s && (s.hasAny || s.running) && (
         <div className={`digest-status status-${info.status}`}>
           <div className="digest-status-line">
-            <span className="digest-status-label">{statusLabel(info, s)}</span>
+            <span className="digest-status-label">{digestStatusLabel(info, s)}</span>
             {info.provider && (
               <span className="muted small">
                 {providerWithModel(providers, info.provider, info.model)}
@@ -278,7 +275,7 @@ export function DigestPanel({
               </button>
             ) : (
               <>
-                {(!s.complete || s.needsSummary) && (
+                {continueLabel && (
                   <button
                     type="button"
                     className="ghost-btn small accent"
@@ -286,11 +283,7 @@ export function DigestPanel({
                     disabled={startDisabled}
                     title={startTitle}
                   >
-                    {s.done < s.total || info.status !== 'ready'
-                      ? '▶ 이어서 만들기'
-                      : s.failed > 0
-                        ? '↻ 실패한 슬라이드 다시'
-                        : '📘 강의 요약 만들기'}
+                    {continueLabel}
                   </button>
                 )}
                 <button
@@ -315,9 +308,10 @@ export function DigestPanel({
               </span>
             </div>
           )}
-          {info.error && info.status !== 'running' && (
+          {note && (
             <div className={info.status === 'error' ? 'msg-error' : 'msg-note'}>
-              {info.status === 'ready' ? `⚠️ 강의 요약을 만들지 못했어요: ${info.error}` : `⚠️ ${info.error}`}
+              {note.message}
+              {note.hint && <div className="digest-note-hint">{note.hint}</div>}
             </div>
           )}
           <div className="digest-file">
@@ -346,23 +340,6 @@ export function DigestPanel({
       </div>
     </div>
   );
-}
-
-/** Status headline; counts are left to the progress bar whenever it is shown (i.e. not complete). */
-function statusLabel(info: DigestInfo, s: ReturnType<typeof summarize>): string {
-  switch (info.status) {
-    case 'running':
-      return '⏳ 정리하는 중';
-    case 'ready':
-      if (s.failed > 0) return `✓ 정리본 · 실패 ${s.failed}장`;
-      return s.complete ? `✓ 정리본 완성 · ${s.total}장` : '✓ 정리본 (일부)';
-    case 'aborted':
-      return '⏸ 중지됨';
-    case 'error':
-      return '⚠️ 오류로 멈춤';
-    default:
-      return '정리본';
-  }
 }
 
 /** Ignore clicks that select text or hit a link / control inside the entry. */

@@ -4,10 +4,13 @@
 //
 // Stored as library/<docId>/digest/digest.json (DigestRecord) and rendered to library/<docId>/DIGEST.md
 // (plus the course's COURSE.md). A job persists after every batch, so a crash or an abort keeps the
-// finished slides and a later run ("이어서 만들기") only does the missing or failed ones.
+// finished slides and a later run ("이어서 만들기") only does the missing or failed ones. A forced redo
+// ("다시 만들기") keeps every old entry (and the old summary) until a new one replaces it, so an aborted
+// or failed redo never loses the digest the student already had.
 //
-// One job per document at a time. Provider calls are one-shot (resume: null, ephemeral), run with a
-// small concurrency, and never touch the study sessions.
+// One job per document at a time. Provider calls are one-shot (resume: null, ephemeral, no tools) and
+// never touch the study sessions. All jobs together run at most EASY_STUDY_DIGEST_CONCURRENCY calls at
+// a time (a process-wide limit), so opening several lectures does not multiply the load.
 import fs from 'node:fs/promises';
 import type { DigestInfo, DigestSlide, ProviderId } from '../shared/types.ts';
 import { defaultChatDeps } from './chat.ts';
@@ -60,7 +63,7 @@ export interface DigestDeps {
   /** Availability of a provider (should be cached). */
   checkProvider: (id: ProviderId) => Promise<ProviderCheck>;
   prompts: DigestPrompts;
-  /** Provider calls one job runs at the same time. */
+  /** Provider calls that all digest jobs together run at the same time (process-wide limit). */
   concurrency: () => number;
   now: () => Date;
 }
@@ -99,11 +102,80 @@ interface DigestJob {
   finished: Promise<void>;
   /** The job's working copy (authoritative while it runs); null until the job has read the old record. */
   record: DigestRecord | null;
+  /**
+   * Forced redo only: slides not redone yet (their old entries are still in `record`). Progress of a
+   * redo is counted from this set, since every slide keeps an entry the whole time.
+   */
+  redo: Set<number> | null;
 }
 
 const jobs = new Map<string, DigestJob>();
 /** Serializes writes of digest.json / DIGEST.md per document. */
 const persistQueue = createKeyedQueue();
+
+// ---------------------------------------------------------------------------
+// Process-wide limit on digest provider calls
+// ---------------------------------------------------------------------------
+
+interface SlotWaiter {
+  limit: number;
+  grant: () => void;
+}
+
+/** Digest provider calls running right now, across all jobs. */
+let callsInFlight = 0;
+/** Calls waiting for a slot, first come first served. */
+const slotWaiters: SlotWaiter[] = [];
+
+function pumpCallSlots(): void {
+  while (slotWaiters.length > 0 && callsInFlight < slotWaiters[0].limit) {
+    slotWaiters.shift()?.grant();
+  }
+}
+
+/**
+ * Waits for one of the `limit` process-wide call slots; resolves with its release function. Rejects
+ * (and leaves the queue) when `signal` aborts first, so aborting a queued job never waits for others.
+ */
+function acquireCallSlot(limit: number, signal: AbortSignal): Promise<() => void> {
+  const max = Math.max(1, Math.floor(limit) || 1);
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    callsInFlight--;
+    pumpCallSlots();
+  };
+  const aborted = () => (signal.reason instanceof Error ? signal.reason : new Error('정리본 만들기가 중단되었습니다'));
+  if (signal.aborted) return Promise.reject(aborted());
+  if (slotWaiters.length === 0 && callsInFlight < max) {
+    callsInFlight++;
+    return Promise.resolve(release);
+  }
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      const index = slotWaiters.indexOf(waiter);
+      if (index !== -1) slotWaiters.splice(index, 1);
+      reject(aborted());
+      pumpCallSlots(); // the next waiter may have a larger limit
+    };
+    const waiter: SlotWaiter = {
+      limit: max,
+      grant: () => {
+        signal.removeEventListener('abort', onAbort);
+        callsInFlight++;
+        resolve(release);
+      },
+    };
+    slotWaiters.push(waiter);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/** Digest provider calls running right now, across all jobs (for tests and diagnostics). */
+export function digestCallsInFlight(): number {
+  return callsInFlight;
+}
 
 // ---------------------------------------------------------------------------
 // Queries
@@ -119,7 +191,9 @@ function toInfo(docId: string, pageCount: number, record: DigestRecord | null, j
   if (job && !job.record) status = 'running'; // the job is still reading the previous record
   // 'running' on disk without a job is a leftover of a crash (the startup sweep rewrites it).
   else if (!job && status === 'running') status = 'aborted';
-  const info: DigestInfo = { docId, status, done: slides.length, total: pageCount, slides, summary: record.summary, markdownPath };
+  // A forced redo keeps the old entries until they are replaced: its progress is what it redid.
+  const done = job?.redo ? Math.max(0, pageCount - job.redo.size) : slides.length;
+  const info: DigestInfo = { docId, status, done, total: pageCount, slides, summary: record.summary, markdownPath };
   if (record.provider) info.provider = record.provider;
   if (record.model !== undefined) info.model = record.model;
   if (record.error) info.error = record.error;
@@ -169,6 +243,7 @@ export async function startDigest(
   const job: DigestJob = {
     controller: new AbortController(),
     record: null,
+    redo: null,
     finished: new Promise<void>((resolve) => {
       markFinished = resolve;
     }),
@@ -186,26 +261,42 @@ export async function startDigest(
     const [previous, course] = await Promise.all([readDigestRecord(docId), courseOf(docId)]);
     courseTitle = course?.title ?? null;
     const now = deps.now().toISOString();
-    job.record = {
+    // Even a forced redo starts from the previous entries and summary: each is kept until a new one
+    // replaces it, so an aborted or failed redo leaves a complete digest behind.
+    const record: DigestRecord = {
       version: 1,
       status: 'running',
       provider: provider.id,
       model: (options.model ?? '').trim() || provider.defaultModel,
       startedAt: now,
       updatedAt: now,
-      slides: options.force ? [] : (previous?.slides ?? []).filter((entry) => entry.slide <= pageCount),
-      summary: options.force ? null : (previous?.summary ?? null),
+      slides: (previous?.slides ?? []).filter((entry) => entry.slide <= pageCount),
+      summary: previous?.summary ?? null,
     };
-    await persist(docId, assets, job.record);
+    if (previous && (previous.summaryStale || summaryFailedLastTime(previous))) record.summaryStale = true;
+    job.redo = options.force ? new Set(Array.from({ length: pageCount }, (_, i) => i + 1)) : null;
+    job.record = record;
+    await persist(docId, assets, record);
   } catch (err) {
     release();
     throw err;
   }
 
   const info = toInfo(docId, pageCount, job.record, job);
-  console.log(`[digest] ${docId}: started with ${provider.id}${job.record.model ? ` (${job.record.model})` : ''}`);
+  console.log(
+    `[digest] ${docId}: ${options.force ? 'redo ' : ''}started with ${provider.id}${job.record.model ? ` (${job.record.model})` : ''}`,
+  );
   void runJob(docId, job, job.record, { assets, provider, courseTitle, deps }).finally(release);
   return info;
+}
+
+/**
+ * The run that wrote `record` could not (re)write the lecture summary: a 'ready' digest without failed
+ * slides carries a note only then. New records also say so with `summaryStale`; records written before it
+ * existed only have the note, and the UI offers a summary-only run for exactly this state.
+ */
+function summaryFailedLastTime(record: DigestRecord): boolean {
+  return record.status === 'ready' && !!record.error && record.slides.every((entry) => !entry.failed);
 }
 
 /** Aborts the running digest job of a document (finished slides are kept). False when none runs. */
@@ -336,7 +427,6 @@ async function runJob(docId: string, job: DigestJob, record: DigestRecord, ctx: 
 
   let succeeded = 0; // slides this job digested successfully
   let attempted = 0; // slides this job sent to the provider
-  let changed = false; // this job stored at least one entry
   let firstError: string | null = null;
   let failedCallsInARow = 0;
   let streakError: string | null = null;
@@ -355,32 +445,47 @@ async function runJob(docId: string, job: DigestJob, record: DigestRecord, ctx: 
     if (failedCallsInARow >= MAX_FAILED_CALLS_IN_A_ROW) fatal ??= streakError;
   };
 
+  /** Stores this job's entries for some slides (the slides are then done, even when they failed). */
   const store = (entries: DigestSlide[]) => {
-    if (entries.length === 0) return;
-    record.slides = sortDigestSlides([...record.slides, ...entries.map(cleanEntry)]);
-    succeeded += entries.filter((entry) => !entry.failed).length;
-    changed = true;
+    for (const entry of entries) job.redo?.delete(entry.slide);
+    const usableBefore = new Set(record.slides.filter((entry) => !entry.failed).map((entry) => entry.slide));
+    // A failed attempt never replaces a usable entry (a forced redo keeps the old one).
+    const accepted = entries.map(cleanEntry).filter((entry) => !entry.failed || !usableBefore.has(entry.slide));
+    if (accepted.length === 0) return;
+    record.slides = sortDigestSlides([...record.slides, ...accepted]);
+    const usable = accepted.filter((entry) => !entry.failed).length;
+    succeeded += usable;
+    // The summary was written from other entries: it must be regenerated (persisted, so a later run
+    // still does it when this one is interrupted before its summary step).
+    if (usable > 0) record.summaryStale = true;
     stamp();
   };
 
-  /** One provider call; resolves with the answer text (falls back to the streamed text). */
+  /** One provider call (waits for a process-wide slot); resolves with the answer text. */
   const call = async (systemPrompt: string, parts: Part[]): Promise<string> => {
-    let streamed = '';
-    const result = await provider.run({
-      cwd: assets.dir,
-      systemPrompt,
-      parts,
-      resume: null,
-      history: [],
-      model: record.model ?? '',
-      ephemeral: true,
-      signal,
-      onDelta: (text) => {
-        streamed += text;
-      },
-      onStatus: () => {},
-    });
-    return result.text.trim() ? result.text : streamed;
+    const release = await acquireCallSlot(deps.concurrency(), signal);
+    try {
+      let streamed = '';
+      const result = await provider.run({
+        cwd: assets.dir,
+        systemPrompt,
+        parts,
+        resume: null,
+        history: [],
+        model: record.model ?? '',
+        ephemeral: true,
+        // The slide images are attached; the model has no reason to run commands or read files.
+        allowTools: false,
+        signal,
+        onDelta: (text) => {
+          streamed += text;
+        },
+        onStatus: () => {},
+      });
+      return result.text.trim() ? result.text : streamed;
+    } finally {
+      release();
+    }
   };
 
   /** Digests `slides` in one call. Never throws; an aborted call resolves with nothing. */
@@ -440,7 +545,7 @@ async function runJob(docId: string, job: DigestJob, record: DigestRecord, ctx: 
   try {
     const todo: number[] = [];
     const good = new Set(record.slides.filter((entry) => !entry.failed).map((entry) => entry.slide));
-    for (let slide = 1; slide <= pageCount; slide++) if (!good.has(slide)) todo.push(slide);
+    for (let slide = 1; slide <= pageCount; slide++) if (job.redo?.has(slide) || !good.has(slide)) todo.push(slide);
 
     const batches = planBatches(todo, prompts.batchSize);
     await runPool(
@@ -458,11 +563,16 @@ async function runJob(docId: string, job: DigestJob, record: DigestRecord, ctx: 
     const entries = new Set(record.slides.map((entry) => entry.slide));
     const everySlideHasEntry = pageCount > 0 && Array.from({ length: pageCount }, (_, i) => i + 1).every((n) => entries.has(n));
     const usable = record.slides.filter((entry) => !entry.failed);
-    if (!stopped() && everySlideHasEntry && usable.length > 0 && (changed || !record.summary)) {
+    // `summaryStale` is persisted, so a summary that an earlier run could not (re)write is made now.
+    if (!stopped() && everySlideHasEntry && usable.length > 0 && (record.summaryStale === true || !record.summary)) {
       try {
         const text = await call(prompts.summarySystemPrompt(), prompts.buildSummaryParts({ deckTitle, courseTitle, digest: usable }));
-        if (text.trim()) record.summary = text.trim();
-        else summaryError = '모델이 빈 요약을 돌려주었습니다';
+        if (text.trim()) {
+          record.summary = text.trim();
+          delete record.summaryStale;
+        } else {
+          summaryError = '모델이 빈 요약을 돌려주었습니다';
+        }
       } catch (err) {
         if (!signal.aborted) summaryError = errorText(err);
       }

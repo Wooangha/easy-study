@@ -38,7 +38,7 @@ export interface SessionRecord {
 export interface ContextSettings {
   /**
    * Do not re-send a slide's full image if it is among the last N slides sent in the current
-   * provider conversation. Default 8 (env EASY_STUDY_RECENT_WINDOW).
+   * provider conversation. Default 16 (env EASY_STUDY_RECENT_WINDOW).
    */
   recentWindow: number;
   /**
@@ -115,6 +115,11 @@ export interface BuildTurnInput {
   slide: number;
   /** Slides before/after the focused slide to feed as well (buildTurn clamps to 0..3). */
   neighbors: number;
+  /**
+   * Start a new provider conversation even though the current one is primed (the provider lost it or it
+   * overflowed): behaves like a rollover (re-prime + recap), and ContextInfo.recoveredFrom is set.
+   */
+  forceNewConversation?: 'resume_invalid' | 'context_overflow';
   settings: ContextSettings;
   /** Provider.maxImagesPerConversation of the session's provider. */
   maxImagesPerConversation: number;
@@ -150,6 +155,8 @@ export interface DigestRecord {
   /** Ascending by slide. */
   slides: DigestSlide[];
   summary: string | null;
+  /** True when slide entries changed after the summary was written (the summary must be regenerated). */
+  summaryStale?: boolean;
 }
 
 /** Persisted as library/courses/<courseId>/course.json (the Course type from shared/types.ts plus a version). */

@@ -2,11 +2,12 @@
 // - spawning CLI tools (argument array, never a shell) and parsing their JSONL stdout,
 // - abort handling (SIGTERM, then SIGKILL after a grace period) and AbortError creation,
 // - `<bin> --version` probing for detect(),
-// - loading slide images for providers that send them inline.
+// - loading slide images for providers that send them inline (re-encoded to compact JPEGs).
 import { execFile, spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
+import sharp from 'sharp';
 import type { ProviderAvailability } from './types.ts';
 
 /** Time between SIGTERM and SIGKILL when a turn is aborted. */
@@ -370,12 +371,107 @@ export function imageMediaType(file: string): ImageMediaType {
   }
 }
 
-/** Reads an image as base64 (for providers that embed images in the request). */
-export async function loadImageBase64(file: string): Promise<{ mediaType: ImageMediaType; data: string }> {
+export interface InlineImage {
+  mediaType: ImageMediaType;
+  /** Base64 of the image bytes. */
+  data: string;
+}
+
+/** Reads an image as base64, unchanged. */
+export async function loadImageBase64(file: string): Promise<InlineImage> {
   try {
     const bytes = await readFile(file);
     return { mediaType: imageMediaType(file), data: bytes.toString('base64') };
   } catch (err) {
     throw new Error(`슬라이드 이미지를 읽을 수 없습니다: ${file} (${errorMessage(err)})`);
   }
+}
+
+/**
+ * Long edge of images sent inline to a model API. Claude's standard vision limit (larger images are
+ * downscaled server-side anyway, and slides are rendered at 1600 px), and more than OpenAI's
+ * high-detail processing keeps.
+ */
+export const INLINE_IMAGE_MAX_EDGE = 1568;
+/**
+ * Per-image size target. Conversations resend (anthropic-api, and Claude Code under the hood) up to
+ * Provider.maxImagesPerConversation = 90 images: 90 × 280 KB as base64 stays below the Messages API's
+ * 32 MB request limit, and a priming turn (at most ~75 overview sheets) stays well below it.
+ */
+export const INLINE_IMAGE_MAX_BYTES = 280_000;
+/** JPEG qualities tried in order until the image fits INLINE_IMAGE_MAX_BYTES. */
+const INLINE_IMAGE_QUALITIES = [85, 72, 60];
+/** Encoded images kept in memory (base64 characters): history is resent every turn. */
+const INLINE_IMAGE_CACHE_CHARS = 64 * 1024 * 1024;
+
+const inlineCache = new Map<string, InlineImage>();
+let inlineCacheChars = 0;
+
+/**
+ * Loads a slide or overview image for embedding in a request: downscaled to INLINE_IMAGE_MAX_EDGE and
+ * re-encoded as JPEG (a slide PNG of 100–400 KB becomes ~50–150 KB, which keeps long conversations
+ * under request size limits). Results are cached per file version. An image the encoder cannot read
+ * is sent unchanged, so the model API reports the problem.
+ */
+export async function loadInlineImage(file: string): Promise<InlineImage> {
+  let info: { size: number; mtimeMs: number };
+  try {
+    info = await stat(file);
+  } catch (err) {
+    throw new Error(`슬라이드 이미지를 읽을 수 없습니다: ${file} (${errorMessage(err)})`);
+  }
+  const key = `${file}\0${info.size}\0${info.mtimeMs}`;
+  const cached = inlineCache.get(key);
+  if (cached) {
+    // Most recently used last.
+    inlineCache.delete(key);
+    inlineCache.set(key, cached);
+    return cached;
+  }
+
+  const original = await loadImageBase64(file);
+  let image = original;
+  try {
+    const jpeg = await encodeInlineJpeg(Buffer.from(original.data, 'base64'));
+    image = { mediaType: 'image/jpeg', data: jpeg.toString('base64') };
+  } catch {
+    // Not decodable here: send it as it is.
+  }
+
+  inlineCache.set(key, image);
+  inlineCacheChars += image.data.length;
+  for (const [oldKey, old] of inlineCache) {
+    if (inlineCacheChars <= INLINE_IMAGE_CACHE_CHARS || oldKey === key) break;
+    inlineCache.delete(oldKey);
+    inlineCacheChars -= old.data.length;
+  }
+  return image;
+}
+
+/** Forgets every encoded image (tests). */
+export function clearInlineImageCache(): void {
+  inlineCache.clear();
+  inlineCacheChars = 0;
+}
+
+async function encodeInlineJpeg(bytes: Buffer): Promise<Buffer> {
+  const resized = () =>
+    sharp(bytes)
+      .resize({ width: INLINE_IMAGE_MAX_EDGE, height: INLINE_IMAGE_MAX_EDGE, fit: 'inside', withoutEnlargement: true })
+      .flatten({ background: '#ffffff' });
+  let out = Buffer.alloc(0);
+  for (const quality of INLINE_IMAGE_QUALITIES) {
+    out = await resized().jpeg({ quality }).toBuffer();
+    if (out.length <= INLINE_IMAGE_MAX_BYTES) return out;
+  }
+  // Still too large (a photo or noise-like picture): make it smaller as well, down to a legible minimum.
+  for (const edge of [1200, 960, 768, 640, 512]) {
+    out = await sharp(bytes)
+      .resize({ width: edge, height: edge, fit: 'inside', withoutEnlargement: true })
+      .flatten({ background: '#ffffff' })
+      .jpeg({ quality: 60 })
+      .toBuffer();
+    if (out.length <= INLINE_IMAGE_MAX_BYTES) break;
+  }
+  return out;
 }

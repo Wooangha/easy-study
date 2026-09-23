@@ -95,6 +95,15 @@ export const listDocs = () => request<DocMeta[]>('/api/docs').then((list) => lis
 
 export const getDoc = (docId: string) => request<DocMeta>(docPath(docId)).then(normalizeDoc);
 
+/**
+ * Delete a document and everything made from it (slides, sessions, notes, 정리본); it also leaves its
+ * course. 409 while its conversion, digest or an answer is running.
+ */
+export const deleteDoc = (docId: string) => request<void>(docPath(docId), { method: 'DELETE' });
+
+/** Run the PDF conversion again for a document whose conversion failed (status 'error'); 409 otherwise. */
+export const retryDoc = (docId: string) => postJSON<DocMeta>(`${docPath(docId)}/retry`).then(normalizeDoc);
+
 export const slideUrl = (docId: string, slide: number) => `${docPath(docId)}/slides/${slide}.png`;
 
 export const listSessions = (docId: string) => request<SessionSummary[]>(`${docPath(docId)}/sessions`);

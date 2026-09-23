@@ -4,7 +4,12 @@
 // previous_response_id and only sends the new user turn. `instructions` are not carried over
 // between responses, so the system prompt is sent every turn. OPENAI_BASE_URL is honoured by the SDK.
 // One-shot (ephemeral) calls such as digest batches are never continued, so they are not stored.
-// extraReadDirs is ignored: the model has no file access.
+// extraReadDirs and allowTools are ignored: the model has no tools or file access. Images are sent
+// inline, re-encoded as compact JPEGs (see loadInlineImage).
+//
+// Failures are classified (ProviderError): an expired / deleted previous_response_id (stored
+// responses are kept for a limited time) is 'resume_invalid'; context_length_exceeded / HTTP 413 is
+// 'context_overflow' — both make the orchestrator continue in a new conversation (re-prime + recap).
 import OpenAI from 'openai';
 import type {
   ResponseCreateParamsStreaming,
@@ -16,11 +21,13 @@ import type {
   Part,
   Provider,
   ProviderAvailability,
+  ProviderErrorKind,
   ProviderRunInput,
   ProviderRunResult,
   ResumeHandle,
 } from './types.ts';
-import { abortError, errorMessage, loadImageBase64 } from './proc.ts';
+import { ProviderError } from './types.ts';
+import { abortError, errorMessage, loadInlineImage } from './proc.ts';
 
 export const OPENAI_FALLBACK_MODEL = 'gpt-5';
 
@@ -52,7 +59,7 @@ async function toContent(parts: Part[]): Promise<ResponseInputContent[]> {
     if (part.type === 'text') {
       if (part.text) content.push({ type: 'input_text', text: part.text });
     } else {
-      const image = await loadImageBase64(part.path);
+      const image = await loadInlineImage(part.path);
       content.push({
         type: 'input_image',
         image_url: `data:${image.mediaType};base64,${image.data}`,
@@ -120,10 +127,13 @@ export class OpenAIStreamState {
         if (reason) this.onStatus(`응답이 중간에 끝났습니다 (${reason})`);
         break;
       }
-      case 'response.failed':
-        throw new Error(`OpenAI API 오류: ${event.response.error?.message ?? '응답 생성에 실패했습니다.'}`);
+      case 'response.failed': {
+        const error = event.response.error;
+        const message = error?.message ?? '응답 생성에 실패했습니다.';
+        throw openaiFailure({ code: error?.code ?? null, message }, false);
+      }
       case 'error':
-        throw new Error(`OpenAI API 오류: ${event.message}`);
+        throw openaiFailure({ code: event.code ?? null, param: event.param ?? null, message: event.message }, false);
       default:
         break;
     }
@@ -141,30 +151,86 @@ export class OpenAIStreamState {
   }
 }
 
-function toProviderError(err: unknown): Error {
-  if (err instanceof OpenAI.AuthenticationError) {
-    return new Error('OpenAI API 인증에 실패했습니다. OPENAI_API_KEY를 확인하세요.');
+export interface OpenAIErrorInfo {
+  status?: number;
+  code?: string | null;
+  param?: string | null;
+  message: string;
+}
+
+/**
+ * Kind of an OpenAI API error (HTTP error or failure event). `resumed` = the request continued a
+ * conversation with previous_response_id. OpenAI reports an unknown previous response as a 400 or 404
+ * with code previous_response_not_found / param previous_response_id, so the status alone says nothing.
+ */
+export function classifyOpenAIError(info: OpenAIErrorInfo, resumed: boolean): ProviderErrorKind {
+  const { status, code, param, message } = info;
+  if (resumed && (code === 'previous_response_not_found' || param === 'previous_response_id' || /previous[_ ]response/i.test(message))) {
+    return 'resume_invalid';
   }
-  if (err instanceof OpenAI.NotFoundError) {
-    return new Error(`OpenAI API: 모델 또는 이전 응답을 찾을 수 없습니다 (${err.message})`);
+  if (
+    status === 413 ||
+    code === 'context_length_exceeded' ||
+    /context[_ ]length|context window|maximum context length|too many tokens|input (?:is )?too (?:long|large)|request too large/i.test(message)
+  ) {
+    return 'context_overflow';
   }
-  if (err instanceof OpenAI.RateLimitError) {
-    return new Error(`OpenAI API 요청 한도를 초과했습니다: ${err.message}`);
+  if (status === 401 || code === 'invalid_api_key') return 'auth';
+  if (code === 'model_not_found' || ((status === 403 || status === 404) && /\bmodel\b/i.test(message))) {
+    return 'model_unavailable';
   }
-  if (err instanceof OpenAI.BadRequestError) {
-    return new Error(`OpenAI API 요청 오류: ${err.message}`);
+  if (status === 400 && /\bmodel\b.{0,80}(?:does not exist|not supported|not found|unsupported|not available)/i.test(message)) {
+    return 'model_unavailable';
   }
+  if (status === 403) return 'auth';
+  return 'other';
+}
+
+/** ProviderError with a Korean message for an OpenAI failure. */
+function openaiFailure(info: OpenAIErrorInfo, resumed: boolean, cause?: unknown): ProviderError {
+  const kind = classifyOpenAIError(info, resumed);
+  const detail = info.message;
+  let message: string;
+  switch (kind) {
+    case 'resume_invalid':
+      message = `OpenAI API: 이전 응답(previous_response_id)을 찾을 수 없습니다. 저장된 대화가 만료되었거나 삭제되었습니다 (${detail})`;
+      break;
+    case 'context_overflow':
+      message = `OpenAI API: 대화가 모델의 컨텍스트 한도를 넘었습니다 (${detail})`;
+      break;
+    case 'auth':
+      message =
+        info.status === 403
+          ? `OpenAI API 권한 오류: ${detail}`
+          : 'OpenAI API 인증에 실패했습니다. OPENAI_API_KEY를 확인하세요.';
+      break;
+    case 'model_unavailable':
+      message = `OpenAI API: 모델을 찾을 수 없거나 사용할 수 없습니다 (${detail})`;
+      break;
+    default:
+      if (info.status === 429) message = `OpenAI API 요청 한도를 초과했습니다: ${detail}`;
+      else if (info.status === 400) message = `OpenAI API 요청 오류: ${detail}`;
+      else if (info.status === 404) message = `OpenAI API: 요청한 항목을 찾을 수 없습니다 (${detail})`;
+      else if (info.status) message = `OpenAI API 오류 (${info.status}): ${detail}`;
+      else message = `OpenAI API 오류: ${detail}`;
+      break;
+  }
+  return new ProviderError(message, kind, cause === undefined ? undefined : { cause });
+}
+
+function toProviderError(err: unknown, resumed: boolean): Error {
+  if (err instanceof ProviderError) return err;
   if (err instanceof OpenAI.APIConnectionError) {
-    return new Error(`OpenAI API에 연결할 수 없습니다: ${err.message}`);
+    return new ProviderError(`OpenAI API에 연결할 수 없습니다: ${err.message}`, 'other', { cause: err });
   }
   if (err instanceof OpenAI.APIError) {
-    return new Error(`OpenAI API 오류${err.status ? ` (${err.status})` : ''}: ${err.message}`);
+    return openaiFailure({ status: err.status, code: err.code, param: err.param, message: err.message }, resumed, err);
   }
   return err instanceof Error ? err : new Error(errorMessage(err));
 }
 
 async function runOpenAI(input: ProviderRunInput): Promise<ProviderRunResult> {
-  if (!process.env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY 환경 변수가 설정되지 않았습니다.');
+  if (!process.env.OPENAI_API_KEY) throw new ProviderError('OPENAI_API_KEY 환경 변수가 설정되지 않았습니다.', 'auth');
   if (input.signal.aborted) throw abortError();
 
   const params = await buildOpenAIRequest({
@@ -182,7 +248,7 @@ async function runOpenAI(input: ProviderRunInput): Promise<ProviderRunResult> {
     for await (const event of stream) state.handle(event);
   } catch (err) {
     if (input.signal.aborted || err instanceof OpenAI.APIUserAbortError) throw abortError();
-    throw toProviderError(err);
+    throw toProviderError(err, Boolean(params.previous_response_id));
   }
   // The SDK may end the stream quietly instead of throwing when the request is aborted.
   if (input.signal.aborted) throw abortError();

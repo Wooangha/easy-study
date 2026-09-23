@@ -2,9 +2,11 @@ import { useCallback, useState, type ReactNode } from 'react';
 import type { DigestInfo, DocMeta, ProviderInfo } from '../../../shared/types.ts';
 import { courseSummaryUrl } from '../api.ts';
 import type { CourseMembership } from '../hooks/useCourses.ts';
+import { useLatest } from '../hooks/useLatest.ts';
 import { NEIGHBOR_OPTIONS } from '../hooks/useNeighbors.ts';
 import type { ProviderChoice } from '../hooks/useProviderChoice.ts';
 import { PENDING_ASSISTANT_ID, type StudySession } from '../hooks/useStudySession.ts';
+import { canOpenFiles, courseBadgeTitle, courseContextSentence, type EarlierLectures } from '../lib/courseContext.ts';
 import { providerLabel, providerWithModel } from '../lib/format.ts';
 import { Composer } from './Composer.tsx';
 import { MessageList } from './MessageList.tsx';
@@ -32,6 +34,10 @@ interface ChatPanelProps {
   digestInfo: DigestInfo | null;
   /** Course this lecture belongs to, or null. */
   course: CourseMembership | null;
+  /** Earlier lectures of the course and whether their summaries exist (null when not in a course). */
+  earlier: EarlierLectures | null;
+  /** Start the digests of these lectures (with the provider chosen for new sessions). */
+  onDigestLectures: (docs: DocMeta[]) => void;
   /** Neighbor slides (±N) fed with every question. */
   neighbors: number;
   onNeighborsChange: (n: number) => void;
@@ -73,20 +79,26 @@ export function ChatPanel({
   digest,
   digestInfo,
   course,
+  earlier,
+  onDigestLectures,
   neighbors,
   onNeighborsChange,
 }: ChatPanelProps) {
   const { session, messages, liveTurn, running, creating } = study;
   const targetSlide = pinnedSlide ?? focusedSlide;
+  const targetRef = useLatest(targetSlide);
   const digestReady = digestInfo?.status === 'ready';
   // The digest tab can render dozens of Markdown/KaTeX entries: mount it only once it was opened.
   const [digestMounted, setDigestMounted] = useState(false);
   if (tab === 'digest' && !digestMounted) setDigestMounted(true);
 
-  // `ask` is stable while streaming, so memoized message items do not re-render on every delta.
-  const { ask } = study;
+  // `ask` / `primeCurrent` are stable while streaming, so memoized message items do not re-render on every delta.
+  const { ask, primeCurrent } = study;
   const onSend = useCallback((text: string) => ask(text, targetSlide), [ask, targetSlide]);
   const onRetry = useCallback((text: string, slide: number) => void ask(text, slide), [ask]);
+  const retryPrime = useCallback(() => void primeCurrent(targetRef.current), [primeCurrent, targetRef]);
+  // A priming turn that failed or was aborted leaves the session unprimed: offer to feed the deck again.
+  const onRetryPrime = session && !session.primed && !running ? retryPrime : undefined;
 
   // Without a session a question creates one, which needs an available provider.
   const disabledReason = !session && !running && !choice ? (providerProblem ?? '사용 가능한 LLM이 없어요') : null;
@@ -114,11 +126,22 @@ export function ChatPanel({
         {digestReady ? '(정리본 텍스트)' : ''}을 먼저 전달한 뒤 지금 보고 있는 슬라이드
         {neighbors > 0 ? `(앞뒤 ${neighbors}장 포함)` : ''}를 기준으로 설명해요.
       </p>
-      {course && course.index > 1 && (
-        <p className="muted small">
-          📁 {course.course.title}의 {course.index}강이라서 1–{course.index - 1}강의 요약도 함께 전달하고, 필요하면 이전
-          강의 파일도 열어 봐요.
-        </p>
+      {course && earlier && earlier.total > 0 && (
+        <div className="course-context-note">
+          <p className="muted small">
+            {courseContextSentence(
+              course.course.title,
+              course.index,
+              earlier,
+              choice ? canOpenFiles(providers, choice.provider) : false,
+            )}
+          </p>
+          {earlier.missing.length > 0 && choice && (
+            <button type="button" className="ghost-btn small" onClick={() => onDigestLectures(earlier.missing)}>
+              📝 이전 강의 {earlier.missing.length}개 정리본 만들기
+            </button>
+          )}
+        </div>
       )}
       {choice ? (
         <button type="button" className="primary-btn" onClick={() => void study.newSession(targetSlide)}>
@@ -239,7 +262,11 @@ export function ChatPanel({
               href={courseSummaryUrl(course.course.id)}
               target="_blank"
               rel="noreferrer"
-              title={`과목 ‘${course.course.title}’의 ${course.index}번째 강의 — 이전 강의 요약이 LLM에게 함께 전달돼요 (클릭하면 COURSE.md)`}
+              title={
+                earlier
+                  ? courseBadgeTitle(course.course.title, course.index, earlier)
+                  : `과목 ‘${course.course.title}’의 ${course.index}번째 강의 (클릭하면 COURSE.md)`
+              }
             >
               📁 {course.course.title} · {course.index}/{course.total}강
             </a>
@@ -262,9 +289,10 @@ export function ChatPanel({
           liveStatus={study.liveStatus}
           stopping={study.stopping}
           running={running}
-          scrollKey={`${study.sessionId ?? ''}:${liveTurn?.seq ?? ''}`}
+          scrollKey={study.scrollKey}
           onGoToSlide={onGoToSlide}
           onRetry={onRetry}
+          onRetryPrime={onRetryPrime}
           empty={empty}
         />
 

@@ -63,9 +63,19 @@ function upsertSummary(list: SessionSummary[], s: SessionSummary): SessionSummar
   return next;
 }
 
-function toSummary(s: Session): SessionSummary {
+function toSummary(s: Session | SessionSummary): SessionSummary {
+  if (!('messages' in s)) return s;
   const { messages: _messages, ...summary } = s;
   return summary;
+}
+
+/**
+ * The persisted messages when the server sent the whole session in `done` (it does so when it changed
+ * the turn's user message after `start`, e.g. its context after recovering from a lost conversation).
+ */
+function messagesOf(s: SessionSummary): ChatMessage[] | null {
+  const messages = (s as Partial<Session>).messages;
+  return Array.isArray(messages) ? messages : null;
 }
 
 /** Persisted messages + the live turn (optimistic or streaming) of the same session. */
@@ -108,6 +118,8 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
   const [flow, setFlow] = useState<{ docId: string; creating: boolean } | null>(null);
 
   const turnsRef = useRef(new Map<string, LiveTurn>());
+  /** Seq of the most recently started turn per session; kept after the turn ends (see scrollKey). */
+  const lastTurnSeqRef = useRef(new Map<string, number>());
   const [version, rerender] = useReducer((x: number) => x + 1, 0);
   const renderTimer = useRef<number | null>(null);
   const scheduleRender = useCallback(() => {
@@ -131,14 +143,20 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
   const session =
     rawSession && rawSession.docId === docId && rawSession.id === sessionId ? rawSession : null;
 
-  const refreshSessions = useCallback(async (forDoc: string) => {
-    try {
-      const list = await api.listSessions(forDoc);
-      setSessionsState({ docId: forDoc, list });
-    } catch {
-      /* keep the previous list */
-    }
-  }, []);
+  const refreshSessions = useCallback(
+    async (forDoc: string) => {
+      try {
+        const list = await api.listSessions(forDoc);
+        // Only one list is kept (the open document's). A turn of another document that finishes in the
+        // background must not replace it; the docId effect reloads the list when the user returns.
+        if (docIdRef.current !== forDoc) return;
+        setSessionsState({ docId: forDoc, list });
+      } catch {
+        /* keep the previous list */
+      }
+    },
+    [docIdRef],
+  );
 
   // Load the session list when the document changes and pick the last used (or newest) session.
   useEffect(() => {
@@ -200,6 +218,16 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
     };
   }, [docId, sessionId, refreshSessions]);
 
+  /** Reload a finished session from the server (the saved messages are authoritative). */
+  const reloadSession = useCallback(async (forDoc: string, sid: string) => {
+    try {
+      const s = await api.getSession(forDoc, sid);
+      setRawSession((prev) => (prev && prev.docId === forDoc && prev.id === sid ? s : prev));
+    } catch {
+      /* keep what we have */
+    }
+  }, []);
+
   /** Reload a session after a stream ended without `done` (the server saves the aborted turn shortly after). */
   const resync = useCallback(async (forDoc: string, sid: string) => {
     for (let attempt = 0; attempt < 6; attempt++) {
@@ -239,11 +267,14 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
         controller: new AbortController(),
       };
       turnsRef.current.set(key, turn);
+      lastTurnSeqRef.current.set(key, turn.seq);
       rerender();
 
       let outcome: TurnOutcome = 'disconnected';
       let finished = false; // `done` or `error` received
       let gotDone = false;
+      /** `done` came without the saved messages: reload them (the user message may have changed). */
+      let reloadAfterDone = false;
 
       const onEvent = (ev: StreamEvent) => {
         switch (ev.type) {
@@ -267,14 +298,19 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
             gotDone = true;
             const final = ev.assistantMessage;
             outcome = final.status === 'complete' ? 'complete' : final.status === 'aborted' ? 'aborted' : 'error';
+            const summary = toSummary(ev.session);
+            const saved = messagesOf(ev.session);
             const add = turn.userMessage ? [turn.userMessage, final] : [final];
+            // With the saved messages, the user message's final context (e.g. `recoveredFrom` after the
+            // server retried in a new conversation) replaces the one announced by `start`.
+            reloadAfterDone = saved === null;
             setRawSession((prev) =>
               prev && prev.docId === forDoc && prev.id === sid
-                ? { ...prev, ...ev.session, messages: mergeMessages(prev.messages, add) }
+                ? { ...prev, ...summary, messages: saved ?? mergeMessages(prev.messages, add) }
                 : prev,
             );
             setSessionsState((prev) =>
-              prev && prev.docId === forDoc ? { docId: forDoc, list: upsertSummary(prev.list, ev.session) } : prev,
+              prev && prev.docId === forDoc ? { docId: forDoc, list: upsertSummary(prev.list, summary) } : prev,
             );
             break;
           }
@@ -317,11 +353,12 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
 
       // Without `done` the final messages never reached us: reload what the server saved.
       if (!gotDone && outcome !== 'rejected') await resync(forDoc, sid);
+      else if (reloadAfterDone) void reloadSession(forDoc, sid);
       void refreshSessions(forDoc);
       onTurnFinishedRef.current?.(forDoc);
       return outcome;
     },
-    [scheduleRender, resync, refreshSessions, neighborsRef, onTurnFinishedRef],
+    [scheduleRender, resync, reloadSession, refreshSessions, neighborsRef, onTurnFinishedRef],
   );
 
   /** Create a session with the chosen provider, select it and prime it. */
@@ -339,13 +376,15 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
         toast(`세션을 만들지 못했어요: ${api.errorMessage(e)}`, 'error');
         return null;
       }
-      setRawSession(created);
       onSessionCreatedRef.current?.(forDoc);
-      // (Leave another document's list alone if the user switched docs meanwhile.)
-      setSessionsState((prev) =>
-        prev && prev.docId !== forDoc ? prev : { docId: forDoc, list: upsertSummary(prev?.list ?? [], toSummary(created)) },
-      );
+      // Show it only while its document is still open: if the user switched documents meanwhile, the
+      // open document's list and session must stay (they see the new session when they come back).
       if (docIdRef.current === forDoc) {
+        setSessionsState((prev) => ({
+          docId: forDoc,
+          list: upsertSummary(prev?.docId === forDoc ? prev.list : [], toSummary(created)),
+        }));
+        setRawSession(created);
         preloadedRef.current = turnKey(forDoc, created.id); // already have it: skip the GET
         setSelection({ docId: forDoc, sessionId: created.id });
       }
@@ -456,17 +495,26 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
         toast(`세션을 삭제하지 못했어요: ${api.errorMessage(e)}`, 'error');
         return;
       }
-      const remaining = (sessions ?? []).filter((s) => s.id !== sid);
-      setSessionsState({ docId: forDoc, list: remaining });
-      if (sessionId === sid) {
-        writeStorage(storageKeys.session(forDoc), null);
-        setSelection(remaining[0] ? { docId: forDoc, sessionId: remaining[0].id } : null);
+      // Without a loaded list (still loading), ask the server rather than assume there are no others.
+      let list = sessions;
+      if (!list) list = await api.listSessions(forDoc).catch(() => null);
+      if (sessionId === sid) writeStorage(storageKeys.session(forDoc), null);
+      if (docIdRef.current === forDoc) {
+        const remaining = (list ?? []).filter((s) => s.id !== sid);
+        if (list) setSessionsState({ docId: forDoc, list: remaining });
+        if (sessionId === sid) setSelection(remaining[0] ? { docId: forDoc, sessionId: remaining[0].id } : null);
       }
       toast('세션을 삭제했어요.', 'success');
       onTurnFinishedRef.current?.(forDoc); // notes changed
     },
-    [docId, sessionId, sessions, onTurnFinishedRef],
+    [docId, docIdRef, sessionId, sessions, onTurnFinishedRef],
   );
+
+  // Changes only when the chat should jump to the bottom: another session is shown, or a turn starts in
+  // it. Unlike liveTurn.seq it does not change when the turn ends, so a student who scrolled up to read
+  // the answer while it streamed keeps the position.
+  const lastSeq = docId && sessionId ? lastTurnSeqRef.current.get(turnKey(docId, sessionId)) : undefined;
+  const scrollKey = `${docId ?? ''}/${sessionId ?? ''}:${lastSeq ?? ''}`;
 
   const messages = useMemo(
     () => overlayLiveTurn(session?.messages ?? [], liveTurn),
@@ -484,6 +532,8 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
     liveTurn,
     /** Status line of the live turn. */
     liveStatus: liveTurn?.status ?? null,
+    /** Changes when the message list should jump to the bottom (session switch, turn started). */
+    scrollKey,
     /** A turn (or the create → prime → ask flow) is running for the current session. */
     running: liveTurn !== null || flowActive,
     /** Creating a new session (before priming starts). */

@@ -60,6 +60,11 @@ export interface ProviderRunInput {
    * API providers ignore it.
    */
   extraReadDirs?: string[];
+  /**
+   * false = the model needs no tools for this call (digest batches: images are attached). CLI providers then
+   * disable tools as far as the CLI allows (claude: --tools ""). Defaults to true.
+   */
+  allowTools?: boolean;
   signal: AbortSignal;
   /** Streamed assistant text (append-only). */
   onDelta: (text: string) => void;
@@ -92,6 +97,38 @@ export interface Provider {
    */
   maxImagesPerConversation: number;
   detect(): Promise<ProviderAvailability>;
-  /** Must reject with an Error on failure; must reject with an AbortError-like error when aborted. */
+  /**
+   * Must reject with an Error on failure (preferably a ProviderError with a precise kind); must reject with an
+   * AbortError-like error when aborted.
+   */
   run(input: ProviderRunInput): Promise<ProviderRunResult>;
+}
+
+/**
+ * Why a provider call failed, so the orchestrator can recover:
+ * - 'resume_invalid'   the conversation handle no longer exists (expired/deleted CLI session, unknown thread,
+ *                      unknown previous_response_id) → start a new conversation (re-prime + recap) and retry once.
+ * - 'context_overflow' the request/conversation is too large (HTTP 413, "prompt is too long",
+ *                      context_length_exceeded, …) → start a new conversation (re-prime + recap) and retry once.
+ * - 'auth'             not logged in / invalid key → show a login hint, no retry.
+ * - 'model_unavailable' the chosen model is unknown or needs a newer CLI → show a hint, no retry.
+ * - 'other'            anything else.
+ */
+export type ProviderErrorKind = 'resume_invalid' | 'context_overflow' | 'auth' | 'model_unavailable' | 'other';
+
+export class ProviderError extends Error {
+  kind: ProviderErrorKind;
+  constructor(message: string, kind: ProviderErrorKind, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'ProviderError';
+    this.kind = kind;
+  }
+}
+
+/** Kind of any thrown value ('other' unless it is a ProviderError-like object with a known kind). */
+export function providerErrorKind(err: unknown): ProviderErrorKind {
+  const kind = (err as { kind?: unknown } | null)?.kind;
+  return kind === 'resume_invalid' || kind === 'context_overflow' || kind === 'auth' || kind === 'model_unavailable'
+    ? kind
+    : 'other';
 }

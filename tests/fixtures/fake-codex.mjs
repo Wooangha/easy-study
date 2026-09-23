@@ -2,9 +2,14 @@
 // Fake `codex` CLI for tests (pointed to by CODEX_BIN). It never talks to any service.
 //
 // - `--version` prints a version line.
-// - Otherwise it reads stdin until EOF, records { argv, stdin, cwd, pid } as JSON to the file named
-//   by $FAKE_CLI_RECORD, then behaves according to $FAKE_CLI_MODE:
+// - Otherwise it reads stdin until EOF, records { argv, stdin, cwd, pid, script } as JSON to the file
+//   named by $FAKE_CLI_RECORD (script = the path it was executed by, symlinks not resolved), then
+//   behaves according to $FAKE_CLI_MODE:
 //     success (default) | turn-failed | error | error-recovered | exit1 | no-thread | hang | no-turn-completed
+//     | resume-new-thread (a resume that silently starts a new thread, like a CLI that lost the rollout)
+//     | resume-missing (a resume that fails: "thread not found") | context-overflow | model-unsupported
+//     | sandbox-init-failed (the session cannot start under the permissions profile, as codex-cli 0.154
+//       reports it when an AGENTS.md on the way to the project root is unreadable)
 // Like the real CLI, success sends a preamble agent message before running a command, then more
 // agent messages; only the last one is the answer.
 import fs from 'node:fs';
@@ -27,17 +32,53 @@ function main() {
   if (process.env.FAKE_CLI_RECORD) {
     fs.writeFileSync(
       process.env.FAKE_CLI_RECORD,
-      JSON.stringify({ argv, stdin, cwd: process.cwd(), pid: process.pid }),
+      JSON.stringify({ argv, stdin, cwd: process.cwd(), pid: process.pid, script: process.argv[1] }),
     );
   }
 
   const resuming = argv[0] === 'exec' && argv[1] === 'resume';
-  const threadId = resuming ? argv[2] : 'thread-new-1';
+  const threadId = resuming && mode !== 'resume-new-thread' ? argv[2] : 'thread-new-1';
+
+  if (mode === 'resume-missing') {
+    process.stderr.write(`Error: thread not found: ${argv[2]}\n`);
+    process.exitCode = 1;
+    return;
+  }
+
+  if (mode === 'sandbox-init-failed') {
+    process.stderr.write(
+      'Error: Fatal error: Failed to initialize session: failed to load AGENTS.md instructions for environment `local`: Operation not permitted (os error 1)\n',
+    );
+    process.exitCode = 1;
+    return;
+  }
 
   if (mode !== 'no-thread') emit({ type: 'thread.started', thread_id: threadId });
   emit({ type: 'turn.started' });
   process.stdout.write('WARN not json\n');
 
+  if (mode === 'context-overflow') {
+    emit({
+      type: 'turn.failed',
+      error: {
+        message:
+          "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.",
+      },
+    });
+    process.exitCode = 1;
+    return;
+  }
+  if (mode === 'model-unsupported') {
+    emit({ type: 'error', message: "The 'gpt-nope' model is not supported when using Codex with a ChatGPT account." });
+    process.exitCode = 1;
+    return;
+  }
+  if (mode === 'resume-new-thread') {
+    // Would answer without the deck: the adapter must stop at thread.started.
+    emit({ type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text: '덱을 모르는 답변' } });
+    emit({ type: 'turn.completed', usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } });
+    return;
+  }
   if (mode === 'turn-failed') {
     emit({ type: 'turn.failed', error: { message: 'stream disconnected before completion' } });
     process.exitCode = 1;

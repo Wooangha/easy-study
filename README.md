@@ -136,7 +136,7 @@ library/
 | 선택지 | 필요 조건 | 비고 |
 |---|---|---|
 | Claude Code (구독) | `claude` 로그인 | `claude -p` 헤드리스로 실행돼요. 세션을 이어 쓰고, 파일은 읽기 전용이에요. |
-| Codex (ChatGPT 구독) | `codex` 로그인 | `codex exec` 읽기 전용 샌드박스로 실행돼요. |
+| Codex (ChatGPT 구독) | `codex` 로그인 | `codex exec`로 실행돼요. 파일은 읽기만 할 수 있고, 읽을 수 있는 곳도 지금 강의 폴더와 같은 과목의 다른 강의 폴더(와 명령 실행에 필요한 시스템 파일)뿐이에요. 네트워크와 권한 상승 요청은 막혀 있어요. |
 | Claude API | `ANTHROPIC_API_KEY` | 프롬프트 캐싱을 써요. |
 | OpenAI API | `OPENAI_API_KEY` | Responses API를 쓰고, 모델은 `OPENAI_MODEL`로 정해요. |
 
@@ -149,15 +149,17 @@ library/
 | `PORT` | `5180` | 서버 포트. 항상 127.0.0.1에만 바인딩돼요. |
 | `EASY_STUDY_LIBRARY` | `./library` | 라이브러리 위치 |
 | `EASY_STUDY_NEIGHBORS` | `1` | 질문할 때 같이 보내는 앞뒤 슬라이드 수. 화면에서도 바꿀 수 있어요. |
-| `EASY_STUDY_RECENT_WINDOW` | `8` | 최근 보낸 슬라이드 중 몇 장까지 다시 보내지 않을지 |
+| `EASY_STUDY_RECENT_WINDOW` | `16` | 최근 보낸 슬라이드 중 몇 장까지 다시 보내지 않을지 |
 | `EASY_STUDY_PRIME_IMAGES` | `auto` | 프라이밍에 목차 이미지를 쓸지 (`auto`: 정리본이 없을 때만, `always`, `never`) |
 | `EASY_STUDY_AUTO_DIGEST` | `1` | 첫 세션을 만들 때 정리본 자동 생성 (`0`이면 끔) |
 | `EASY_STUDY_DIGEST_CONCURRENCY` | `2` | 정리본 생성 동시 호출 수 |
+| `EASY_STUDY_CODEX_CONFINE` | `1` | `0`이면 Codex의 읽기 제한(강의 폴더만 읽기)을 끄고 예전처럼 읽기 전용 샌드박스만 써요. 이때 Codex는 **컴퓨터의 모든 파일**(예: `~/.ssh`)을 읽을 수 있어요. 읽기 제한 때문에 Codex가 시작하지 못할 때만 쓰세요. |
 | `CLAUDE_BIN` / `CODEX_BIN` | PATH | CLI 경로 지정 |
 
 ## 문제 해결
 
 - **`Claude Code 2.1.x does not support this model … Run 'claude update'`**: `~/.claude/settings.json`의 기본 모델이 설치된 CLI보다 새 버전을 요구하는 경우예요. `claude update`로 CLI를 업데이트하거나, 새 세션을 만들 때 모델을 `Sonnet`/`Opus`로 지정하세요.
+- **Codex가 `Failed to initialize session` / `fs sandbox helper` 오류로 바로 멈출 때**: 설치된 Codex CLI가 읽기 제한(권한 프로필)을 지원하지 않는 경우예요. Codex CLI를 업데이트하고(0.154에서 확인), 그래도 안 되면 `EASY_STUDY_CODEX_CONFINE=0`으로 서버를 다시 시작하세요 (위 표의 경고 참고).
 - **`poppler is not installed`**: `brew install poppler`
 - 답변이 이상하거나 멈췄을 때: ■ 중지를 누른 뒤 다시 질문하세요. 실패한 턴은 LLM 대화 상태를 바꾸지 않아요.
 

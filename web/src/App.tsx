@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DocMeta } from '../../shared/types.ts';
+import { ApiError, errorMessage, startDigest } from './api.ts';
 import { ChatPanel, type PanelTab } from './components/ChatPanel.tsx';
 import { DigestPanel, type DigestMode } from './components/DigestPanel.tsx';
 import { DocStatusView, LibraryView } from './components/LibraryView.tsx';
@@ -17,6 +18,8 @@ import { useNeighbors } from './hooks/useNeighbors.ts';
 import { useNotes } from './hooks/useNotes.ts';
 import { useProviderChoice } from './hooks/useProviderChoice.ts';
 import { useStudySession } from './hooks/useStudySession.ts';
+import { earlierLectures } from './lib/courseContext.ts';
+import { providerWithModel } from './lib/format.ts';
 import { isString, readStorage, storageKeys, writeStorage } from './lib/storage.ts';
 import { toast } from './lib/toast.ts';
 
@@ -27,7 +30,16 @@ export function App() {
   const providers = health?.providers;
   const [choice, setChoice] = useProviderChoice(providers);
 
-  const { docs, loadError, uploads, refresh: refreshDocs, upload, patchDoc } = useDocs();
+  const {
+    docs,
+    loadError,
+    uploads,
+    refresh: refreshDocs,
+    upload,
+    patchDoc,
+    retry: retryDoc,
+    remove: removeDoc,
+  } = useDocs();
   const coursesState = useCourses();
   const { courses, membership } = coursesState;
   const [docId, setDocIdState] = useState<string | null>(() =>
@@ -40,6 +52,10 @@ export function App() {
   const doc = docs?.find((d) => d.id === docId) ?? null;
   const readyDocId = doc?.status === 'ready' ? doc.id : null;
   const docCourse = doc ? (membership.get(doc.id) ?? null) : null;
+  const earlier = useMemo(
+    () => (docCourse ? earlierLectures(docCourse.course, docCourse.index, docs) : null),
+    [docCourse, docs],
+  );
 
   // Forget a remembered doc that no longer exists.
   useEffect(() => {
@@ -202,6 +218,61 @@ export function App() {
     return () => window.removeEventListener('beforeunload', onBeforeUnload);
   }, [busy]);
 
+  // ---- Documents whose conversion failed: retry or delete (DESIGN §14) ----------------------------
+  const deleteDoc = useCallback(
+    async (target: DocMeta) => {
+      const msg =
+        `‘${target.title}’을(를) 삭제할까요?\n` +
+        '업로드한 PDF와 여기서 만든 파일(슬라이드 이미지, 대화, 노트, 정리본)이 모두 지워지고, 과목에서도 빠져요.';
+      if (!window.confirm(msg)) return;
+      if (await removeDoc(target.id)) {
+        void refreshCourses(); // the server also removed it from its course
+        toast(`‘${target.title}’을(를) 삭제했어요.`, 'success');
+      }
+    },
+    [removeDoc, refreshCourses],
+  );
+
+  // ---- 정리본 of several lectures at once (earlier lectures of a course: their summaries become context) --
+  const digestLectures = useCallback(
+    async (targets: DocMeta[]) => {
+      if (targets.length === 0) return;
+      if (!choice) {
+        toast('사용할 수 있는 LLM이 없어요. 상단의 모델 선택을 확인해 주세요.', 'error');
+        return;
+      }
+      const who = providerWithModel(providers, choice.provider, choice.model);
+      const msg =
+        `강의 ${targets.length}개의 정리본을 ${who}(으)로 만들까요?\n\n` +
+        targets.map((d) => `• ${d.title}`).join('\n') +
+        '\n\nLLM이 강의마다 모든 슬라이드를 읽어서 시간이 걸리고 사용량이 들어요. 완성된 강의의 요약은 같은 과목의 뒤 강의를 공부할 때 LLM에게 함께 전달돼요.';
+      if (!window.confirm(msg)) return;
+      let started = 0;
+      const failed: string[] = [];
+      for (const d of targets) {
+        try {
+          await startDigest(d.id, { provider: choice.provider, model: choice.model || undefined });
+          started++;
+          patchDoc(d.id, { digestStatus: 'running' });
+        } catch (e) {
+          if (e instanceof ApiError && e.status === 409) {
+            started++; // already running
+            patchDoc(d.id, { digestStatus: 'running' });
+          } else {
+            failed.push(`${d.title}: ${errorMessage(e)}`);
+          }
+        }
+      }
+      if (started > 0) {
+        toast(`정리본 만들기를 시작했어요 (${started}개). 진행 상황은 강의 목록의 배지에서 볼 수 있어요.`, 'success');
+      }
+      if (failed.length > 0) toast(`정리본을 시작하지 못했어요:\n${failed.join('\n')}`, 'error');
+      void refreshDocs();
+    },
+    [choice, providers, patchDoc, refreshDocs],
+  );
+  const onDigestLectures = useCallback((targets: DocMeta[]) => void digestLectures(targets), [digestLectures]);
+
   // ---- Provider availability ---------------------------------------------------------------------
   const noProvider = !!providers && !providers.some((p) => p.available);
   const providerProblem = healthError
@@ -245,6 +316,8 @@ export function App() {
             notesCount={notesCount}
             digestInfo={digest.info}
             course={docCourse}
+            earlier={earlier}
+            onDigestLectures={onDigestLectures}
             neighbors={neighbors}
             onNeighborsChange={setNeighbors}
             digest={
@@ -281,7 +354,14 @@ export function App() {
       />
     );
   } else if (doc) {
-    main = <DocStatusView doc={doc} onBack={() => setDocId(null)} />;
+    main = (
+      <DocStatusView
+        doc={doc}
+        onBack={() => setDocId(null)}
+        onRetry={() => void retryDoc(doc.id)}
+        onDelete={() => void deleteDoc(doc)}
+      />
+    );
   } else {
     main = (
       <LibraryView
@@ -302,6 +382,10 @@ export function App() {
         onDeleteCourse={(courseId) => void coursesState.remove(courseId)}
         onSetLectures={(courseId, ids) => void coursesState.setLectures(courseId, ids)}
         onMoveLecture={(id, courseId) => void coursesState.moveLecture(id, courseId)}
+        onRetryDoc={(id) => void retryDoc(id)}
+        onDeleteDoc={(d) => void deleteDoc(d)}
+        canDigest={choice !== null}
+        onDigestLectures={onDigestLectures}
         onRetryLoad={() => {
           void refreshDocs();
           void refreshCourses();

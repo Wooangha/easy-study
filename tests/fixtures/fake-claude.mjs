@@ -5,6 +5,9 @@
 // - Otherwise it reads stdin until EOF, records { argv, stdin, cwd, pid, env } as JSON to the file
 //   named by $FAKE_CLI_RECORD, then behaves according to $FAKE_CLI_MODE:
 //     success (default) | no-deltas | is_error | exit1 | hang | hang-ignore-term | no-session-id
+//     | resume-missing (a --resume of an unknown session, as the real CLI reports it: an is_error result)
+//     | resume-missing-stderr (the same, on stderr only) | prompt-too-long | request-too-large
+//     | model-unavailable | model-needs-update
 // Like the real CLI, a run without --session-id / --resume (e.g. --no-session-persistence) still
 // reports a session id of its own (except in mode no-session-id).
 import fs from 'node:fs';
@@ -78,6 +81,26 @@ async function main() {
       result: 'Invalid API key · Please run /login',
       session_id: reportedId,
     });
+    process.exitCode = 1;
+    return;
+  }
+
+  const errorResults = {
+    'resume-missing': `No conversation found with session ID: ${resumeId ?? '(none)'}`,
+    'prompt-too-long': 'Prompt is too long',
+    'request-too-large':
+      'Request too large (max 32 MB). Accumulated images and attachments in the conversation pushed the request over the limit.',
+    'model-unavailable':
+      "There's an issue with the selected model (claude-nope). It may not exist or you may not have access to it. Run /model to pick a different model.",
+    'model-needs-update': "API Error: 400 This version of Claude Code does not support this model. Run 'claude update' to update.",
+  };
+  if (mode in errorResults) {
+    emit({ type: 'result', subtype: 'error_during_execution', is_error: true, result: errorResults[mode], session_id: reportedId });
+    process.exitCode = 1;
+    return;
+  }
+  if (mode === 'resume-missing-stderr') {
+    process.stderr.write(`No conversation found with session ID: ${resumeId ?? '(none)'}\n`);
     process.exitCode = 1;
     return;
   }

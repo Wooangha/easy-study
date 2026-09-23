@@ -1,12 +1,18 @@
 // claude-code provider: the user's Claude subscription through the Claude Code CLI (DESIGN §6).
 //
 //   claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages
-//          --system-prompt <prompt> --tools Read,Glob,Grep --strict-mcp-config [--add-dir <dir> ...]
+//          --system-prompt <prompt> --tools (Read,Glob,Grep | "") --strict-mcp-config [--add-dir <dir> ...]
 //          [--model <model>] (--session-id <new uuid> | --resume <cliSessionId> | --no-session-persistence)
 //
-// The user turn (text + base64 images) is written to stdin as one stream-json line. `--add-dir`
-// lets the read-only tools open other lectures of the same course; one-shot (ephemeral) calls such
-// as digest batches do not persist a CLI session.
+// The user turn (text + base64 images, re-encoded as compact JPEGs: the CLI resends the whole
+// conversation to the Messages API, which has a 32 MB request limit) is written to stdin as one
+// stream-json line. The read-only tools let the model open slide files and, with `--add-dir`, other
+// lectures of the same course; calls that need no tools (ProviderRunInput.allowTools === false, e.g.
+// digest batches) get none. One-shot (ephemeral) calls do not persist a CLI session.
+//
+// Failures are classified (ProviderError): a --resume whose CLI session no longer exists is
+// 'resume_invalid', "Prompt is too long" / "Request too large" is 'context_overflow', login problems
+// are 'auth', an unknown model or a CLI too old for it is 'model_unavailable'.
 import { randomUUID } from 'node:crypto';
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
@@ -14,13 +20,15 @@ import type {
   Part,
   Provider,
   ProviderAvailability,
+  ProviderErrorKind,
   ProviderRunInput,
   ProviderRunResult,
 } from './types.ts';
+import { ProviderError } from './types.ts';
 import {
   childEnv,
   describeExit,
-  loadImageBase64,
+  loadInlineImage,
   probeVersion,
   resolveBin,
   runJsonlProcess,
@@ -40,11 +48,14 @@ export interface ClaudeArgsInput {
   resumeId?: string;
   /** One-shot call: --no-session-persistence and no --session-id. */
   ephemeral?: boolean;
-  /** Extra readable directories (one --add-dir each). */
+  /** Extra readable directories (one --add-dir each; ignored without tools). */
   addDirs?: string[];
+  /** false = no tools at all (`--tools ""`). Defaults to true (CLAUDE_TOOLS). */
+  allowTools?: boolean;
 }
 
 export function claudeArgs(input: ClaudeArgsInput): string[] {
+  const tools = input.allowTools !== false;
   const args = [
     '-p',
     '--input-format',
@@ -56,11 +67,11 @@ export function claudeArgs(input: ClaudeArgsInput): string[] {
     '--system-prompt',
     input.systemPrompt,
     '--tools',
-    CLAUDE_TOOLS,
+    tools ? CLAUDE_TOOLS : '',
     '--strict-mcp-config',
   ];
   // --add-dir is variadic in the CLI: every value is followed by another option, never a positional.
-  for (const dir of uniqueDirs(input.addDirs)) args.push('--add-dir', dir);
+  if (tools) for (const dir of uniqueDirs(input.addDirs)) args.push('--add-dir', dir);
   if (input.model) args.push('--model', input.model);
   if (input.ephemeral) args.push('--no-session-persistence');
   if (input.resumeId) args.push('--resume', input.resumeId);
@@ -97,7 +108,7 @@ export async function claudeUserMessage(parts: Part[]): Promise<string> {
     if (part.type === 'text') {
       if (part.text) content.push({ type: 'text', text: part.text });
     } else {
-      const image = await loadImageBase64(part.path);
+      const image = await loadInlineImage(part.path);
       content.push({ type: 'image', source: { type: 'base64', media_type: image.mediaType, data: image.data } });
     }
   }
@@ -242,8 +253,54 @@ function loginHint(message: string): string {
     : '';
 }
 
+/**
+ * Kind of a Claude Code failure from its messages (result text, stderr). `resumed` = the call passed
+ * --resume, so "No conversation found" means that CLI session is gone (deleted transcripts, a moved
+ * library, Claude Code's cleanupPeriodDays).
+ */
+export function classifyClaudeFailure(text: string, resumed: boolean): ProviderErrorKind {
+  if (resumed && /No conversation found|No message found with message\.uuid/i.test(text)) return 'resume_invalid';
+  if (
+    /prompt is too long|input is too long for requested model|request too large|request_too_large|exceed context limit|context window exceeded|model_context_window_exceeded/i.test(
+      text,
+    )
+  ) {
+    return 'context_overflow';
+  }
+  if (
+    /issue with the selected model|model_not_found|may not exist or you may not have access|is not available on your .{0,40}deployment|does not support (?:this|the) model|(?:requires|needs) a newer version of Claude Code|not_found_error.{0,40}model/i.test(
+      text,
+    )
+  ) {
+    return 'model_unavailable';
+  }
+  if (
+    /not logged in|please run \/login|invalid api key|invalid auth token|failed to authenticate|authentication_error|oauth token|oauth authentication|api error:?\s*40[13]\b/i.test(
+      text,
+    )
+  ) {
+    return 'auth';
+  }
+  return 'other';
+}
+
+const KIND_HINTS: Partial<Record<ProviderErrorKind, string>> = {
+  resume_invalid: '\n이전 Claude Code 대화(세션)를 더 이상 찾을 수 없습니다. 새 대화로 다시 시작해야 합니다.',
+  context_overflow: '\n대화가 모델이 한 번에 받을 수 있는 크기를 넘었습니다. 새 대화로 이어가야 합니다.',
+  model_unavailable:
+    '\n선택한 모델을 이 Claude Code에서 사용할 수 없습니다. 다른 모델을 고르거나 터미널에서 `claude update` 로 CLI를 업데이트하세요.',
+};
+
+/** ProviderError for a failed run: `base` + a hint for its kind (a login hint for 'auth') + the stderr tail. */
+function claudeFailure(base: string, evidence: string, resumed: boolean, stderrTail: string): ProviderError {
+  const kind = classifyClaudeFailure(evidence, resumed);
+  const hint = kind === 'auth' ? loginHint(evidence) || loginHint('login') : (KIND_HINTS[kind] ?? loginHint(evidence));
+  return new ProviderError(`${base}${hint}${stderrSuffix(stderrTail)}`, kind);
+}
+
 async function runClaude(input: ProviderRunInput): Promise<ProviderRunResult> {
   const ephemeral = input.ephemeral === true;
+  const allowTools = input.allowTools !== false;
   const resumeId = input.resume?.cliSessionId || undefined;
   const sessionId = resumeId || ephemeral ? undefined : randomUUID();
   const args = claudeArgs({
@@ -252,7 +309,8 @@ async function runClaude(input: ProviderRunInput): Promise<ProviderRunResult> {
     sessionId,
     resumeId,
     ephemeral,
-    addDirs: await existingDirs(input.extraReadDirs),
+    allowTools,
+    addDirs: allowTools ? await existingDirs(input.extraReadDirs) : [],
   });
   const stdin = `${await claudeUserMessage(input.parts)}\n`;
 
@@ -269,13 +327,17 @@ async function runClaude(input: ProviderRunInput): Promise<ProviderRunResult> {
 
   const result = state.result;
   const tail = stderrSuffix(proc.stderrTail);
+  const resumed = resumeId !== undefined;
   if (result?.isError) {
     const message = result.text || result.subtype || 'unknown error';
-    throw new Error(`Claude Code 오류: ${message}${loginHint(message + proc.stderrTail)}${tail}`);
+    throw claudeFailure(`Claude Code 오류: ${message}`, `${message}\n${proc.stderrTail}`, resumed, proc.stderrTail);
   }
   if (proc.code !== 0) {
-    throw new Error(
-      `Claude Code가 비정상 종료했습니다 (${describeExit(proc.code, proc.signal)}).${loginHint(proc.stderrTail)}${tail}`,
+    throw claudeFailure(
+      `Claude Code가 비정상 종료했습니다 (${describeExit(proc.code, proc.signal)}).`,
+      proc.stderrTail,
+      resumed,
+      proc.stderrTail,
     );
   }
   if (!result) throw new Error(`Claude Code가 결과 없이 종료되었습니다.${tail}`);

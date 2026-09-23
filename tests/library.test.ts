@@ -1,5 +1,7 @@
-// Ingest pipeline end-to-end on samples/sample-lecture.pdf (needs poppler), plus import validation.
+// Ingest pipeline end-to-end on samples/sample-lecture.pdf (needs poppler), plus import validation,
+// deleting / retrying documents and the single-instance library lock.
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -8,26 +10,35 @@ import sharp from 'sharp';
 import { DOC_ID_RE } from '../shared/types.ts';
 import type { DigestSlide, DocMeta } from '../shared/types.ts';
 import { HttpError, autoDigestEnabled, digestConcurrency, libraryDir, repoRoot } from '../server/config.ts';
-import type { CourseRecord, DigestRecord } from '../server/internal-types.ts';
+import { startServer } from '../server/index.ts';
+import type { CourseRecord, DigestRecord, SessionRecord } from '../server/internal-types.ts';
 import {
+  LibraryLockedError,
   POPPLER_MISSING_MESSAGE,
+  acquireServerLock,
   coursePaths,
+  deleteDoc,
   demoteHeadings,
   docPaths,
   getDoc,
   importPdf,
   isDigestComplete,
+  isIngestRunning,
   listDocs,
   loadDocAssets,
+  readDigestRecord,
   readStoredDoc,
+  removeDeletedLeftovers,
   resumePendingIngests,
+  retryIngest,
   runPoppler,
+  serverLockPath,
   slideFileName,
   slugify,
   textFileName,
   waitForIngest,
 } from '../server/library.ts';
-import type { StoredDocMeta } from '../server/library.ts';
+import type { ServerLockInfo, StoredDocMeta } from '../server/library.ts';
 
 const SAMPLE_PDF = path.join(repoRoot(), 'samples', 'sample-lecture.pdf');
 let tmpRoot = '';
@@ -414,5 +425,221 @@ describe('derived DocMeta fields and DocAssets course/digest', () => {
     assert.equal(isDigestComplete([entry(1), entry(2, true)], 2), false);
     assert.equal(isDigestComplete([], 0), false);
     assert.equal(demoteHeadings('# A\n```\n# code\n```\n###### deep', 2), '### A\n```\n# code\n```\n###### deep');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Deleting and retrying documents (DESIGN §14)
+// ---------------------------------------------------------------------------
+
+describe('retrying a failed conversion and deleting documents', () => {
+  function isHttpError(status: number) {
+    return (err: unknown) => err instanceof HttpError && err.status === status;
+  }
+
+  test('retryIngest converts a failed document again; only status error may be retried', async () => {
+    // The conversion fails (as without poppler); then the PDF becomes readable (poppler installed).
+    const failed = await importPdf(Buffer.from('%PDF-1.4\nnot really a pdf\n%%EOF\n'), 'L8 Semantic Analysis.pdf');
+    await waitForIngest(failed.id);
+    const broken = await waitUntilSettled(failed.id);
+    assert.equal(broken.status, 'error');
+    await fs.copyFile(SAMPLE_PDF, docPaths(failed.id).sourcePdf);
+
+    const retried = await retryIngest(failed.id);
+    assert.equal(retried.status, 'processing');
+    assert.equal(retried.error, undefined);
+    assert.equal(retried.progress, 0);
+    assert.equal(isIngestRunning(failed.id), true);
+    await assert.rejects(retryIngest(failed.id), isHttpError(409), 'already converting');
+
+    await waitForIngest(failed.id);
+    const ready = await waitUntilSettled(failed.id);
+    assert.equal(ready.status, 'ready');
+    assert.equal(ready.error, undefined);
+    assert.equal(ready.pageCount, 9);
+    await assert.rejects(retryIngest(failed.id), isHttpError(409), 'a ready document is not converted again');
+    await assert.rejects(retryIngest('unknown-doc-123456'), isHttpError(404));
+    await assert.rejects(retryIngest('courses'), isHttpError(404));
+  });
+
+  test('deleteDoc removes the folder at once; busy documents are refused with 409', async () => {
+    const meta = await importPdf(await fs.readFile(SAMPLE_PDF), 'To Delete.pdf');
+    // While the PDF is being converted it cannot be deleted.
+    await assert.rejects(deleteDoc(meta.id), isHttpError(409));
+    await waitForIngest(meta.id);
+    await waitUntilSettled(meta.id);
+
+    // Something else (a digest job, a running answer) keeps it busy.
+    await assert.rejects(
+      deleteDoc(meta.id, () => '정리본을 만드는 중'),
+      (err: unknown) => err instanceof HttpError && err.status === 409 && err.message === '정리본을 만드는 중',
+    );
+    assert.ok(await readStoredDoc(meta.id), 'nothing was deleted');
+
+    await deleteDoc(meta.id);
+    assert.equal(await readStoredDoc(meta.id), null);
+    assert.equal(await getDoc(meta.id), null);
+    assert.ok(!(await listDocs()).some((doc) => doc.id === meta.id));
+    await assert.rejects(fs.access(docPaths(meta.id).dir));
+    assert.deepEqual(
+      (await fs.readdir(libraryDir())).filter((name) => name.startsWith('.deleted-')),
+      [],
+      'the renamed folder was removed too',
+    );
+    await assert.rejects(deleteDoc(meta.id), isHttpError(404));
+    await assert.rejects(deleteDoc('courses'), isHttpError(404));
+  });
+
+  test('leftover folders of deleted documents are swept and never listed', async () => {
+    const leftover = path.join(libraryDir(), '.deleted-old-doc-abc123-ffffff');
+    await fs.mkdir(path.join(leftover, 'slides'), { recursive: true });
+    await fs.writeFile(path.join(leftover, 'doc.json'), '{}');
+    assert.ok(!(await listDocs()).some((doc) => doc.id.includes('old-doc')));
+    assert.equal(await removeDeletedLeftovers(), 1);
+    await assert.rejects(fs.access(leftover));
+    assert.equal(await removeDeletedLeftovers(), 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Single-instance lock (library/.server.lock)
+// ---------------------------------------------------------------------------
+
+describe('single-instance library lock', () => {
+  /** The pid of a process that has exited. */
+  async function deadPid(): Promise<number> {
+    const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    await new Promise((resolve) => child.once('exit', resolve));
+    assert.ok(child.pid);
+    return child.pid;
+  }
+
+  async function readLock(): Promise<ServerLockInfo> {
+    return JSON.parse(await fs.readFile(serverLockPath(), 'utf8')) as ServerLockInfo;
+  }
+
+  test('acquire writes { pid, port, startedAt }; setPort updates it; release removes it', async () => {
+    assert.equal(serverLockPath(), path.join(libraryDir(), '.server.lock'));
+    const lock = await acquireServerLock(0);
+    const info = await readLock();
+    assert.equal(info.pid, process.pid);
+    assert.equal(info.port, 0);
+    assert.ok(!Number.isNaN(Date.parse(info.startedAt)));
+    await lock.setPort(5199);
+    assert.equal((await readLock()).port, 5199);
+    assert.equal((await readLock()).startedAt, info.startedAt);
+    assert.ok(!(await listDocs()).some((doc) => doc.id.includes('lock')), 'the lock is not a document');
+    await lock.release();
+    await assert.rejects(fs.access(serverLockPath()));
+    await lock.release(); // idempotent
+  });
+
+  test('a lock held by another live process refuses; the lock file is left alone', async () => {
+    const holder: ServerLockInfo = { pid: process.ppid, port: 5180, startedAt: '2026-09-23T08:00:00.000Z' };
+    await fs.writeFile(serverLockPath(), JSON.stringify(holder));
+    try {
+      await assert.rejects(acquireServerLock(5181), (err: unknown) => {
+        assert.ok(err instanceof LibraryLockedError);
+        assert.deepEqual(err.holder, holder);
+        assert.equal(err.lockFile, serverLockPath());
+        assert.match(err.message, /이미 이 라이브러리로 실행 중/);
+        return true;
+      });
+      assert.deepEqual(await readLock(), holder);
+    } finally {
+      await fs.rm(serverLockPath(), { force: true });
+    }
+  });
+
+  test('a stale lock (process gone, or unreadable) is replaced', async () => {
+    await fs.writeFile(serverLockPath(), JSON.stringify({ pid: await deadPid(), port: 5180, startedAt: '2026-01-01T00:00:00.000Z' }));
+    const first = await acquireServerLock(5180);
+    assert.equal((await readLock()).pid, process.pid);
+    await first.release();
+
+    await fs.writeFile(serverLockPath(), '');
+    const second = await acquireServerLock(5180);
+    assert.equal((await readLock()).pid, process.pid);
+    await second.release();
+    await assert.rejects(fs.access(serverLockPath()));
+  });
+
+  test('servers of one process share the lock; the last release removes it', async () => {
+    const [a, b] = await Promise.all([acquireServerLock(1), acquireServerLock(2)]);
+    await a.release();
+    assert.equal((await readLock()).pid, process.pid, 'still held by the second server');
+    await b.release();
+    await assert.rejects(fs.access(serverLockPath()));
+  });
+
+  test('startServer refuses a locked library before touching it; takes it over when free', async () => {
+    // Interrupted work that the startup sweeps would rewrite.
+    const docId = 'locked-doc-abc123';
+    const paths = docPaths(docId);
+    await fs.mkdir(paths.sessionsDir, { recursive: true });
+    await fs.mkdir(paths.digestDir, { recursive: true });
+    const stored: StoredDocMeta = {
+      id: docId,
+      title: 'Locked',
+      fileName: 'Locked.pdf',
+      pageCount: 1,
+      aspectRatio: 1,
+      status: 'ready',
+      progress: 1,
+      createdAt: new Date().toISOString(),
+    };
+    await fs.writeFile(paths.docJson, JSON.stringify(stored));
+    const now = new Date().toISOString();
+    const session: SessionRecord = {
+      version: 1,
+      id: '20260923-100000-abcd',
+      docId,
+      title: 's',
+      provider: 'claude-code',
+      model: '',
+      createdAt: now,
+      updatedAt: now,
+      providerState: { resume: null, primed: false, imagesSent: 0, recentSlides: [], generation: 0, history: [] },
+      messages: [{ id: 'a', role: 'assistant', text: 'half', slide: 1, kind: 'question', createdAt: now, status: 'streaming' }],
+    };
+    const sessionFile = path.join(paths.sessionsDir, `${session.id}.json`);
+    await fs.writeFile(sessionFile, JSON.stringify(session));
+    const digest: DigestRecord = { version: 1, status: 'running', slides: [], summary: null };
+    await fs.writeFile(paths.digestJson, JSON.stringify(digest));
+
+    await fs.writeFile(serverLockPath(), JSON.stringify({ pid: process.ppid, port: 5180, startedAt: now }));
+    await assert.rejects(startServer({ port: 0, log: false, resumeIngests: false }), LibraryLockedError);
+    const untouched = JSON.parse(await fs.readFile(sessionFile, 'utf8')) as SessionRecord;
+    assert.equal(untouched.messages[0].status, 'streaming', 'no startup sweep ran');
+    assert.equal((await readDigestRecord(docId))?.status, 'running');
+
+    // The holder is gone: the next start replaces the lock and sweeps.
+    await fs.writeFile(serverLockPath(), JSON.stringify({ pid: await deadPid(), port: 5180, startedAt: now }));
+    const server = await startServer({ port: 0, log: false, resumeIngests: false });
+    try {
+      const lock = await readLock();
+      assert.equal(lock.pid, process.pid);
+      assert.equal(lock.port, Number(new URL(server.url).port), 'the actual port is recorded');
+      const swept = JSON.parse(await fs.readFile(sessionFile, 'utf8')) as SessionRecord;
+      assert.equal(swept.messages[0].status, 'aborted');
+      assert.equal((await readDigestRecord(docId))?.status, 'aborted');
+    } finally {
+      await server.close();
+    }
+    await assert.rejects(fs.access(serverLockPath()), 'close() removes the lock');
+    await server.close(); // idempotent
+  });
+
+  test('a start that fails after taking the lock gives it back', async () => {
+    const blocker = await startServer({ port: 0, log: false, resumeIngests: false });
+    try {
+      const { port } = new URL(blocker.url);
+      // Same process, same library: the lock is shared, but the port is taken.
+      await assert.rejects(startServer({ port: Number(port), log: false, resumeIngests: false }), { code: 'EADDRINUSE' });
+      assert.equal((await readLock()).pid, process.pid, 'still held by the running server');
+    } finally {
+      await blocker.close();
+    }
+    await assert.rejects(fs.access(serverLockPath()));
   });
 });

@@ -362,7 +362,9 @@ function studyNotesMarkdown(doc: StoredDocMeta, records: SessionRecord[], slides
         `> ${entry.sessionTitle} · ${provider} · ${formatDateTime(entry.question.createdAt)}`,
         '',
       );
-      if (question.includes('\n')) lines.push(withHardBreaks(question), '');
+      // The heading only holds the (possibly shortened) first line: add the full question whenever the
+      // heading does not already show all of it, so the review file never loses question text.
+      if (question.includes('\n') || firstLine(question) !== question) lines.push(withHardBreaks(question), '');
       lines.push(answerMarkdown(entry.answer, 3), '');
     }
   }

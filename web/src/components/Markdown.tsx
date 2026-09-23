@@ -1,18 +1,8 @@
 import { memo, useMemo } from 'react';
-import ReactMarkdown, { type Components, type Options } from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import remarkMath from 'remark-math';
-import rehypeKatex from 'rehype-katex';
-import rehypeHighlight from 'rehype-highlight';
+import ReactMarkdown, { type Components } from 'react-markdown';
 import 'katex/dist/katex.min.css';
 import { normalizeMathDelimiters } from '../lib/mathDelimiters.ts';
-
-const remarkPlugins: Options['remarkPlugins'] = [remarkGfm, remarkMath];
-// KaTeX must run before highlight.js so math code nodes are never treated as code.
-const rehypePlugins: Options['rehypePlugins'] = [
-  [rehypeKatex, { strict: 'ignore', errorColor: 'var(--danger)' }],
-  [rehypeHighlight, { detect: false }],
-];
+import { rehypePlugins, remarkPlugins, urlTransform } from '../lib/markdownOptions.ts';
 
 const components: Components = {
   a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noreferrer noopener" />,
@@ -29,12 +19,20 @@ interface MarkdownProps {
   className?: string;
 }
 
-/** Assistant Markdown: GFM tables/code, KaTeX math (also \( \) / \[ \] delimiters), highlighted code. */
+/**
+ * LLM Markdown: GFM tables/code, KaTeX math (also \( \) / \[ \] delimiters and `\$` inside math),
+ * highlighted code. Remote images are shown as links, never loaded automatically (lib/markdownOptions.ts).
+ */
 export const Markdown = memo(function Markdown({ text, className }: MarkdownProps) {
   const source = useMemo(() => normalizeMathDelimiters(text), [text]);
   return (
     <div className={className ? `md ${className}` : 'md'}>
-      <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={components}>
+      <ReactMarkdown
+        remarkPlugins={remarkPlugins}
+        rehypePlugins={rehypePlugins}
+        urlTransform={urlTransform}
+        components={components}
+      >
         {source}
       </ReactMarkdown>
     </div>
