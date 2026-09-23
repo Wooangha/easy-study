@@ -1,0 +1,483 @@
+// HTTP server (DESIGN §4): JSON API, SSE chat turns, slide images and the web client.
+//
+//   node server/index.ts --dev   Express + Vite in middleware mode (HMR)
+//   node server/index.ts         serves the production build in web/dist
+import { existsSync } from 'node:fs';
+import fs from 'node:fs/promises';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
+import path from 'node:path';
+import express from 'express';
+import type { NextFunction, Request, Response } from 'express';
+import { DOC_ID_RE, SESSION_ID_RE } from '../shared/types.ts';
+import type { CreateSessionRequest, DocMeta, HealthResponse, ProviderInfo, StreamEvent } from '../shared/types.ts';
+import { abortAllTurns, abortTurn, defaultChatDeps, runTurn, waitForIdle, waitForTurn } from './chat.ts';
+import type { ChatDeps } from './chat.ts';
+import { HttpError, host, libraryDir, port, webDir, webDistDir } from './config.ts';
+import { docPaths, getDoc, importPdf, listDocs, resumePendingIngests, slideFileName } from './library.ts';
+import { providerInfos } from './providers/index.ts';
+import {
+  buildNotes,
+  createSession,
+  deleteSession,
+  getSession,
+  listSessions,
+  recoverInterruptedSessions,
+  toSession,
+  writeNotes,
+} from './sessions.ts';
+
+const MAX_UPLOAD = '300mb';
+const SSE_PING_MS = 15_000;
+const IMMUTABLE_MAX_AGE_MS = 31_536_000 * 1000; // one year → "max-age=31536000"
+/** Model names reach CLI argument lists: no leading dash, no whitespace. */
+const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:/@[\]-]{0,127}$/;
+
+export interface AppOptions {
+  /** Provider availability for /api/health and session creation (default: the real registry). */
+  providerInfos?: () => Promise<ProviderInfo[]>;
+  /** Collaborators of the chat orchestrator (default: the real providers and context builder). */
+  chatDeps?: ChatDeps;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+async function requireDoc(docId: string): Promise<DocMeta> {
+  const doc = await getDoc(docId);
+  if (!doc) throw new HttpError(404, '문서를 찾을 수 없습니다');
+  return doc;
+}
+
+/** X-Filename carries the URI-encoded original file name (headers cannot hold raw unicode). */
+function decodeFileName(header: string | undefined): string {
+  if (!header) return 'document.pdf';
+  try {
+    return decodeURIComponent(header);
+  } catch {
+    return header;
+  }
+}
+
+/** Express 5 leaves req.body undefined when there is no body. */
+function jsonBody(req: Request): Record<string, unknown> {
+  const body: unknown = req.body;
+  return typeof body === 'object' && body !== null && !Buffer.isBuffer(body) ? (body as Record<string, unknown>) : {};
+}
+
+function sendFile(res: Response, file: string, options: Parameters<Response['sendFile']>[1]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    res.sendFile(file, options ?? {}, (err) => (err ? reject(err) : resolve()));
+  });
+}
+
+interface LazySse {
+  readonly opened: boolean;
+  send(event: StreamEvent): void;
+  close(): void;
+}
+
+/**
+ * Server-Sent Events writer that only commits the response (status 200 + SSE headers) on the
+ * first event, so failures before a turn starts can still be answered with a JSON error.
+ */
+function lazySse(res: Response): LazySse {
+  let opened = false;
+  let ping: NodeJS.Timeout | undefined;
+  const writable = () => !res.writableEnded && !res.destroyed;
+  const open = () => {
+    opened = true;
+    res.status(200);
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+    res.socket?.setNoDelay(true);
+    ping = setInterval(() => {
+      if (writable()) res.write(': ping\n\n');
+    }, SSE_PING_MS);
+  };
+  return {
+    get opened() {
+      return opened;
+    },
+    send(event) {
+      if (!opened) open();
+      if (writable()) res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+    },
+    close() {
+      clearInterval(ping);
+      if (opened && writable()) res.end();
+    },
+  };
+}
+
+const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]']);
+
+/**
+ * The API has no authentication; binding to loopback keeps other machines out, and this guard
+ * keeps web pages out: the Host must be a loopback name (defeats DNS rebinding) and state-changing
+ * requests sent by a browser must come from our own origin (defeats cross-site "simple" POSTs).
+ */
+function localOriginOnly(req: Request, _res: Response, next: NextFunction): void {
+  const hostHeader = req.headers.host ?? '';
+  const hostname = hostHeader.replace(/:\d+$/, '').toLowerCase();
+  if (!LOOPBACK_HOSTNAMES.has(hostname)) {
+    next(new HttpError(403, '로컬 주소(127.0.0.1)로만 접속할 수 있습니다'));
+    return;
+  }
+  const origin = req.headers.origin;
+  if (origin !== undefined && req.method !== 'GET' && req.method !== 'HEAD') {
+    let sameOrigin = false;
+    try {
+      sameOrigin = new URL(origin).host === hostHeader.toLowerCase();
+    } catch {
+      // "null" or garbage: not our page.
+    }
+    if (!sameOrigin) {
+      next(new HttpError(403, '다른 사이트에서 보낸 요청은 허용되지 않습니다'));
+      return;
+    }
+  }
+  next();
+}
+
+// ---------------------------------------------------------------------------
+// API
+// ---------------------------------------------------------------------------
+
+export function createApiRouter(options: AppOptions = {}): express.Router {
+  const getProviderInfos = options.providerInfos ?? providerInfos;
+  const chatDeps = options.chatDeps ?? defaultChatDeps();
+  const api = express.Router();
+
+  api.use(localOriginOnly);
+
+  // Invalid ids are answered with 404 before any handler (and any filesystem access) runs.
+  api.param('docId', (_req, _res, next, value: string) => {
+    next(DOC_ID_RE.test(value) ? undefined : new HttpError(404, '문서를 찾을 수 없습니다'));
+  });
+  api.param('sid', (_req, _res, next, value: string) => {
+    next(SESSION_ID_RE.test(value) ? undefined : new HttpError(404, '세션을 찾을 수 없습니다'));
+  });
+  // Only parses application/json bodies; the raw PDF upload passes through untouched.
+  api.use(express.json({ limit: '2mb' }));
+
+  api.get('/health', async (_req, res) => {
+    const body: HealthResponse = { ok: true, providers: await getProviderInfos(), libraryDir: libraryDir() };
+    res.json(body);
+  });
+
+  // --- documents -------------------------------------------------------------------------------
+
+  api.get('/docs', async (_req, res) => {
+    res.json(await listDocs());
+  });
+
+  api.post('/docs', express.raw({ type: () => true, limit: MAX_UPLOAD }), async (req, res) => {
+    const bytes: unknown = req.body;
+    if (!Buffer.isBuffer(bytes) || bytes.length === 0) throw new HttpError(400, 'PDF 파일 내용이 비어 있습니다');
+    const meta = await importPdf(bytes, decodeFileName(req.get('X-Filename')));
+    res.status(201).json(meta);
+  });
+
+  api.get('/docs/:docId', async (req, res) => {
+    res.json(await requireDoc(req.params.docId));
+  });
+
+  api.get('/docs/:docId/slides/:file', async (req, res) => {
+    const doc = await getDoc(req.params.docId);
+    const match = /^(\d{1,6})\.png$/.exec(req.params.file);
+    const slide = match ? Number(match[1]) : 0;
+    if (!doc || slide < 1 || slide > doc.pageCount) throw new HttpError(404, '슬라이드를 찾을 수 없습니다');
+    const file = path.join(docPaths(doc.id).slidesDir, slideFileName(slide, doc.pageCount));
+    try {
+      await sendFile(res, file, { maxAge: IMMUTABLE_MAX_AGE_MS, immutable: true });
+    } catch (err) {
+      // Not rendered yet (still processing) or the client went away mid-transfer.
+      if (!res.headersSent) throw new HttpError(404, '슬라이드를 찾을 수 없습니다');
+      if ((err as NodeJS.ErrnoException).code !== 'ECONNABORTED') console.warn(`[http] ${req.path}: ${errorMessage(err)}`);
+    }
+  });
+
+  // --- sessions ----------------------------------------------------------------------------------
+
+  api.get('/docs/:docId/sessions', async (req, res) => {
+    await requireDoc(req.params.docId);
+    res.json(await listSessions(req.params.docId));
+  });
+
+  api.post('/docs/:docId/sessions', async (req, res) => {
+    const docId = req.params.docId;
+    await requireDoc(docId);
+    const body = jsonBody(req) as Partial<Record<keyof CreateSessionRequest, unknown>>;
+    const info = (await getProviderInfos()).find((candidate) => candidate.id === body.provider);
+    if (!info) throw new HttpError(400, `알 수 없는 제공자입니다: ${String(body.provider)}`);
+    if (!info.available) {
+      throw new HttpError(400, `${info.label}을(를) 사용할 수 없습니다${info.reason ? `: ${info.reason}` : ''}`);
+    }
+    if (body.model !== undefined && typeof body.model !== 'string') throw new HttpError(400, '모델 이름이 올바르지 않습니다');
+    const model = (body.model ?? '').trim() || info.defaultModel;
+    if (model && !MODEL_RE.test(model)) throw new HttpError(400, `모델 이름이 올바르지 않습니다: ${model}`);
+    const record = await createSession(docId, {
+      provider: info.id,
+      model,
+      title: typeof body.title === 'string' ? body.title : undefined,
+    });
+    res.status(201).json(toSession(record));
+  });
+
+  api.get('/docs/:docId/sessions/:sid', async (req, res) => {
+    const record = await getSession(req.params.docId, req.params.sid);
+    if (!record) throw new HttpError(404, '세션을 찾을 수 없습니다');
+    res.json(toSession(record));
+  });
+
+  api.delete('/docs/:docId/sessions/:sid', async (req, res) => {
+    const { docId, sid } = req.params;
+    if (abortTurn(docId, sid)) await waitForTurn(docId, sid, 5_000);
+    if (!(await deleteSession(docId, sid))) throw new HttpError(404, '세션을 찾을 수 없습니다');
+    res.status(204).end();
+  });
+
+  /** Runs a turn, streaming it as SSE once it has started. */
+  const streamTurn = async (req: Request, res: Response, kind: 'question' | 'prime') => {
+    const docId = String(req.params.docId);
+    const sessionId = String(req.params.sid);
+    const body = jsonBody(req);
+    const slide = body.slide;
+    if (typeof slide !== 'number' || !Number.isInteger(slide)) throw new HttpError(400, '슬라이드 번호가 필요합니다');
+    if (kind === 'question' && typeof body.text !== 'string') throw new HttpError(400, '질문을 입력해 주세요');
+    const text = kind === 'question' ? String(body.text) : '';
+
+    // Abort the turn when the client goes away mid-stream. This must watch the *response*:
+    // req 'close' fires as soon as the request body has been consumed.
+    const disconnect = new AbortController();
+    res.on('close', () => {
+      if (!res.writableFinished) disconnect.abort(new Error('클라이언트 연결이 끊어져 중단되었습니다'));
+    });
+
+    const sse = lazySse(res);
+    try {
+      await runTurn(
+        { docId, sessionId, kind, text, slide, signal: disconnect.signal, onEvent: (event) => sse.send(event) },
+        chatDeps,
+      );
+    } catch (err) {
+      if (!sse.opened) throw err; // not started: answered as a JSON error
+      console.error(`[chat] turn of ${sessionId} failed after start:`, err);
+      sse.send({ type: 'error', message: errorMessage(err) });
+    } finally {
+      sse.close();
+    }
+  };
+
+  api.post('/docs/:docId/sessions/:sid/prime', (req, res) => streamTurn(req, res, 'prime'));
+  api.post('/docs/:docId/sessions/:sid/messages', (req, res) => streamTurn(req, res, 'question'));
+
+  api.post('/docs/:docId/sessions/:sid/abort', async (req, res) => {
+    const { docId, sid } = req.params;
+    if (!(await getSession(docId, sid))) throw new HttpError(404, '세션을 찾을 수 없습니다');
+    abortTurn(docId, sid);
+    res.status(204).end();
+  });
+
+  // --- notes ---------------------------------------------------------------------------------------
+
+  api.get('/docs/:docId/notes', async (req, res) => {
+    res.json(await buildNotes(req.params.docId));
+  });
+
+  api.get('/docs/:docId/notes.md', async (req, res) => {
+    const docId = req.params.docId;
+    await requireDoc(docId);
+    const file = docPaths(docId).studyNotes;
+    if (!existsSync(file)) await writeNotes(docId);
+    const markdown = await fs.readFile(file, 'utf8');
+    res.set('Cache-Control', 'no-cache');
+    res.type('text/markdown; charset=utf-8').send(markdown);
+  });
+
+  api.use((_req, _res, next) => next(new HttpError(404, 'API 경로를 찾을 수 없습니다')));
+  api.use(apiErrorHandler);
+  return api;
+}
+
+/** Every API error becomes `{ "error": string }` with a 4xx/5xx status. */
+function apiErrorHandler(err: unknown, req: Request, res: Response, _next: NextFunction): void {
+  const bodyParserError = err as { status?: number; statusCode?: number; type?: string };
+  let status = 500;
+  let message = errorMessage(err);
+  if (err instanceof HttpError) {
+    status = err.status;
+  } else if (bodyParserError.type === 'entity.too.large') {
+    status = 413;
+    message = `파일이 너무 큽니다 (최대 ${MAX_UPLOAD.toUpperCase()})`;
+  } else if (bodyParserError.type === 'entity.parse.failed') {
+    status = 400;
+    message = '요청 본문이 올바른 JSON이 아닙니다';
+  } else {
+    const candidate = bodyParserError.status ?? bodyParserError.statusCode;
+    if (typeof candidate === 'number' && candidate >= 400 && candidate < 600) status = candidate;
+  }
+  if (status >= 500) console.error(`[http] ${req.method} ${req.originalUrl} failed:`, err);
+  if (res.headersSent) {
+    res.end();
+    return;
+  }
+  res.status(status).json({ error: message });
+}
+
+// ---------------------------------------------------------------------------
+// Web client
+// ---------------------------------------------------------------------------
+
+function mountProductionClient(app: express.Express, log: boolean): void {
+  const dist = webDistDir();
+  const indexHtml = path.join(dist, 'index.html');
+  if (!existsSync(indexHtml)) {
+    if (log) {
+      console.warn(
+        `[web] ${path.relative(process.cwd(), dist) || dist} 이(가) 없습니다. ` +
+          '`npm start`(빌드 후 실행) 또는 `npm run dev`(개발 모드)로 실행하세요.',
+      );
+    }
+    app.use((_req, res) => {
+      res
+        .status(503)
+        .type('text/plain; charset=utf-8')
+        .send('웹 클라이언트가 빌드되지 않았습니다 (web/dist 없음).\n`npm start` 또는 `npm run dev` 로 실행하세요.\n');
+    });
+    return;
+  }
+  // Vite emits content-hashed file names under assets/.
+  app.use('/assets', express.static(path.join(dist, 'assets'), { maxAge: IMMUTABLE_MAX_AGE_MS, immutable: true }));
+  app.use(express.static(dist, { index: false }));
+  // SPA fallback.
+  app.use((req, res, next) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+    res.set('Cache-Control', 'no-cache');
+    res.sendFile(indexHtml);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Server
+// ---------------------------------------------------------------------------
+
+export interface ServerOptions extends AppOptions {
+  /** Port to listen on (default: PORT env or 5180; 0 = ephemeral). */
+  port?: number;
+  /** Vite middleware mode with HMR instead of serving web/dist. */
+  dev?: boolean;
+  /** Re-process documents left in 'processing' (default true). */
+  resumeIngests?: boolean;
+  /** Print startup information (default true). */
+  log?: boolean;
+}
+
+export interface RunningServer {
+  server: http.Server;
+  url: string;
+  /** Aborts running turns, then stops Vite and the HTTP server. */
+  close(): Promise<void>;
+}
+
+function listen(server: http.Server, portNumber: number, hostname: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onError = (err: Error) => reject(err);
+    server.once('error', onError);
+    server.listen(portNumber, hostname, () => {
+      server.off('error', onError);
+      resolve();
+    });
+  });
+}
+
+export async function startServer(options: ServerOptions = {}): Promise<RunningServer> {
+  const log = options.log ?? true;
+  // Before accepting requests: mark answers interrupted by a previous crash as aborted.
+  const repaired = await recoverInterruptedSessions();
+  if (log && repaired > 0) console.log(`[chat] marked unfinished answers of ${repaired} session(s) as aborted`);
+
+  const app = express();
+  app.disable('x-powered-by');
+  const server = http.createServer(app);
+  app.use('/api', createApiRouter(options));
+
+  let closeVite: (() => Promise<void>) | undefined;
+  if (options.dev) {
+    const { createServer: createViteServer } = await import('vite');
+    const vite = await createViteServer({
+      configFile: path.join(webDir(), 'vite.config.ts'),
+      // HMR websocket shares our HTTP server (Vite 8: server.ws.server, formerly server.hmr.server).
+      server: { middlewareMode: true, ws: { server } },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+    closeVite = () => vite.close();
+  } else {
+    mountProductionClient(app, log);
+  }
+
+  await listen(server, options.port ?? port(), host());
+  const { port: actualPort } = server.address() as AddressInfo;
+  const url = `http://${host()}:${actualPort}`;
+
+  if (options.resumeIngests ?? true) {
+    resumePendingIngests().catch((err: unknown) => console.error('[library] resuming ingests failed:', err));
+  }
+
+  const close = async () => {
+    abortAllTurns();
+    await waitForIdle(4_000); // let aborted turns persist their partial answers
+    await closeVite?.();
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+      server.closeAllConnections();
+    });
+  };
+  return { server, url, close };
+}
+
+async function main(): Promise<void> {
+  const dev = process.argv.includes('--dev');
+  let running: RunningServer;
+  try {
+    running = await startServer({ dev });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EADDRINUSE') {
+      console.error(`포트 ${port()}이(가) 이미 사용 중입니다. 다른 포트로 실행하세요: PORT=5181 npm run ${dev ? 'dev' : 'serve'}`);
+    } else {
+      console.error('서버를 시작하지 못했습니다:', err);
+    }
+    process.exit(1);
+  }
+
+  console.log(`\n  easy-study ${dev ? '(dev)' : ''}  →  ${running.url}`);
+  console.log(`  library     →  ${libraryDir()}\n`);
+
+  let stopping = false;
+  const shutdown = (signal: NodeJS.Signals) => {
+    if (stopping) process.exit(1); // second Ctrl+C: leave immediately
+    stopping = true;
+    console.log(`\n${signal}: 종료하는 중…`);
+    const forceExit = setTimeout(() => process.exit(0), 8_000);
+    forceExit.unref();
+    running
+      .close()
+      .catch((err: unknown) => console.error('종료 중 오류:', err))
+      .finally(() => process.exit(0));
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+}
+
+if (import.meta.main) {
+  await main();
+}

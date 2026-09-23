@@ -6,3 +6,5 @@ library/
 .env
 .env.*
 !.env.example
+.claude/*.lock
+.claude/settings.local.json

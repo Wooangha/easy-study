@@ -1,0 +1,730 @@
+// Turn orchestration (server/chat.ts) with fake providers, and an in-process HTTP smoke test of
+// server/index.ts. No real CLI or API is ever called.
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
+import { after, before, describe, test } from 'node:test';
+import type { ChatMessage, DocMeta, NotesResponse, ProviderId, ProviderInfo, Session, StreamEvent } from '../shared/types.ts';
+import { abortTurn, defaultChatDeps, isTurnRunning, runTurn } from '../server/chat.ts';
+import type { ChatDeps, TurnRequest } from '../server/chat.ts';
+import { HttpError, repoRoot } from '../server/config.ts';
+import { initialProviderState } from '../server/context.ts';
+import { startServer } from '../server/index.ts';
+import type { RunningServer } from '../server/index.ts';
+import type { ProviderState } from '../server/internal-types.ts';
+import { docPaths, slideFileName, textFileName } from '../server/library.ts';
+import type { Part, Provider, ProviderRunInput, ProviderRunResult } from '../server/providers/types.ts';
+import { createSession, getSession, saveSession } from '../server/sessions.ts';
+
+let tmpRoot = '';
+
+before(async () => {
+  tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'easy-study-chat-'));
+  process.env.EASY_STUDY_LIBRARY = tmpRoot;
+});
+
+after(async () => {
+  await fs.rm(tmpRoot, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// Fixtures
+// ---------------------------------------------------------------------------
+
+const PAGES = 9;
+
+/** A ready 9-slide document with extracted texts and sheets.json (images are never opened). */
+async function makeReadyDoc(docId: string, status: DocMeta['status'] = 'ready'): Promise<void> {
+  const paths = docPaths(docId);
+  await fs.mkdir(paths.textDir, { recursive: true });
+  await fs.mkdir(paths.sheetsDir, { recursive: true });
+  await fs.mkdir(paths.slidesDir, { recursive: true });
+  const meta: DocMeta = {
+    id: docId,
+    title: 'Fake Deck',
+    fileName: 'Fake Deck.pdf',
+    pageCount: PAGES,
+    aspectRatio: 16 / 9,
+    status,
+    progress: status === 'ready' ? PAGES : 0,
+    createdAt: new Date().toISOString(),
+  };
+  await fs.writeFile(paths.docJson, JSON.stringify(meta));
+  for (let n = 1; n <= PAGES; n++) {
+    await fs.writeFile(path.join(paths.textDir, textFileName(n, PAGES)), `Slide ${n} text`);
+  }
+  await fs.writeFile(
+    paths.sheetsJson,
+    JSON.stringify([
+      { file: 'sheet-01.png', fromSlide: 1, toSlide: 4 },
+      { file: 'sheet-02.png', fromSlide: 5, toSlide: 8 },
+      { file: 'sheet-03.png', fromSlide: 9, toSlide: 9 },
+    ]),
+  );
+}
+
+type Script = (input: ProviderRunInput, call: number) => Promise<ProviderRunResult>;
+
+interface FakeProvider extends Provider {
+  calls: ProviderRunInput[];
+  script: Script;
+}
+
+function fakeProvider(id: ProviderId, script: Script): FakeProvider {
+  const provider: FakeProvider = {
+    id,
+    label: `Fake ${id}`,
+    kind: 'cli',
+    models: [{ id: '', label: 'default' }],
+    defaultModel: '',
+    maxImagesPerConversation: 90,
+    calls: [],
+    script,
+    detect: async () => ({ available: true }),
+    run: async (input) => {
+      provider.calls.push(input);
+      return provider.script(input, provider.calls.length);
+    },
+  };
+  return provider;
+}
+
+/** Streams the answer in two chunks with a status line in between. */
+const streamingAnswer =
+  (answer: (call: number) => string): Script =>
+  async (input, call) => {
+    const text = answer(call);
+    const half = Math.ceil(text.length / 2);
+    input.onDelta(text.slice(0, half));
+    input.onStatus('slides/003.png 읽는 중');
+    input.onDelta(text.slice(half));
+    return { text, resume: { cliSessionId: `cli-${call}` } };
+  };
+
+function abortError(): Error {
+  const err = new Error('요청이 중단되었습니다.');
+  err.name = 'AbortError';
+  return err;
+}
+
+/** Streams a partial answer, then waits until aborted. */
+const hangUntilAborted: Script = (input) => {
+  input.onDelta('partial ');
+  return new Promise((_resolve, reject) => {
+    if (input.signal.aborted) reject(abortError());
+    input.signal.addEventListener('abort', () => reject(abortError()), { once: true });
+  });
+};
+
+function depsFor(provider: FakeProvider, overrides: Partial<ChatDeps> = {}): ChatDeps & { appendCalls: number } {
+  const base = defaultChatDeps();
+  const deps = {
+    ...base,
+    appendCalls: 0,
+    getProvider: (id: ProviderId) => (id === provider.id ? provider : undefined),
+    checkProvider: async () => ({ available: true }),
+    appendHistory: (state: ProviderState, parts: Part[], answer: string) => {
+      deps.appendCalls++;
+      return base.appendHistory(state, parts, answer);
+    },
+    ...overrides,
+  };
+  return deps;
+}
+
+async function turn(
+  deps: ChatDeps,
+  args: Omit<TurnRequest, 'onEvent' | 'text'> & { text?: string },
+): Promise<{ events: StreamEvent[]; assistant: ChatMessage }> {
+  const events: StreamEvent[] = [];
+  const result = await runTurn({ text: '', ...args, onEvent: (event) => events.push(event) }, deps);
+  return { events, assistant: result.assistantMessage };
+}
+
+function textOf(parts: Part[]): string {
+  return parts
+    .filter((part): part is Extract<Part, { type: 'text' }> => part.type === 'text')
+    .map((part) => part.text)
+    .join('\n');
+}
+
+async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!(await predicate())) {
+    if (Date.now() > deadline) throw new Error('condition not met in time');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Orchestration
+// ---------------------------------------------------------------------------
+
+describe('runTurn', () => {
+  const DOC = 'fake-deck-aaa111';
+  before(() => makeReadyDoc(DOC));
+
+  test('prime then questions: events, persistence, provider state, notes', async () => {
+    const provider = fakeProvider('claude-code', streamingAnswer((call) => `answer ${call}`));
+    const deps = depsFor(provider);
+    const session = await createSession(DOC, { provider: 'claude-code', model: 'sonnet' });
+
+    // Prime (feeds the deck).
+    const prime = await turn(deps, { docId: DOC, sessionId: session.id, kind: 'prime', slide: 2 });
+    assert.deepEqual(
+      prime.events.map((e) => e.type),
+      ['start', 'delta', 'status', 'delta', 'done'],
+    );
+    const start = prime.events[0] as Extract<StreamEvent, { type: 'start' }>;
+    assert.equal(start.userMessage.kind, 'prime');
+    assert.equal(start.userMessage.role, 'user');
+    assert.equal(start.userMessage.slide, 2);
+    assert.deepEqual(start.userMessage.context, {
+      primed: true,
+      rollover: false,
+      attachedSlides: [2],
+      reusedSlides: [],
+      overviewImages: 3,
+    });
+    assert.equal(start.assistantMessage.status, 'streaming');
+    assert.equal(start.assistantMessage.text, '');
+    assert.equal(start.assistantMessage.provider, 'claude-code');
+    assert.equal(start.assistantMessage.model, 'sonnet');
+
+    const done = prime.events.at(-1) as Extract<StreamEvent, { type: 'done' }>;
+    assert.equal(done.assistantMessage.status, 'complete');
+    assert.equal(done.assistantMessage.text, 'answer 1');
+    assert.equal(typeof done.assistantMessage.durationMs, 'number');
+    assert.equal(done.session.primed, true);
+    assert.equal(done.session.messageCount, 2);
+
+    const firstCall = provider.calls[0];
+    assert.equal(firstCall.resume, null);
+    assert.equal(firstCall.cwd, docPaths(DOC).dir);
+    assert.equal(firstCall.model, 'sonnet');
+    assert.ok(firstCall.systemPrompt.length > 0);
+    assert.equal(firstCall.parts.filter((p) => p.type === 'image').length, 4); // 3 sheets + focus
+
+    let stored = await getSession(DOC, session.id);
+    assert.ok(stored);
+    assert.equal(stored.providerState.primed, true);
+    assert.deepEqual(stored.providerState.resume, { cliSessionId: 'cli-1' });
+    assert.equal(stored.providerState.generation, 1);
+    assert.deepEqual(stored.providerState.recentSlides, [2]);
+    assert.deepEqual(
+      stored.messages.map((m) => [m.role, m.kind, m.status]),
+      [
+        ['user', 'prime', 'complete'],
+        ['assistant', 'prime', 'complete'],
+      ],
+    );
+
+    // Question about the same slide: continues the conversation, image not re-sent.
+    const again = await turn(deps, { docId: DOC, sessionId: session.id, kind: 'question', text: '  왜 그런가요?  ', slide: 2 });
+    const againStart = again.events[0] as Extract<StreamEvent, { type: 'start' }>;
+    assert.equal(againStart.userMessage.text, '왜 그런가요?');
+    assert.deepEqual(againStart.userMessage.context?.reusedSlides, [2]);
+    assert.deepEqual(provider.calls[1].resume, { cliSessionId: 'cli-1' });
+    assert.equal(provider.calls[1].parts.filter((p) => p.type === 'image').length, 0);
+    assert.match(textOf(provider.calls[1].parts), /왜 그런가요\?/);
+
+    // Question about another slide: its image is attached.
+    const other = await turn(deps, { docId: DOC, sessionId: session.id, kind: 'question', text: 'slide 5?', slide: 5 });
+    assert.equal(other.assistant.status, 'complete');
+    const otherImages = provider.calls[2].parts.filter((p) => p.type === 'image');
+    assert.equal(otherImages.length, 1);
+    assert.equal(otherImages[0].type === 'image' && otherImages[0].path, path.join(docPaths(DOC).slidesDir, slideFileName(5, PAGES)));
+
+    stored = await getSession(DOC, session.id);
+    assert.equal(stored?.messages.length, 6);
+    assert.deepEqual(stored?.providerState.resume, { cliSessionId: 'cli-3' });
+    assert.equal(deps.appendCalls, 0, 'appendHistory is only for anthropic-api');
+
+    // Notes were regenerated after the turn (prime excluded).
+    const notes = await fs.readFile(docPaths(DOC).studyNotes, 'utf8');
+    assert.match(notes, /### Q\. 왜 그런가요\?/);
+    assert.match(notes, /## Slide 5/);
+    assert.ok(!notes.includes('answer 1'));
+    await fs.access(path.join(docPaths(DOC).notesDir, `${session.id}.md`));
+  });
+
+  test('anthropic-api keeps the history via appendHistory', async () => {
+    const provider = fakeProvider('anthropic-api', streamingAnswer((call) => `api answer ${call}`));
+    const deps = depsFor(provider);
+    const session = await createSession(DOC, { provider: 'anthropic-api', model: '' });
+
+    await turn(deps, { docId: DOC, sessionId: session.id, kind: 'prime', slide: 1 });
+    await turn(deps, { docId: DOC, sessionId: session.id, kind: 'question', text: 'q2', slide: 1 });
+    assert.equal(deps.appendCalls, 2);
+    assert.equal(provider.calls[1].history.length, 2, 'second turn receives the first exchange');
+    const stored = await getSession(DOC, session.id);
+    assert.equal(stored?.providerState.history.length, 4);
+    const lastTurn = stored?.providerState.history.at(-1);
+    assert.deepEqual(lastTurn, { role: 'assistant', parts: [{ type: 'text', text: 'api answer 2' }] });
+  });
+
+  test('provider error keeps partial text and does not advance the provider state', async () => {
+    const provider = fakeProvider('claude-code', async (input) => {
+      input.onDelta('partial ');
+      throw new Error('claude exited with code 1: boom');
+    });
+    const deps = depsFor(provider);
+    const session = await createSession(DOC, { provider: 'claude-code', model: '' });
+
+    const { events, assistant } = await turn(deps, { docId: DOC, sessionId: session.id, kind: 'prime', slide: 1 });
+    assert.deepEqual(
+      events.map((e) => e.type),
+      ['start', 'delta', 'done'],
+    );
+    assert.equal(assistant.status, 'error');
+    assert.equal(assistant.error, 'claude exited with code 1: boom');
+    assert.equal(assistant.text, 'partial ');
+    assert.equal(typeof assistant.durationMs, 'number');
+
+    const stored = await getSession(DOC, session.id);
+    assert.deepEqual(stored?.providerState, initialProviderState());
+    assert.equal(stored?.messages[1].status, 'error');
+    assert.equal(stored?.messages[1].text, 'partial ');
+
+    // The next turn primes again because the failed priming was not recorded.
+    provider.script = streamingAnswer(() => 'ok');
+    const retry = await turn(deps, { docId: DOC, sessionId: session.id, kind: 'question', text: 'again', slide: 1 });
+    const retryStart = retry.events[0] as Extract<StreamEvent, { type: 'start' }>;
+    assert.equal(retryStart.userMessage.context?.primed, true);
+    assert.equal(provider.calls[1].resume, null);
+    assert.equal(retry.assistant.status, 'complete');
+  });
+
+  test('abortTurn stops a running turn; partial text is kept as aborted', async () => {
+    const provider = fakeProvider('claude-code', hangUntilAborted);
+    const deps = depsFor(provider);
+    const session = await createSession(DOC, { provider: 'claude-code', model: '' });
+    const before = structuredClone((await getSession(DOC, session.id))?.providerState);
+
+    const events: StreamEvent[] = [];
+    const running = runTurn(
+      { docId: DOC, sessionId: session.id, kind: 'question', text: 'long question', slide: 3, onEvent: (e) => events.push(e) },
+      deps,
+    );
+    await waitFor(() => events.some((e) => e.type === 'delta'));
+    assert.equal(isTurnRunning(DOC, session.id), true);
+    assert.equal(abortTurn(DOC, session.id), true);
+    const { assistantMessage } = await running;
+
+    assert.equal(assistantMessage.status, 'aborted');
+    assert.equal(assistantMessage.text, 'partial ');
+    assert.equal(assistantMessage.error, '사용자가 답변 생성을 중단했습니다');
+    assert.equal(events.at(-1)?.type, 'done');
+    assert.equal(isTurnRunning(DOC, session.id), false);
+    assert.equal(abortTurn(DOC, session.id), false);
+
+    const stored = await getSession(DOC, session.id);
+    assert.equal(stored?.messages[1].status, 'aborted');
+    assert.deepEqual(stored?.providerState, before);
+  });
+
+  test('an external signal (client disconnect) aborts the turn', async () => {
+    const provider = fakeProvider('claude-code', hangUntilAborted);
+    const deps = depsFor(provider);
+    const session = await createSession(DOC, { provider: 'claude-code', model: '' });
+    const disconnect = new AbortController();
+    const events: StreamEvent[] = [];
+    const running = runTurn(
+      {
+        docId: DOC,
+        sessionId: session.id,
+        kind: 'question',
+        text: 'q',
+        slide: 1,
+        signal: disconnect.signal,
+        onEvent: (e) => events.push(e),
+      },
+      deps,
+    );
+    await waitFor(() => events.some((e) => e.type === 'delta'));
+    disconnect.abort(new Error('client went away'));
+    const { assistantMessage } = await running;
+    assert.equal(assistantMessage.status, 'aborted');
+    assert.equal(assistantMessage.error, 'client went away');
+  });
+
+  test('a second turn on the same session gets 409 while one is running', async () => {
+    let release = () => {};
+    const provider = fakeProvider('claude-code', async (input) => {
+      input.onDelta('working');
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return { text: 'finished', resume: { cliSessionId: 'x' } };
+    });
+    const deps = depsFor(provider);
+    const session = await createSession(DOC, { provider: 'claude-code', model: '' });
+
+    const events: StreamEvent[] = [];
+    const first = runTurn({ docId: DOC, sessionId: session.id, kind: 'prime', text: '', slide: 1, onEvent: (e) => events.push(e) }, deps);
+    const secondEvents: StreamEvent[] = [];
+    await assert.rejects(
+      runTurn({ docId: DOC, sessionId: session.id, kind: 'question', text: 'hi', slide: 1, onEvent: (e) => secondEvents.push(e) }, deps),
+      (err: unknown) => err instanceof HttpError && err.status === 409,
+    );
+    assert.deepEqual(secondEvents, []);
+
+    // Another session is not blocked.
+    const otherSession = await createSession(DOC, { provider: 'claude-code', model: '' });
+    const otherProvider = fakeProvider('claude-code', streamingAnswer(() => 'other'));
+    const other = await turn(depsFor(otherProvider), { docId: DOC, sessionId: otherSession.id, kind: 'prime', slide: 1 });
+    assert.equal(other.assistant.status, 'complete');
+
+    await waitFor(() => events.some((e) => e.type === 'delta'));
+    release();
+    assert.equal((await first).assistantMessage.text, 'finished');
+
+    provider.script = streamingAnswer(() => 'next');
+    const next = await turn(deps, { docId: DOC, sessionId: session.id, kind: 'question', text: 'now?', slide: 1 });
+    assert.equal(next.assistant.status, 'complete');
+  });
+
+  test('validation failures reject before start and release the session', async () => {
+    const provider = fakeProvider('claude-code', streamingAnswer(() => 'fine'));
+    const deps = depsFor(provider);
+    const session = await createSession(DOC, { provider: 'claude-code', model: '' });
+    const base = { docId: DOC, sessionId: session.id, kind: 'question' as const, text: 'q', slide: 1 };
+
+    const cases: Array<[string, ChatDeps, Partial<TurnRequest>, number]> = [
+      ['unknown session', deps, { sessionId: '20200101-000000-0000' }, 404],
+      ['unknown doc', deps, { docId: 'nope-doc-000000' }, 404],
+      ['slide 0', deps, { slide: 0 }, 400],
+      ['slide past the end', deps, { slide: PAGES + 1 }, 400],
+      ['fractional slide', deps, { slide: 1.5 }, 400],
+      ['empty question', deps, { text: '   ' }, 400],
+      ['unknown provider', { ...deps, getProvider: () => undefined }, {}, 400],
+      ['unavailable provider', { ...deps, checkProvider: async () => ({ available: false, reason: 'not logged in' }) }, {}, 400],
+    ];
+    for (const [name, caseDeps, patch, status] of cases) {
+      const events: StreamEvent[] = [];
+      await assert.rejects(
+        runTurn({ ...base, ...patch, onEvent: (e) => events.push(e) }, caseDeps),
+        (err: unknown) => err instanceof HttpError && err.status === status,
+        name,
+      );
+      assert.deepEqual(events, [], name);
+    }
+    assert.equal(provider.calls.length, 0);
+    assert.equal((await getSession(DOC, session.id))?.messages.length, 0);
+
+    // A document that is still processing cannot be studied yet.
+    await makeReadyDoc('processing-doc-bbb222', 'processing');
+    const pending = await createSession('processing-doc-bbb222', { provider: 'claude-code', model: '' });
+    await assert.rejects(
+      runTurn({ ...base, docId: 'processing-doc-bbb222', sessionId: pending.id, onEvent: () => {} }, deps),
+      (err: unknown) => err instanceof HttpError && err.status === 409,
+    );
+
+    // The lock was released every time.
+    const ok = await turn(deps, base);
+    assert.equal(ok.assistant.status, 'complete');
+  });
+
+  test('leftover streaming messages are repaired and listener errors are ignored', async () => {
+    const provider = fakeProvider('claude-code', streamingAnswer(() => 'fine'));
+    const deps = depsFor(provider);
+    const session = await createSession(DOC, { provider: 'claude-code', model: '' });
+    const record = await getSession(DOC, session.id);
+    assert.ok(record);
+    record.messages.push(
+      { id: 'u', role: 'user', text: 'old', slide: 1, kind: 'question', createdAt: new Date().toISOString(), status: 'complete' },
+      { id: 'a', role: 'assistant', text: 'half', slide: 1, kind: 'question', createdAt: new Date().toISOString(), status: 'streaming' },
+    );
+    await saveSession(record);
+
+    const result = await runTurn(
+      {
+        docId: DOC,
+        sessionId: session.id,
+        kind: 'question',
+        text: 'new',
+        slide: 1,
+        onEvent: () => {
+          throw new Error('listener exploded');
+        },
+      },
+      deps,
+    );
+    assert.equal(result.assistantMessage.status, 'complete');
+    const stored = await getSession(DOC, session.id);
+    assert.equal(stored?.messages[1].status, 'aborted');
+    assert.equal(stored?.messages.at(-1)?.status, 'complete');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HTTP smoke test
+// ---------------------------------------------------------------------------
+
+interface SseFrame {
+  event: string;
+  data: StreamEvent;
+}
+
+function parseSse(raw: string): SseFrame[] {
+  return raw
+    .split('\n\n')
+    .filter((frame) => frame.trim() && !frame.startsWith(':'))
+    .map((frame) => {
+      const event = /^event: (.+)$/m.exec(frame)?.[1] ?? '';
+      const data = /^data: (.+)$/m.exec(frame)?.[1] ?? 'null';
+      return { event, data: JSON.parse(data) as StreamEvent };
+    });
+}
+
+describe('HTTP server', () => {
+  let server: RunningServer;
+  let base = '';
+  const provider = fakeProvider('claude-code', async (input, call) => {
+    if (textOf(input.parts).includes('BLOCK')) return hangUntilAborted(input, call);
+    return streamingAnswer(() => `http answer ${call}`)(input, call);
+  });
+  const infos: ProviderInfo[] = [
+    { id: 'claude-code', label: 'Claude Code', kind: 'cli', available: true, models: [], defaultModel: '' },
+    { id: 'codex', label: 'Codex', kind: 'cli', available: false, reason: 'codex CLI not found', models: [], defaultModel: '' },
+  ];
+  let docId = '';
+  let sessionId = '';
+
+  before(async () => {
+    server = await startServer({
+      port: 0,
+      log: false,
+      resumeIngests: false,
+      providerInfos: async () => infos,
+      chatDeps: depsFor(provider),
+    });
+    base = server.url;
+  });
+
+  after(async () => {
+    await server?.close();
+  });
+
+  const api = (p: string, init?: RequestInit) => fetch(`${base}/api${p}`, init);
+  const postJson = (p: string, body: unknown) =>
+    api(p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+
+  async function expectError(res: Response, status: number): Promise<string> {
+    assert.equal(res.status, status);
+    assert.match(res.headers.get('content-type') ?? '', /application\/json/);
+    const body = (await res.json()) as { error: string };
+    assert.equal(typeof body.error, 'string');
+    return body.error;
+  }
+
+  test('health', async () => {
+    const res = await api('/health');
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.deepEqual(body, { ok: true, providers: infos, libraryDir: path.resolve(tmpRoot) });
+  });
+
+  test('upload validates and ingests a PDF', async () => {
+    await expectError(await api('/docs', { method: 'POST', headers: { 'Content-Type': 'application/pdf' }, body: 'nope' }), 400);
+
+    const pdf = await fs.readFile(path.join(repoRoot(), 'samples', 'sample-lecture.pdf'));
+    const res = await api('/docs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/pdf', 'X-Filename': encodeURIComponent('운영체제 5강.pdf') },
+      body: pdf,
+    });
+    assert.equal(res.status, 201);
+    const meta = (await res.json()) as DocMeta;
+    assert.equal(meta.title, '운영체제 5강');
+    assert.equal(meta.status, 'processing');
+    docId = meta.id;
+
+    let current = meta;
+    await waitFor(async () => {
+      current = (await (await api(`/docs/${docId}`)).json()) as DocMeta;
+      return current.status !== 'processing';
+    }, 60_000);
+    assert.equal(current.status, 'ready', current.error ?? '');
+    assert.equal(current.pageCount, 9);
+
+    const list = (await (await api('/docs')).json()) as DocMeta[];
+    assert.ok(list.some((d) => d.id === docId));
+  });
+
+  test('slides are served as immutable PNGs; bad ids and numbers are 404', async () => {
+    const res = await api(`/docs/${docId}/slides/7.png`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-type'), 'image/png');
+    assert.equal(res.headers.get('cache-control'), 'public, max-age=31536000, immutable');
+    assert.ok((await res.arrayBuffer()).byteLength > 1000);
+    assert.equal((await api(`/docs/${docId}/slides/007.png`)).status, 200);
+
+    await expectError(await api(`/docs/${docId}/slides/0.png`), 404);
+    await expectError(await api(`/docs/${docId}/slides/10.png`), 404);
+    await expectError(await api(`/docs/${docId}/slides/..%2Fdoc.json`), 404);
+    await expectError(await api('/docs/NOT_VALID/slides/1.png'), 404);
+    await expectError(await api('/docs/missing-000000'), 404);
+    await expectError(await api('/nope'), 404);
+  });
+
+  test('sessions: create, validate providers, list, get', async () => {
+    await expectError(await postJson(`/docs/${docId}/sessions`, { provider: 'nope' }), 400);
+    await expectError(await postJson(`/docs/${docId}/sessions`, { provider: 'codex' }), 400);
+    await expectError(await postJson(`/docs/${docId}/sessions`, { provider: 'claude-code', model: '--evil' }), 400);
+    await expectError(
+      await api(`/docs/${docId}/sessions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{oops' }),
+      400,
+    );
+
+    const res = await postJson(`/docs/${docId}/sessions`, { provider: 'claude-code', model: 'sonnet', title: '스모크' });
+    assert.equal(res.status, 201);
+    const session = (await res.json()) as Session;
+    assert.equal(session.title, '스모크');
+    assert.equal(session.model, 'sonnet');
+    assert.deepEqual(session.messages, []);
+    sessionId = session.id;
+
+    const list = (await (await api(`/docs/${docId}/sessions`)).json()) as Session[];
+    assert.deepEqual(
+      list.map((s) => s.id),
+      [sessionId],
+    );
+    assert.equal(((await (await api(`/docs/${docId}/sessions/${sessionId}`)).json()) as Session).id, sessionId);
+    await expectError(await api(`/docs/${docId}/sessions/20200101-000000-0000`), 404);
+    await expectError(await api(`/docs/${docId}/sessions/BAD%20ID`), 404);
+  });
+
+  test('prime and messages stream SSE frames', async () => {
+    const prime = await postJson(`/docs/${docId}/sessions/${sessionId}/prime`, { slide: 1 });
+    assert.equal(prime.status, 200);
+    assert.equal(prime.headers.get('content-type'), 'text/event-stream');
+    assert.equal(prime.headers.get('cache-control'), 'no-cache');
+    assert.equal(prime.headers.get('x-accel-buffering'), 'no');
+    const frames = parseSse(await prime.text());
+    assert.deepEqual(
+      frames.map((f) => f.event),
+      ['start', 'delta', 'status', 'delta', 'done'],
+    );
+    for (const frame of frames) assert.equal(frame.data.type, frame.event);
+    const done = frames.at(-1)?.data as Extract<StreamEvent, { type: 'done' }>;
+    assert.equal(done.assistantMessage.status, 'complete');
+    assert.equal(done.session.primed, true);
+
+    const ask = await postJson(`/docs/${docId}/sessions/${sessionId}/messages`, { text: '간트 차트 설명해줘', slide: 7 });
+    const askFrames = parseSse(await ask.text());
+    assert.equal(askFrames.at(-1)?.event, 'done');
+
+    // Validation errors are plain JSON, not SSE.
+    await expectError(await postJson(`/docs/${docId}/sessions/${sessionId}/messages`, { text: '', slide: 1 }), 400);
+    await expectError(await postJson(`/docs/${docId}/sessions/${sessionId}/messages`, { text: 'x', slide: 99 }), 400);
+    await expectError(await postJson(`/docs/${docId}/sessions/${sessionId}/messages`, { text: 'x' }), 400);
+  });
+
+  test('409 while running, /abort stops the turn', async () => {
+    const running = await postJson(`/docs/${docId}/sessions/${sessionId}/messages`, { text: 'BLOCK please', slide: 2 });
+    assert.equal(running.status, 200);
+    const reader = running.body!.getReader();
+    const decoder = new TextDecoder();
+    let raw = '';
+    while (!raw.includes('event: delta')) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      raw += decoder.decode(value, { stream: true });
+    }
+
+    await expectError(await postJson(`/docs/${docId}/sessions/${sessionId}/messages`, { text: 'second', slide: 2 }), 409);
+    const abort = await api(`/docs/${docId}/sessions/${sessionId}/abort`, { method: 'POST' });
+    assert.equal(abort.status, 204);
+
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      raw += decoder.decode(value, { stream: true });
+    }
+    const last = parseSse(raw).at(-1);
+    assert.equal(last?.event, 'done');
+    const done = last?.data as Extract<StreamEvent, { type: 'done' }>;
+    assert.equal(done.assistantMessage.status, 'aborted');
+    assert.equal(done.assistantMessage.text, 'partial ');
+  });
+
+  test('a client disconnect aborts the turn (response close, not request close)', async () => {
+    const controller = new AbortController();
+    const res = await fetch(`${base}/api/docs/${docId}/sessions/${sessionId}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: 'BLOCK again', slide: 3 }),
+      signal: controller.signal,
+    });
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let raw = '';
+    while (!raw.includes('event: delta')) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      raw += decoder.decode(value, { stream: true });
+    }
+    controller.abort();
+    await waitFor(async () => {
+      const session = (await (await api(`/docs/${docId}/sessions/${sessionId}`)).json()) as Session;
+      return session.messages.at(-1)?.status === 'aborted';
+    });
+    const session = (await (await api(`/docs/${docId}/sessions/${sessionId}`)).json()) as Session;
+    assert.equal(session.messages.at(-1)?.text, 'partial ');
+    assert.equal(session.messages.at(-1)?.error, '클라이언트 연결이 끊어져 중단되었습니다');
+  });
+
+  test('notes endpoints', async () => {
+    const notes = (await (await api(`/docs/${docId}/notes`)).json()) as NotesResponse;
+    assert.equal(notes.docId, docId);
+    assert.ok(notes.slides.some((s) => s.slide === 7 && s.entries[0].question.text === '간트 차트 설명해줘'));
+    assert.ok(path.isAbsolute(notes.markdownPath));
+
+    const md = await api(`/docs/${docId}/notes.md`);
+    assert.equal(md.status, 200);
+    assert.match(md.headers.get('content-type') ?? '', /^text\/markdown; charset=utf-8/);
+    const text = await md.text();
+    assert.match(text, /^# 운영체제 5강 — study notes/);
+    assert.match(text, /!\[slide 7\]\(slides\/007\.png\)/);
+  });
+
+  test('delete a session', async () => {
+    const res = await api(`/docs/${docId}/sessions/${sessionId}`, { method: 'DELETE' });
+    assert.equal(res.status, 204);
+    await expectError(await api(`/docs/${docId}/sessions/${sessionId}`), 404);
+    await expectError(await api(`/docs/${docId}/sessions/${sessionId}`, { method: 'DELETE' }), 404);
+    const md = await (await api(`/docs/${docId}/notes.md`)).text();
+    assert.ok(!md.includes('간트 차트 설명해줘'));
+  });
+
+  test('cross-site requests and foreign Host headers are refused', async () => {
+    const session = (await (await postJson(`/docs/${docId}/sessions`, { provider: 'claude-code' })).json()) as Session;
+    const abortPath = `/docs/${docId}/sessions/${session.id}/abort`;
+
+    await expectError(await api(abortPath, { method: 'POST', headers: { Origin: 'https://evil.example' } }), 403);
+    await expectError(await api(abortPath, { method: 'POST', headers: { Origin: 'null' } }), 403);
+    assert.equal((await api(abortPath, { method: 'POST', headers: { Origin: base } })).status, 204);
+    assert.equal((await api(`/docs/${docId}`, { headers: { Origin: 'https://evil.example' } })).status, 200, 'reads stay open');
+
+    // DNS rebinding: a page on evil.example resolving to 127.0.0.1 sends its own Host header.
+    const { port } = new URL(base);
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, path: '/api/docs', headers: { Host: `evil.example:${port}` } }, (res) => {
+        res.resume();
+        resolve(res.statusCode ?? 0);
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    assert.equal(status, 403);
+  });
+
+  test('without web/dist the SPA routes explain how to build', async () => {
+    const res = await fetch(`${base}/some/page`);
+    // Either the built client (index.html) or the 503 hint, depending on whether web/dist exists.
+    assert.ok(res.status === 200 || res.status === 503, String(res.status));
+  });
+});
