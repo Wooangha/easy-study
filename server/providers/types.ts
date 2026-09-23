@@ -48,6 +48,18 @@ export interface ProviderRunInput {
   history: HistoryTurn[];
   /** '' = provider default. */
   model: string;
+  /**
+   * One-shot call that will never be resumed (digest batches): CLI providers should not persist
+   * a session (claude: --no-session-persistence without --session-id; codex: --ephemeral).
+   * Defaults to false.
+   */
+  ephemeral?: boolean;
+  /**
+   * Extra directories the model may read (other lectures of the same course).
+   * claude: one `--add-dir <dir>` per entry. codex: its read-only sandbox can already read them.
+   * API providers ignore it.
+   */
+  extraReadDirs?: string[];
   signal: AbortSignal;
   /** Streamed assistant text (append-only). */
   onDelta: (text: string) => void;

@@ -9,9 +9,13 @@ export interface UploadItem {
   size: number;
   /** 0..1 upload progress. */
   fraction: number;
+  /** Course the file is being uploaded into (null = uncategorized). */
+  courseId: string | null;
 }
 
 const POLL_MS = 800;
+/** While any document's digest is running, refresh the list this often (digest badges in pickers). */
+const DIGEST_POLL_MS = 5000;
 
 export function isPdfFile(file: File): boolean {
   return file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
@@ -65,30 +69,52 @@ export function useDocs() {
     };
   }, [processingIds]);
 
-  /** Uploads PDFs one by one. Resolves with the last successfully created doc (or null). */
-  const upload = useCallback(async (files: File[]): Promise<DocMeta | null> => {
-    let last: DocMeta | null = null;
-    for (const file of files) {
-      if (!isPdfFile(file)) {
-        toast(`PDF 파일만 올릴 수 있어요: ${file.name}`, 'error');
-        continue;
+  // Digest jobs run in the background (possibly for a document that is not open): keep the badges fresh.
+  const digestRunning = useMemo(() => (docs ?? []).some((d) => d.digestStatus === 'running'), [docs]);
+  useEffect(() => {
+    if (!digestRunning) return;
+    const timer = window.setInterval(() => void refresh(), DIGEST_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [digestRunning, refresh]);
+
+  /**
+   * Uploads PDFs one by one (into `courseId` when given). Resolves with the successfully created docs.
+   * `onCreated` runs right after each document is created (e.g. to show it in its course immediately).
+   */
+  const upload = useCallback(
+    async (files: File[], courseId: string | null = null, onCreated?: (doc: DocMeta) => void): Promise<DocMeta[]> => {
+      const created: DocMeta[] = [];
+      for (const file of files) {
+        if (!isPdfFile(file)) {
+          toast(`PDF 파일만 올릴 수 있어요: ${file.name}`, 'error');
+          continue;
+        }
+        const id = ++uploadSeq.current;
+        setUploads((u) => [...u, { id, name: file.name, size: file.size, fraction: 0, courseId }]);
+        try {
+          const doc = await uploadPdf(
+            file,
+            (fraction) => setUploads((u) => u.map((x) => (x.id === id ? { ...x, fraction } : x))),
+            courseId,
+          );
+          setDocs((prev) => [doc, ...(prev ?? []).filter((d) => d.id !== doc.id)]);
+          created.push(doc);
+          onCreated?.(doc);
+        } catch (e) {
+          toast(`업로드 실패 (${file.name}): ${errorMessage(e)}`, 'error');
+        } finally {
+          setUploads((u) => u.filter((x) => x.id !== id));
+        }
       }
-      const id = ++uploadSeq.current;
-      setUploads((u) => [...u, { id, name: file.name, size: file.size, fraction: 0 }]);
-      try {
-        const doc = await uploadPdf(file, (fraction) =>
-          setUploads((u) => u.map((x) => (x.id === id ? { ...x, fraction } : x))),
-        );
-        setDocs((prev) => [doc, ...(prev ?? []).filter((d) => d.id !== doc.id)]);
-        last = doc;
-      } catch (e) {
-        toast(`업로드 실패 (${file.name}): ${errorMessage(e)}`, 'error');
-      } finally {
-        setUploads((u) => u.filter((x) => x.id !== id));
-      }
-    }
-    return last;
+      return created;
+    },
+    [],
+  );
+
+  /** Locally patch one document (e.g. its digest status) without waiting for the next refresh. */
+  const patchDoc = useCallback((docId: string, patch: Partial<DocMeta>) => {
+    setDocs((prev) => prev && prev.map((d) => (d.id === docId ? { ...d, ...patch } : d)));
   }, []);
 
-  return { docs, loadError, uploads, refresh, upload };
+  return { docs, loadError, uploads, refresh, upload, patchDoc };
 }

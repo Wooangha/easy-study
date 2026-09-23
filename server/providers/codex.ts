@@ -1,11 +1,16 @@
 // codex provider: the user's ChatGPT subscription through the Codex CLI (DESIGN §6).
 //
-//   new:    codex exec --json --skip-git-repo-check --sandbox read-only -C <cwd> [-m <model>] [-i <img> ...]
+//   new:    codex exec --json --skip-git-repo-check [--ephemeral] --sandbox read-only -C <cwd> [-m <model>] [-i <img> ...]
 //   resume: codex exec resume <threadId> - --json --skip-git-repo-check -c sandbox_mode="read-only"
 //           [-m <model>] [-i <img> ...]
 //
 // The prompt is read from stdin. Images cannot be interleaved with text, so every image part is
 // replaced by a "[Attached image #k: label]" marker and the files are passed with -i in that order.
+// The read-only sandbox can read outside the working directory, so other lectures of a course
+// (ProviderRunInput.extraReadDirs) need no flag.
+//
+// Codex may send several agent messages in one turn (e.g. "I'll check the file." before running a
+// command, then the answer). Only the LAST one is the answer: earlier ones are shown as status lines.
 import type {
   Part,
   Provider,
@@ -23,12 +28,19 @@ export interface CodexArgsInput {
   threadId?: string;
   /** Image files, in marker order. */
   images: string[];
+  /** One-shot call: do not persist the session (--ephemeral; new conversations only). */
+  ephemeral?: boolean;
 }
 
 export function codexArgs(input: CodexArgsInput): string[] {
-  const args = input.threadId
-    ? ['exec', 'resume', input.threadId, '-', '--json', '--skip-git-repo-check', '-c', 'sandbox_mode="read-only"']
-    : ['exec', '--json', '--skip-git-repo-check', '--sandbox', 'read-only', '-C', input.cwd];
+  let args: string[];
+  if (input.threadId) {
+    args = ['exec', 'resume', input.threadId, '-', '--json', '--skip-git-repo-check', '-c', 'sandbox_mode="read-only"'];
+  } else {
+    args = ['exec', '--json', '--skip-git-repo-check'];
+    if (input.ephemeral) args.push('--ephemeral');
+    args.push('--sandbox', 'read-only', '-C', input.cwd);
+  }
   if (input.model) args.push('-m', input.model);
   for (const image of input.images) args.push('-i', image);
   return args;
@@ -65,7 +77,17 @@ export function codexPrompt(parts: Part[], systemPrompt: string | null): { promp
   return { prompt: sections.join('\n\n'), images };
 }
 
-/** Stateful interpreter of `codex exec --json` events. */
+/** Max characters of an intermediate agent message shown as a status line. */
+const STATUS_MESSAGE_CHARS = 200;
+
+/**
+ * Stateful interpreter of `codex exec --json` events.
+ *
+ * Agent messages are buffered, because a message is only known to be the final answer when the
+ * turn completes. A buffered message is shown through onStatus as soon as more work starts (a
+ * command, reasoning, …) or a newer message replaces it; the last one is emitted through onDelta at
+ * turn.completed (or by finish() if the stream ends without it). So `text` is the final answer only.
+ */
 export class CodexStreamState {
   text = '';
   threadId: string | undefined;
@@ -75,6 +97,10 @@ export class CodexStreamState {
 
   private readonly onDelta: (text: string) => void;
   private readonly onStatus: (text: string) => void;
+  /** Latest agent message, not emitted as answer text yet. */
+  private pending: string | null = null;
+  /** `pending` has already been shown as a status line. */
+  private pendingShown = false;
 
   constructor(onDelta: (text: string) => void, onStatus: (text: string) => void) {
     this.onDelta = onDelta;
@@ -94,6 +120,7 @@ export class CodexStreamState {
         break;
       case 'turn.completed':
         this.completed = true;
+        this.flushAnswer();
         break;
       case 'turn.failed':
         this.failure = messageOf(asObject(event.error)) || 'turn failed';
@@ -107,33 +134,58 @@ export class CodexStreamState {
     }
   }
 
+  /** Call once the stream has ended: emits a buffered answer that no turn.completed confirmed. */
+  finish(): void {
+    if (!this.failure) this.flushAnswer();
+  }
+
   private itemStarted(item: JsonObject): void {
-    switch (item.type) {
-      case 'reasoning':
-        this.onStatus('생각하는 중…');
-        break;
-      case 'command_execution':
-        this.onStatus(`명령 실행 중: ${clip(String(item.command ?? ''), 100)}`);
-        break;
-      case 'web_search':
-        this.onStatus('웹 검색 중…');
-        break;
-      case 'mcp_tool_call':
-        this.onStatus(`도구 사용 중: ${String(item.tool ?? '')}`);
-        break;
-      default:
-        break;
-    }
+    if (item.type === 'agent_message') return;
+    // More work follows the buffered message, so it is a progress note for now (it still becomes
+    // the answer if no other message follows).
+    this.showPendingAsStatus();
+    const status = startedItemStatus(item);
+    if (status) this.onStatus(status);
   }
 
   private itemCompleted(item: JsonObject): void {
-    if (item.type === 'agent_message' && typeof item.text === 'string' && item.text) {
-      const chunk = this.text ? `\n\n${item.text}` : item.text;
-      this.text += chunk;
-      this.onDelta(chunk);
+    if (item.type === 'agent_message' && typeof item.text === 'string' && item.text.trim()) {
+      this.showPendingAsStatus(); // superseded by a newer message
+      this.pending = item.text;
+      this.pendingShown = false;
     } else if (item.type === 'error' && typeof item.message === 'string') {
       this.onStatus(`경고: ${clip(item.message, 120)}`);
     }
+  }
+
+  private showPendingAsStatus(): void {
+    if (this.pending === null || this.pendingShown) return;
+    this.pendingShown = true;
+    this.onStatus(clip(this.pending, STATUS_MESSAGE_CHARS));
+  }
+
+  private flushAnswer(): void {
+    if (this.pending === null) return;
+    const chunk = this.text ? `\n\n${this.pending}` : this.pending;
+    this.pending = null;
+    this.text += chunk;
+    this.onDelta(chunk);
+  }
+}
+
+/** Status line for a started work item ('' for item types without one). */
+function startedItemStatus(item: JsonObject): string {
+  switch (item.type) {
+    case 'reasoning':
+      return '생각하는 중…';
+    case 'command_execution':
+      return `명령 실행 중: ${clip(String(item.command ?? ''), 100)}`;
+    case 'web_search':
+      return '웹 검색 중…';
+    case 'mcp_tool_call':
+      return `도구 사용 중: ${String(item.tool ?? '')}`;
+    default:
+      return '';
   }
 }
 
@@ -157,9 +209,10 @@ function loginHint(message: string): string {
 }
 
 async function runCodex(input: ProviderRunInput): Promise<ProviderRunResult> {
+  const ephemeral = input.ephemeral === true;
   const threadId = input.resume?.cliSessionId || undefined;
   const { prompt, images } = codexPrompt(input.parts, threadId ? null : input.systemPrompt);
-  const args = codexArgs({ cwd: input.cwd, model: input.model, threadId, images });
+  const args = codexArgs({ cwd: input.cwd, model: input.model, threadId, images, ephemeral });
 
   const state = new CodexStreamState(input.onDelta, input.onStatus);
   const proc = await runJsonlProcess({
@@ -181,9 +234,11 @@ async function runCodex(input: ProviderRunInput): Promise<ProviderRunResult> {
   if (proc.code !== 0) {
     throw new Error(`Codex가 비정상 종료했습니다 (${describeExit(proc.code, proc.signal)}).${loginHint(proc.stderrTail)}${tail}`);
   }
+  state.finish();
   if (!state.completed && !state.text) throw new Error(`Codex가 응답 없이 종료되었습니다.${tail}`);
 
   const id = state.threadId ?? threadId;
+  if (ephemeral) return { text: state.text, resume: id ? { cliSessionId: id } : {} };
   // Without a thread id the next turn could not continue this conversation (and would lack the deck).
   if (!id) throw new Error(`Codex가 thread id를 알려주지 않았습니다.${tail}`);
   return { text: state.text, resume: { cliSessionId: id } };

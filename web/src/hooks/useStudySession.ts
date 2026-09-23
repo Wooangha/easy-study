@@ -91,11 +91,15 @@ interface Options {
   docId: string | null;
   /** Provider/model for new sessions (null = no provider available). */
   choice: ProviderChoice | null;
+  /** Neighbor slides (±N) fed with every turn; read when a turn starts. */
+  neighbors: number;
   /** Called after every finished turn (notes need refreshing). */
   onTurnFinished?: (docId: string) => void;
+  /** Called when a session was created (the server may have started the document's digest). */
+  onSessionCreated?: (docId: string) => void;
 }
 
-export function useStudySession({ docId, choice, onTurnFinished }: Options) {
+export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSessionCreated }: Options) {
   // All three are tagged with the doc they belong to, so switching docs never shows stale data.
   const [sessionsState, setSessionsState] = useState<{ docId: string; list: SessionSummary[] } | null>(null);
   const [selection, setSelection] = useState<{ docId: string; sessionId: string } | null>(null);
@@ -116,7 +120,9 @@ export function useStudySession({ docId, choice, onTurnFinished }: Options) {
 
   const docIdRef = useLatest(docId);
   const choiceRef = useLatest(choice);
+  const neighborsRef = useLatest(neighbors);
   const onTurnFinishedRef = useLatest(onTurnFinished);
+  const onSessionCreatedRef = useLatest(onSessionCreated);
   /** Session just created by us (no need to GET it again). */
   const preloadedRef = useRef<string | null>(null);
 
@@ -281,11 +287,18 @@ export function useStudySession({ docId, choice, onTurnFinished }: Options) {
         }
       };
 
+      const neighborCount = neighborsRef.current;
       try {
         if (kind === 'prime') {
-          await api.primeSession(forDoc, sid, { slide }, onEvent, turn.controller.signal);
+          await api.primeSession(forDoc, sid, { slide, neighbors: neighborCount }, onEvent, turn.controller.signal);
         } else {
-          await api.sendMessage(forDoc, sid, { text: question, slide }, onEvent, turn.controller.signal);
+          await api.sendMessage(
+            forDoc,
+            sid,
+            { text: question, slide, neighbors: neighborCount },
+            onEvent,
+            turn.controller.signal,
+          );
         }
         if (!finished) toast('서버와의 연결이 끊겼어요. 대화를 다시 불러올게요.', 'error');
       } catch (e) {
@@ -308,7 +321,7 @@ export function useStudySession({ docId, choice, onTurnFinished }: Options) {
       onTurnFinishedRef.current?.(forDoc);
       return outcome;
     },
-    [scheduleRender, resync, refreshSessions, onTurnFinishedRef],
+    [scheduleRender, resync, refreshSessions, neighborsRef, onTurnFinishedRef],
   );
 
   /** Create a session with the chosen provider, select it and prime it. */
@@ -327,6 +340,7 @@ export function useStudySession({ docId, choice, onTurnFinished }: Options) {
         return null;
       }
       setRawSession(created);
+      onSessionCreatedRef.current?.(forDoc);
       // (Leave another document's list alone if the user switched docs meanwhile.)
       setSessionsState((prev) =>
         prev && prev.docId !== forDoc ? prev : { docId: forDoc, list: upsertSummary(prev?.list ?? [], toSummary(created)) },
@@ -339,7 +353,7 @@ export function useStudySession({ docId, choice, onTurnFinished }: Options) {
       const outcome = await runTurn(forDoc, created.id, 'prime', '', slide);
       return { sid: created.id, outcome };
     },
-    [choiceRef, docIdRef, runTurn],
+    [choiceRef, docIdRef, runTurn, onSessionCreatedRef],
   );
 
   const flowActive = flow !== null && flow.docId === docId;

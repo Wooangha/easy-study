@@ -5,11 +5,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, beforeEach, describe, test } from 'node:test';
 import { SESSION_ID_RE } from '../shared/types.ts';
-import type { ChatMessage, DocMeta } from '../shared/types.ts';
+import type { ChatMessage } from '../shared/types.ts';
 import { HttpError } from '../server/config.ts';
 import { initialProviderState } from '../server/context.ts';
 import type { SessionRecord } from '../server/internal-types.ts';
 import { docPaths } from '../server/library.ts';
+import type { StoredDocMeta } from '../server/library.ts';
 import {
   buildNotes,
   createSession,
@@ -41,7 +42,7 @@ async function makeDoc(docId: string, title = '운영체제 5강'): Promise<void
   const paths = docPaths(docId);
   await fs.rm(paths.dir, { recursive: true, force: true });
   await fs.mkdir(paths.dir, { recursive: true });
-  const meta: DocMeta = {
+  const meta: StoredDocMeta = {
     id: docId,
     title,
     fileName: `${title}.pdf`,

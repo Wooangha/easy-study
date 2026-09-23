@@ -49,6 +49,37 @@ export interface DocMeta {
   progress: number;
   error?: string;
   createdAt: string; // ISO
+  /** Course ("과목" folder) this lecture belongs to, derived from the course files. null = uncategorized. */
+  courseId: string | null;
+  /** Digest status of this document (for badges in pickers). */
+  digestStatus: DigestStatus;
+}
+
+// ---------------------------------------------------------------------------
+// Courses: an ordered folder of lecture PDFs (e.g. "Compiler" → Lec 1, Lec 2, …). When studying
+// lecture k, the LLM also receives the summaries of lectures 1..k-1 and may open their files.
+// ---------------------------------------------------------------------------
+
+export interface Course {
+  /** Same format as DocMeta.id (COURSE_ID_RE). */
+  id: string;
+  title: string;
+  createdAt: string;
+  /** Lecture order. A document belongs to at most one course. */
+  docIds: string[];
+}
+
+export interface CreateCourseRequest {
+  title: string;
+}
+
+export interface UpdateCourseRequest {
+  title?: string;
+  /**
+   * New full ordered list of lectures. Every id must be an existing document. Documents newly
+   * listed here are removed from any other course; documents omitted become uncategorized.
+   */
+  docIds?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -120,11 +151,63 @@ export interface SendMessageRequest {
   text: string;
   /** 1-based focused slide number. */
   slide: number;
+  /**
+   * Also feed the N slides before and after the focused slide (0–3). Omitted = server default
+   * (ContextSettings.neighborWindow, default 1).
+   */
+  neighbors?: number;
 }
 
 export interface PrimeRequest {
   /** Slide the user is currently looking at (used as the initial focus). */
   slide: number;
+  /** Same meaning as SendMessageRequest.neighbors. */
+  neighbors?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Digest ("정리본"): a per-slide text transcription + explanation written once by an LLM
+// that reads every slide image. Reused for priming later sessions (cheap, text only) and
+// shown to the student next to the focused slide.
+// ---------------------------------------------------------------------------
+
+export type DigestStatus = 'none' | 'running' | 'ready' | 'error' | 'aborted';
+
+export interface DigestSlide {
+  slide: number;
+  /** Slide title as read from the image ('' if none). */
+  title: string;
+  /** Markdown: faithful transcription (LaTeX math, Markdown tables, code fences), figure descriptions, then a "핵심:" takeaway. */
+  markdown: string;
+  /** True when the model output for this slide could not be parsed (markdown holds a placeholder). */
+  failed?: boolean;
+}
+
+export interface DigestInfo {
+  docId: string;
+  status: DigestStatus;
+  provider?: ProviderId;
+  model?: string;
+  /** Slides digested so far (successfully or failed). */
+  done: number;
+  total: number;
+  error?: string;
+  startedAt?: string;
+  updatedAt?: string;
+  /** Ascending by slide; partial while running. */
+  slides: DigestSlide[];
+  /** LLM-written summary of the whole lecture (made after all slides are digested). Used as course context. */
+  summary: string | null;
+  /** Absolute path of DIGEST.md. */
+  markdownPath: string;
+}
+
+export interface StartDigestRequest {
+  provider: ProviderId;
+  /** '' or omitted = provider default. */
+  model?: string;
+  /** Re-digest every slide even if a digest exists (otherwise only missing/failed slides are done). */
+  force?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -170,4 +253,5 @@ export interface NotesResponse {
 }
 
 export const DOC_ID_RE = /^[a-z0-9][a-z0-9-]{0,80}$/;
+export const COURSE_ID_RE = /^[a-z0-9][a-z0-9-]{0,80}$/;
 export const SESSION_ID_RE = /^[a-z0-9][a-z0-9-]{0,80}$/;

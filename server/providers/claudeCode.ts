@@ -1,11 +1,14 @@
 // claude-code provider: the user's Claude subscription through the Claude Code CLI (DESIGN §6).
 //
 //   claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages
-//          --system-prompt <prompt> --tools Read,Glob,Grep --strict-mcp-config
-//          [--model <model>] (--session-id <new uuid> | --resume <cliSessionId>)
+//          --system-prompt <prompt> --tools Read,Glob,Grep --strict-mcp-config [--add-dir <dir> ...]
+//          [--model <model>] (--session-id <new uuid> | --resume <cliSessionId> | --no-session-persistence)
 //
-// The user turn (text + base64 images) is written to stdin as one stream-json line.
+// The user turn (text + base64 images) is written to stdin as one stream-json line. `--add-dir`
+// lets the read-only tools open other lectures of the same course; one-shot (ephemeral) calls such
+// as digest batches do not persist a CLI session.
 import { randomUUID } from 'node:crypto';
+import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import type {
   Part,
@@ -35,6 +38,10 @@ export interface ClaudeArgsInput {
   sessionId?: string;
   /** Continued conversation: the CLI session id to resume. */
   resumeId?: string;
+  /** One-shot call: --no-session-persistence and no --session-id. */
+  ephemeral?: boolean;
+  /** Extra readable directories (one --add-dir each). */
+  addDirs?: string[];
 }
 
 export function claudeArgs(input: ClaudeArgsInput): string[] {
@@ -52,10 +59,31 @@ export function claudeArgs(input: ClaudeArgsInput): string[] {
     CLAUDE_TOOLS,
     '--strict-mcp-config',
   ];
+  // --add-dir is variadic in the CLI: every value is followed by another option, never a positional.
+  for (const dir of uniqueDirs(input.addDirs)) args.push('--add-dir', dir);
   if (input.model) args.push('--model', input.model);
+  if (input.ephemeral) args.push('--no-session-persistence');
   if (input.resumeId) args.push('--resume', input.resumeId);
-  else args.push('--session-id', input.sessionId ?? randomUUID());
+  else if (!input.ephemeral) args.push('--session-id', input.sessionId ?? randomUUID());
   return args;
+}
+
+function uniqueDirs(dirs: string[] | undefined): string[] {
+  return [...new Set((dirs ?? []).filter((dir) => typeof dir === 'string' && dir.trim() !== ''))];
+}
+
+/** The directories that exist (a lecture removed from disk must not make the CLI call fail). */
+async function existingDirs(dirs: string[] | undefined): Promise<string[]> {
+  const candidates = uniqueDirs(dirs);
+  const exists = await Promise.all(
+    candidates.map((dir) =>
+      stat(dir).then(
+        (s) => s.isDirectory(),
+        () => false,
+      ),
+    ),
+  );
+  return candidates.filter((_, i) => exists[i]);
 }
 
 type ClaudeContentBlock =
@@ -180,11 +208,14 @@ export function toolStatus(name: string, input: JsonObject, cwd: string): string
   }
 }
 
+/** Path relative to the doc dir when it is inside it or in a sibling doc dir (another lecture). */
 function displayPath(file: string, cwd: string): string {
   if (!file) return '(알 수 없음)';
   if (!path.isAbsolute(file)) return file;
-  const rel = path.relative(cwd, file);
-  return rel && !rel.startsWith('..') && !path.isAbsolute(rel) ? rel.split(path.sep).join('/') : file;
+  const rel = path.relative(cwd, file).split(path.sep).join('/');
+  if (!rel || path.isAbsolute(rel)) return file;
+  const levelsUp = rel.split('/').filter((segment) => segment === '..').length;
+  return levelsUp <= 1 ? rel : file;
 }
 
 function blockSeparator(previous: string): string {
@@ -212,9 +243,17 @@ function loginHint(message: string): string {
 }
 
 async function runClaude(input: ProviderRunInput): Promise<ProviderRunResult> {
+  const ephemeral = input.ephemeral === true;
   const resumeId = input.resume?.cliSessionId || undefined;
-  const sessionId = resumeId ? undefined : randomUUID();
-  const args = claudeArgs({ systemPrompt: input.systemPrompt, model: input.model, sessionId, resumeId });
+  const sessionId = resumeId || ephemeral ? undefined : randomUUID();
+  const args = claudeArgs({
+    systemPrompt: input.systemPrompt,
+    model: input.model,
+    sessionId,
+    resumeId,
+    ephemeral,
+    addDirs: await existingDirs(input.extraReadDirs),
+  });
   const stdin = `${await claudeUserMessage(input.parts)}\n`;
 
   const state = new ClaudeStreamState(input.cwd, input.onDelta, input.onStatus);
@@ -247,7 +286,9 @@ async function runClaude(input: ProviderRunInput): Promise<ProviderRunResult> {
     text = result.text;
     input.onDelta(text);
   }
-  return { text, resume: { cliSessionId: result.sessionId ?? resumeId ?? sessionId } };
+  // An ephemeral run has no session of ours; still hand back what the CLI reported, if anything.
+  const cliSessionId = result.sessionId ?? resumeId ?? sessionId;
+  return { text, resume: cliSessionId ? { cliSessionId } : {} };
 }
 
 export const claudeCodeProvider: Provider = {

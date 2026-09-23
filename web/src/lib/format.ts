@@ -49,19 +49,29 @@ export function formatBytes(n: number): string {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
+/** "p.12·13·14" (ascending, as given). */
 export function pageList(slides: number[]): string {
-  return slides.map((n) => `p.${n}`).join(', ');
+  return slides.length === 0 ? '' : `p.${slides.join('·')}`;
+}
+
+export type ContextChipKind = 'rollover' | 'primed' | 'overview' | 'attached' | 'reused';
+
+export interface ContextChip {
+  kind: ContextChipKind;
+  text: string;
 }
 
 /** Human-readable description of what was sent to the LLM for a turn (one entry per chip). */
-export function describeContext(ctx: ContextInfo | undefined): string[] {
+export function describeContext(ctx: ContextInfo | undefined): ContextChip[] {
   if (!ctx) return [];
-  const out: string[] = [];
-  if (ctx.rollover) out.push('🔄 새 대화로 이어감');
-  if (ctx.primed) out.push('📚 전체 슬라이드 전달');
-  if (ctx.overviewImages > 0) out.push(`개요 이미지 ${ctx.overviewImages}장`);
-  if (ctx.attachedSlides.length > 0) out.push(`🖼 ${pageList(ctx.attachedSlides)} 이미지 첨부`);
-  if (ctx.reusedSlides.length > 0) out.push(`↺ ${pageList(ctx.reusedSlides)} 이미 전달됨`);
+  const out: ContextChip[] = [];
+  if (ctx.rollover) out.push({ kind: 'rollover', text: '🔄 새 대화로 이어감' });
+  if (ctx.primed) out.push({ kind: 'primed', text: '📚 전체 슬라이드 전달' });
+  if (ctx.overviewImages > 0) out.push({ kind: 'overview', text: `개요 이미지 ${ctx.overviewImages}장` });
+  const attached = [...(ctx.attachedSlides ?? [])].sort((a, b) => a - b);
+  const reused = [...(ctx.reusedSlides ?? [])].sort((a, b) => a - b);
+  if (attached.length > 0) out.push({ kind: 'attached', text: `🖼 ${pageList(attached)} 첨부` });
+  if (reused.length > 0) out.push({ kind: 'reused', text: `↺ ${pageList(reused)} 이미 전달됨` });
   return out;
 }
 

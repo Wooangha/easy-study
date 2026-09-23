@@ -9,12 +9,40 @@ import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
-import { DOC_ID_RE, SESSION_ID_RE } from '../shared/types.ts';
-import type { CreateSessionRequest, DocMeta, HealthResponse, ProviderInfo, StreamEvent } from '../shared/types.ts';
-import { abortAllTurns, abortTurn, defaultChatDeps, runTurn, waitForIdle, waitForTurn } from './chat.ts';
+import { COURSE_ID_RE, DOC_ID_RE, SESSION_ID_RE } from '../shared/types.ts';
+import type {
+  CreateSessionRequest,
+  DocMeta,
+  HealthResponse,
+  ProviderId,
+  ProviderInfo,
+  StartDigestRequest,
+  StreamEvent,
+} from '../shared/types.ts';
+import { MAX_NEIGHBORS, abortAllTurns, abortTurn, defaultChatDeps, runTurn, waitForIdle, waitForTurn } from './chat.ts';
 import type { ChatDeps } from './chat.ts';
-import { HttpError, host, libraryDir, port, webDir, webDistDir } from './config.ts';
-import { docPaths, getDoc, importPdf, listDocs, resumePendingIngests, slideFileName } from './library.ts';
+import { HttpError, autoDigestEnabled, host, libraryDir, port, webDir, webDistDir } from './config.ts';
+import {
+  addDocToCourse,
+  createCourse,
+  deleteCourse,
+  getCourse,
+  listCourses,
+  updateCourse,
+  writeCourseMarkdown,
+} from './courses.ts';
+import {
+  abortAllDigests,
+  abortDigest,
+  defaultDigestDeps,
+  getDigestInfo,
+  readDigestMarkdown,
+  recoverInterruptedDigests,
+  startDigest,
+  waitForDigestsIdle,
+} from './digest.ts';
+import type { DigestDeps } from './digest.ts';
+import { coursePaths, docPaths, getDoc, importPdf, listDocs, resumePendingIngests, slideFileName } from './library.ts';
 import { providerInfos } from './providers/index.ts';
 import {
   buildNotes,
@@ -38,6 +66,11 @@ export interface AppOptions {
   providerInfos?: () => Promise<ProviderInfo[]>;
   /** Collaborators of the chat orchestrator (default: the real providers and context builder). */
   chatDeps?: ChatDeps;
+  /**
+   * Collaborators of the digest runner. Default: digestPrompt.ts with the provider lookup and
+   * availability check of `chatDeps` (so fake chat providers are used for digests too).
+   */
+  digestDeps?: DigestDeps;
 }
 
 // ---------------------------------------------------------------------------
@@ -62,6 +95,36 @@ function decodeFileName(header: string | undefined): string {
   } catch {
     return header;
   }
+}
+
+/**
+ * Provider + model of a request (POST /sessions, POST /digest): the provider must be known and
+ * available; '' / omitted model = the provider's default. Throws HttpError 400 otherwise.
+ */
+function resolveProviderChoice(infos: ProviderInfo[], provider: unknown, model: unknown): { info: ProviderInfo; model: string } {
+  const info = infos.find((candidate) => candidate.id === provider);
+  if (!info) throw new HttpError(400, `알 수 없는 제공자입니다: ${String(provider)}`);
+  if (!info.available) {
+    throw new HttpError(400, `${info.label}을(를) 사용할 수 없습니다${info.reason ? `: ${info.reason}` : ''}`);
+  }
+  if (model !== undefined && typeof model !== 'string') throw new HttpError(400, '모델 이름이 올바르지 않습니다');
+  const resolved = (model ?? '').trim() || info.defaultModel;
+  if (resolved && !MODEL_RE.test(resolved)) throw new HttpError(400, `모델 이름이 올바르지 않습니다: ${resolved}`);
+  return { info, model: resolved };
+}
+
+/** SendMessageRequest.neighbors / PrimeRequest.neighbors: absent, or an integer 0..3. */
+function parseNeighbors(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > MAX_NEIGHBORS) {
+    throw new HttpError(400, `neighbors는 0부터 ${MAX_NEIGHBORS} 사이의 정수여야 합니다`);
+  }
+  return value;
+}
+
+function sendMarkdown(res: Response, markdown: string): void {
+  res.set('Cache-Control', 'no-cache');
+  res.type('text/markdown; charset=utf-8').send(markdown);
 }
 
 /** Express 5 leaves req.body undefined when there is no body. */
@@ -154,6 +217,11 @@ function localOriginOnly(req: Request, _res: Response, next: NextFunction): void
 export function createApiRouter(options: AppOptions = {}): express.Router {
   const getProviderInfos = options.providerInfos ?? providerInfos;
   const chatDeps = options.chatDeps ?? defaultChatDeps();
+  const digestDeps: DigestDeps = options.digestDeps ?? {
+    ...defaultDigestDeps(),
+    getProvider: chatDeps.getProvider,
+    checkProvider: chatDeps.checkProvider,
+  };
   const api = express.Router();
 
   api.use(localOriginOnly);
@@ -164,6 +232,9 @@ export function createApiRouter(options: AppOptions = {}): express.Router {
   });
   api.param('sid', (_req, _res, next, value: string) => {
     next(SESSION_ID_RE.test(value) ? undefined : new HttpError(404, '세션을 찾을 수 없습니다'));
+  });
+  api.param('courseId', (_req, _res, next, value: string) => {
+    next(COURSE_ID_RE.test(value) ? undefined : new HttpError(404, '과목을 찾을 수 없습니다'));
   });
   // Only parses application/json bodies; the raw PDF upload passes through untouched.
   api.use(express.json({ limit: '2mb' }));
@@ -182,7 +253,21 @@ export function createApiRouter(options: AppOptions = {}): express.Router {
   api.post('/docs', express.raw({ type: () => true, limit: MAX_UPLOAD }), async (req, res) => {
     const bytes: unknown = req.body;
     if (!Buffer.isBuffer(bytes) || bytes.length === 0) throw new HttpError(400, 'PDF 파일 내용이 비어 있습니다');
-    const meta = await importPdf(bytes, decodeFileName(req.get('X-Filename')));
+    // X-Course-Id: upload straight into a course ("과목" folder).
+    const courseId = req.get('X-Course-Id')?.trim() || null;
+    if (courseId !== null && (!COURSE_ID_RE.test(courseId) || (await getCourse(courseId)) === null)) {
+      throw new HttpError(400, `과목을 찾을 수 없습니다: ${courseId}`);
+    }
+    const meta: DocMeta = await importPdf(bytes, decodeFileName(req.get('X-Filename')));
+    if (courseId !== null) {
+      try {
+        await addDocToCourse(courseId, meta.id);
+        meta.courseId = courseId;
+      } catch (err) {
+        // The course was deleted in the meantime: the lecture stays uncategorized.
+        console.warn(`[courses] could not add ${meta.id} to ${courseId}: ${errorMessage(err)}`);
+      }
+    }
     res.status(201).json(meta);
   });
 
@@ -216,21 +301,30 @@ export function createApiRouter(options: AppOptions = {}): express.Router {
     const docId = req.params.docId;
     await requireDoc(docId);
     const body = jsonBody(req) as Partial<Record<keyof CreateSessionRequest, unknown>>;
-    const info = (await getProviderInfos()).find((candidate) => candidate.id === body.provider);
-    if (!info) throw new HttpError(400, `알 수 없는 제공자입니다: ${String(body.provider)}`);
-    if (!info.available) {
-      throw new HttpError(400, `${info.label}을(를) 사용할 수 없습니다${info.reason ? `: ${info.reason}` : ''}`);
-    }
-    if (body.model !== undefined && typeof body.model !== 'string') throw new HttpError(400, '모델 이름이 올바르지 않습니다');
-    const model = (body.model ?? '').trim() || info.defaultModel;
-    if (model && !MODEL_RE.test(model)) throw new HttpError(400, `모델 이름이 올바르지 않습니다: ${model}`);
+    const { info, model } = resolveProviderChoice(await getProviderInfos(), body.provider, body.model);
     const record = await createSession(docId, {
       provider: info.id,
       model,
       title: typeof body.title === 'string' ? body.title : undefined,
     });
+    await autoStartDigest(docId, info.id, model);
     res.status(201).json(toSession(record));
   });
+
+  /**
+   * The first session of a document starts its digest with the session's provider/model
+   * (DESIGN §11; EASY_STUDY_AUTO_DIGEST=0 disables it). Never fails the request.
+   */
+  const autoStartDigest = async (docId: string, provider: ProviderId, model: string) => {
+    if (!autoDigestEnabled()) return;
+    try {
+      if ((await getDigestInfo(docId)).status !== 'none') return;
+      await startDigest(docId, { provider, model }, digestDeps);
+    } catch (err) {
+      // e.g. 409: the document is still being processed, or a job started concurrently.
+      console.warn(`[digest] auto start for ${docId} skipped: ${errorMessage(err)}`);
+    }
+  };
 
   api.get('/docs/:docId/sessions/:sid', async (req, res) => {
     const record = await getSession(req.params.docId, req.params.sid);
@@ -254,6 +348,7 @@ export function createApiRouter(options: AppOptions = {}): express.Router {
     if (typeof slide !== 'number' || !Number.isInteger(slide)) throw new HttpError(400, '슬라이드 번호가 필요합니다');
     if (kind === 'question' && typeof body.text !== 'string') throw new HttpError(400, '질문을 입력해 주세요');
     const text = kind === 'question' ? String(body.text) : '';
+    const neighbors = parseNeighbors(body.neighbors);
 
     // Abort the turn when the client goes away mid-stream. This must watch the *response*:
     // req 'close' fires as soon as the request body has been consumed.
@@ -265,7 +360,7 @@ export function createApiRouter(options: AppOptions = {}): express.Router {
     const sse = lazySse(res);
     try {
       await runTurn(
-        { docId, sessionId, kind, text, slide, signal: disconnect.signal, onEvent: (event) => sse.send(event) },
+        { docId, sessionId, kind, text, slide, neighbors, signal: disconnect.signal, onEvent: (event) => sse.send(event) },
         chatDeps,
       );
     } catch (err) {
@@ -298,9 +393,69 @@ export function createApiRouter(options: AppOptions = {}): express.Router {
     await requireDoc(docId);
     const file = docPaths(docId).studyNotes;
     if (!existsSync(file)) await writeNotes(docId);
-    const markdown = await fs.readFile(file, 'utf8');
+    sendMarkdown(res, await fs.readFile(file, 'utf8'));
+  });
+
+  // --- digest ("정리본") ------------------------------------------------------------------------
+
+  api.get('/docs/:docId/digest', async (req, res) => {
     res.set('Cache-Control', 'no-cache');
-    res.type('text/markdown; charset=utf-8').send(markdown);
+    res.json(await getDigestInfo(req.params.docId));
+  });
+
+  api.post('/docs/:docId/digest', async (req, res) => {
+    const docId = req.params.docId;
+    await requireDoc(docId);
+    const body = jsonBody(req) as Partial<Record<keyof StartDigestRequest, unknown>>;
+    if (body.force !== undefined && typeof body.force !== 'boolean') throw new HttpError(400, 'force는 true/false 여야 합니다');
+    const { info, model } = resolveProviderChoice(await getProviderInfos(), body.provider, body.model);
+    res.status(202).json(await startDigest(docId, { provider: info.id, model, force: body.force === true }, digestDeps));
+  });
+
+  api.post('/docs/:docId/digest/abort', async (req, res) => {
+    await requireDoc(req.params.docId);
+    abortDigest(req.params.docId);
+    res.status(204).end();
+  });
+
+  api.get('/docs/:docId/digest.md', async (req, res) => {
+    const markdown = await readDigestMarkdown(req.params.docId);
+    if (markdown === null) throw new HttpError(404, '정리본이 아직 없습니다');
+    sendMarkdown(res, markdown);
+  });
+
+  // --- courses ("과목") -----------------------------------------------------------------------------
+
+  api.get('/courses', async (_req, res) => {
+    res.json(await listCourses());
+  });
+
+  api.post('/courses', async (req, res) => {
+    res.status(201).json(await createCourse(jsonBody(req).title));
+  });
+
+  api.patch('/courses/:courseId', async (req, res) => {
+    const body = jsonBody(req);
+    res.json(await updateCourse(req.params.courseId, { title: body.title, docIds: body.docIds }));
+  });
+
+  api.delete('/courses/:courseId', async (req, res) => {
+    if (!(await deleteCourse(req.params.courseId))) throw new HttpError(404, '과목을 찾을 수 없습니다');
+    res.status(204).end();
+  });
+
+  api.get('/courses/:courseId/summary.md', async (req, res) => {
+    const courseId = req.params.courseId;
+    if ((await getCourse(courseId)) === null) throw new HttpError(404, '과목을 찾을 수 없습니다');
+    // Regenerated on every request: lecture titles and summaries may have changed since the last write.
+    await writeCourseMarkdown(courseId);
+    let markdown: string;
+    try {
+      markdown = await fs.readFile(coursePaths(courseId).courseMd, 'utf8');
+    } catch {
+      throw new HttpError(404, '과목을 찾을 수 없습니다'); // deleted in the meantime
+    }
+    sendMarkdown(res, markdown);
   });
 
   api.use((_req, _res, next) => next(new HttpError(404, 'API 경로를 찾을 수 없습니다')));
@@ -384,7 +539,7 @@ export interface ServerOptions extends AppOptions {
 export interface RunningServer {
   server: http.Server;
   url: string;
-  /** Aborts running turns, then stops Vite and the HTTP server. */
+  /** Aborts running turns and digest jobs, then stops Vite and the HTTP server. */
   close(): Promise<void>;
 }
 
@@ -401,9 +556,11 @@ function listen(server: http.Server, portNumber: number, hostname: string): Prom
 
 export async function startServer(options: ServerOptions = {}): Promise<RunningServer> {
   const log = options.log ?? true;
-  // Before accepting requests: mark answers interrupted by a previous crash as aborted.
+  // Before accepting requests: mark answers and digest jobs interrupted by a previous crash as aborted.
   const repaired = await recoverInterruptedSessions();
   if (log && repaired > 0) console.log(`[chat] marked unfinished answers of ${repaired} session(s) as aborted`);
+  const interruptedDigests = await recoverInterruptedDigests();
+  if (log && interruptedDigests > 0) console.log(`[digest] marked ${interruptedDigests} unfinished digest(s) as aborted`);
 
   const app = express();
   app.disable('x-powered-by');
@@ -435,7 +592,9 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
 
   const close = async () => {
     abortAllTurns();
-    await waitForIdle(4_000); // let aborted turns persist their partial answers
+    abortAllDigests();
+    // Let aborted turns and digest jobs persist their partial results.
+    await Promise.all([waitForIdle(4_000), waitForDigestsIdle(4_000)]);
     await closeVite?.();
     await new Promise<void>((resolve) => {
       server.close(() => resolve());

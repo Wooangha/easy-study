@@ -7,6 +7,12 @@ export const storageKeys = {
   lastDoc: 'lastDoc',
   zoom: 'zoom',
   providerChoice: 'providerChoice',
+  /** Neighbor slides (±N) fed with every question. */
+  neighbors: 'neighbors',
+  /** Digest tab content mode ('current' | 'all'). */
+  digestMode: 'digestMode',
+  /** Course that uploads from the library drop zone / top bar go into (null = uncategorized). */
+  uploadCourse: 'uploadCourse',
   slide: (docId: string) => `slide:${docId}`,
   session: (docId: string) => `session:${docId}`,
 } as const;

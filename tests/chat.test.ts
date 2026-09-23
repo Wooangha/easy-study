@@ -7,14 +7,16 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import type { ChatMessage, DocMeta, NotesResponse, ProviderId, ProviderInfo, Session, StreamEvent } from '../shared/types.ts';
-import { abortTurn, defaultChatDeps, isTurnRunning, runTurn } from '../server/chat.ts';
+import { abortTurn, defaultChatDeps, isTurnRunning, resolveNeighbors, runTurn } from '../server/chat.ts';
 import type { ChatDeps, TurnRequest } from '../server/chat.ts';
 import { HttpError, repoRoot } from '../server/config.ts';
 import { initialProviderState } from '../server/context.ts';
 import { startServer } from '../server/index.ts';
 import type { RunningServer } from '../server/index.ts';
-import type { ProviderState } from '../server/internal-types.ts';
+import { createCourse, updateCourse } from '../server/courses.ts';
+import type { BuildTurnInput, ProviderState } from '../server/internal-types.ts';
 import { docPaths, slideFileName, textFileName } from '../server/library.ts';
+import type { StoredDocMeta } from '../server/library.ts';
 import type { Part, Provider, ProviderRunInput, ProviderRunResult } from '../server/providers/types.ts';
 import { createSession, getSession, saveSession } from '../server/sessions.ts';
 
@@ -23,6 +25,8 @@ let tmpRoot = '';
 before(async () => {
   tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'easy-study-chat-'));
   process.env.EASY_STUDY_LIBRARY = tmpRoot;
+  // Digest jobs are covered by digest.test.ts; here they would only add provider calls.
+  process.env.EASY_STUDY_AUTO_DIGEST = '0';
 });
 
 after(async () => {
@@ -36,14 +40,14 @@ after(async () => {
 const PAGES = 9;
 
 /** A ready 9-slide document with extracted texts and sheets.json (images are never opened). */
-async function makeReadyDoc(docId: string, status: DocMeta['status'] = 'ready'): Promise<void> {
+async function makeReadyDoc(docId: string, status: DocMeta['status'] = 'ready', title = 'Fake Deck'): Promise<void> {
   const paths = docPaths(docId);
   await fs.mkdir(paths.textDir, { recursive: true });
   await fs.mkdir(paths.sheetsDir, { recursive: true });
   await fs.mkdir(paths.slidesDir, { recursive: true });
-  const meta: DocMeta = {
+  const meta: StoredDocMeta = {
     id: docId,
-    title: 'Fake Deck',
+    title,
     fileName: 'Fake Deck.pdf',
     pageCount: PAGES,
     aspectRatio: 16 / 9,
@@ -171,7 +175,7 @@ describe('runTurn', () => {
     const deps = depsFor(provider);
     const session = await createSession(DOC, { provider: 'claude-code', model: 'sonnet' });
 
-    // Prime (feeds the deck).
+    // Prime (feeds the deck). No `neighbors` in the request: the default window (±1) applies.
     const prime = await turn(deps, { docId: DOC, sessionId: session.id, kind: 'prime', slide: 2 });
     assert.deepEqual(
       prime.events.map((e) => e.type),
@@ -184,7 +188,7 @@ describe('runTurn', () => {
     assert.deepEqual(start.userMessage.context, {
       primed: true,
       rollover: false,
-      attachedSlides: [2],
+      attachedSlides: [1, 2, 3],
       reusedSlides: [],
       overviewImages: 3,
     });
@@ -205,14 +209,15 @@ describe('runTurn', () => {
     assert.equal(firstCall.cwd, docPaths(DOC).dir);
     assert.equal(firstCall.model, 'sonnet');
     assert.ok(firstCall.systemPrompt.length > 0);
-    assert.equal(firstCall.parts.filter((p) => p.type === 'image').length, 4); // 3 sheets + focus
+    assert.equal(firstCall.parts.filter((p) => p.type === 'image').length, 6); // 3 sheets + slides 1–3
+    assert.deepEqual(firstCall.extraReadDirs, [], 'not in a course: no other lecture dirs');
 
     let stored = await getSession(DOC, session.id);
     assert.ok(stored);
     assert.equal(stored.providerState.primed, true);
     assert.deepEqual(stored.providerState.resume, { cliSessionId: 'cli-1' });
     assert.equal(stored.providerState.generation, 1);
-    assert.deepEqual(stored.providerState.recentSlides, [2]);
+    assert.deepEqual(stored.providerState.recentSlides, [2, 1, 3]);
     assert.deepEqual(
       stored.messages.map((m) => [m.role, m.kind, m.status]),
       [
@@ -225,17 +230,19 @@ describe('runTurn', () => {
     const again = await turn(deps, { docId: DOC, sessionId: session.id, kind: 'question', text: '  왜 그런가요?  ', slide: 2 });
     const againStart = again.events[0] as Extract<StreamEvent, { type: 'start' }>;
     assert.equal(againStart.userMessage.text, '왜 그런가요?');
-    assert.deepEqual(againStart.userMessage.context?.reusedSlides, [2]);
+    assert.deepEqual(againStart.userMessage.context?.reusedSlides, [1, 2, 3]);
     assert.deepEqual(provider.calls[1].resume, { cliSessionId: 'cli-1' });
     assert.equal(provider.calls[1].parts.filter((p) => p.type === 'image').length, 0);
     assert.match(textOf(provider.calls[1].parts), /왜 그런가요\?/);
 
-    // Question about another slide: its image is attached.
+    // Question about another slide: its window (slides 4–6) is attached.
     const other = await turn(deps, { docId: DOC, sessionId: session.id, kind: 'question', text: 'slide 5?', slide: 5 });
     assert.equal(other.assistant.status, 'complete');
     const otherImages = provider.calls[2].parts.filter((p) => p.type === 'image');
-    assert.equal(otherImages.length, 1);
-    assert.equal(otherImages[0].type === 'image' && otherImages[0].path, path.join(docPaths(DOC).slidesDir, slideFileName(5, PAGES)));
+    assert.deepEqual(
+      otherImages.map((p) => p.type === 'image' && p.path),
+      [4, 5, 6].map((n) => path.join(docPaths(DOC).slidesDir, slideFileName(n, PAGES))),
+    );
 
     stored = await getSession(DOC, session.id);
     assert.equal(stored?.messages.length, 6);
@@ -457,6 +464,64 @@ describe('runTurn', () => {
     assert.equal(stored?.messages[1].status, 'aborted');
     assert.equal(stored?.messages.at(-1)?.status, 'complete');
   });
+
+  test('resolveNeighbors: request value clamped to 0..3, else the settings default', () => {
+    assert.equal(resolveNeighbors(2, { neighborWindow: 1 }), 2);
+    assert.equal(resolveNeighbors(0, { neighborWindow: 1 }), 0);
+    assert.equal(resolveNeighbors(7, { neighborWindow: 1 }), 3);
+    assert.equal(resolveNeighbors(-2, { neighborWindow: 1 }), 0);
+    assert.equal(resolveNeighbors(undefined, { neighborWindow: 2 }), 2);
+    assert.equal(resolveNeighbors(undefined, { neighborWindow: 9 }), 3);
+    assert.equal(resolveNeighbors(Number.NaN, { neighborWindow: 0 }), 0);
+  });
+
+  test('neighbors reach buildTurn (request value, clamped, or the settings default)', async () => {
+    const provider = fakeProvider('claude-code', streamingAnswer(() => 'ok'));
+    const seen: number[] = [];
+    const base = depsFor(provider);
+    const deps = depsFor(provider, {
+      contextSettings: () => ({ ...base.contextSettings(), neighborWindow: 2 }),
+      buildTurn: (input: BuildTurnInput) => {
+        seen.push(input.neighbors);
+        return base.buildTurn(input);
+      },
+    });
+    const session = await createSession(DOC, { provider: 'claude-code', model: '' });
+    const ask = (neighbors: number | undefined, slide = 5) =>
+      turn(deps, { docId: DOC, sessionId: session.id, kind: 'question', text: 'q', slide, neighbors });
+
+    const first = await ask(undefined);
+    const start = first.events[0] as Extract<StreamEvent, { type: 'start' }>;
+    assert.deepEqual(start.userMessage.context?.attachedSlides, [3, 4, 5, 6, 7], 'settings default ±2');
+    await ask(0);
+    await ask(9);
+    await ask(-1);
+    assert.deepEqual(seen, [2, 0, 3, 0]);
+  });
+
+  test('BuildTurnOutput.readDirs are handed to the provider as extraReadDirs', async () => {
+    const provider = fakeProvider('claude-code', streamingAnswer(() => 'ok'));
+    const base = depsFor(provider);
+    const deps = depsFor(provider, {
+      buildTurn: (input: BuildTurnInput) => ({ ...base.buildTurn(input), readDirs: ['/abs/library/lecture-6-aaaaaa'] }),
+    });
+    const session = await createSession(DOC, { provider: 'claude-code', model: '' });
+    await turn(deps, { docId: DOC, sessionId: session.id, kind: 'prime', slide: 1 });
+    assert.deepEqual(provider.calls[0].extraReadDirs, ['/abs/library/lecture-6-aaaaaa']);
+  });
+
+  test('a lecture of a course can read the other lectures (real loadDocAssets + buildTurn)', async () => {
+    await makeReadyDoc('lec-6-ccc333', 'ready', 'Lecture 6');
+    await makeReadyDoc('lec-7-ddd444', 'ready', 'Lecture 7');
+    const course = await createCourse('Compiler');
+    await updateCourse(course.id, { docIds: ['lec-6-ccc333', 'lec-7-ddd444'] });
+
+    const provider = fakeProvider('claude-code', streamingAnswer(() => 'ok'));
+    const session = await createSession('lec-7-ddd444', { provider: 'claude-code', model: '' });
+    await turn(depsFor(provider), { docId: 'lec-7-ddd444', sessionId: session.id, kind: 'prime', slide: 1 });
+    assert.deepEqual(provider.calls[0].extraReadDirs, [docPaths('lec-6-ccc333').dir]);
+    assert.match(textOf(provider.calls[0].parts), /Compiler/);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -621,6 +686,23 @@ describe('HTTP server', () => {
     await expectError(await postJson(`/docs/${docId}/sessions/${sessionId}/messages`, { text: '', slide: 1 }), 400);
     await expectError(await postJson(`/docs/${docId}/sessions/${sessionId}/messages`, { text: 'x', slide: 99 }), 400);
     await expectError(await postJson(`/docs/${docId}/sessions/${sessionId}/messages`, { text: 'x' }), 400);
+  });
+
+  test('neighbors: integer 0..3 or absent, for /messages and /prime', async () => {
+    for (const neighbors of [4, -1, 1.5, '1', null, true]) {
+      await expectError(await postJson(`/docs/${docId}/sessions/${sessionId}/messages`, { text: 'x', slide: 1, neighbors }), 400);
+      await expectError(await postJson(`/docs/${docId}/sessions/${sessionId}/prime`, { slide: 1, neighbors }), 400);
+    }
+    const ask = await postJson(`/docs/${docId}/sessions/${sessionId}/messages`, { text: '이 슬라이드만', slide: 8, neighbors: 0 });
+    const start = parseSse(await ask.text()).find((frame) => frame.event === 'start')?.data as Extract<StreamEvent, { type: 'start' }>;
+    assert.deepEqual([...(start.userMessage.context?.attachedSlides ?? []), ...(start.userMessage.context?.reusedSlides ?? [])], [8]);
+    const wide = await postJson(`/docs/${docId}/sessions/${sessionId}/messages`, { text: '넓게', slide: 5, neighbors: 3 });
+    const wideStart = parseSse(await wide.text()).find((frame) => frame.event === 'start')?.data as Extract<StreamEvent, { type: 'start' }>;
+    const slides = [...(wideStart.userMessage.context?.attachedSlides ?? []), ...(wideStart.userMessage.context?.reusedSlides ?? [])];
+    assert.deepEqual(
+      slides.sort((a, b) => a - b),
+      [2, 3, 4, 5, 6, 7, 8],
+    );
   });
 
   test('409 while running, /abort stops the turn', async () => {

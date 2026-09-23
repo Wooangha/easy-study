@@ -4,7 +4,9 @@
 // - `--version` prints a version line.
 // - Otherwise it reads stdin until EOF, records { argv, stdin, cwd, pid, env } as JSON to the file
 //   named by $FAKE_CLI_RECORD, then behaves according to $FAKE_CLI_MODE:
-//     success (default) | no-deltas | is_error | exit1 | hang | hang-ignore-term
+//     success (default) | no-deltas | is_error | exit1 | hang | hang-ignore-term | no-session-id
+// Like the real CLI, a run without --session-id / --resume (e.g. --no-session-persistence) still
+// reports a session id of its own (except in mode no-session-id).
 import fs from 'node:fs';
 
 const argv = process.argv.slice(2);
@@ -55,7 +57,8 @@ async function main() {
   const resumeId = valueAfter('--resume');
   const sessionId = valueAfter('--session-id');
   // On resume the real CLI may report a different session id; the adapter must use the reported one.
-  const reportedId = resumeId ? `${resumeId}-next` : sessionId;
+  const reportedId =
+    mode === 'no-session-id' ? undefined : resumeId ? `${resumeId}-next` : (sessionId ?? 'fake-ephemeral-session');
   const cwd = process.cwd();
 
   emit({ type: 'system', subtype: 'init', session_id: reportedId, tools: ['Read', 'Glob', 'Grep'] });

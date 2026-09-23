@@ -18,6 +18,9 @@ import type { Part, Provider } from './providers/types.ts';
 import { getSession, repairInterruptedMessages, saveSession, toSummary, writeNotes } from './sessions.ts';
 
 const MAX_QUESTION_CHARS = 20_000;
+/** Neighbor slides fed before/after the focused one are clamped to 0..MAX_NEIGHBORS (DESIGN §10). */
+export const MAX_NEIGHBORS = 3;
+const FALLBACK_NEIGHBORS = 1;
 
 /** Stateless providers get the conversation history re-sent every turn (see appendHistory). */
 const STATELESS_PROVIDERS: ReadonlySet<ProviderId> = new Set<ProviderId>(['anthropic-api']);
@@ -59,6 +62,11 @@ export interface TurnRequest {
   text: string;
   /** 1-based focused slide. */
   slide: number;
+  /**
+   * Slides before and after the focused one to feed as well (clamped to 0..3).
+   * Omitted = ContextSettings.neighborWindow.
+   */
+  neighbors?: number;
   /** Receives start / delta / status / done. Exceptions thrown by the listener are ignored. */
   onEvent: (event: StreamEvent) => void;
   /** External cancellation, e.g. the HTTP client disconnected. */
@@ -148,6 +156,14 @@ export async function runTurn(request: TurnRequest, deps: ChatDeps = defaultChat
   }
 }
 
+/** The neighbor window of a turn: the request's value, else the settings default, clamped to 0..3. */
+export function resolveNeighbors(requested: number | undefined, settings: Pick<ContextSettings, 'neighborWindow'>): number {
+  const clamp = (value: number) => Math.min(MAX_NEIGHBORS, Math.max(0, Math.trunc(value)));
+  if (typeof requested === 'number' && Number.isFinite(requested)) return clamp(requested);
+  const fallback = settings.neighborWindow;
+  return typeof fallback === 'number' && Number.isFinite(fallback) ? clamp(fallback) : FALLBACK_NEIGHBORS;
+}
+
 function errorText(err: unknown): string {
   if (err instanceof Error) return err.message || err.name;
   return String(err);
@@ -198,13 +214,15 @@ async function executeTurn(request: TurnRequest, deps: ChatDeps, signal: AbortSi
   // 2. Build the turn and persist the new messages ------------------------------------------
   // We hold the session's turn lock, so any 'streaming' message is a leftover of a crash.
   repairInterruptedMessages(session);
+  const settings = deps.contextSettings();
   const built = deps.buildTurn({
     doc,
     session,
     kind,
     question,
     slide,
-    settings: deps.contextSettings(),
+    neighbors: resolveNeighbors(request.neighbors, settings),
+    settings,
     maxImagesPerConversation: provider.maxImagesPerConversation,
   });
 
@@ -246,6 +264,8 @@ async function executeTurn(request: TurnRequest, deps: ChatDeps, signal: AbortSi
       resume: built.resume,
       history: built.history,
       model: session.model,
+      // Other lectures of the course, so agentic CLIs can open their DIGEST.md / slides.
+      extraReadDirs: built.readDirs,
       signal,
       onDelta: (text) => {
         if (settled || !text) return;

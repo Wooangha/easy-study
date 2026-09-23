@@ -1,25 +1,35 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { DocMeta } from '../../shared/types.ts';
 import { ChatPanel, type PanelTab } from './components/ChatPanel.tsx';
+import { DigestPanel, type DigestMode } from './components/DigestPanel.tsx';
 import { DocStatusView, LibraryView } from './components/LibraryView.tsx';
 import { NotesPanel, type NotesFilter } from './components/NotesPanel.tsx';
 import { SlideViewer, type SlideViewerHandle } from './components/SlideViewer.tsx';
 import { SplitPane } from './components/SplitPane.tsx';
 import { Toaster } from './components/Toaster.tsx';
 import { TopBar } from './components/TopBar.tsx';
+import { useCourses } from './hooks/useCourses.ts';
+import { useDigest } from './hooks/useDigest.ts';
 import { useDocs } from './hooks/useDocs.ts';
 import { useHealth } from './hooks/useHealth.ts';
 import { useLatest } from './hooks/useLatest.ts';
+import { useNeighbors } from './hooks/useNeighbors.ts';
 import { useNotes } from './hooks/useNotes.ts';
 import { useProviderChoice } from './hooks/useProviderChoice.ts';
 import { useStudySession } from './hooks/useStudySession.ts';
 import { isString, readStorage, storageKeys, writeStorage } from './lib/storage.ts';
+import { toast } from './lib/toast.ts';
+
+const isDigestMode = (v: unknown): v is DigestMode => v === 'current' || v === 'all';
 
 export function App() {
   const { health, error: healthError, loading: healthLoading, reload: reloadHealth } = useHealth();
   const providers = health?.providers;
   const [choice, setChoice] = useProviderChoice(providers);
 
-  const { docs, loadError, uploads, refresh: refreshDocs, upload } = useDocs();
+  const { docs, loadError, uploads, refresh: refreshDocs, upload, patchDoc } = useDocs();
+  const coursesState = useCourses();
+  const { courses, membership } = coursesState;
   const [docId, setDocIdState] = useState<string | null>(() =>
     readStorage<string | null>(storageKeys.lastDoc, null, isString),
   );
@@ -29,6 +39,7 @@ export function App() {
   }, []);
   const doc = docs?.find((d) => d.id === docId) ?? null;
   const readyDocId = doc?.status === 'ready' ? doc.id : null;
+  const docCourse = doc ? (membership.get(doc.id) ?? null) : null;
 
   // Forget a remembered doc that no longer exists.
   useEffect(() => {
@@ -45,11 +56,38 @@ export function App() {
     setNotesFilter('all');
     setTab('chat');
   }, [readyDocId]);
+  const [neighbors, setNeighbors] = useNeighbors();
+  const [digestMode, setDigestModeState] = useState<DigestMode>(() =>
+    readStorage<DigestMode>(storageKeys.digestMode, 'current', isDigestMode),
+  );
+  const setDigestMode = useCallback((mode: DigestMode) => {
+    setDigestModeState(mode);
+    writeStorage(storageKeys.digestMode, mode);
+  }, []);
+
+  // ---- Digest of the open document: keep its DocMeta badge in sync with what the digest says. ------
+  const digest = useDigest(readyDocId);
+  const digestStatus = digest.info?.status;
+  useEffect(() => {
+    if (readyDocId && digestStatus && doc && doc.digestStatus !== digestStatus) {
+      patchDoc(readyDocId, { digestStatus });
+    }
+  }, [readyDocId, digestStatus, doc, patchDoc]);
 
   const notesState = useNotes(readyDocId);
   const refreshNotes = notesState.refresh;
-  const onTurnFinished = useCallback((forDoc: string) => void refreshNotes(forDoc), [refreshNotes]);
-  const study = useStudySession({ docId: readyDocId, choice, onTurnFinished });
+  const refreshDigest = digest.refresh;
+  // Creating a session may auto-start the digest on the server (DESIGN §11): look again right after
+  // creation and after each turn (in case the job was registered only after the create response).
+  const onSessionCreated = useCallback((forDoc: string) => void refreshDigest(forDoc), [refreshDigest]);
+  const onTurnFinished = useCallback(
+    (forDoc: string) => {
+      void refreshNotes(forDoc);
+      void refreshDigest(forDoc, true);
+    },
+    [refreshNotes, refreshDigest],
+  );
+  const study = useStudySession({ docId: readyDocId, choice, neighbors, onTurnFinished, onSessionCreated });
 
   const viewerRef = useRef<SlideViewerHandle>(null);
   const goToSlide = useCallback((slide: number) => viewerRef.current?.scrollToSlide(slide), []);
@@ -65,21 +103,54 @@ export function App() {
     (next: PanelTab) => {
       setTab(next);
       if (next === 'notes') void refreshNotes();
+      if (next === 'digest') void refreshDigest();
     },
-    [refreshNotes],
+    [refreshNotes, refreshDigest],
   );
   const togglePin = useCallback(() => setPinnedSlide((p) => (p === null ? focusedSlide : null)), [focusedSlide]);
+
+  // ---- Upload target: the course new PDFs go into ------------------------------------------------
+  // Chosen in the library, and following the course of the lecture that is open ("you are in Compiler").
+  const [uploadCourseId, setUploadCourseIdState] = useState<string | null>(() =>
+    readStorage<string | null>(storageKeys.uploadCourse, null, isString),
+  );
+  const setUploadCourseId = useCallback((id: string | null) => {
+    setUploadCourseIdState(id);
+    writeStorage(storageKeys.uploadCourse, id);
+  }, []);
+  const docCourseId = docCourse?.course.id ?? null;
+  const docExists = doc !== null;
+  useEffect(() => {
+    if (docExists) setUploadCourseId(docCourseId);
+  }, [docId, docExists, docCourseId, setUploadCourseId]);
+  const uploadTarget = courses?.find((c) => c.id === uploadCourseId) ?? null;
 
   // ---- Upload: file picker, library drop zone and window-wide drag & drop -------------------------
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pickFiles = useCallback(() => fileInputRef.current?.click(), []);
-  const handleFiles = useCallback(
-    async (files: File[]) => {
+  const { addLocally: addLectureLocally, refresh: refreshCourses } = coursesState;
+  /**
+   * Upload PDFs (into `courseId` when given). With `open`, the last created doc is opened (its
+   * progress is shown and it opens automatically when ready); course-card uploads stay in the library.
+   */
+  const uploadFiles = useCallback(
+    async (files: File[], courseId: string | null, open: boolean) => {
       if (files.length === 0) return;
-      const created = await upload(files);
-      if (created) setDocId(created.id); // shows its progress, opens automatically when ready
+      const onCreated = courseId ? (d: DocMeta) => addLectureLocally(courseId, d.id) : undefined;
+      const created = await upload(files, courseId, onCreated);
+      if (created.length === 0) return;
+      if (courseId) {
+        void refreshCourses(); // the server inserts new lectures in natural title order
+        const title = courses?.find((c) => c.id === courseId)?.title;
+        if (title) toast(`📁 ${title} 과목에 강의 ${created.length}개를 추가했어요`, 'success');
+      }
+      if (open) setDocId(created[created.length - 1].id);
     },
-    [upload, setDocId],
+    [upload, addLectureLocally, refreshCourses, courses, setDocId],
+  );
+  const handleFiles = useCallback(
+    (files: File[]) => uploadFiles(files, uploadTarget?.id ?? null, true),
+    [uploadFiles, uploadTarget],
   );
   const handleFilesRef = useLatest(handleFiles);
 
@@ -172,6 +243,25 @@ export function App() {
             tab={tab}
             onTabChange={changeTab}
             notesCount={notesCount}
+            digestInfo={digest.info}
+            course={docCourse}
+            neighbors={neighbors}
+            onNeighborsChange={setNeighbors}
+            digest={
+              <DigestPanel
+                key={doc.id}
+                doc={doc}
+                digest={digest}
+                providers={providers}
+                choice={choice}
+                providerProblem={providerProblem}
+                focusedSlide={focusedSlide}
+                active={tab === 'digest'}
+                mode={digestMode}
+                onModeChange={setDigestMode}
+                onGoToSlide={goToSlide}
+              />
+            }
             notes={
               <NotesPanel
                 docId={doc.id}
@@ -197,12 +287,25 @@ export function App() {
       <LibraryView
         docs={docs}
         loadError={loadError}
+        courses={courses}
+        coursesError={coursesState.loadError}
         uploads={uploads}
         libraryDir={health?.libraryDir ?? null}
+        uploadCourseId={uploadTarget?.id ?? null}
+        onUploadCourseChange={setUploadCourseId}
         onOpen={setDocId}
         onPickFiles={pickFiles}
         onDropFiles={(files) => void handleFiles(files)}
-        onRetryLoad={() => void refreshDocs()}
+        onUploadToCourse={(courseId, files) => void uploadFiles(files, courseId, false)}
+        onCreateCourse={coursesState.create}
+        onRenameCourse={(courseId, title) => void coursesState.rename(courseId, title)}
+        onDeleteCourse={(courseId) => void coursesState.remove(courseId)}
+        onSetLectures={(courseId, ids) => void coursesState.setLectures(courseId, ids)}
+        onMoveLecture={(id, courseId) => void coursesState.moveLecture(id, courseId)}
+        onRetryLoad={() => {
+          void refreshDocs();
+          void refreshCourses();
+        }}
       />
     );
   }
@@ -212,8 +315,10 @@ export function App() {
       <TopBar
         docs={docs}
         doc={doc}
+        courses={courses}
         onSelectDoc={setDocId}
         onUploadClick={pickFiles}
+        uploadCourse={uploadTarget}
         sessions={study.sessions}
         sessionId={study.sessionId}
         sessionBusy={study.running}
@@ -236,6 +341,7 @@ export function App() {
             onClick={() => {
               void reloadHealth();
               void refreshDocs();
+              void refreshCourses();
             }}
           >
             다시 시도
@@ -268,7 +374,12 @@ export function App() {
       />
       {dragOver && (
         <div className="drop-overlay" aria-hidden>
-          <div className="drop-overlay-card">📄 PDF를 놓으면 업로드해요</div>
+          <div className="drop-overlay-card">
+            {uploadTarget ? `📄 PDF를 놓으면 📁 ${uploadTarget.title}에 강의로 추가해요` : '📄 PDF를 놓으면 업로드해요'}
+            {!doc && (courses?.length ?? 0) > 0 && (
+              <div className="drop-overlay-sub">과목 카드 위에 놓으면 그 과목에 추가돼요</div>
+            )}
+          </div>
         </div>
       )}
       <Toaster />

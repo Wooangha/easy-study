@@ -29,6 +29,29 @@ export function host(): string {
   return '127.0.0.1';
 }
 
+const DEFAULT_DIGEST_CONCURRENCY = 2;
+const MAX_DIGEST_CONCURRENCY = 8;
+
+/**
+ * Provider calls a digest job runs at the same time (EASY_STUDY_DIGEST_CONCURRENCY, default 2,
+ * clamped to 1..8). Each call carries a few full-resolution slide images, so keep it small.
+ */
+export function digestConcurrency(): number {
+  const raw = process.env.EASY_STUDY_DIGEST_CONCURRENCY?.trim();
+  const parsed = raw ? Number(raw) : NaN;
+  if (!Number.isInteger(parsed)) return DEFAULT_DIGEST_CONCURRENCY;
+  return Math.min(MAX_DIGEST_CONCURRENCY, Math.max(1, parsed));
+}
+
+/**
+ * Whether creating a session starts a digest of a document that has none yet
+ * (EASY_STUDY_AUTO_DIGEST=0 / false / off disables it; default on).
+ */
+export function autoDigestEnabled(): boolean {
+  const raw = process.env.EASY_STUDY_AUTO_DIGEST?.trim().toLowerCase();
+  return !(raw === '0' || raw === 'false' || raw === 'off' || raw === 'no');
+}
+
 /** Absolute path of the web client sources (Vite root). */
 export function webDir(): string {
   return path.join(repoRoot(), 'web');

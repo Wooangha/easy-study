@@ -4,7 +4,9 @@
 // - `--version` prints a version line.
 // - Otherwise it reads stdin until EOF, records { argv, stdin, cwd, pid } as JSON to the file named
 //   by $FAKE_CLI_RECORD, then behaves according to $FAKE_CLI_MODE:
-//     success (default) | turn-failed | error | error-recovered | exit1 | no-thread | hang
+//     success (default) | turn-failed | error | error-recovered | exit1 | no-thread | hang | no-turn-completed
+// Like the real CLI, success sends a preamble agent message before running a command, then more
+// agent messages; only the last one is the answer.
 import fs from 'node:fs';
 
 const argv = process.argv.slice(2);
@@ -53,7 +55,13 @@ function main() {
   }
   if (mode === 'hang') {
     emit({ type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text: '부분' } });
+    emit({ type: 'item.started', item: { id: 'item_1', type: 'reasoning', text: '' } });
     setInterval(() => {}, 1000);
+    return;
+  }
+  if (mode === 'no-turn-completed') {
+    // Older CLIs: the stream ends after the message without a turn.completed event.
+    emit({ type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text: '끝 이벤트 없는 답변' } });
     return;
   }
   if (mode === 'error-recovered') {
@@ -62,15 +70,18 @@ function main() {
 
   emit({ type: 'item.started', item: { id: 'item_0', type: 'reasoning', text: '' } });
   emit({ type: 'item.completed', item: { id: 'item_0', type: 'reasoning', text: '**Reading the slide**' } });
+  emit({ type: 'item.completed', item: { id: 'item_1', type: 'agent_message', text: '요청한 파일을 확인할게요.' } });
   emit({
     type: 'item.started',
-    item: { id: 'item_1', type: 'command_execution', command: "bash -lc 'ls slides'", status: 'in_progress' },
+    item: { id: 'item_2', type: 'command_execution', command: "bash -lc 'ls slides'", status: 'in_progress' },
   });
   emit({
     type: 'item.completed',
-    item: { id: 'item_1', type: 'command_execution', command: "bash -lc 'ls slides'", exit_code: 0, status: 'completed' },
+    item: { id: 'item_2', type: 'command_execution', command: "bash -lc 'ls slides'", exit_code: 0, status: 'completed' },
   });
-  emit({ type: 'item.completed', item: { id: 'item_2', type: 'agent_message', text: '첫 번째 메시지' } });
-  emit({ type: 'item.completed', item: { id: 'item_3', type: 'agent_message', text: '두 번째 메시지' } });
+  emit({ type: 'item.completed', item: { id: 'item_3', type: 'agent_message', text: '중간 메시지' } });
+  emit({ type: 'item.completed', item: { id: 'item_4', type: 'agent_message', text: '최종 답변입니다.' } });
+  // A trailing non-message item must not demote the final answer.
+  emit({ type: 'item.completed', item: { id: 'item_5', type: 'todo_list', items: [] } });
   emit({ type: 'turn.completed', usage: { input_tokens: 10, cached_input_tokens: 0, output_tokens: 5 } });
 }

@@ -6,7 +6,6 @@ import path from 'node:path';
 import { SESSION_ID_RE } from '../shared/types.ts';
 import type {
   ChatMessage,
-  DocMeta,
   NoteEntry,
   NotesResponse,
   ProviderId,
@@ -19,15 +18,17 @@ import { initialProviderState } from './context.ts';
 import type { SessionRecord } from './internal-types.ts';
 import {
   createKeyedQueue,
+  demoteHeadings,
   docPaths,
-  getDoc,
   isNotFound,
-  listDocs,
+  listStoredDocs,
   readJsonFile,
+  readStoredDoc,
   slideFileName,
   writeFileAtomic,
   writeJsonAtomic,
 } from './library.ts';
+import type { StoredDocMeta } from './library.ts';
 
 /** Display names used in the notes (kept here so notes do not depend on provider modules). */
 const PROVIDER_LABELS: Record<ProviderId, string> = {
@@ -96,7 +97,7 @@ export interface CreateSessionInput {
 
 /** Creates and persists an empty session. Throws HttpError 404 when the document does not exist. */
 export async function createSession(docId: string, input: CreateSessionInput): Promise<SessionRecord> {
-  const doc = await getDoc(docId);
+  const doc = await readStoredDoc(docId);
   if (!doc) throw new HttpError(404, '문서를 찾을 수 없습니다');
   await fs.mkdir(docPaths(docId).sessionsDir, { recursive: true });
 
@@ -154,7 +155,7 @@ async function readRecord(docId: string, sessionId: string): Promise<SessionReco
 
 /** The session, or null when an id is invalid or the session does not exist. */
 export async function getSession(docId: string, sessionId: string): Promise<SessionRecord | null> {
-  if (!SESSION_ID_RE.test(sessionId) || (await getDoc(docId)) === null) return null;
+  if (!SESSION_ID_RE.test(sessionId) || (await readStoredDoc(docId)) === null) return null;
   return readRecord(docId, sessionId);
 }
 
@@ -243,7 +244,7 @@ export function repairInterruptedMessages(record: SessionRecord): boolean {
 /** Startup sweep over the whole library (see repairInterruptedMessages). */
 export async function recoverInterruptedSessions(): Promise<number> {
   let repaired = 0;
-  for (const doc of await listDocs()) {
+  for (const doc of await listStoredDocs()) {
     let docChanged = false;
     for (const record of await loadRecords(doc.id)) {
       if (repairInterruptedMessages(record)) {
@@ -283,28 +284,6 @@ function sessionEntries(record: SessionRecord): NoteEntry[] {
   return entries;
 }
 
-/** Shifts ATX headings of an answer down so they nest under the note's own headings. */
-function demoteHeadings(markdown: string, levels: number): string {
-  let fence: string | null = null;
-  return markdown
-    .split('\n')
-    .map((line) => {
-      const fenceMatch = /^\s{0,3}(`{3,}|~{3,})/.exec(line);
-      if (fenceMatch) {
-        const marker = fenceMatch[1][0];
-        if (fence === null) fence = marker;
-        else if (fence === marker) fence = null;
-        return line;
-      }
-      if (fence !== null) return line;
-      const heading = /^(#{1,6})(\s)/.exec(line);
-      if (!heading) return line;
-      const level = Math.min(6, heading[1].length + levels);
-      return '#'.repeat(level) + line.slice(heading[1].length);
-    })
-    .join('\n');
-}
-
 /** Keeps the student's line breaks when rendered (Markdown would join single newlines). */
 function withHardBreaks(text: string): string {
   return text.trim().split('\n').join('  \n');
@@ -332,7 +311,7 @@ function answerMarkdown(answer: ChatMessage | null, headingLevels: number): stri
   }
 }
 
-function sessionNotesMarkdown(doc: DocMeta, record: SessionRecord): string {
+function sessionNotesMarkdown(doc: StoredDocMeta, record: SessionRecord): string {
   const lines: string[] = [
     `# ${doc.title} — ${record.title}`,
     `- Provider: ${providerLabel(record.provider, record.model)} · Started: ${formatDateTime(record.createdAt)}`,
@@ -369,7 +348,7 @@ function groupBySlide(records: SessionRecord[]): SlideNotes[] {
     }));
 }
 
-function studyNotesMarkdown(doc: DocMeta, records: SessionRecord[], slides: SlideNotes[]): string {
+function studyNotesMarkdown(doc: StoredDocMeta, records: SessionRecord[], slides: SlideNotes[]): string {
   const providerBySession = new Map(records.map((record) => [record.id, providerLabel(record.provider, record.model)]));
   const lines: string[] = [`# ${doc.title} — study notes`, ''];
   if (slides.length === 0) lines.push('_No questions yet._', '');
@@ -391,7 +370,7 @@ function studyNotesMarkdown(doc: DocMeta, records: SessionRecord[], slides: Slid
 }
 
 async function regenerateNotes(docId: string): Promise<void> {
-  const doc = await getDoc(docId);
+  const doc = await readStoredDoc(docId);
   if (!doc) return;
   const paths = docPaths(docId);
   const records = (await loadRecords(docId)).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
@@ -419,7 +398,7 @@ export function writeNotes(docId: string): Promise<void> {
 
 /** All Q&A of a document grouped by slide (also makes sure STUDY_NOTES.md exists). */
 export async function buildNotes(docId: string): Promise<NotesResponse> {
-  if ((await getDoc(docId)) === null) throw new HttpError(404, '문서를 찾을 수 없습니다');
+  if ((await readStoredDoc(docId)) === null) throw new HttpError(404, '문서를 찾을 수 없습니다');
   const paths = docPaths(docId);
   try {
     await fs.access(paths.studyNotes);

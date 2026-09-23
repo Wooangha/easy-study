@@ -6,6 +6,9 @@ export const QUICK_PROMPTS = ['이 슬라이드 설명해줘', '핵심만 요약
 interface ComposerProps {
   /** Slide the question will be about. */
   targetSlide: number;
+  pageCount: number;
+  /** Neighbor slides (±N) sent along with the target slide. */
+  neighbors: number;
   pinned: boolean;
   /** A turn (or session creation / priming) is running — sending is disabled. */
   running: boolean;
@@ -23,6 +26,8 @@ const MAX_TEXTAREA_PX = 220;
 
 export function Composer({
   targetSlide,
+  pageCount,
+  neighbors,
   pinned,
   running,
   canStop,
@@ -71,6 +76,10 @@ export function Composer({
     void send(text, true);
   };
 
+  const from = Math.max(1, targetSlide - neighbors);
+  const to = Math.min(pageCount, targetSlide + neighbors);
+  const withNeighbors = to > from ? ` (p.${from}–${to}도 함께 전달)` : '';
+
   const placeholder = disabledReason
     ? disabledReason
     : running
@@ -91,9 +100,13 @@ export function Composer({
           type="button"
           className={pinned ? 'target-chip is-pinned' : 'target-chip'}
           onClick={() => onGoToSlide(targetSlide)}
-          title={pinned ? '고정된 슬라이드에 대해 질문해요 (클릭하면 이동)' : '보고 있는 슬라이드에 대해 질문해요'}
+          title={
+            (pinned ? '고정된 슬라이드에 대해 질문해요 (클릭하면 이동)' : '보고 있는 슬라이드에 대해 질문해요') +
+            withNeighbors
+          }
         >
           {pinned ? '📌' : '📄'} p.{targetSlide}
+          {to > from && <span className="target-neighbors">±{neighbors}</span>}
         </button>
         <textarea
           ref={textareaRef}

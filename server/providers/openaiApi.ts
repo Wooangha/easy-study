@@ -3,6 +3,8 @@
 // The conversation lives on OpenAI's side (store: true); each turn continues it with
 // previous_response_id and only sends the new user turn. `instructions` are not carried over
 // between responses, so the system prompt is sent every turn. OPENAI_BASE_URL is honoured by the SDK.
+// One-shot (ephemeral) calls such as digest batches are never continued, so they are not stored.
+// extraReadDirs is ignored: the model has no file access.
 import OpenAI from 'openai';
 import type {
   ResponseCreateParamsStreaming,
@@ -40,6 +42,8 @@ export interface OpenAIRequestInput {
   parts: Part[];
   resume: ResumeHandle | null;
   model: string;
+  /** One-shot call that will never be continued: store: false. */
+  ephemeral?: boolean;
 }
 
 async function toContent(parts: Part[]): Promise<ResponseInputContent[]> {
@@ -66,7 +70,7 @@ export async function buildOpenAIRequest(input: OpenAIRequestInput): Promise<Res
     model: input.model || defaultModel(),
     instructions: input.systemPrompt,
     input: [{ role: 'user', content: await toContent(input.parts) }],
-    store: true,
+    store: input.ephemeral !== true,
     stream: true,
   };
   const previous = input.resume?.previousResponseId;
@@ -168,6 +172,7 @@ async function runOpenAI(input: ProviderRunInput): Promise<ProviderRunResult> {
     parts: input.parts,
     resume: input.resume,
     model: input.model,
+    ephemeral: input.ephemeral,
   });
   const client = new OpenAI({ maxRetries: 2 });
   const state = new OpenAIStreamState(input.onDelta, input.onStatus);

@@ -1,0 +1,561 @@
+// Digest ("정리본", DESIGN §11): turns a whole deck into reusable text once. An LLM reads the slide
+// images a few at a time and writes a faithful per-slide transcription + explanation; when every
+// slide has an entry, one more call writes a summary of the lecture (used as course context).
+//
+// Stored as library/<docId>/digest/digest.json (DigestRecord) and rendered to library/<docId>/DIGEST.md
+// (plus the course's COURSE.md). A job persists after every batch, so a crash or an abort keeps the
+// finished slides and a later run ("이어서 만들기") only does the missing or failed ones.
+//
+// One job per document at a time. Provider calls are one-shot (resume: null, ephemeral), run with a
+// small concurrency, and never touch the study sessions.
+import fs from 'node:fs/promises';
+import type { DigestInfo, DigestSlide, ProviderId } from '../shared/types.ts';
+import { defaultChatDeps } from './chat.ts';
+import type { ProviderCheck } from './chat.ts';
+import { HttpError, digestConcurrency } from './config.ts';
+import { courseOf, writeCourseMarkdown } from './courses.ts';
+import {
+  DIGEST_BATCH_SIZE,
+  buildDigestBatchParts,
+  buildLectureSummaryParts,
+  digestSystemPrompt,
+  lectureSummarySystemPrompt,
+  parseDigestOutput,
+} from './digestPrompt.ts';
+import type { DocAssets, DigestRecord } from './internal-types.ts';
+import {
+  createKeyedQueue,
+  demoteHeadings,
+  docPaths,
+  listStoredDocs,
+  loadDocAssets,
+  readDigestRecord,
+  readStoredDoc,
+  slideFileName,
+  sortDigestSlides,
+  writeFileAtomic,
+  writeJsonAtomic,
+} from './library.ts';
+import type { Part, Provider } from './providers/types.ts';
+
+/**
+ * Provider calls in a row that produced nothing usable (the call threw, or no slide could be parsed)
+ * after which a job gives up with status 'error' instead of burning through the whole deck.
+ */
+const MAX_FAILED_CALLS_IN_A_ROW = 4;
+
+/** The prompt/parse functions of digestPrompt.ts (injectable for tests). */
+export interface DigestPrompts {
+  batchSize: number;
+  systemPrompt: typeof digestSystemPrompt;
+  buildBatchParts: typeof buildDigestBatchParts;
+  parseOutput: typeof parseDigestOutput;
+  summarySystemPrompt: typeof lectureSummarySystemPrompt;
+  buildSummaryParts: typeof buildLectureSummaryParts;
+}
+
+/** Collaborators of the digest runner; injectable so tests can use fakes. */
+export interface DigestDeps {
+  getProvider: (id: ProviderId) => Provider | undefined;
+  /** Availability of a provider (should be cached). */
+  checkProvider: (id: ProviderId) => Promise<ProviderCheck>;
+  prompts: DigestPrompts;
+  /** Provider calls one job runs at the same time. */
+  concurrency: () => number;
+  now: () => Date;
+}
+
+export const DEFAULT_DIGEST_PROMPTS: Readonly<DigestPrompts> = Object.freeze({
+  batchSize: DIGEST_BATCH_SIZE,
+  systemPrompt: digestSystemPrompt,
+  buildBatchParts: buildDigestBatchParts,
+  parseOutput: parseDigestOutput,
+  summarySystemPrompt: lectureSummarySystemPrompt,
+  buildSummaryParts: buildLectureSummaryParts,
+});
+
+/** The real provider registry (same availability check as chat turns) and digestPrompt.ts. */
+export function defaultDigestDeps(): DigestDeps {
+  const chat = defaultChatDeps();
+  return {
+    getProvider: chat.getProvider,
+    checkProvider: chat.checkProvider,
+    prompts: DEFAULT_DIGEST_PROMPTS,
+    concurrency: digestConcurrency,
+    now: () => new Date(),
+  };
+}
+
+export interface StartDigestOptions {
+  provider: ProviderId;
+  /** '' or omitted = provider default. */
+  model?: string;
+  /** Redo every slide (otherwise only slides without a successful entry are done). */
+  force?: boolean;
+}
+
+interface DigestJob {
+  controller: AbortController;
+  finished: Promise<void>;
+  /** The job's working copy (authoritative while it runs); null until the job has read the old record. */
+  record: DigestRecord | null;
+}
+
+const jobs = new Map<string, DigestJob>();
+/** Serializes writes of digest.json / DIGEST.md per document. */
+const persistQueue = createKeyedQueue();
+
+// ---------------------------------------------------------------------------
+// Queries
+// ---------------------------------------------------------------------------
+
+function toInfo(docId: string, pageCount: number, record: DigestRecord | null, job: DigestJob | undefined): DigestInfo {
+  const markdownPath = docPaths(docId).digestMd;
+  if (!record) {
+    return { docId, status: job ? 'running' : 'none', done: 0, total: pageCount, slides: [], summary: null, markdownPath };
+  }
+  const slides = record.slides.filter((entry) => entry.slide <= pageCount).map((entry) => ({ ...entry }));
+  let status = record.status;
+  if (job && !job.record) status = 'running'; // the job is still reading the previous record
+  // 'running' on disk without a job is a leftover of a crash (the startup sweep rewrites it).
+  else if (!job && status === 'running') status = 'aborted';
+  const info: DigestInfo = { docId, status, done: slides.length, total: pageCount, slides, summary: record.summary, markdownPath };
+  if (record.provider) info.provider = record.provider;
+  if (record.model !== undefined) info.model = record.model;
+  if (record.error) info.error = record.error;
+  if (record.startedAt) info.startedAt = record.startedAt;
+  if (record.updatedAt) info.updatedAt = record.updatedAt;
+  return info;
+}
+
+/** Digest state of a document (status 'none' when there is none). Throws 404 for unknown documents. */
+export async function getDigestInfo(docId: string): Promise<DigestInfo> {
+  const doc = await readStoredDoc(docId);
+  if (!doc) throw new HttpError(404, '문서를 찾을 수 없습니다');
+  const job = jobs.get(docId);
+  const record = job?.record ?? (await readDigestRecord(docId));
+  return toInfo(docId, doc.pageCount, record, job);
+}
+
+export function isDigestRunning(docId: string): boolean {
+  return jobs.has(docId);
+}
+
+// ---------------------------------------------------------------------------
+// Control
+// ---------------------------------------------------------------------------
+
+/**
+ * Starts (or resumes, or with `force` redoes) the digest of a ready document in the background and
+ * returns its state (status 'running'). Throws 404 (unknown document), 409 (document not ready or a
+ * digest job already running) or 400 (unknown / unavailable provider).
+ */
+export async function startDigest(
+  docId: string,
+  options: StartDigestOptions,
+  deps: DigestDeps = defaultDigestDeps(),
+): Promise<DigestInfo> {
+  const provider = deps.getProvider(options.provider);
+  if (!provider) throw new HttpError(400, `알 수 없는 제공자입니다: ${String(options.provider)}`);
+  const assets = await loadDocAssets(docId);
+  const check = await deps.checkProvider(provider.id);
+  if (!check.available) {
+    throw new HttpError(400, `${provider.label}을(를) 사용할 수 없습니다${check.reason ? `: ${check.reason}` : ''}`);
+  }
+
+  // Check-and-reserve without an await in between, so concurrent requests cannot both start a job.
+  if (jobs.has(docId)) throw new HttpError(409, '이미 정리본을 만들고 있습니다');
+  let markFinished = () => {};
+  const job: DigestJob = {
+    controller: new AbortController(),
+    record: null,
+    finished: new Promise<void>((resolve) => {
+      markFinished = resolve;
+    }),
+  };
+  jobs.set(docId, job);
+  const release = () => {
+    jobs.delete(docId);
+    markFinished();
+  };
+
+  const pageCount = assets.meta.pageCount;
+  let courseTitle: string | null;
+  try {
+    // Read the previous record only now: with the reservation held no other job can be writing it.
+    const [previous, course] = await Promise.all([readDigestRecord(docId), courseOf(docId)]);
+    courseTitle = course?.title ?? null;
+    const now = deps.now().toISOString();
+    job.record = {
+      version: 1,
+      status: 'running',
+      provider: provider.id,
+      model: (options.model ?? '').trim() || provider.defaultModel,
+      startedAt: now,
+      updatedAt: now,
+      slides: options.force ? [] : (previous?.slides ?? []).filter((entry) => entry.slide <= pageCount),
+      summary: options.force ? null : (previous?.summary ?? null),
+    };
+    await persist(docId, assets, job.record);
+  } catch (err) {
+    release();
+    throw err;
+  }
+
+  const info = toInfo(docId, pageCount, job.record, job);
+  console.log(`[digest] ${docId}: started with ${provider.id}${job.record.model ? ` (${job.record.model})` : ''}`);
+  void runJob(docId, job, job.record, { assets, provider, courseTitle, deps }).finally(release);
+  return info;
+}
+
+/** Aborts the running digest job of a document (finished slides are kept). False when none runs. */
+export function abortDigest(docId: string): boolean {
+  const job = jobs.get(docId);
+  if (!job) return false;
+  job.controller.abort(new Error('사용자가 정리본 만들기를 중단했습니다'));
+  return true;
+}
+
+/** Aborts every running digest job (server shutdown). Returns how many were aborted. */
+export function abortAllDigests(): number {
+  for (const job of jobs.values()) job.controller.abort(new Error('서버가 종료되어 정리본 만들기가 중단되었습니다'));
+  return jobs.size;
+}
+
+function withTimeout(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), timeoutMs);
+    void promise.then(() => {
+      clearTimeout(timer);
+      resolve(true);
+    });
+  });
+}
+
+/** Resolves true once the document's job (if any) has finished and persisted, false on timeout. */
+export function waitForDigest(docId: string, timeoutMs = 60_000): Promise<boolean> {
+  const job = jobs.get(docId);
+  return job ? withTimeout(job.finished, timeoutMs) : Promise.resolve(true);
+}
+
+/** Resolves true once no digest job is running, false on timeout. */
+export function waitForDigestsIdle(timeoutMs: number): Promise<boolean> {
+  return withTimeout(Promise.all([...jobs.values()].map((job) => job.finished)), timeoutMs);
+}
+
+/**
+ * Startup sweep: a record left in 'running' (the server stopped mid-job) becomes 'aborted', so the
+ * user can resume it; finished slides are kept. Returns how many records were changed.
+ */
+export async function recoverInterruptedDigests(): Promise<number> {
+  let recovered = 0;
+  for (const doc of await listStoredDocs()) {
+    if (jobs.has(doc.id)) continue;
+    const record = await readDigestRecord(doc.id);
+    if (record?.status !== 'running') continue;
+    record.status = 'aborted';
+    record.error = '서버가 중단되어 정리본 만들기가 멈췄습니다. 이어서 만들 수 있습니다';
+    await persistQueue(doc.id, () => writeJsonAtomic(docPaths(doc.id).digestJson, record));
+    recovered++;
+  }
+  return recovered;
+}
+
+// ---------------------------------------------------------------------------
+// The job
+// ---------------------------------------------------------------------------
+
+interface JobContext {
+  assets: DocAssets;
+  provider: Provider;
+  courseTitle: string | null;
+  deps: DigestDeps;
+}
+
+function errorText(err: unknown): string {
+  if (err instanceof Error) return err.message || err.name;
+  return String(err);
+}
+
+function abortReason(signal: AbortSignal): string {
+  const reason: unknown = signal.reason;
+  if (reason instanceof Error && reason.name !== 'AbortError' && reason.message) return reason.message;
+  return '정리본 만들기가 중단되었습니다';
+}
+
+/** Slides in runs of consecutive numbers, each run cut into batches of at most `size`. */
+export function planBatches(slides: number[], size: number): number[][] {
+  const limit = Math.max(1, Math.floor(size));
+  const batches: number[][] = [];
+  let current: number[] = [];
+  for (const slide of [...new Set(slides)].sort((a, b) => a - b)) {
+    const last = current.at(-1);
+    if (last !== undefined && (current.length >= limit || slide !== last + 1)) {
+      batches.push(current);
+      current = [];
+    }
+    current.push(slide);
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
+}
+
+/** Runs `worker` over `items` with at most `limit` in flight; stops taking new items once `stop()` is true. */
+async function runPool<T>(items: T[], limit: number, worker: (item: T) => Promise<void>, stop: () => boolean): Promise<void> {
+  let next = 0;
+  const lanes = Array.from({ length: Math.max(1, Math.min(Math.floor(limit) || 1, items.length)) }, async () => {
+    while (next < items.length && !stop()) await worker(items[next++]);
+  });
+  await Promise.all(lanes);
+}
+
+interface Attempt {
+  /** Successfully parsed entries of the requested slides. */
+  good: DigestSlide[];
+  /** Entries the parser gave up on (they carry a placeholder), by slide. */
+  failed: Map<number, DigestSlide>;
+  /** The provider error, when the call threw. */
+  error: string | null;
+}
+
+function cleanEntry(entry: DigestSlide): DigestSlide {
+  const clean: DigestSlide = { slide: entry.slide, title: entry.title.replace(/\s+/g, ' ').trim(), markdown: entry.markdown.trim() };
+  if (entry.failed) clean.failed = true;
+  return clean;
+}
+
+async function runJob(docId: string, job: DigestJob, record: DigestRecord, ctx: JobContext): Promise<void> {
+  const { assets, provider, courseTitle, deps } = ctx;
+  const { prompts } = deps;
+  const signal = job.controller.signal;
+  const pageCount = assets.meta.pageCount;
+  const deckTitle = assets.meta.title;
+  const stamp = () => {
+    record.updatedAt = deps.now().toISOString();
+  };
+
+  let succeeded = 0; // slides this job digested successfully
+  let attempted = 0; // slides this job sent to the provider
+  let changed = false; // this job stored at least one entry
+  let firstError: string | null = null;
+  let failedCallsInARow = 0;
+  let streakError: string | null = null;
+  let fatal: string | null = null;
+  const stopped = () => signal.aborted || fatal !== null;
+
+  const noteCall = (useful: boolean, error: string) => {
+    if (useful) {
+      failedCallsInARow = 0;
+      streakError = null;
+      return;
+    }
+    firstError ??= error;
+    streakError ??= error;
+    failedCallsInARow++;
+    if (failedCallsInARow >= MAX_FAILED_CALLS_IN_A_ROW) fatal ??= streakError;
+  };
+
+  const store = (entries: DigestSlide[]) => {
+    if (entries.length === 0) return;
+    record.slides = sortDigestSlides([...record.slides, ...entries.map(cleanEntry)]);
+    succeeded += entries.filter((entry) => !entry.failed).length;
+    changed = true;
+    stamp();
+  };
+
+  /** One provider call; resolves with the answer text (falls back to the streamed text). */
+  const call = async (systemPrompt: string, parts: Part[]): Promise<string> => {
+    let streamed = '';
+    const result = await provider.run({
+      cwd: assets.dir,
+      systemPrompt,
+      parts,
+      resume: null,
+      history: [],
+      model: record.model ?? '',
+      ephemeral: true,
+      signal,
+      onDelta: (text) => {
+        streamed += text;
+      },
+      onStatus: () => {},
+    });
+    return result.text.trim() ? result.text : streamed;
+  };
+
+  /** Digests `slides` in one call. Never throws; an aborted call resolves with nothing. */
+  const attempt = async (slides: number[]): Promise<Attempt> => {
+    attempted += slides.length;
+    const parts = prompts.buildBatchParts({
+      deckTitle,
+      pageCount,
+      courseTitle,
+      slides: slides.map((slide) => ({ slide, imagePath: assets.slidePath(slide), text: assets.texts[slide - 1] ?? '' })),
+    });
+    let output: string;
+    try {
+      output = await call(prompts.systemPrompt(), parts);
+    } catch (err) {
+      if (signal.aborted) return { good: [], failed: new Map(), error: null };
+      const message = errorText(err);
+      console.warn(`[digest] ${docId}: slides ${slides.join(',')} failed: ${message}`);
+      noteCall(false, message);
+      return { good: [], failed: new Map(), error: message };
+    }
+    const wanted = new Set(slides);
+    const parsed = prompts.parseOutput(output, slides).filter((entry) => wanted.has(entry.slide));
+    const good = parsed.filter((entry) => !entry.failed && entry.markdown.trim() !== '');
+    const failed = new Map(parsed.filter((entry) => entry.failed).map((entry) => [entry.slide, entry] as const));
+    noteCall(good.length > 0, `모델 출력에서 슬라이드 ${slides.join(', ')}의 정리를 찾지 못했습니다`);
+    return { good, failed, error: null };
+  };
+
+  const processBatch = async (batch: number[]) => {
+    const first = await attempt(batch);
+    store(first.good);
+    const done = new Set(first.good.map((entry) => entry.slide));
+    // Slides missing from the output get one more chance each, alone.
+    for (const slide of batch.filter((candidate) => !done.has(candidate))) {
+      if (stopped()) break;
+      const retry = await attempt([slide]);
+      if (signal.aborted) break;
+      if (retry.good.length > 0) {
+        store(retry.good);
+        continue;
+      }
+      const reason = retry.error ?? first.error;
+      const parsedFailure = retry.failed.get(slide) ?? first.failed.get(slide);
+      store([
+        parsedFailure ?? {
+          slide,
+          title: '',
+          markdown: `_(이 슬라이드의 정리본을 만들지 못했습니다${reason ? `: ${reason.replace(/\s+/g, ' ')}` : ''})_`,
+          failed: true,
+        },
+      ]);
+    }
+    await persist(docId, assets, record);
+  };
+
+  try {
+    const todo: number[] = [];
+    const good = new Set(record.slides.filter((entry) => !entry.failed).map((entry) => entry.slide));
+    for (let slide = 1; slide <= pageCount; slide++) if (!good.has(slide)) todo.push(slide);
+
+    const batches = planBatches(todo, prompts.batchSize);
+    await runPool(
+      batches,
+      deps.concurrency(),
+      (batch) =>
+        processBatch(batch).catch((err: unknown) => {
+          // Not a provider failure (those are handled per call): e.g. the disk is full.
+          fatal ??= errorText(err);
+        }),
+      stopped,
+    );
+
+    let summaryError: string | null = null;
+    const entries = new Set(record.slides.map((entry) => entry.slide));
+    const everySlideHasEntry = pageCount > 0 && Array.from({ length: pageCount }, (_, i) => i + 1).every((n) => entries.has(n));
+    const usable = record.slides.filter((entry) => !entry.failed);
+    if (!stopped() && everySlideHasEntry && usable.length > 0 && (changed || !record.summary)) {
+      try {
+        const text = await call(prompts.summarySystemPrompt(), prompts.buildSummaryParts({ deckTitle, courseTitle, digest: usable }));
+        if (text.trim()) record.summary = text.trim();
+        else summaryError = '모델이 빈 요약을 돌려주었습니다';
+      } catch (err) {
+        if (!signal.aborted) summaryError = errorText(err);
+      }
+    }
+
+    if (signal.aborted) {
+      record.status = 'aborted';
+      record.error = abortReason(signal);
+    } else if (fatal !== null) {
+      record.status = 'error';
+      record.error = fatal;
+    } else if (attempted > 0 && succeeded === 0) {
+      record.status = 'error';
+      record.error = firstError ?? '정리본을 만들지 못했습니다';
+    } else {
+      record.status = 'ready';
+      const notes: string[] = [];
+      const failedSlides = record.slides.filter((entry) => entry.failed).map((entry) => entry.slide);
+      if (failedSlides.length > 0) {
+        notes.push(`슬라이드 ${failedSlides.join(', ')}의 정리본을 만들지 못했습니다 (이어서 만들기로 다시 시도할 수 있습니다)`);
+      }
+      if (summaryError) notes.push(`강의 요약을 만들지 못했습니다: ${summaryError}`);
+      if (notes.length > 0) record.error = notes.join(' / ');
+      else delete record.error;
+    }
+  } catch (err) {
+    record.status = 'error';
+    record.error = errorText(err);
+    console.error(`[digest] ${docId}: job failed:`, err);
+  }
+
+  stamp();
+  try {
+    await persist(docId, assets, record);
+  } catch (err) {
+    console.error(`[digest] ${docId}: could not save the digest:`, err);
+  }
+  console.log(`[digest] ${docId}: ${record.status} (${record.slides.length}/${pageCount} slides)${record.error ? ` — ${record.error}` : ''}`);
+}
+
+// ---------------------------------------------------------------------------
+// Files
+// ---------------------------------------------------------------------------
+
+/** DIGEST.md: `# <title> — 정리본`, the lecture summary, then every slide's entry (DESIGN §11). */
+export function digestMarkdown(title: string, pageCount: number, record: DigestRecord): string {
+  const slides = record.slides.filter((entry) => entry.slide <= pageCount);
+  const lines: string[] = [`# ${title} — 정리본`, ''];
+  if (slides.length < pageCount) lines.push(`_(미완성 정리본: ${slides.length}/${pageCount} 슬라이드)_`, '');
+  if (record.summary?.trim()) lines.push('## 강의 요약', '', demoteHeadings(record.summary.trim(), 2), '');
+  for (const entry of slides) {
+    lines.push(
+      entry.title ? `## Slide ${entry.slide} · ${entry.title}` : `## Slide ${entry.slide}`,
+      '',
+      `![slide ${entry.slide}](slides/${slideFileName(entry.slide, pageCount)})`,
+      '',
+    );
+    if (entry.failed) lines.push('> 이 슬라이드는 자동 정리에 실패했습니다.', '');
+    lines.push(demoteHeadings(entry.markdown.trim(), 2), '');
+  }
+  return `${lines.join('\n').trimEnd()}\n`;
+}
+
+/** Writes digest.json + DIGEST.md, then the course's COURSE.md (its summaries may have changed). */
+async function persist(docId: string, assets: DocAssets, record: DigestRecord): Promise<void> {
+  const paths = docPaths(docId);
+  // Serialized per document; the record is serialized when the write runs, so the latest state wins.
+  await persistQueue(docId, async () => {
+    await fs.mkdir(paths.digestDir, { recursive: true });
+    await writeJsonAtomic(paths.digestJson, record);
+    await writeFileAtomic(paths.digestMd, digestMarkdown(assets.meta.title, assets.meta.pageCount, record));
+  });
+  try {
+    const course = await courseOf(docId);
+    if (course) await writeCourseMarkdown(course.id);
+  } catch (err) {
+    console.error(`[digest] ${docId}: could not update COURSE.md:`, err);
+  }
+}
+
+/** DIGEST.md of a document, regenerated from digest.json when missing. Null when there is no digest. */
+export async function readDigestMarkdown(docId: string): Promise<string | null> {
+  const doc = await readStoredDoc(docId);
+  if (!doc) throw new HttpError(404, '문서를 찾을 수 없습니다');
+  const paths = docPaths(docId);
+  try {
+    return await fs.readFile(paths.digestMd, 'utf8');
+  } catch {
+    // Missing (e.g. deleted by hand): rebuild it from the record below.
+  }
+  const record = jobs.get(docId)?.record ?? (await readDigestRecord(docId));
+  if (!record) return null;
+  const markdown = digestMarkdown(doc.title, doc.pageCount, record);
+  await persistQueue(docId, () => writeFileAtomic(paths.digestMd, markdown));
+  return markdown;
+}

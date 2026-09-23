@@ -1,12 +1,15 @@
-import { useCallback, type ReactNode } from 'react';
-import type { DocMeta, ProviderInfo } from '../../../shared/types.ts';
+import { useCallback, useState, type ReactNode } from 'react';
+import type { DigestInfo, DocMeta, ProviderInfo } from '../../../shared/types.ts';
+import { courseSummaryUrl } from '../api.ts';
+import type { CourseMembership } from '../hooks/useCourses.ts';
+import { NEIGHBOR_OPTIONS } from '../hooks/useNeighbors.ts';
 import type { ProviderChoice } from '../hooks/useProviderChoice.ts';
 import { PENDING_ASSISTANT_ID, type StudySession } from '../hooks/useStudySession.ts';
 import { providerLabel, providerWithModel } from '../lib/format.ts';
 import { Composer } from './Composer.tsx';
 import { MessageList } from './MessageList.tsx';
 
-export type PanelTab = 'chat' | 'notes';
+export type PanelTab = 'chat' | 'digest' | 'notes';
 
 interface ChatPanelProps {
   doc: DocMeta;
@@ -23,6 +26,34 @@ interface ChatPanelProps {
   onTabChange: (tab: PanelTab) => void;
   notesCount: number;
   notes: ReactNode;
+  /** Content of the 정리본 tab. */
+  digest: ReactNode;
+  /** Digest of this document (for the tab badge and the empty-state copy); null while unknown. */
+  digestInfo: DigestInfo | null;
+  /** Course this lecture belongs to, or null. */
+  course: CourseMembership | null;
+  /** Neighbor slides (±N) fed with every question. */
+  neighbors: number;
+  onNeighborsChange: (n: number) => void;
+}
+
+function DigestTabBadge({ info }: { info: DigestInfo | null }) {
+  if (!info) return null;
+  switch (info.status) {
+    case 'running':
+      return (
+        <span className="tab-count is-running">
+          ⏳ {info.done}/{info.total}
+        </span>
+      );
+    case 'ready':
+      return <span className="tab-count is-ok">✓</span>;
+    case 'aborted':
+    case 'error':
+      return info.slides.length > 0 ? <span className="tab-count is-warn">일부</span> : null;
+    default:
+      return null;
+  }
 }
 
 export function ChatPanel({
@@ -39,9 +70,18 @@ export function ChatPanel({
   onTabChange,
   notesCount,
   notes,
+  digest,
+  digestInfo,
+  course,
+  neighbors,
+  onNeighborsChange,
 }: ChatPanelProps) {
   const { session, messages, liveTurn, running, creating } = study;
   const targetSlide = pinnedSlide ?? focusedSlide;
+  const digestReady = digestInfo?.status === 'ready';
+  // The digest tab can render dozens of Markdown/KaTeX entries: mount it only once it was opened.
+  const [digestMounted, setDigestMounted] = useState(false);
+  if (tab === 'digest' && !digestMounted) setDigestMounted(true);
 
   // `ask` is stable while streaming, so memoized message items do not re-render on every delta.
   const { ask } = study;
@@ -70,9 +110,16 @@ export function ChatPanel({
       <h3>무엇이든 물어보세요</h3>
       <p>
         질문을 보내면 {choice ? <b>{providerWithModel(providers, choice.provider, choice.model)}</b> : 'LLM'}(으)로 새
-        세션을 만들고, <b>전체 슬라이드 {doc.pageCount}장</b>을 먼저 전달한 뒤 지금 보고 있는 슬라이드를 기준으로
-        설명해요.
+        세션을 만들고, <b>전체 슬라이드 {doc.pageCount}장</b>
+        {digestReady ? '(정리본 텍스트)' : ''}을 먼저 전달한 뒤 지금 보고 있는 슬라이드
+        {neighbors > 0 ? `(앞뒤 ${neighbors}장 포함)` : ''}를 기준으로 설명해요.
       </p>
+      {course && course.index > 1 && (
+        <p className="muted small">
+          📁 {course.course.title}의 {course.index}강이라서 1–{course.index - 1}강의 요약도 함께 전달하고, 필요하면 이전
+          강의 파일도 열어 봐요.
+        </p>
+      )}
       {choice ? (
         <button type="button" className="primary-btn" onClick={() => void study.newSession(targetSlide)}>
           ＋ 새 세션 시작 (슬라이드 전달)
@@ -86,6 +133,7 @@ export function ChatPanel({
         </li>
         <li>📌 고정하면 스크롤해도 같은 슬라이드에 대해 계속 질문해요</li>
         <li>모든 Q&amp;A는 파일로 저장되고 ‘노트’ 탭에서 슬라이드별로 다시 볼 수 있어요</li>
+        <li>‘정리본’ 탭에서 LLM이 슬라이드를 옮겨 적고 설명한 정리본을 슬라이드별로 읽을 수 있어요</li>
       </ul>
     </div>
   ) : !session ? (
@@ -125,6 +173,16 @@ export function ChatPanel({
         <button
           type="button"
           role="tab"
+          aria-selected={tab === 'digest'}
+          className={tab === 'digest' ? 'panel-tab is-active' : 'panel-tab'}
+          onClick={() => onTabChange('digest')}
+        >
+          정리본
+          <DigestTabBadge info={digestInfo} />
+        </button>
+        <button
+          type="button"
+          role="tab"
           aria-selected={tab === 'notes'}
           className={tab === 'notes' ? 'panel-tab is-active' : 'panel-tab'}
           onClick={() => onTabChange('notes')}
@@ -156,7 +214,36 @@ export function ChatPanel({
           >
             📌 {pinnedSlide !== null ? `p.${pinnedSlide} 고정됨` : '고정'}
           </button>
+          <label
+            className="neighbor-picker"
+            title="질문할 때 지금 슬라이드와 함께 앞뒤 슬라이드도 LLM에게 전달해요 (슬라이드 내용이 여러 장에 이어질 때 유용해요)"
+          >
+            <span className="neighbor-label">앞뒤</span>
+            <select
+              className="picker small"
+              aria-label="함께 전달할 앞뒤 슬라이드 수"
+              value={neighbors}
+              onChange={(e) => onNeighborsChange(Number(e.target.value))}
+            >
+              {NEIGHBOR_OPTIONS.map((n) => (
+                <option key={n} value={n}>
+                  ±{n}
+                </option>
+              ))}
+            </select>
+          </label>
           <span className="spacer" />
+          {course && (
+            <a
+              className="course-badge"
+              href={courseSummaryUrl(course.course.id)}
+              target="_blank"
+              rel="noreferrer"
+              title={`과목 ‘${course.course.title}’의 ${course.index}번째 강의 — 이전 강의 요약이 LLM에게 함께 전달돼요 (클릭하면 COURSE.md)`}
+            >
+              📁 {course.course.title} · {course.index}/{course.total}강
+            </a>
+          )}
           {session && (
             <span
               className="provider-badge"
@@ -183,6 +270,8 @@ export function ChatPanel({
 
         <Composer
           targetSlide={targetSlide}
+          pageCount={doc.pageCount}
+          neighbors={neighbors}
           pinned={pinnedSlide !== null}
           running={running}
           canStop={liveTurn !== null && !study.stopping}
@@ -191,6 +280,10 @@ export function ChatPanel({
           onStop={study.stop}
           onGoToSlide={onGoToSlide}
         />
+      </div>
+
+      <div className="digest-view" hidden={tab !== 'digest'}>
+        {digestMounted && digest}
       </div>
 
       <div className="notes-view" hidden={tab !== 'notes'}>

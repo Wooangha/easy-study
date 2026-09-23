@@ -145,13 +145,13 @@ const MessageItem = memo(function MessageItem(props: MessageItemProps) {
 });
 
 function ContextLine({ message }: { message: ChatMessage }) {
-  const parts = describeContext(message.context);
-  if (parts.length === 0) return null;
+  const chips = describeContext(message.context);
+  if (chips.length === 0) return null;
   return (
     <div className="context-line" title="이 질문과 함께 LLM에게 전달된 내용">
-      {parts.map((p) => (
-        <span key={p} className="context-chip">
-          {p}
+      {chips.map((c) => (
+        <span key={c.kind} className={`context-chip chip-${c.kind}`}>
+          {c.text}
         </span>
       ))}
     </div>
@@ -176,7 +176,9 @@ function UserBubble({ message: m, onGoToSlide }: MessageItemProps) {
 
 function PrimeCard({ message: m, pageCount }: MessageItemProps) {
   const pending = m.id === PENDING_USER_ID || !m.context;
-  const extra = describeContext(m.context).filter((p) => p !== '📚 전체 슬라이드 전달');
+  const extra = describeContext(m.context)
+    .filter((c) => c.kind !== 'primed')
+    .map((c) => c.text);
   return (
     <div className="msg system-card">
       <div className="system-card-title">

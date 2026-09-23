@@ -3,7 +3,8 @@
 // Stateless: every turn resends the current provider conversation (`history`) plus this turn's
 // parts, with images inlined as base64. Two prompt-cache breakpoints keep that cheap: one at the end
 // of the first (priming) user turn — the deck — and one at the end of the current turn.
-// ANTHROPIC_BASE_URL is honoured by the SDK itself.
+// ANTHROPIC_BASE_URL is honoured by the SDK itself. ProviderRunInput.ephemeral needs no handling
+// (nothing is stored server-side) and extraReadDirs is ignored (the model has no file access).
 import Anthropic from '@anthropic-ai/sdk';
 import type {
   BetaContentBlockParam,

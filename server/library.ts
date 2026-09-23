@@ -1,19 +1,26 @@
 // The on-disk library: PDF import, the background ingest pipeline (poppler + sharp),
-// document metadata and a few filesystem helpers shared with sessions.ts.
+// document metadata, read access to course and digest files, and a few filesystem helpers
+// shared with sessions.ts / courses.ts / digest.ts.
 //
-// Layout (docs/DESIGN.md §2):
+// Layout (docs/DESIGN.md §2, §11, §12):
 //   library/<docId>/doc.json, source.pdf, slides/NNN.png, sheets/sheet-NN.png, sheets/sheets.json,
-//   text/NNN.txt, sessions/<sid>.json, notes/<sid>.md, STUDY_NOTES.md
+//   text/NNN.txt, sessions/<sid>.json, notes/<sid>.md, STUDY_NOTES.md,
+//   digest/digest.json, DIGEST.md
+//   library/courses/<courseId>/course.json, COURSE.md
+//
+// Course and digest files are *read* here (DocMeta.courseId / digestStatus and DocAssets are derived
+// from them) but written only by courses.ts and digest.ts, which import this module — never the
+// other way round.
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import sharp from 'sharp';
 import type { OverlayOptions } from 'sharp';
-import { DOC_ID_RE } from '../shared/types.ts';
-import type { DocMeta } from '../shared/types.ts';
+import { COURSE_ID_RE, DOC_ID_RE } from '../shared/types.ts';
+import type { DigestSlide, DigestStatus, DocMeta } from '../shared/types.ts';
 import { HttpError, libraryDir } from './config.ts';
-import type { DocAssets } from './internal-types.ts';
+import type { CourseContext, CourseLectureRef, CourseRecord, DigestRecord, DocAssets } from './internal-types.ts';
 
 export const POPPLER_MISSING_MESSAGE = 'poppler is not installed (brew install poppler)';
 
@@ -24,6 +31,11 @@ const SHEET_GUTTER = 8;
 const SHEET_MAX_EDGE = 1600;
 const PROGRESS_POLL_MS = 400;
 const MAX_TITLE_CHARS = 200;
+
+/** Directory of library/ that holds the courses; never a document (DOC_ID_RE would accept the name). */
+export const COURSES_DIR_NAME = 'courses';
+
+const DIGEST_STATUSES: ReadonlySet<DigestStatus> = new Set<DigestStatus>(['none', 'running', 'ready', 'error', 'aborted']);
 
 // Slides are re-rendered in place when an ingest is resumed; never serve stale decoded files.
 sharp.cache({ files: 0 });
@@ -43,6 +55,15 @@ export interface DocPaths {
   sessionsDir: string;
   notesDir: string;
   studyNotes: string;
+  digestDir: string;
+  digestJson: string;
+  digestMd: string;
+}
+
+export interface CoursePaths {
+  dir: string;
+  courseJson: string;
+  courseMd: string;
 }
 
 /** Entry of sheets/sheets.json. */
@@ -52,12 +73,17 @@ export interface SheetEntry {
   toSlide: number;
 }
 
+/** A syntactically valid document id that does not name a reserved library directory. */
+export function isDocId(docId: string): boolean {
+  return DOC_ID_RE.test(docId) && docId !== COURSES_DIR_NAME;
+}
+
 /**
  * Paths of a document directory. Throws for ids that do not match DOC_ID_RE so an
  * unvalidated id can never reach the filesystem.
  */
 export function docPaths(docId: string): DocPaths {
-  if (!DOC_ID_RE.test(docId)) throw new HttpError(404, '문서를 찾을 수 없습니다');
+  if (!isDocId(docId)) throw new HttpError(404, '문서를 찾을 수 없습니다');
   const dir = path.join(libraryDir(), docId);
   return {
     dir,
@@ -70,7 +96,22 @@ export function docPaths(docId: string): DocPaths {
     sessionsDir: path.join(dir, 'sessions'),
     notesDir: path.join(dir, 'notes'),
     studyNotes: path.join(dir, 'STUDY_NOTES.md'),
+    digestDir: path.join(dir, 'digest'),
+    digestJson: path.join(dir, 'digest', 'digest.json'),
+    digestMd: path.join(dir, 'DIGEST.md'),
   };
+}
+
+/** Absolute path of library/courses. */
+export function coursesDir(): string {
+  return path.join(libraryDir(), COURSES_DIR_NAME);
+}
+
+/** Paths of a course directory. Throws (404) for ids that do not match COURSE_ID_RE. */
+export function coursePaths(courseId: string): CoursePaths {
+  if (!COURSE_ID_RE.test(courseId)) throw new HttpError(404, '과목을 찾을 수 없습니다');
+  const dir = path.join(coursesDir(), courseId);
+  return { dir, courseJson: path.join(dir, 'course.json'), courseMd: path.join(dir, 'COURSE.md') };
 }
 
 /** 1-based page number, zero padded to 3 digits (more when the deck has > 999 pages). */
@@ -215,19 +256,47 @@ export function runPoppler(tool: string, args: string[]): Promise<ToolResult> {
 // Document metadata
 // ---------------------------------------------------------------------------
 
+/** doc.json as stored on disk: DocMeta without the fields derived from course and digest files. */
+export type StoredDocMeta = Omit<DocMeta, 'courseId' | 'digestStatus'>;
+
 const metaQueue = createKeyedQueue();
 const activeIngests = new Map<string, Promise<void>>();
 
-/** Metadata of a document, or null when the id is invalid or the document does not exist. */
-export async function getDoc(docId: string): Promise<DocMeta | null> {
-  if (!DOC_ID_RE.test(docId)) return null;
-  const meta = await readJsonFile<DocMeta>(docPaths(docId).docJson);
-  // The directory name is authoritative (a copied/renamed folder still works).
-  return meta ? { ...meta, id: docId } : null;
+function isPresent<T>(value: T | null | undefined): value is T {
+  return value !== null && value !== undefined;
 }
 
-/** All documents of the library, newest first. */
-export async function listDocs(): Promise<DocMeta[]> {
+/** Drops derived fields (they are never authoritative on disk) and fixes the id. */
+function toStoredMeta(value: StoredDocMeta & Partial<DocMeta>, docId: string): StoredDocMeta {
+  const { courseId: _courseId, digestStatus: _digestStatus, ...stored } = value;
+  // The directory name is authoritative (a copied/renamed folder still works).
+  return { ...stored, id: docId };
+}
+
+/**
+ * doc.json of a document without the derived fields — cheap, for callers that only need the
+ * title / page count. Null when the id is invalid or the document does not exist.
+ */
+export async function readStoredDoc(docId: string): Promise<StoredDocMeta | null> {
+  if (!isDocId(docId)) return null;
+  const meta = await readJsonFile<StoredDocMeta & Partial<DocMeta>>(docPaths(docId).docJson);
+  return typeof meta === 'object' && meta !== null ? toStoredMeta(meta, docId) : null;
+}
+
+/** Metadata of a document, or null when the id is invalid or the document does not exist. */
+export async function getDoc(docId: string): Promise<DocMeta | null> {
+  const stored = await readStoredDoc(docId);
+  if (!stored) return null;
+  const [courses, digest] = await Promise.all([readCourseRecords(), readDigestRecord(docId)]);
+  return withDerivedFields(stored, courseIdIndex(courses), digest);
+}
+
+function withDerivedFields(stored: StoredDocMeta, courseIds: Map<string, string>, digest: DigestRecord | null): DocMeta {
+  return { ...stored, courseId: courseIds.get(stored.id) ?? null, digestStatus: digest?.status ?? 'none' };
+}
+
+/** Names of the directories of library/ that may hold a document (library/courses excluded). */
+async function listDocDirs(): Promise<string[]> {
   let entries;
   try {
     entries = await fs.readdir(libraryDir(), { withFileTypes: true });
@@ -235,57 +304,234 @@ export async function listDocs(): Promise<DocMeta[]> {
     if (isNotFound(err)) return [];
     throw err;
   }
-  const metas = await Promise.all(
-    entries.filter((entry) => entry.isDirectory() && DOC_ID_RE.test(entry.name)).map((entry) => getDoc(entry.name)),
-  );
-  return metas
-    .filter((meta): meta is DocMeta => meta !== null)
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id));
+  return entries.filter((entry) => entry.isDirectory() && isDocId(entry.name)).map((entry) => entry.name);
+}
+
+/** doc.json of every document (without the derived fields), newest first. */
+export async function listStoredDocs(): Promise<StoredDocMeta[]> {
+  const metas = await Promise.all((await listDocDirs()).map((docId) => readStoredDoc(docId)));
+  return metas.filter(isPresent).sort((a, b) => b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id));
+}
+
+/** All documents of the library, newest first. */
+export async function listDocs(): Promise<DocMeta[]> {
+  const [stored, courses] = await Promise.all([listStoredDocs(), readCourseRecords()]);
+  const courseIds = courseIdIndex(courses);
+  return Promise.all(stored.map(async (meta) => withDerivedFields(meta, courseIds, await readDigestRecord(meta.id))));
 }
 
 /** Applies a patch to doc.json (serialized per document; `undefined` values remove the key). */
-async function updateMeta(docId: string, patch: Partial<DocMeta>): Promise<DocMeta> {
+async function updateMeta(docId: string, patch: Partial<StoredDocMeta>): Promise<StoredDocMeta> {
   return metaQueue(docId, async () => {
     const file = docPaths(docId).docJson;
-    const current = await readJsonFile<DocMeta>(file);
+    const current = await readJsonFile<StoredDocMeta & Partial<DocMeta>>(file);
     if (!current) throw new Error(`doc.json of ${docId} is missing`);
-    const next: DocMeta = { ...current, ...patch, id: docId };
+    const next = toStoredMeta({ ...current, ...patch }, docId);
     await writeJsonAtomic(file, next);
     return next;
   });
 }
 
-/** Everything the context builder needs. Throws (HttpError 404/409) unless the document is ready. */
+/**
+ * Everything the context builder needs, including the digest and the course context.
+ * Throws (HttpError 404/409) unless the document is ready.
+ */
 export async function loadDocAssets(docId: string): Promise<DocAssets> {
-  const meta = await getDoc(docId);
-  if (!meta) throw new HttpError(404, '문서를 찾을 수 없습니다');
-  if (meta.status !== 'ready') {
+  const stored = await readStoredDoc(docId);
+  if (!stored) throw new HttpError(404, '문서를 찾을 수 없습니다');
+  if (stored.status !== 'ready') {
     throw new HttpError(
       409,
-      meta.status === 'error' ? `문서 처리에 실패했습니다: ${meta.error ?? '알 수 없는 오류'}` : '문서를 아직 처리하는 중입니다',
+      stored.status === 'error' ? `문서 처리에 실패했습니다: ${stored.error ?? '알 수 없는 오류'}` : '문서를 아직 처리하는 중입니다',
     );
   }
   const paths = docPaths(docId);
-  const pageCount = meta.pageCount;
-  const texts = await Promise.all(
-    Array.from({ length: pageCount }, (_, i) =>
-      fs.readFile(path.join(paths.textDir, textFileName(i + 1, pageCount)), 'utf8').catch(() => ''),
+  const pageCount = stored.pageCount;
+  const [texts, sheetEntries, courses, digestRecord] = await Promise.all([
+    Promise.all(
+      Array.from({ length: pageCount }, (_, i) =>
+        fs.readFile(path.join(paths.textDir, textFileName(i + 1, pageCount)), 'utf8').catch(() => ''),
+      ),
     ),
-  );
-  const sheetEntries = (await readJsonFile<SheetEntry[]>(paths.sheetsJson)) ?? [];
-  const sheets = sheetEntries.map((entry) => ({
+    readJsonFile<SheetEntry[]>(paths.sheetsJson),
+    readCourseRecords(),
+    readDigestRecord(docId),
+  ]);
+  const sheets = (Array.isArray(sheetEntries) ? sheetEntries : []).map((entry) => ({
     // basename(): sheets.json is data on disk, never let it point outside the sheets dir.
     path: path.join(paths.sheetsDir, path.basename(entry.file)),
     fromSlide: entry.fromSlide,
     toSlide: entry.toSlide,
   }));
+  const courseIds = courseIdIndex(courses);
+  const meta = withDerivedFields(stored, courseIds, digestRecord);
+  const courseRecord = courses.find((course) => course.id === meta.courseId);
+  const digestSlides = (digestRecord?.slides ?? []).filter((entry) => entry.slide <= pageCount);
   return {
     meta,
     dir: paths.dir,
     texts,
     slidePath: (slide: number) => path.join(paths.slidesDir, slideFileName(slide, pageCount)),
     sheets,
+    digest: digestSlides.length > 0 ? digestSlides : null,
+    digestComplete: isDigestComplete(digestSlides, pageCount),
+    course: courseRecord ? await buildCourseContext(courseRecord, docId) : null,
   };
+}
+
+/** The course as the context builder sees it: every existing lecture in order, with its summary. */
+async function buildCourseContext(course: CourseRecord, docId: string): Promise<CourseContext> {
+  const refs = await Promise.all(
+    course.docIds.map(async (lectureId): Promise<Omit<CourseLectureRef, 'index'> | null> => {
+      const [lecture, digest] = await Promise.all([readStoredDoc(lectureId), readDigestRecord(lectureId)]);
+      // A lecture whose folder was removed by hand is skipped (the course file still lists it).
+      if (!lecture) return null;
+      return {
+        docId: lectureId,
+        title: lecture.title,
+        pageCount: lecture.pageCount,
+        dir: docPaths(lectureId).dir,
+        summary: digest?.summary ?? null,
+        hasDigest: digest ? isDigestComplete(digest.slides, lecture.pageCount) : false,
+      };
+    }),
+  );
+  const lectures: CourseLectureRef[] = refs.filter(isPresent).map((ref, i) => ({ ...ref, index: i + 1 }));
+  const current = lectures.find((lecture) => lecture.docId === docId);
+  return { id: course.id, title: course.title, lectures, currentIndex: current?.index ?? 0 };
+}
+
+// ---------------------------------------------------------------------------
+// Courses and digests — read side (written by courses.ts / digest.ts)
+// ---------------------------------------------------------------------------
+
+function normalizeCourseRecord(value: unknown, courseId: string): CourseRecord | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const raw = value as Partial<Record<keyof CourseRecord, unknown>>;
+  if (typeof raw.title !== 'string' || !Array.isArray(raw.docIds)) return null;
+  const docIds = raw.docIds.filter((id): id is string => typeof id === 'string' && isDocId(id));
+  return {
+    version: 1,
+    // The directory name is authoritative, like for documents.
+    id: courseId,
+    title: raw.title,
+    createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : '',
+    docIds: [...new Set(docIds)],
+  };
+}
+
+/** A course file, or null when the id is invalid or the course does not exist. */
+export async function readCourseRecord(courseId: string): Promise<CourseRecord | null> {
+  if (!COURSE_ID_RE.test(courseId)) return null;
+  return normalizeCourseRecord(await readJsonFile<unknown>(coursePaths(courseId).courseJson), courseId);
+}
+
+/** Oldest first (createdAt, then id) — the order of GET /api/courses and of membership conflicts. */
+export function compareCourses(a: CourseRecord, b: CourseRecord): number {
+  return a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id);
+}
+
+/** Every course of the library, oldest first. */
+export async function readCourseRecords(): Promise<CourseRecord[]> {
+  let entries;
+  try {
+    entries = await fs.readdir(coursesDir(), { withFileTypes: true });
+  } catch (err) {
+    if (isNotFound(err)) return [];
+    throw err;
+  }
+  const records = await Promise.all(
+    entries.filter((entry) => entry.isDirectory() && COURSE_ID_RE.test(entry.name)).map((entry) => readCourseRecord(entry.name)),
+  );
+  return records.filter(isPresent).sort(compareCourses);
+}
+
+/**
+ * docId → id of the course that lists it. `courses` must be oldest first: a document listed by
+ * several courses (a data error) belongs to the oldest one.
+ */
+export function courseIdIndex(courses: CourseRecord[]): Map<string, string> {
+  const index = new Map<string, string>();
+  for (const course of courses) {
+    for (const docId of course.docIds) if (!index.has(docId)) index.set(docId, course.id);
+  }
+  return index;
+}
+
+function normalizeDigestSlide(value: unknown): DigestSlide | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const raw = value as Partial<Record<keyof DigestSlide, unknown>>;
+  if (typeof raw.slide !== 'number' || !Number.isInteger(raw.slide) || raw.slide < 1) return null;
+  if (typeof raw.markdown !== 'string') return null;
+  const entry: DigestSlide = { slide: raw.slide, title: typeof raw.title === 'string' ? raw.title : '', markdown: raw.markdown };
+  if (raw.failed === true) entry.failed = true;
+  return entry;
+}
+
+/** One entry per slide (a later entry replaces an earlier one), ascending by slide. */
+export function sortDigestSlides(slides: DigestSlide[]): DigestSlide[] {
+  const bySlide = new Map<number, DigestSlide>();
+  for (const entry of slides) bySlide.set(entry.slide, entry);
+  return [...bySlide.values()].sort((a, b) => a.slide - b.slide);
+}
+
+function normalizeDigestRecord(value: unknown): DigestRecord | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const raw = value as Partial<Record<keyof DigestRecord, unknown>>;
+  const status = raw.status as DigestStatus;
+  if (!DIGEST_STATUSES.has(status) || !Array.isArray(raw.slides)) return null;
+  const record: DigestRecord = {
+    version: 1,
+    status,
+    slides: sortDigestSlides(raw.slides.map(normalizeDigestSlide).filter(isPresent)),
+    summary: typeof raw.summary === 'string' && raw.summary.trim() ? raw.summary : null,
+  };
+  if (typeof raw.provider === 'string') record.provider = raw.provider as DigestRecord['provider'];
+  if (typeof raw.model === 'string') record.model = raw.model;
+  if (typeof raw.startedAt === 'string') record.startedAt = raw.startedAt;
+  if (typeof raw.updatedAt === 'string') record.updatedAt = raw.updatedAt;
+  if (typeof raw.error === 'string' && raw.error) record.error = raw.error;
+  return record;
+}
+
+/** digest/digest.json of a document, or null when there is none (or the id is invalid). */
+export async function readDigestRecord(docId: string): Promise<DigestRecord | null> {
+  if (!isDocId(docId)) return null;
+  return normalizeDigestRecord(await readJsonFile<unknown>(docPaths(docId).digestJson));
+}
+
+/** Every slide 1..pageCount has a non-failed digest entry. */
+export function isDigestComplete(slides: DigestSlide[], pageCount: number): boolean {
+  if (pageCount < 1) return false;
+  const done = new Set(slides.filter((entry) => !entry.failed).map((entry) => entry.slide));
+  for (let n = 1; n <= pageCount; n++) if (!done.has(n)) return false;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Markdown helpers (notes, DIGEST.md, COURSE.md)
+// ---------------------------------------------------------------------------
+
+/** Shifts ATX headings down by `levels` (max h6) so they nest under the file's own headings; code fences are left alone. */
+export function demoteHeadings(markdown: string, levels: number): string {
+  let fence: string | null = null;
+  return markdown
+    .split('\n')
+    .map((line) => {
+      const fenceMatch = /^\s{0,3}(`{3,}|~{3,})/.exec(line);
+      if (fenceMatch) {
+        const marker = fenceMatch[1][0];
+        if (fence === null) fence = marker;
+        else if (fence === marker) fence = null;
+        return line;
+      }
+      if (fence !== null) return line;
+      const heading = /^(#{1,6})(\s)/.exec(line);
+      if (!heading) return line;
+      const level = Math.min(6, heading[1].length + levels);
+      return '#'.repeat(level) + line.slice(heading[1].length);
+    })
+    .join('\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -311,8 +557,8 @@ function titleFromFileName(fileName: string): string {
   return (withoutExt || fileName).slice(0, MAX_TITLE_CHARS);
 }
 
-/** ascii `[a-z0-9-]`, max 40 chars, fallback `doc`. */
-export function slugify(title: string): string {
+/** ascii `[a-z0-9-]`, max 40 chars, `fallback` (default `doc`) when nothing ascii is left. */
+export function slugify(title: string, fallback = 'doc'): string {
   const slug = title
     .normalize('NFKD')
     .replace(/[̀-ͯ]/g, '') // strip combining accents: é -> e
@@ -321,7 +567,7 @@ export function slugify(title: string): string {
     .replace(/^-+|-+$/g, '')
     .slice(0, 40)
     .replace(/-+$/, '');
-  return slug || 'doc';
+  return slug || fallback;
 }
 
 /**
@@ -348,7 +594,7 @@ export async function importPdf(bytes: Buffer, fileName: string): Promise<DocMet
 
   const paths = docPaths(docId);
   await fs.writeFile(paths.sourcePdf, bytes);
-  const meta: DocMeta = {
+  const meta: StoredDocMeta = {
     id: docId,
     title,
     fileName: name,
@@ -360,7 +606,8 @@ export async function importPdf(bytes: Buffer, fileName: string): Promise<DocMet
   };
   await writeJsonAtomic(paths.docJson, meta);
   void startIngest(docId);
-  return meta;
+  // A brand-new document is in no course (courses.ts adds it afterwards) and has no digest.
+  return { ...meta, courseId: null, digestStatus: 'none' };
 }
 
 // ---------------------------------------------------------------------------
@@ -383,7 +630,7 @@ export function waitForIngest(docId: string): Promise<void> {
 
 /** Re-processes documents left in `processing` (e.g. the server stopped mid-ingest). */
 export async function resumePendingIngests(): Promise<void> {
-  const pending = (await listDocs()).filter((doc) => doc.status === 'processing');
+  const pending = (await listStoredDocs()).filter((doc) => doc.status === 'processing');
   // One at a time: rendering is CPU heavy and this runs while the server starts.
   for (const doc of pending) {
     console.log(`[library] resuming ingest of ${doc.id}`);

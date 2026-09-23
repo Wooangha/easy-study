@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { DocMeta, ProviderId, ProviderInfo, SessionSummary } from '../../../shared/types.ts';
+import type { Course, DocMeta, ProviderId, ProviderInfo, SessionSummary } from '../../../shared/types.ts';
 import { notesMarkdownUrl } from '../api.ts';
 import type { ProviderChoice } from '../hooks/useProviderChoice.ts';
 import { formatTime, providerWithModel } from '../lib/format.ts';
@@ -11,8 +11,12 @@ const CUSTOM_MODEL = '__custom__';
 interface TopBarProps {
   docs: DocMeta[] | null;
   doc: DocMeta | null;
+  /** Courses in creation order (null while loading / unavailable). */
+  courses: Course[] | null;
   onSelectDoc: (docId: string | null) => void;
   onUploadClick: () => void;
+  /** Course that "＋ PDF 추가" uploads into (null = uncategorized). */
+  uploadCourse: Course | null;
 
   /** Session controls are shown only for a ready doc. */
   sessions: SessionSummary[] | null;
@@ -29,13 +33,65 @@ interface TopBarProps {
   hasNotes: boolean;
 }
 
-function docOptionLabel(d: DocMeta): string {
+function docOptionLabel(d: DocMeta, index?: number): string {
+  const name = index === undefined ? d.title : `${index}. ${d.title}`;
   if (d.status === 'processing') {
     const pct = d.pageCount > 0 ? Math.round((d.progress / d.pageCount) * 100) : 0;
-    return `${d.title} (처리 중 ${pct}%)`;
+    return `${name} (처리 중 ${pct}%)`;
   }
-  if (d.status === 'error') return `${d.title} (오류)`;
-  return `${d.title} · ${d.pageCount}장`;
+  if (d.status === 'error') return `${name} (오류)`;
+  const badge = d.digestStatus === 'ready' ? ' · ✓ 정리본' : d.digestStatus === 'running' ? ' · ⏳ 정리 중' : '';
+  return `${name} · ${d.pageCount}장${badge}`;
+}
+
+/** Document picker options: one <optgroup> per course (lectures in order) + "미분류" (only when courses exist). */
+function DocOptions({ docs, courses }: { docs: DocMeta[]; courses: Course[] }) {
+  if (courses.length === 0) {
+    return docs.map((d) => (
+      <option key={d.id} value={d.id}>
+        {docOptionLabel(d)}
+      </option>
+    ));
+  }
+  const byId = new Map(docs.map((d) => [d.id, d]));
+  const placed = new Set<string>();
+  const groups = courses.map((c) => {
+    const lectures = c.docIds
+      .filter((id) => !placed.has(id))
+      .map((id) => byId.get(id))
+      .filter((d): d is DocMeta => d !== undefined);
+    for (const d of lectures) placed.add(d.id);
+    return (
+      <optgroup key={c.id} label={`📁 ${c.title}`}>
+        {lectures.length === 0 ? (
+          <option disabled value={`__empty:${c.id}`}>
+            (강의 없음)
+          </option>
+        ) : (
+          lectures.map((d, i) => (
+            <option key={d.id} value={d.id}>
+              {docOptionLabel(d, i + 1)}
+            </option>
+          ))
+        )}
+      </optgroup>
+    );
+  });
+  const rest = docs.filter((d) => !placed.has(d.id));
+  return (
+    <>
+      {groups}
+      {rest.length > 0 && (
+        <optgroup label="미분류">
+          {rest.map((d) => (
+            <option key={d.id} value={d.id}>
+              {docOptionLabel(d)}
+            </option>
+          ))}
+        </optgroup>
+      )}
+    </>
+  );
 }
 
 export function TopBar(props: TopBarProps) {
@@ -59,12 +115,8 @@ export function TopBar(props: TopBarProps) {
         }}
       >
         <option value="">{docs && docs.length > 0 ? '📚 문서 선택…' : '📚 문서 없음'}</option>
-        {(docs ?? []).map((d) => (
-          <option key={d.id} value={d.id}>
-            {docOptionLabel(d)}
-          </option>
-        ))}
-        <option value={UPLOAD}>＋ PDF 추가</option>
+        <DocOptions docs={docs ?? []} courses={props.courses ?? []} />
+        <option value={UPLOAD}>{props.uploadCourse ? `＋ PDF 추가 (📁 ${props.uploadCourse.title})` : '＋ PDF 추가'}</option>
       </select>
 
       {ready && (

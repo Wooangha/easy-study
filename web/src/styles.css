@@ -222,6 +222,35 @@ kbd {
   padding: 0;
 }
 
+.icon-btn.small {
+  width: 26px;
+  height: 26px;
+  font-size: 11px;
+  border-radius: 6px;
+}
+
+.ghost-btn.accent {
+  color: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+.ghost-btn.accent:hover:not(:disabled) {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.ghost-btn.danger {
+  color: var(--danger);
+  border-color: var(--danger);
+  font-weight: 600;
+}
+
+.ghost-btn.danger:hover:not(:disabled) {
+  background: var(--danger-soft);
+  border-color: var(--danger);
+}
+
 .primary-btn {
   background: var(--accent);
   border-color: var(--accent);
@@ -230,8 +259,17 @@ kbd {
   padding: 8px 16px;
 }
 
-.primary-btn:hover {
+.primary-btn:hover:not(:disabled) {
   background: var(--accent-strong);
+}
+
+.primary-btn:disabled {
+  opacity: 0.5;
+}
+
+.primary-btn.small {
+  padding: 5px 12px;
+  font-size: 13px;
 }
 
 .picker,
@@ -248,6 +286,13 @@ kbd {
 
 .picker:hover {
   border-color: var(--border-strong);
+}
+
+.picker.small {
+  height: 26px;
+  padding: 0 4px;
+  font-size: 12px;
+  border-radius: 6px;
 }
 
 .picker:focus,
@@ -656,9 +701,25 @@ kbd {
   border-radius: 999px;
   background: var(--accent-soft);
   color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.tab-count.is-ok {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.tab-count.is-warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.tab-count.is-running {
+  font-weight: 600;
 }
 
 .chat-view,
+.digest-view,
 .notes-view {
   flex: 1;
   min-height: 0;
@@ -670,9 +731,41 @@ kbd {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 6px 8px;
   padding: 7px 12px;
   border-bottom: 1px solid var(--border);
+}
+
+.neighbor-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.neighbor-label {
+  white-space: nowrap;
+}
+
+.course-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  border: 1px solid var(--user-border);
+  color: var(--accent);
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 45%;
+}
+
+.course-badge:hover {
+  border-color: var(--accent);
 }
 
 .page-indicator {
@@ -824,6 +917,12 @@ kbd {
   border-radius: 999px;
   padding: 0 8px;
   line-height: 1.7;
+  font-variant-numeric: tabular-nums;
+}
+
+.context-chip.chip-attached {
+  color: var(--accent);
+  background: var(--accent-soft);
 }
 
 .system-card {
@@ -1110,6 +1209,13 @@ kbd {
   color: var(--accent);
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
+}
+
+.target-neighbors {
+  margin-left: 3px;
+  font-size: 10.5px;
+  font-weight: 600;
+  opacity: 0.75;
 }
 
 .target-chip.is-pinned {
@@ -1626,10 +1732,37 @@ kbd {
     transform 0.12s;
 }
 
-button.doc-card:hover {
+.doc-card:not(.is-uploading):hover {
   border-color: var(--accent);
   box-shadow: var(--shadow);
   transform: translateY(-1px);
+}
+
+.doc-card-main {
+  display: flex;
+  flex-direction: column;
+  text-align: left;
+  padding: 0;
+  border: 0;
+  background: none;
+  flex: 1;
+  min-width: 0;
+}
+
+.doc-card-foot {
+  padding: 0 12px 12px;
+}
+
+.doc-card-foot .picker {
+  width: 100%;
+  height: 28px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.doc-badges {
+  display: flex;
+  gap: 4px;
 }
 
 .doc-card.is-uploading {
@@ -1768,6 +1901,577 @@ button.doc-card:hover {
   font-size: 34px;
 }
 
+/* ---------------------------------------------------------------- digest (정리본) */
+
+.digest-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.segmented {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+.segmented button {
+  border: 0;
+  background: none;
+  border-radius: 6px;
+  padding: 3px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.segmented button:hover {
+  color: var(--text);
+}
+
+.segmented button[aria-pressed='true'] {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
+}
+
+.digest-status {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+  font-size: 12px;
+}
+
+.digest-status-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+
+.digest-status-label {
+  font-weight: 700;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.digest-status.status-ready .digest-status-label {
+  color: var(--ok);
+}
+
+.digest-status.status-error .digest-status-label,
+.digest-status.status-aborted .digest-status-label {
+  color: var(--warn);
+}
+
+.digest-status .msg-error,
+.digest-status .msg-note {
+  margin-top: 0;
+}
+
+.digest-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.digest-progress .progress {
+  flex: 1;
+}
+
+.digest-status.status-running .progress-fill {
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.35) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.6s linear infinite;
+  background-color: var(--accent);
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+.digest-file {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+}
+
+.digest-hint {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.digest-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.digest-intro {
+  margin: 24px auto;
+  max-width: 440px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 10px;
+  color: var(--text-2);
+}
+
+.digest-intro h3 {
+  margin: 0;
+  font-size: 17px;
+  color: var(--text);
+}
+
+.digest-intro p {
+  margin: 0;
+}
+
+.digest-intro .tips {
+  margin-top: 0;
+  align-self: stretch;
+}
+
+.digest-entry {
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 10px 14px 12px;
+  transition:
+    border-color 0.15s,
+    box-shadow 0.15s;
+}
+
+.digest-entry.is-clickable {
+  cursor: pointer;
+}
+
+.digest-entry.is-clickable:hover {
+  border-color: var(--border-strong);
+}
+
+.digest-entry.is-focused {
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+
+.digest-entry.is-failed {
+  border-style: dashed;
+}
+
+.digest-entry-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.digest-entry-head .slide-chip {
+  flex: none;
+  font-size: 12px;
+  padding: 0 9px;
+}
+
+.digest-entry-title {
+  font-weight: 700;
+  font-size: 14px;
+  line-height: 1.4;
+  min-width: 0;
+}
+
+.digest-entry .msg-error {
+  margin: 0 0 8px;
+}
+
+.digest-body .md {
+  font-size: 14px;
+}
+
+/* Headings inside an entry are sub-sections of the slide: keep them modest. */
+.digest-body .md :is(h1, h2, h3, h4, h5, h6) {
+  font-size: 1em;
+  margin: 0.9em 0 0.35em;
+}
+
+.digest-missing {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.digest-missing.is-focused {
+  border-color: var(--accent);
+}
+
+.digest-nav {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.digest-summary {
+  flex: none;
+  border: 1px solid var(--user-border);
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+  padding: 10px 14px 12px;
+}
+
+.digest-summary h3 {
+  margin: 0 0 6px;
+  font-size: 14px;
+}
+
+.digest-summary.compact {
+  background: var(--surface-2);
+  border-color: var(--border);
+  padding: 0;
+}
+
+.digest-summary.compact summary {
+  cursor: pointer;
+  padding: 8px 12px;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.digest-summary.compact[open] summary {
+  border-bottom: 1px solid var(--border);
+}
+
+.digest-summary.compact > .md {
+  padding: 8px 14px 12px;
+}
+
+.digest-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1.7;
+  white-space: nowrap;
+  vertical-align: 1px;
+}
+
+.doc-badges .digest-badge {
+  margin-left: 0;
+}
+
+.digest-badge.is-ready {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.digest-badge.is-running {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.digest-badge.is-partial {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+/* ---------------------------------------------------------------- courses (과목) */
+
+.dropzone-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.upload-target {
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.upload-target .picker {
+  max-width: 60vw;
+}
+
+.library-section-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin-top: 14px;
+}
+
+.library-section-head .library-heading {
+  margin: 0;
+}
+
+.library-section-head .ghost-btn {
+  align-self: center;
+}
+
+.course-hint {
+  margin: 0;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  line-height: 1.6;
+}
+
+.course-create {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--ring);
+}
+
+.course-icon {
+  font-size: 18px;
+  line-height: 1;
+}
+
+.course-title-input {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--surface);
+  padding: 0 8px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.course-title-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+
+.course-card {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  transition:
+    border-color 0.12s,
+    background 0.12s;
+}
+
+.course-card.is-over {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.course-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.course-title {
+  border: 0;
+  background: none;
+  padding: 2px 4px;
+  border-radius: 6px;
+  font-size: 15px;
+  font-weight: 700;
+  text-align: left;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.course-title:hover {
+  background: var(--surface-2);
+}
+
+.course-title-edit {
+  font-size: 12px;
+  color: var(--muted);
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+.course-title:hover .course-title-edit,
+.course-title:focus-visible .course-title-edit {
+  opacity: 1;
+}
+
+.course-count {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.course-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.lecture-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+}
+
+.lecture-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+}
+
+.lecture-row + .lecture-row {
+  border-top: 1px solid var(--border);
+}
+
+.lecture-index {
+  flex: none;
+  width: 22px;
+  text-align: center;
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.lecture-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px;
+  margin: -4px 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: none;
+  text-align: left;
+}
+
+.lecture-open:hover {
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+
+.lecture-thumb {
+  flex: none;
+  width: 72px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--surface-3);
+  font-size: 16px;
+}
+
+.lecture-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.lecture-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.lecture-main .doc-sub {
+  white-space: normal;
+}
+
+.lecture-row.is-uploading .lecture-main {
+  padding: 4px 0;
+}
+
+.lecture-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.course-empty {
+  display: block;
+  width: calc(100% - 24px);
+  margin: 12px;
+  padding: 18px 12px;
+  border: 1.5px dashed var(--border-strong);
+  border-radius: 10px;
+  background: none;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.course-empty:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.course-drop-hint {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--accent-soft) 88%, transparent);
+  border: 2px dashed var(--accent);
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 14px;
+  pointer-events: none;
+}
+
 /* ---------------------------------------------------------------- overlays */
 
 .drop-overlay {
@@ -1788,6 +2492,14 @@ button.doc-card:hover {
   box-shadow: var(--shadow-lg);
   font-size: 16px;
   font-weight: 700;
+  text-align: center;
+}
+
+.drop-overlay-sub {
+  margin-top: 4px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--muted);
 }
 
 .toaster {
@@ -1870,6 +2582,38 @@ button.doc-card:hover {
 
   .msg-user {
     max-width: 94%;
+  }
+
+  .course-badge {
+    max-width: 60%;
+  }
+
+  /* Stacked layout: the right pane is short, keep the digest status block compact. */
+  .digest-hint,
+  .digest-file .path {
+    display: none;
+  }
+}
+
+@media (max-width: 560px) {
+  .lecture-row {
+    flex-wrap: wrap;
+  }
+
+  .lecture-open {
+    flex-basis: calc(100% - 30px);
+  }
+
+  .lecture-actions {
+    margin-left: 30px;
+  }
+
+  .lecture-thumb {
+    width: 56px;
+  }
+
+  .library-inner {
+    padding: 20px 12px 40px;
   }
 }
 

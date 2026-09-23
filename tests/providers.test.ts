@@ -11,8 +11,8 @@ import path from 'node:path';
 import { after, afterEach, before, beforeEach, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import type { Part, Provider, ProviderRunInput, ProviderRunResult } from '../server/providers/types.ts';
-import { claudeArgs, claudeCodeProvider } from '../server/providers/claudeCode.ts';
-import { codexArgs, codexPrompt, codexProvider } from '../server/providers/codex.ts';
+import { claudeArgs, claudeCodeProvider, toolStatus } from '../server/providers/claudeCode.ts';
+import { CodexStreamState, codexArgs, codexPrompt, codexProvider } from '../server/providers/codex.ts';
 import { anthropicApiProvider, buildAnthropicRequest } from '../server/providers/anthropicApi.ts';
 import { buildOpenAIRequest, openaiApiProvider } from '../server/providers/openaiApi.ts';
 import { clearProviderInfoCache, getProvider, listProviders, providerInfos } from '../server/providers/index.ts';
@@ -96,6 +96,7 @@ async function run(
   provider: Provider,
   overrides: Partial<ProviderRunInput> = {},
   onDelta?: (text: string, controller: AbortController) => void,
+  onStatus?: (text: string, controller: AbortController) => void,
 ): Promise<RunOutcome> {
   const controller = new AbortController();
   const deltas: string[] = [];
@@ -113,7 +114,10 @@ async function run(
         deltas.push(t);
         onDelta?.(t, controller);
       },
-      onStatus: (t) => statuses.push(t),
+      onStatus: (t) => {
+        statuses.push(t);
+        onStatus?.(t, controller);
+      },
       ...overrides,
     });
     return { result, deltas, statuses };
@@ -300,6 +304,57 @@ describe('claude-code provider', () => {
     assert.equal(args[args.length - 2], '--session-id');
     assert.match(args[args.length - 1], UUID_RE);
   });
+
+  test('ephemeral: --no-session-persistence without --session-id; the reported session id is returned', async () => {
+    const out = await run(claudeCodeProvider, { ephemeral: true, model: 'haiku' });
+    assert.ifError(out.error);
+    const rec = record();
+    assert.deepEqual(rec.argv.slice(-3), ['--model', 'haiku', '--no-session-persistence']);
+    assert.ok(!rec.argv.includes('--session-id'));
+    assert.ok(!rec.argv.includes('--resume'));
+    assert.deepEqual(out.result?.resume, { cliSessionId: 'fake-ephemeral-session' });
+    assert.equal(out.result?.text, '안녕 세계\n\n두 번째 블록');
+  });
+
+  test('ephemeral without a reported session id resolves with an empty resume handle', async () => {
+    process.env.FAKE_CLI_MODE = 'no-session-id';
+    const out = await run(claudeCodeProvider, { ephemeral: true });
+    assert.ifError(out.error);
+    assert.deepEqual(out.result?.resume, {});
+  });
+
+  test('extraReadDirs: one --add-dir per existing directory (deduplicated), before the session flags', async () => {
+    const other = path.join(workDir, 'lectures', 'l6-parsing-2');
+    const third = path.join(workDir, 'lectures', 'l8-bottom-up');
+    fs.mkdirSync(other, { recursive: true });
+    fs.mkdirSync(third, { recursive: true });
+    const out = await run(claudeCodeProvider, {
+      extraReadDirs: [other, '', path.join(workDir, 'lectures', 'deleted'), third, other],
+      resume: { cliSessionId: 'sess-9' },
+      model: 'opus',
+    });
+    assert.ifError(out.error);
+    const argv = record().argv;
+    const at = argv.indexOf('--strict-mcp-config');
+    assert.deepEqual(argv.slice(at + 1), ['--add-dir', other, '--add-dir', third, '--model', 'opus', '--resume', 'sess-9']);
+  });
+
+  test('claudeArgs: ephemeral + resume keeps --resume; no extra dirs means no --add-dir', () => {
+    const args = claudeArgs({ systemPrompt: 's', model: '', resumeId: 'r1', ephemeral: true, addDirs: [] });
+    assert.deepEqual(args.slice(-3), ['--no-session-persistence', '--resume', 'r1']);
+    assert.ok(!args.includes('--add-dir'));
+    assert.ok(!args.includes('--session-id'));
+  });
+
+  test('tool status shows paths relative to the doc dir, including other lectures', () => {
+    const cwd = '/library/l7-parsing-abc123';
+    assert.equal(toolStatus('Read', { file_path: `${cwd}/slides/012.png` }, cwd), '파일 읽는 중: slides/012.png');
+    assert.equal(
+      toolStatus('Read', { file_path: '/library/l6-parsing-def456/DIGEST.md' }, cwd),
+      '파일 읽는 중: ../l6-parsing-def456/DIGEST.md',
+    );
+    assert.equal(toolStatus('Read', { file_path: '/etc/hosts' }, cwd), '파일 읽는 중: /etc/hosts');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -337,10 +392,16 @@ describe('codex provider', () => {
     assert.ok(second > first && second > rec.stdin.indexOf('Full-resolution image of slide 3:'));
     assert.ok(rec.stdin.trimEnd().endsWith('이게 뭐야?'));
 
-    assert.deepEqual(out.deltas, ['첫 번째 메시지', '\n\n두 번째 메시지']);
-    assert.equal(out.result?.text, '첫 번째 메시지\n\n두 번째 메시지');
+    // Only the last agent message is the answer; earlier ones become status lines.
+    assert.deepEqual(out.deltas, ['최종 답변입니다.']);
+    assert.equal(out.result?.text, '최종 답변입니다.');
     assert.deepEqual(out.result?.resume, { cliSessionId: 'thread-new-1' });
-    assert.deepEqual(out.statuses, ['생각하는 중…', "명령 실행 중: bash -lc 'ls slides'"]);
+    assert.deepEqual(out.statuses, [
+      '생각하는 중…',
+      '요청한 파일을 확인할게요.',
+      "명령 실행 중: bash -lc 'ls slides'",
+      '중간 메시지',
+    ]);
   });
 
   test("resume: 'exec resume <id> -', sandbox via -c, no -C, no -m, no instructions", async () => {
@@ -388,7 +449,15 @@ describe('codex provider', () => {
     process.env.FAKE_CLI_MODE = 'error-recovered';
     const out = await run(codexProvider);
     assert.ifError(out.error);
-    assert.equal(out.result?.text, '첫 번째 메시지\n\n두 번째 메시지');
+    assert.equal(out.result?.text, '최종 답변입니다.');
+  });
+
+  test('a stream that ends without turn.completed still delivers the last message', async () => {
+    process.env.FAKE_CLI_MODE = 'no-turn-completed';
+    const out = await run(codexProvider);
+    assert.ifError(out.error);
+    assert.deepEqual(out.deltas, ['끝 이벤트 없는 답변']);
+    assert.equal(out.result?.text, '끝 이벤트 없는 답변');
   });
 
   test('non-zero exit rejects with the stderr tail', async () => {
@@ -405,9 +474,59 @@ describe('codex provider', () => {
 
   test('abort kills the child and rejects with AbortError', async () => {
     process.env.FAKE_CLI_MODE = 'hang';
-    const out = await run(codexProvider, {}, (_t, controller) => controller.abort());
+    const out = await run(codexProvider, {}, undefined, (_t, controller) => controller.abort());
     assert.equal(out.error?.name, 'AbortError');
+    assert.deepEqual(out.deltas, [], 'an unconfirmed message is never streamed as the answer');
+    assert.equal(out.statuses[0], '부분');
     assertDead(record().pid);
+  });
+
+  test('ephemeral: --ephemeral on a new conversation; extraReadDirs adds no flags', async () => {
+    const out = await run(codexProvider, { ephemeral: true, extraReadDirs: ['/library/other-lecture'] });
+    assert.ifError(out.error);
+    assert.deepEqual(record().argv, [
+      'exec',
+      '--json',
+      '--skip-git-repo-check',
+      '--ephemeral',
+      '--sandbox',
+      'read-only',
+      '-C',
+      workDir,
+      '-i',
+      sheetPng,
+      '-i',
+      slidePng,
+    ]);
+    assert.deepEqual(out.result?.resume, { cliSessionId: 'thread-new-1' });
+  });
+
+  test('ephemeral runs do not need a thread id', async () => {
+    process.env.FAKE_CLI_MODE = 'no-thread';
+    const out = await run(codexProvider, { ephemeral: true });
+    assert.ifError(out.error);
+    assert.deepEqual(out.result?.resume, {});
+    assert.equal(out.result?.text, '최종 답변입니다.');
+  });
+
+  test('CodexStreamState: a lone message is the answer; a preamble is shown once as status', () => {
+    const deltas: string[] = [];
+    const statuses: string[] = [];
+    const state = new CodexStreamState((t) => deltas.push(t), (t) => statuses.push(t));
+    state.handle({ type: 'item.completed', item: { type: 'agent_message', text: "I'll check the requested file." } });
+    state.handle({ type: 'item.started', item: { type: 'command_execution', command: 'cat ../l6/DIGEST.md' } });
+    state.handle({ type: 'item.started', item: { type: 'reasoning' } });
+    assert.deepEqual(deltas, []);
+    assert.deepEqual(statuses, ["I'll check the requested file.", '명령 실행 중: cat ../l6/DIGEST.md', '생각하는 중…']);
+    // No later message: the preamble turns out to be the answer after all.
+    state.handle({ type: 'turn.completed' });
+    assert.deepEqual(deltas, ["I'll check the requested file."]);
+    assert.equal(state.text, "I'll check the requested file.");
+
+    const long = new CodexStreamState(() => {}, (t) => statuses.push(t));
+    long.handle({ type: 'item.completed', item: { type: 'agent_message', text: `${'가'.repeat(300)}\n둘째 줄` } });
+    long.handle({ type: 'item.completed', item: { type: 'agent_message', text: '답' } });
+    assert.equal(statuses[statuses.length - 1], `${'가'.repeat(200)}…`);
   });
 
   test('codexArgs / codexPrompt helpers', () => {
@@ -420,6 +539,10 @@ describe('codex provider', () => {
       '-C',
       '/d',
     ]);
+    assert.ok(
+      !codexArgs({ cwd: '/d', model: '', images: [], threadId: 't', ephemeral: true }).includes('--ephemeral'),
+      '--ephemeral is only passed when starting a conversation',
+    );
     const { prompt, images } = codexPrompt([{ type: 'text', text: 'only text' }], null);
     assert.equal(prompt, 'only text');
     assert.deepEqual(images, []);
@@ -697,7 +820,17 @@ describe('openai-api provider', () => {
     const params = await buildOpenAIRequest({ systemPrompt: 's', parts: parts(), resume: null, model: '' });
     assert.equal(params.previous_response_id, undefined);
     assert.equal(params.model, 'gpt-test');
+    assert.equal(params.store, true);
     assert.equal(openaiApiProvider.defaultModel, 'gpt-test');
+  });
+
+  test('ephemeral runs are not stored; extraReadDirs is ignored', async () => {
+    handler = (_req, res) => sse(res, openaiEvents('resp_9'));
+    const out = await run(openaiApiProvider, { ephemeral: true, extraReadDirs: ['/library/other'] });
+    assert.ifError(out.error);
+    assert.equal(requests[0].body.store, false);
+    assert.equal(JSON.stringify(requests[0].body).includes('/library/other'), false);
+    assert.deepEqual(out.result?.resume, { previousResponseId: 'resp_9' });
   });
 
   test('response.failed rejects', async () => {

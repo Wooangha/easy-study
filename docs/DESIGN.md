@@ -308,3 +308,137 @@ Cross-module functions (exact signatures):
   `listDocs()`, `getDoc(docId)`, `importPdf(bytes: Buffer, fileName: string): Promise<DocMeta>`, `resumePendingIngests()`.
 - `server/sessions.ts`: `createSession`, `getSession`, `saveSession`, `listSessions`, `deleteSession`,
   `toSummary`, `writeNotes(docId)`, `buildNotes(docId): Promise<NotesResponse>`.
+
+---
+
+# Round 2 additions (neighbors, digest, courses)
+
+These sections extend/override the ones above. Contract changes are already in `shared/types.ts`,
+`server/internal-types.ts` and `server/providers/types.ts`.
+
+## 10. Neighbor slides (locality)
+
+Lecture slides often continue across pages, so each turn feeds the focused slide **and** the
+`neighbors` slides before and after it (`BuildTurnInput.neighbors`, clamped to 0..3 and to the deck;
+request field `neighbors`, default `ContextSettings.neighborWindow` = 1).
+
+`buildTurn` changes (replaces FOCUS in §5):
+```
+window = [max(1, slide-n) .. min(M, slide+n)]
+newSlides    = window slides NOT in state.recentSlides (all of them when (re)priming)
+reusedSlides = the rest
+cost = |newSlides|; rollover when state.primed && state.imagesSent + cost > maxImagesPerConversation
+FOCUS(window):
+  "The student is currently looking at slide N of M." +
+  (n > 0) "Slides a–b are included for context because lecture slides often continue across pages; answer about slide N unless asked otherwise."
+  for s in window ascending:
+     label "Slide s" (+ " — CURRENT" for s == N)
+     new    → full-resolution image (detail 'high') + that slide's material (digest entry if present, else extracted text)
+     reused → "(Slide s's image was already provided earlier in this conversation.)"
+nextState.recentSlides = [N, ...other window slides (nearest first), ...previous recentSlides] deduped, sliced to recentWindow
+nextState.imagesSent += |newSlides|
+ContextInfo.attachedSlides = newSlides (ascending), reusedSlides = reused (ascending)
+```
+Sequential reading therefore costs about one new image per step. `recentWindow` default becomes 8.
+
+## 11. Digest ("정리본")
+
+Goal (user request): feed the whole deck once and turn it into reusable **text**: a careful per-slide
+transcription + explanation produced by an LLM that looks at every slide image. It is saved and reused:
+priming later sessions (text instead of overview images — cheaper/faster, and it fixes symbols that
+pdftotext garbles, e.g. α ε ∪ ∈), the focused-slide material, the course context (§12), and the student
+reads it in the UI next to the focused slide.
+
+Storage: `library/<docId>/digest/digest.json` (`DigestRecord`), `library/<docId>/DIGEST.md`.
+
+Job (`server/digest.ts`, one job per document at a time, persisted after every batch so it survives crashes/restarts):
+1. Slides to do = all (force) or those without a non-failed entry. Split into batches of `DIGEST_BATCH_SIZE` (4) consecutive slides.
+2. Run batches with concurrency `EASY_STUDY_DIGEST_CONCURRENCY` (default 2). Each batch = one provider call with
+   `resume: null`, `ephemeral: true`, `history: []`, the digest system prompt and `buildDigestBatchParts(...)`
+   (the batch's full-resolution slide images + their extracted text + deck/course title).
+   Parse with `parseDigestOutput(text, expectedSlides)`. Slides missing from the output are retried once in a
+   smaller batch (1 slide each); if still missing they are stored with `failed: true` and a placeholder.
+3. When every slide has an entry, one more call with `buildLectureSummaryParts(...)` (text only: the whole digest)
+   → `summary` (Korean, ≤ ~1500 chars: topics, key definitions/notation, algorithms, connections).
+   A summary failure does not fail the digest (status stays 'ready', `error` explains).
+4. Status: running → ready | error (a batch threw and nothing could continue) | aborted (`POST .../digest/abort`).
+   On server start, a record left in 'running' becomes 'aborted' (the user can resume; done slides are kept).
+5. After every batch: rewrite `DIGEST.md` and, if the doc is in a course, the course's `COURSE.md`.
+
+Model output format (enforced by the prompt, parsed leniently — tolerate extra text, Markdown fences, `**`, spacing):
+```
+<<<SLIDE 5>>>
+TITLE: Predictive Parsing
+<markdown body: transcription (LaTeX math $...$, Markdown tables, code fences), figure descriptions,
+ then a final line starting with "핵심:" with a 1–2 sentence takeaway in Korean>
+<<<SLIDE 6>>>
+...
+```
+`server/digestPrompt.ts` (owned by the context/providers agent) exports:
+`DIGEST_BATCH_SIZE`, `digestSystemPrompt()`, `buildDigestBatchParts({ deckTitle, pageCount, courseTitle, slides: [{ slide, imagePath, text }] }): Part[]`,
+`parseDigestOutput(output: string, expectedSlides: number[]): DigestSlide[]` (one entry per expected slide, missing → `failed: true`),
+`lectureSummarySystemPrompt()`, `buildLectureSummaryParts({ deckTitle, courseTitle, digest }): Part[]`.
+
+`DIGEST.md`: `# <title> — 정리본`, the summary (if any) under `## 강의 요약`, then per slide
+`## Slide N · <title>` + `![slide N](slides/NNN.png)` + markdown (headings inside bodies demoted like notes).
+
+Auto start: `POST /sessions` starts a digest job with the session's provider/model when the document's
+digest status is `'none'` (disable with `EASY_STUDY_AUTO_DIGEST=0`). The UI can (re)start it with any provider.
+
+HTTP:
+| GET `/api/docs/:docId/digest` | – | `DigestInfo` |
+| POST `/api/docs/:docId/digest` | `StartDigestRequest` | 202 `DigestInfo` (409 if running; 400 provider unavailable) |
+| POST `/api/docs/:docId/digest/abort` | – | 204 |
+| GET `/api/docs/:docId/digest.md` | – | `text/markdown` |
+
+Context use (context.ts): material for slide s = digest entry markdown (if present and not failed) else extracted text.
+PRIMING with `digestComplete`: header says the per-slide material is a transcription made from the slide images;
+sheets only if `primeWithImages === 'always'` (or 'auto' and !digestComplete). DocAssets.digest/digestComplete are
+filled by `loadDocAssets`.
+
+## 12. Courses ("과목" folders)
+
+A course is an ordered list of lecture documents. Storage: `library/courses/<courseId>/course.json` (`CourseRecord`),
+`library/courses/<courseId>/COURSE.md`. Course id = slug(title) + '-' + 6 hex (COURSE_ID_RE). Membership's single
+source of truth is the course files; `DocMeta.courseId` is derived when docs are listed (a doc in several courses
+= data error → first course by createdAt wins). `listDocs` must ignore `library/courses`.
+
+HTTP:
+| GET `/api/courses` | – | `Course[]` (createdAt ascending) |
+| POST `/api/courses` | `CreateCourseRequest` | 201 `Course` |
+| PATCH `/api/courses/:courseId` | `UpdateCourseRequest` | `Course` (400 unknown doc ids / duplicates) |
+| DELETE `/api/courses/:courseId` | – | 204 (lectures are kept, become uncategorized) |
+| GET `/api/courses/:courseId/summary.md` | – | `text/markdown` COURSE.md |
+| POST `/api/docs` with header `X-Course-Id` | PDF | adds the new doc to that course (400 if unknown); inserted by natural sort of titles among the course's lectures (so "L8…" lands after "L7…"), else appended |
+
+`COURSE.md`: `# <course title> — 과목 정리`, then for each lecture in order `## <k>. <title>` + summary or
+`_(정리본 없음)_` + relative links `../../<docId>/DIGEST.md`, `../../<docId>/STUDY_NOTES.md`.
+
+Context (`loadDocAssets` fills `DocAssets.course`; context.ts uses it when priming — CLI and API providers alike):
+```
+COURSE CONTEXT (before the deck material):
+  "This lecture is part of the course <title>: lecture k of K." + ordered list of all lecture titles
+  for each PREVIOUS lecture (index < current), oldest first: "### Lecture i: <title>\n<summary or '(no summary yet)'>"
+     — total capped by maxCourseContextChars, dropping the OLDEST summaries first (keep their titles)
+  later lectures: titles only
+  CLI providers only: "Files of other lectures are readable: ../<docId>/DIGEST.md (per-slide transcription),
+     ../<docId>/slides/NNN.png (slide images). Open them when the student refers to earlier material."
+BuildTurnOutput.readDirs = dirs of all OTHER lectures (chat.ts passes them as extraReadDirs).
+```
+The system prompt mentions that earlier lectures of the course may be referenced ("저번 강의", "Lecture 6").
+Recap/rollover behaviour is unchanged.
+
+## 13. Web additions
+
+- Library view grouped by course: course "folder" cards (title, #lectures, "COURSE.md" link, rename, delete with
+  confirm) listing lectures in order with ▲▼ reorder, "과목에서 빼기", and a drop zone/upload button that uploads
+  into that course (`X-Course-Id`); an "미분류" section; "＋ 새 과목" button; moving an uncategorized doc into a
+  course via a select. Top-bar document picker uses `<optgroup>` per course.
+- Chat header: course badge `📁 Compiler · 2/5강` when in a course; neighbor selector `앞뒤 ±0/±1/±2/±3`
+  (default ±1, localStorage) sent as `neighbors` on every question/prime.
+- Context line lists all attached/reused slides (`🖼 p.12·13·14 첨부`, `↺ p.13 이미 전달됨`).
+- Right pane tabs **채팅 | 정리본 | 노트**. 정리본 tab: status + progress bar (`done/total`, poll `GET digest`
+  every 2 s while running), "정리본 만들기 / 이어서 만들기 / 다시 만들기" with the provider/model chosen for new
+  sessions, abort; content mode "현재 슬라이드" (default: the focused slide's entry, follows scrolling) or "전체"
+  (lecture summary + all entries, auto-scrolls to the focused slide); link to DIGEST.md. Failed entries show a warning.
+- DocMeta.digestStatus badge in pickers (✓ 정리본 / ⏳).

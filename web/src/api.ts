@@ -1,6 +1,9 @@
 // Typed client for the easy-study HTTP API (DESIGN.md §4). Same-origin, everything under /api.
 import type {
+  Course,
+  CreateCourseRequest,
   CreateSessionRequest,
+  DigestInfo,
   DocMeta,
   HealthResponse,
   NotesResponse,
@@ -8,7 +11,9 @@ import type {
   SendMessageRequest,
   Session,
   SessionSummary,
+  StartDigestRequest,
   StreamEvent,
+  UpdateCourseRequest,
 } from '../../shared/types.ts';
 
 export class ApiError extends Error {
@@ -58,17 +63,22 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
-function postJSON<T>(path: string, body?: unknown): Promise<T> {
+function sendJSON<T>(method: 'POST' | 'PATCH', path: string, body?: unknown): Promise<T> {
   return request<T>(path, {
-    method: 'POST',
+    method,
     headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
 }
 
+function postJSON<T>(path: string, body?: unknown): Promise<T> {
+  return sendJSON<T>('POST', path, body);
+}
+
 const enc = encodeURIComponent;
 const docPath = (docId: string) => `/api/docs/${enc(docId)}`;
 const sessionPath = (docId: string, sid: string) => `${docPath(docId)}/sessions/${enc(sid)}`;
+const coursePath = (courseId: string) => `/api/courses/${enc(courseId)}`;
 
 // ---------------------------------------------------------------------------
 // Plain JSON endpoints
@@ -76,9 +86,14 @@ const sessionPath = (docId: string, sid: string) => `${docPath(docId)}/sessions/
 
 export const getHealth = () => request<HealthResponse>('/api/health');
 
-export const listDocs = () => request<DocMeta[]>('/api/docs');
+/** Fill round-2 fields an older server may omit, so the UI can rely on them. */
+function normalizeDoc(d: DocMeta): DocMeta {
+  return { ...d, courseId: d.courseId ?? null, digestStatus: d.digestStatus ?? 'none' };
+}
 
-export const getDoc = (docId: string) => request<DocMeta>(docPath(docId));
+export const listDocs = () => request<DocMeta[]>('/api/docs').then((list) => list.map(normalizeDoc));
+
+export const getDoc = (docId: string) => request<DocMeta>(docPath(docId)).then(normalizeDoc);
 
 export const slideUrl = (docId: string, slide: number) => `${docPath(docId)}/slides/${slide}.png`;
 
@@ -99,16 +114,54 @@ export const getNotes = (docId: string) => request<NotesResponse>(`${docPath(doc
 
 export const notesMarkdownUrl = (docId: string) => `${docPath(docId)}/notes.md`;
 
+// ---------------------------------------------------------------------------
+// Digest ("정리본", DESIGN.md §11)
+// ---------------------------------------------------------------------------
+
+export const getDigest = (docId: string) => request<DigestInfo>(`${docPath(docId)}/digest`);
+
+/** Start (or resume, or with `force` redo) the digest job. 409 when one is already running. */
+export const startDigest = (docId: string, body: StartDigestRequest) =>
+  postJSON<DigestInfo>(`${docPath(docId)}/digest`, body);
+
+export const abortDigest = (docId: string) => postJSON<void>(`${docPath(docId)}/digest/abort`);
+
+export const digestMarkdownUrl = (docId: string) => `${docPath(docId)}/digest.md`;
+
+// ---------------------------------------------------------------------------
+// Courses ("과목" folders, DESIGN.md §12)
+// ---------------------------------------------------------------------------
+
+/** Courses in creation order (oldest first). */
+export const listCourses = () => request<Course[]>('/api/courses');
+
+export const createCourse = (body: CreateCourseRequest) => postJSON<Course>('/api/courses', body);
+
+/** Rename and/or replace the full ordered lecture list (documents omitted become uncategorized). */
+export const updateCourse = (courseId: string, body: UpdateCourseRequest) =>
+  sendJSON<Course>('PATCH', coursePath(courseId), body);
+
+/** Delete a course folder. Its lectures are kept and become uncategorized. */
+export const deleteCourse = (courseId: string) => request<void>(coursePath(courseId), { method: 'DELETE' });
+
+export const courseSummaryUrl = (courseId: string) => `${coursePath(courseId)}/summary.md`;
+
 /**
  * Upload a PDF as raw bytes. Uses XMLHttpRequest (not fetch) to get upload progress events.
+ * With `courseId` the new lecture is added to that course (header X-Course-Id).
  * Resolves with the new DocMeta (status 'processing').
  */
-export function uploadPdf(file: File, onProgress?: (fraction: number) => void): Promise<DocMeta> {
+export function uploadPdf(
+  file: File,
+  onProgress?: (fraction: number) => void,
+  courseId?: string | null,
+): Promise<DocMeta> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/api/docs');
     xhr.setRequestHeader('Content-Type', 'application/pdf');
     xhr.setRequestHeader('X-Filename', enc(file.name));
+    if (courseId) xhr.setRequestHeader('X-Course-Id', courseId);
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
     };
@@ -120,7 +173,7 @@ export function uploadPdf(file: File, onProgress?: (fraction: number) => void): 
         /* not JSON */
       }
       if (xhr.status >= 200 && xhr.status < 300 && body && typeof body === 'object') {
-        resolve(body as DocMeta);
+        resolve(normalizeDoc(body as DocMeta));
         return;
       }
       const error = (body as { error?: unknown } | null)?.error;
