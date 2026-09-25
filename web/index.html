@@ -6,10 +6,18 @@
     <meta name="color-scheme" content="light dark" />
     <!-- Defence in depth for LLM-written Markdown: images load only from this app (or data:/blob: URLs). -->
     <meta http-equiv="Content-Security-Policy" content="img-src 'self' data: blob:" />
-    <link
-      rel="icon"
-      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📖</text></svg>"
-    />
+    <!-- Installable app (PWA, DESIGN §16): manifest, icons, window color for the light and dark themes. -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180" />
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#161920" media="(prefers-color-scheme: dark)" />
+    <meta name="application-name" content="easy-study" />
+    <meta name="apple-mobile-web-app-title" content="easy-study" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="description" content="강의 PDF를 슬라이드별로 LLM 튜터와 함께 공부하는 앱" />
     <title>easy-study</title>
   </head>
   <body>

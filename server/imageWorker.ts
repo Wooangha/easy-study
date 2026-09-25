@@ -29,6 +29,7 @@ import {
   thumbPath,
   viewPath,
 } from './assets.ts';
+import { childProcessEnv } from './config.ts';
 
 // ---------------------------------------------------------------------------
 // Protocol (shared by both sides)
@@ -111,12 +112,13 @@ export function imageWorkerPath(): string {
 }
 
 /**
- * The server's environment; on macOS plus MallocSpaceEfficient=1, which made libmalloc hand freed libvips
- * buffers back sooner: the worker's peak RSS for a 49-slide deck went from ~275 to ~225 MB (same run time).
- * Other platforms ignore it.
+ * The server's environment without its secrets (config.ts childProcessEnv); on macOS plus
+ * MallocSpaceEfficient=1, which made libmalloc hand freed libvips buffers back sooner: the worker's peak
+ * RSS for a 49-slide deck went from ~275 to ~225 MB (same run time). Other platforms ignore it.
  */
-function workerEnv(): NodeJS.ProcessEnv {
-  return process.platform === 'darwin' ? { ...process.env, MallocSpaceEfficient: '1' } : process.env;
+export function workerEnv(): NodeJS.ProcessEnv {
+  const env = childProcessEnv();
+  return process.platform === 'darwin' ? { ...env, MallocSpaceEfficient: '1' } : env;
 }
 
 /** Runs `job` in a new worker process. */

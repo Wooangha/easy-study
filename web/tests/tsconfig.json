@@ -1,0 +1,10 @@
+{
+  // Typechecks the web client's tests (node:test, run by `npm test` with type stripping). They run in Node
+  // and import both the client (DOM types) and, for shared helpers, the server.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "types": ["node", "vite/client"],
+    "erasableSyntaxOnly": true
+  },
+  "include": ["./**/*.ts"]
+}

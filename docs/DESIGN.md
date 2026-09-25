@@ -501,3 +501,78 @@ Contracts:
   (`--max-semi-space-size=2`). `npm run dev` keeps running TS + Vite (development only).
 - Portability: platform-specific poppler hints; Windows CLI resolution (.exe on PATH, npm `.cmd` shims mapped to the
   real executable), tree-kill on abort, windowsHide, rename/rm retries on EPERM/EBUSY, SIGHUP/SIGBREAK handling.
+
+## 16. Round 5 — access from other computers (remote mode) + installable app (PWA)
+
+User direction: keep the server architecture (it can later move to a remote machine unchanged), make it reachable from
+other computers, and get an "app" on macOS/Windows. The app is the same web client installed as a PWA (Chrome/Edge
+"Install app", Safari "Add to Dock"/"Add to Home Screen") that talks to the server; no separate desktop shell.
+
+### Modes
+- **Local mode (default, unchanged)**: bind `127.0.0.1`, no login, loopback Host/Origin guards as today.
+- **Remote mode**: `EASY_STUDY_HOST` is not a loopback address (e.g. `0.0.0.0`, a LAN IP) **or** `EASY_STUDY_AUTH=on`.
+  Every `/api/*` request needs a valid session (except the auth routes below). `EASY_STUDY_AUTH=off` with a
+  non-loopback host is refused at startup (clear error). `EASY_STUDY_AUTH=on` with loopback is for reverse proxies such as
+  `tailscale serve` (requests then arrive from 127.0.0.1 — loopback is never trusted as authentication).
+- The loopback-only Host check applies only when auth is off. With auth on, DNS rebinding is harmless because the session
+  cookie is host-only and `SameSite=Strict`; the existing Origin check for non-GET requests (CSRF) stays in both modes.
+  The Origin may match `X-Forwarded-Host` (a reverse proxy passing the public name on) only with auth on and only from a
+  loopback peer; in local mode only the `Host` header counts.
+- Every response (both modes, client pages, static files, `/login`, API answers and errors) carries
+  `X-Frame-Options: DENY`, `Content-Security-Policy: frame-ancestors 'none'` (clickjacking: a framed app would send
+  same-origin requests that pass the Host/Origin checks; frame-ancestors cannot be set by `<meta>`),
+  `Referrer-Policy: no-referrer` and `X-Content-Type-Options: nosniff`.
+- Child processes (claude/codex CLIs, poppler, the image worker) never inherit `EASY_STUDY_PASSWORD`,
+  `EASY_STUDY_TLS_KEY` or `EASY_STUDY_TLS_CERT` (`config.ts` `childProcessEnv`): the CLIs read untrusted PDFs.
+
+### Access code and sessions
+- Access code: `EASY_STUDY_PASSWORD` if set (min 8 chars), otherwise a generated code (≥100 bits, typeable:
+  4 groups of 5 lowercase base32 chars, e.g. `k7qm2-x9fda-...`) stored in `<library>/.auth.json` (file mode 0600) and
+  reused across restarts. Deleting `.auth.json` (or `--reset-access-code`) regenerates it and revokes all sessions.
+- Startup log in remote mode prints: every URL to reach the server (each non-internal IPv4 of os.networkInterfaces()
+  plus the hostname), the access code, a one-click login URL `http(s)://<addr>:<port>/login?code=<code>`, and a warning when
+  serving plain HTTP on a non-loopback address ("same Wi-Fi only; use Tailscale/HTTPS outside").
+- Sessions: 256-bit random ids; the server stores only sha256(id) with `createdAt`/`lastSeenAt`/`expiresAt`
+  (30 days, sliding) in `.auth.json`; cookie `es_session` = id, `HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000`,
+  plus `Secure` when the request is HTTPS (native TLS, or `X-Forwarded-Proto: https` from a loopback peer).
+- Scripts/API clients may send `Authorization: Bearer <access code>` instead of a cookie.
+- Comparisons are constant-time (crypto.timingSafeEqual on hashes). Failed logins are rate limited per client IP
+  (10 failures / 10 min → 429 with Retry-After, checked before the code, so even the right code waits); successful
+  login clears the counter. Backstop for many addresses: once 100 logins failed from all clients together within
+  10 min, each failure locks its client at once for the rest of its window (one guess per address). The backstop never
+  refuses a client that still has attempts: a flood of wrong logins cannot lock the owner out of logging in with the
+  right code (login, bearer or `/login?code=`), and existing cookie sessions are unaffected.
+- Startup banner with `EASY_STUDY_PASSWORD`: `--reset-access-code` only ends the logins (the password stays the code),
+  and the banner says so ("모든 로그인을 끊으려면 … (접속 코드를 바꾸려면 EASY_STUDY_PASSWORD 를 바꾸세요)").
+
+### Routes (always reachable, JSON)
+| GET `/api/auth/status` | – | `{ authRequired: boolean, authenticated: boolean }` |
+| POST `/api/auth/login` | `{ code: string }` | 204 + Set-Cookie; 401 `{error}`; 429 `{error}` |
+| POST `/api/auth/logout` | – | 204, revokes the session, clears the cookie |
+| GET `/login?code=…` | – | valid → Set-Cookie + 303 redirect to `/` (so the code leaves the address bar); invalid → 303 to `/?login=failed` |
+Static SPA assets (index.html, JS/CSS, manifest, icons) are served without auth (they contain no user data); every other
+`/api/*` answers 401 `{error:"login required"}` without a session. Images (`/slides`, `/view`, `/thumbs`) and SSE are
+covered by the cookie automatically (same origin).
+
+### TLS
+- `EASY_STUDY_TLS_CERT` + `EASY_STUDY_TLS_KEY` (PEM paths) → `https.createServer`. Both or neither (startup error otherwise).
+
+### Web client
+- On start: `GET /api/auth/status`; if `authRequired && !authenticated` show a login screen (Korean): access-code field,
+  error / rate-limit messages, hint where the code is shown (the server's terminal). Any 401 from the API later
+  (expired/revoked session) returns to the login screen without losing the current doc/slide selection.
+- A logout item in the top bar when `authRequired`.
+- PWA: `web/public/manifest.webmanifest` (name "easy-study", short_name, start_url "/", display "standalone",
+  theme/background colors matching the light theme, icons 192/512 + maskable 512), `apple-touch-icon`, `theme-color`
+  meta for light/dark. No service worker (not needed for installability in Chromium today; avoids stale caches).
+- Installing needs a secure context in Chrome/Edge: plain `http://<LAN IP>:5180` is not installable
+  (`not-from-secure-origin`), `http://127.0.0.1:5180` on the server computer is. From other computers use HTTPS:
+  `tailscale serve` (`EASY_STUDY_HOST=127.0.0.1 EASY_STUDY_AUTH=on`) or `EASY_STUDY_TLS_CERT/KEY` with a certificate the
+  other computer trusts (`tailscale cert`, mkcert). Safari "Add to Dock" also works over HTTP. The remote-mode banner
+  (plain HTTP), the login screen's HTTP notice and the README ("앱으로 설치하기") say this.
+- Plain HTTP is not a secure context either, so `navigator.clipboard` is undefined there: the copy buttons use
+  `web/src/lib/clipboard.ts` `copyText` (Clipboard API when allowed, otherwise a hidden `<textarea>` +
+  `document.execCommand('copy')`; rejects when both fail, so a success or failure toast always shows). In remote mode
+  the notes/digest "copy path" buttons say that the path is on the server computer.
+- Layout must remain usable on tablets/phones (existing ≤800px stacked layout) — check that the login screen and the
+  main view work at 390×844.

@@ -79,6 +79,40 @@ npm run dev
   - Windows에서는 Codex의 읽기 제한이 꺼져 있어서 Codex가 사용자 파일 전체를 읽을 수 있어요. 민감한 파일이 있는 계정이라면 Claude Code를 쓰세요.
   - 환경 변수는 PowerShell에서 `$env:PORT=5181; npm start`처럼 지정해요.
 
+## 다른 컴퓨터에서 쓰기 (원격 모드)
+
+서버는 이 컴퓨터에서 그대로 돌리고, 다른 컴퓨터나 태블릿에서는 브라우저로 접속해요. 서버가 이 컴퓨터에 로그인된 claude/codex와 파일을 쓰기 때문에, 원격 모드에서는 **접속 코드로 로그인해야만** 쓸 수 있어요.
+
+```bash
+npm run start:remote     # 빌드한 뒤 모든 네트워크 주소(0.0.0.0)에서 로그인이 필요한 모드로 실행
+npm run serve:remote     # 이미 빌드했다면
+```
+
+터미널에 접속 주소(예: `http://192.168.0.10:5180`), 접속 코드(`xxxxx-xxxxx-xxxxx-xxxxx`), 바로 로그인 링크가 나와요. 다른 기기에서 그 주소를 열고 코드를 입력하세요. 코드는 `library/.auth.json`에 저장돼서 다시 시작해도 같아요.
+
+- 코드를 바꾸고 모든 기기를 로그아웃시키려면 `npm run serve:remote -- --reset-access-code`로 실행하세요.
+- 자동으로 만든 코드 대신 직접 정한 비밀번호(8자 이상)를 쓰려면 `EASY_STUDY_PASSWORD`를 지정하세요. 이때 `--reset-access-code`는 로그인만 끊어요. 비밀번호를 바꾸려면 `EASY_STUDY_PASSWORD`를 바꾸세요.
+- 스크립트에서는 `Authorization: Bearer <접속 코드>` 헤더로 API를 쓸 수 있어요.
+- 한 주소에서 로그인에 10번 틀리면 10분 동안 기다려야 해요.
+- 일반 HTTP는 암호화되지 않아요. **같은 Wi‑Fi처럼 믿을 수 있는 네트워크에서만** 쓰고, 밖에서는 아래 HTTPS 방법을 쓰세요.
+
+### HTTPS로 쓰기
+
+- **Tailscale (권장)**: 서버는 이 컴퓨터에서만 열고(`EASY_STUDY_HOST=127.0.0.1 npm run serve:remote`), `tailscale serve --bg 5180`으로 내 tailnet에 HTTPS로 공개해요. 다른 기기에서는 `https://<컴퓨터 이름>.<tailnet 이름>.ts.net`으로 접속해요. 로그인은 그대로 필요해요.
+- **인증서 직접 지정**: `EASY_STUDY_TLS_CERT=cert.pem EASY_STUDY_TLS_KEY=key.pem npm run serve:remote`. 접속하는 컴퓨터가 믿는 인증서여야 해요 (예: `tailscale cert`로 받은 인증서, 또는 mkcert로 만들고 그 루트 인증서를 접속하는 컴퓨터에 설치).
+
+### 앱으로 설치하기
+
+같은 화면을 브라우저 탭이 아닌 별도 앱 창으로 쓸 수 있어요 (PWA, macOS·Windows).
+
+- **Chrome / Edge**: 주소창 오른쪽의 설치 아이콘, 또는 메뉴 → ‘앱 설치’(Edge: ‘앱’ → ‘이 사이트를 앱으로 설치’).
+- **Safari (macOS)**: 파일 → ‘Dock에 추가’. iPad/iPhone은 공유 → ‘홈 화면에 추가’.
+
+Chrome/Edge는 **안전한 주소에서만** 설치를 허용해요.
+
+- 서버를 실행한 컴퓨터: `http://127.0.0.1:5180`에서 바로 설치돼요.
+- 다른 컴퓨터: `http://192.168.x.x:5180` 같은 일반 HTTP 주소에서는 설치 메뉴가 나오지 않아요. 위의 Tailscale(`https://….ts.net`)이나 인증서를 지정한 HTTPS 주소로 접속해서 설치하세요. Safari의 ‘Dock에 추가’는 HTTP 주소에서도 돼요.
+
 ## 동작 방식
 
 ### 1. 슬라이드 → 이미지
@@ -156,6 +190,7 @@ library/
   courses/<courseId>/
     course.json                과목 (강의 순서)
     COURSE.md                  과목 정리
+  .auth.json                   원격 모드의 접속 코드와 로그인 세션 (이 컴퓨터의 사용자만 읽을 수 있어요)
 ```
 
 ## LLM 선택
@@ -173,7 +208,11 @@ library/
 
 | 변수 | 기본값 | 설명 |
 |---|---|---|
-| `PORT` | `5180` | 서버 포트. 항상 127.0.0.1에만 바인딩돼요. |
+| `PORT` | `5180` | 서버 포트 |
+| `EASY_STUDY_HOST` | `127.0.0.1` | 바인딩 주소. 127.0.0.1이 아니면(예: `0.0.0.0`) 원격 모드가 되어 접속 코드가 필요해요. `npm run serve:remote`는 `0.0.0.0`을 써요. |
+| `EASY_STUDY_AUTH` | `auto` | `on`이면 127.0.0.1에서도 로그인이 필요해요 (`tailscale serve` 같은 리버스 프록시용). `off`는 127.0.0.1에서만 쓸 수 있어요. |
+| `EASY_STUDY_PASSWORD` | 자동 생성 코드 | 접속 코드 대신 쓸 비밀번호 (8자 이상) |
+| `EASY_STUDY_TLS_CERT` / `EASY_STUDY_TLS_KEY` | 없음 | HTTPS 인증서와 키 (PEM 파일). 둘 다 지정해야 해요. |
 | `EASY_STUDY_LIBRARY` | `./library` | 라이브러리 위치 |
 | `EASY_STUDY_NEIGHBORS` | `1` | 질문할 때 같이 보내는 앞뒤 슬라이드 수. 화면에서도 바꿀 수 있어요. |
 | `EASY_STUDY_RECENT_WINDOW` | `16` | 최근 보낸 슬라이드 중 몇 장까지 다시 보내지 않을지 |
@@ -211,7 +250,7 @@ library/
 
 ## 개발
 
-타입 체크 (서버 + 웹):
+타입 체크 (서버 + 웹 + 웹 테스트):
 
 ```bash
 npm run typecheck

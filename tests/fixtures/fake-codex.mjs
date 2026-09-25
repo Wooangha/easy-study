@@ -2,7 +2,7 @@
 // Fake `codex` CLI for tests (pointed to by CODEX_BIN). It never talks to any service.
 //
 // - `--version` prints a version line.
-// - Otherwise it reads stdin until EOF, records { argv, stdin, cwd, pid, script } as JSON to the file
+// - Otherwise it reads stdin until EOF, records { argv, stdin, cwd, pid, script, env } as JSON to the file
 //   named by $FAKE_CLI_RECORD (script = the path it was executed by, symlinks not resolved), then
 //   behaves according to $FAKE_CLI_MODE:
 //     success (default) | turn-failed | error | error-recovered | exit1 | no-thread | hang | no-turn-completed
@@ -32,7 +32,19 @@ function main() {
   if (process.env.FAKE_CLI_RECORD) {
     fs.writeFileSync(
       process.env.FAKE_CLI_RECORD,
-      JSON.stringify({ argv, stdin, cwd: process.cwd(), pid: process.pid, script: process.argv[1] }),
+      JSON.stringify({
+        argv,
+        stdin,
+        cwd: process.cwd(),
+        pid: process.pid,
+        script: process.argv[1],
+        // The server's secrets must never reach a CLI (server/config.ts SERVER_SECRET_ENV).
+        env: {
+          EASY_STUDY_PASSWORD: process.env.EASY_STUDY_PASSWORD ?? null,
+          EASY_STUDY_TLS_KEY: process.env.EASY_STUDY_TLS_KEY ?? null,
+          EASY_STUDY_TLS_CERT: process.env.EASY_STUDY_TLS_CERT ?? null,
+        },
+      }),
     );
   }
 

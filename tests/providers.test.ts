@@ -140,7 +140,24 @@ const ENV_KEYS = [
   'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
   'ENABLE_CLAUDEAI_MCP_SERVERS',
   'MIMALLOC_PURGE_DELAY',
+  'EASY_STUDY_PASSWORD',
+  'EASY_STUDY_TLS_KEY',
+  'EASY_STUDY_TLS_CERT',
 ];
+
+/** The server's secrets (remote mode, DESIGN §16), set while a CLI runs: none of them may reach it. */
+function setServerSecrets(): void {
+  process.env.EASY_STUDY_PASSWORD = 'secret-access-password';
+  process.env.EASY_STUDY_TLS_KEY = '/etc/easy-study/server.key';
+  process.env.EASY_STUDY_TLS_CERT = '/etc/easy-study/server.crt';
+}
+
+function assertNoServerSecrets(env: Record<string, string | null> | undefined): void {
+  assert.ok(env, 'the fake CLI recorded its environment');
+  assert.equal(env.EASY_STUDY_PASSWORD, null, 'the access password stays in the server');
+  assert.equal(env.EASY_STUDY_TLS_KEY, null);
+  assert.equal(env.EASY_STUDY_TLS_CERT, null);
+}
 let savedEnv: Record<string, string | undefined> = {};
 let workDir = '';
 let recordFile = '';
@@ -505,6 +522,7 @@ describe('claude-code provider', () => {
   test('new conversation: exact argv, stdin message with base64 images, streamed text', FAKE_CLI, async () => {
     process.env.CLAUDECODE = '1';
     process.env.ANTHROPIC_API_KEY = 'sk-should-not-leak';
+    setServerSecrets();
     const out = await run(claudeCodeProvider, { model: 'sonnet' });
     assert.ifError(out.error);
 
@@ -534,6 +552,7 @@ describe('claude-code provider', () => {
     assert.equal(rec.env?.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, '1');
     assert.equal(rec.env?.ENABLE_CLAUDEAI_MCP_SERVERS, 'false');
     assert.equal(rec.env?.MIMALLOC_PURGE_DELAY, '0');
+    assertNoServerSecrets(rec.env);
 
     assert.ok(rec.stdin.endsWith('\n'));
     const lines = rec.stdin.trim().split('\n');
@@ -772,9 +791,11 @@ describe('codex provider', () => {
   });
 
   test('new conversation: exact argv (reads confined to the document), instructions + image markers on stdin', FAKE_CLI, async () => {
+    setServerSecrets();
     const out = await run(codexProvider, { model: 'gpt-5-codex' });
     assert.ifError(out.error);
     const rec = record();
+    assertNoServerSecrets(rec.env);
     assert.deepEqual(rec.argv, [
       'exec',
       '--json',

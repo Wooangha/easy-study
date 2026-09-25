@@ -11,6 +11,7 @@ import {
 } from 'react';
 import type { DocMeta } from '../../../shared/types.ts';
 import { viewSrcSet, viewUrl } from '../api.ts';
+import { useLoginEpoch } from '../hooks/useAuth.ts';
 import { useLatest } from '../hooks/useLatest.ts';
 import { clamp, slideSizes } from '../lib/format.ts';
 import { isNumber, readStorage, storageKeys, writeStorage } from '../lib/storage.ts';
@@ -393,7 +394,10 @@ const SlideItem = memo(function SlideItem({
   register,
   onOpenNotes,
 }: SlideItemProps) {
-  const [failed, setFailed] = useState(false);
+  // Tagged with the login epoch: images that failed while the session had ended load again after a login.
+  const epoch = useLoginEpoch();
+  const [failedAt, setFailedAt] = useState<number | null>(null);
+  const failed = failedAt === epoch;
   const setRef = useCallback((el: HTMLDivElement | null) => register(slide - 1, el), [register, slide]);
   const cls = ['slide', focused && 'is-focused', pinned && 'is-pinned'].filter(Boolean).join(' ');
   return (
@@ -411,7 +415,7 @@ const SlideItem = memo(function SlideItem({
               sizes={sizes}
               alt={`슬라이드 ${slide}`}
               draggable={false}
-              onFail={() => setFailed(true)}
+              onFail={() => setFailedAt(epoch)}
             />
           )
         )}

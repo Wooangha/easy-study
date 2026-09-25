@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type R
 import type { ChatMessage, MessageStatus, ProviderInfo } from '../../../shared/types.ts';
 import { PENDING_ASSISTANT_ID, PENDING_USER_ID } from '../hooks/useStudySession.ts';
 import { CHAT_WINDOW, chatWindowStart } from '../lib/chatWindow.ts';
+import { copyText } from '../lib/clipboard.ts';
 import { describeContext, formatDuration, formatTime, primeCardState, providerWithModel } from '../lib/format.ts';
 import { toast } from '../lib/toast.ts';
 import { Markdown } from './Markdown.tsx';
@@ -271,8 +272,7 @@ function AssistantMessage({
   if (m.durationMs !== undefined && !streaming) meta.push(formatDuration(m.durationMs));
 
   const copy = () => {
-    navigator.clipboard
-      .writeText(m.text)
+    void copyText(m.text)
       .then(() => toast('답변을 복사했어요', 'success', 2000))
       .catch(() => toast('복사하지 못했어요', 'error'));
   };

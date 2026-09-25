@@ -5,6 +5,8 @@
 import { existsSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import http from 'node:http';
+import https from 'node:https';
+import { isIPv6 } from 'node:net';
 import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import express from 'express';
@@ -32,7 +34,32 @@ import {
   waitForTurn,
 } from './chat.ts';
 import type { ChatDeps } from './chat.ts';
-import { HttpError, autoDigestEnabled, host, libraryDir, port, webDir, webDistDir } from './config.ts';
+import {
+  AUTH_FILE_NAME,
+  AuthStore,
+  LoginLimiter,
+  authFilePath,
+  createAuthGate,
+  devServerGuard,
+  formatAccessBanner,
+  isLoopbackPeer,
+  reachableUrls,
+} from './auth.ts';
+import type { AuthGate } from './auth.ts';
+import {
+  ConfigError,
+  HttpError,
+  autoDigestEnabled,
+  isLoopbackHost,
+  isWildcardHost,
+  libraryDir,
+  networkSettings,
+  port,
+  repoRoot,
+  webDir,
+  webDistDir,
+} from './config.ts';
+import type { TlsFiles } from './config.ts';
 import {
   addDocToCourse,
   createCourse,
@@ -57,6 +84,7 @@ import {
 import type { DigestDeps } from './digest.ts';
 import {
   LibraryLockedError,
+  SERVER_LOCK_FILE_NAME,
   acquireServerLock,
   backfillDerivedImages,
   coursePaths,
@@ -89,6 +117,8 @@ import {
 const MAX_UPLOAD = '300mb';
 const SSE_PING_MS = 15_000;
 const IMMUTABLE_MAX_AGE_MS = 31_536_000 * 1000; // one year → "max-age=31536000"
+/** Behind the login (remote mode) slide images are for this browser only: no shared (proxy) caches. */
+const PRIVATE_IMMUTABLE = 'private, max-age=31536000, immutable';
 /** Model names reach CLI argument lists: no leading dash, no whitespace. */
 const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:/@[\]-]{0,127}$/;
 
@@ -199,10 +229,17 @@ function warnTransfer(req: Request, err: unknown): void {
   if ((err as NodeJS.ErrnoException).code !== 'ECONNABORTED') console.warn(`[http] ${req.path}: ${errorMessage(err)}`);
 }
 
+/** sendFile options of a file that never changes under its URL (`private` in remote mode). */
+function immutableOptions(res: Response): Parameters<Response['sendFile']>[1] {
+  return res.locals.authRequired === true
+    ? { cacheControl: false, headers: { 'Cache-Control': PRIVATE_IMMUTABLE } }
+    : { maxAge: IMMUTABLE_MAX_AGE_MS, immutable: true };
+}
+
 /** A file that never changes under its URL (slides of a converted document); 404 when it does not exist. */
 async function sendImmutable(req: Request, res: Response, file: string): Promise<void> {
   try {
-    await sendFile(res, file, { maxAge: IMMUTABLE_MAX_AGE_MS, immutable: true });
+    await sendFile(res, file, immutableOptions(res));
   } catch (err) {
     // Not rendered yet (still processing) or the client went away mid-transfer.
     if (!res.headersSent) throw new HttpError(404, '슬라이드를 찾을 수 없습니다');
@@ -217,7 +254,7 @@ async function sendImmutable(req: Request, res: Response, file: string): Promise
  */
 async function sendDerivedFile(req: Request, res: Response, doc: StoredDocMeta, slideFile: string, file: string): Promise<void> {
   try {
-    await sendFile(res, file, { maxAge: IMMUTABLE_MAX_AGE_MS, immutable: true });
+    await sendFile(res, file, immutableOptions(res));
     return;
   } catch (err) {
     if (res.headersSent) return warnTransfer(req, err);
@@ -285,41 +322,75 @@ function lazySse(res: Response): LazySse {
   };
 }
 
-const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]']);
+/**
+ * Whether a browser request comes from a page of this server (its Origin is the host it was sent to).
+ * With the login on, a reverse proxy on this computer (e.g. tailscale serve, EASY_STUDY_AUTH=on) may pass
+ * the public host name on as X-Forwarded-Host. Local mode has no proxy to trust: there, only the Host
+ * header counts, exactly as before remote mode existed.
+ */
+function isSameOrigin(req: Request, origin: string, authRequired: boolean): boolean {
+  let originHost: string;
+  try {
+    originHost = new URL(origin).host;
+  } catch {
+    return false; // "null" or garbage: not our page
+  }
+  const hosts = [req.headers.host];
+  if (authRequired && isLoopbackPeer(req)) hosts.push(String(req.headers['x-forwarded-host'] ?? '').split(',')[0]?.trim());
+  return hosts.some((candidate) => candidate !== undefined && candidate !== '' && candidate.toLowerCase() === originHost);
+}
 
 /**
- * The API has no authentication; binding to loopback keeps other machines out, and this guard
- * keeps web pages out: the Host must be a loopback name (defeats DNS rebinding) and state-changing
- * requests sent by a browser must come from our own origin (defeats cross-site "simple" POSTs).
+ * Keeps web pages of other sites out of the API (DESIGN §16):
+ * - state-changing requests sent by a browser must come from our own origin (CSRF), in both modes;
+ * - local mode (no login): the Host must be a loopback name, which defeats DNS rebinding. With the login
+ *   on, rebinding is harmless (the session cookie is host-only and SameSite=Strict), and other hosts are
+ *   exactly what remote mode is for.
  */
-function localOriginOnly(req: Request, _res: Response, next: NextFunction): void {
-  const hostHeader = req.headers.host ?? '';
-  const hostname = hostHeader.replace(/:\d+$/, '').toLowerCase();
-  if (!LOOPBACK_HOSTNAMES.has(hostname)) {
-    next(new HttpError(403, '로컬 주소(127.0.0.1)로만 접속할 수 있습니다'));
-    return;
-  }
-  const origin = req.headers.origin;
-  if (origin !== undefined && req.method !== 'GET' && req.method !== 'HEAD') {
-    let sameOrigin = false;
-    try {
-      sameOrigin = new URL(origin).host === hostHeader.toLowerCase();
-    } catch {
-      // "null" or garbage: not our page.
+function apiGuard(authRequired: boolean): express.RequestHandler {
+  return (req, _res, next) => {
+    const hostHeader = req.headers.host ?? '';
+    if (!authRequired && !isLoopbackHost(hostHeader.replace(/:\d+$/, ''))) {
+      next(new HttpError(403, '로컬 주소(127.0.0.1)로만 접속할 수 있습니다'));
+      return;
     }
-    if (!sameOrigin) {
+    const origin = req.headers.origin;
+    if (origin !== undefined && req.method !== 'GET' && req.method !== 'HEAD' && !isSameOrigin(req, origin, authRequired)) {
       next(new HttpError(403, '다른 사이트에서 보낸 요청은 허용되지 않습니다'));
       return;
     }
-  }
-  next();
+    next();
+  };
+}
+
+/**
+ * Headers every response carries, in both modes (DESIGN §16):
+ * - no framing by other sites (X-Frame-Options + CSP frame-ancestors; the latter cannot be set in a <meta>
+ *   tag). A framed app would make requests from its own origin, which pass the Host and Origin checks, so
+ *   a page of another site could make the owner click "delete" or start a CLI run through a disguised
+ *   frame (clickjacking);
+ * - no Referer to other sites (links in answers, the one-click login link);
+ * - no content-type sniffing (Markdown and images are served with their exact types).
+ */
+export function securityHeaders(): express.RequestHandler {
+  return (_req, res, next) => {
+    res.set('X-Frame-Options', 'DENY');
+    res.set('Content-Security-Policy', "frame-ancestors 'none'");
+    res.set('Referrer-Policy', 'no-referrer');
+    res.set('X-Content-Type-Options', 'nosniff');
+    next();
+  };
 }
 
 // ---------------------------------------------------------------------------
 // API
 // ---------------------------------------------------------------------------
 
-export function createApiRouter(options: AppOptions = {}): express.Router {
+/**
+ * The JSON API. `gate` decides who may use it (DESIGN §16); the default is local mode (no login, loopback
+ * Host names only).
+ */
+export function createApiRouter(options: AppOptions = {}, gate: AuthGate = createAuthGate(null)): express.Router {
   const getProviderInfos = options.providerInfos ?? providerInfos;
   const chatDeps = options.chatDeps ?? defaultChatDeps();
   const digestDeps: DigestDeps = options.digestDeps ?? {
@@ -329,7 +400,11 @@ export function createApiRouter(options: AppOptions = {}): express.Router {
   };
   const api = express.Router();
 
-  api.use(localOriginOnly);
+  api.use(apiGuard(gate.required));
+  // Login routes answer without a session; everything after requireAuth needs one in remote mode
+  // (including slide images and SSE turns: the cookie comes along on same-origin requests).
+  api.use('/auth', gate.routes);
+  api.use(gate.requireAuth);
 
   // Invalid ids are answered with 404 before any handler (and any filesystem access) runs.
   api.param('docId', (_req, _res, next, value: string) => {
@@ -676,11 +751,42 @@ export interface ServerOptions extends AppOptions {
   backfillImages?: boolean;
   /** Print startup information (default true). */
   log?: boolean;
+  /** Address to bind (default: EASY_STUDY_HOST or 127.0.0.1). Not loopback = remote mode (DESIGN §16). */
+  host?: string;
+  /** Login requirement 'on' | 'off' | 'auto' (default: EASY_STUDY_AUTH, auto = on for non-loopback hosts). */
+  auth?: string;
+  /** Access code instead of a generated one (default: EASY_STUDY_PASSWORD). */
+  password?: string | null;
+  /** HTTPS certificate and key (PEM files; default: EASY_STUDY_TLS_CERT/KEY); null = plain HTTP. */
+  tls?: TlsFiles | null;
+  /** --reset-access-code: a new generated access code, every login ended. */
+  resetAccessCode?: boolean;
+  /** Login rate limiter (tests; default: 10 failures per client per 10 minutes). */
+  loginLimiter?: LoginLimiter;
+  /** Clock of the login sessions (tests). */
+  authClock?: () => number;
+}
+
+/** Remote mode details of a running server (startup banner, tests). */
+export interface RemoteAccess {
+  scheme: 'http' | 'https';
+  /** The bound address as configured. */
+  bindHost: string;
+  /** Addresses other computers can use (reachableUrls). */
+  urls: string[];
+  /** The access code (EASY_STUDY_PASSWORD when set). Only the startup banner prints it. */
+  accessCode: string;
+  codeSource: 'password' | 'generated';
+  codeIsNew: boolean;
+  sessionsRevoked: boolean;
 }
 
 export interface RunningServer {
   server: http.Server;
+  /** URL of the server from this computer (a wildcard bind address is reached through 127.0.0.1). */
   url: string;
+  /** Remote mode (login required): addresses and access code; null in local mode. */
+  access: RemoteAccess | null;
   /** Aborts running turns and digest jobs, then stops Vite and the HTTP server. */
   close(): Promise<void>;
 }
@@ -696,22 +802,59 @@ function listen(server: http.Server, portNumber: number, hostname: string): Prom
   });
 }
 
+/** Vite's default server.fs.deny (Vite 8), which a configured list replaces rather than extends. */
+const VITE_DEFAULT_FS_DENY = ['.env', '.env.*', '*.{crt,pem,key,p12,pfx,cer,der}', '.npmrc', '.yarnrc.yml', '**/.git/**'];
+
+/** Reads the TLS certificate and key and checks that they make a server (ConfigError otherwise). */
+async function createHttpsServer(files: TlsFiles, app: express.Express): Promise<https.Server> {
+  const read = async (file: string, what: string) => {
+    try {
+      return await fs.readFile(file);
+    } catch (err) {
+      throw new ConfigError(`HTTPS ${what} 파일을 읽을 수 없습니다: ${file} (${errorMessage(err)})`);
+    }
+  };
+  const [cert, key] = await Promise.all([read(files.certFile, '인증서(EASY_STUDY_TLS_CERT)'), read(files.keyFile, '키(EASY_STUDY_TLS_KEY)')]);
+  try {
+    return https.createServer({ cert, key }, app);
+  } catch (err) {
+    throw new ConfigError(`HTTPS 인증서/키가 올바르지 않습니다 (${files.certFile}, ${files.keyFile}): ${errorMessage(err)}`);
+  }
+}
+
 /**
- * Starts the server. Throws LibraryLockedError when another live server uses the same library
- * (library/.server.lock, DESIGN §14): nothing in the library is touched then.
+ * Starts the server. Throws ConfigError for unsafe or incomplete network settings (DESIGN §16) and
+ * LibraryLockedError when another live server uses the same library (library/.server.lock, DESIGN §14):
+ * nothing in the library is touched then.
  */
 export async function startServer(options: ServerOptions = {}): Promise<RunningServer> {
   const log = options.log ?? true;
-  // First of all: one server per library. The startup sweeps below and resumed ingests rewrite files
-  // that a running server may be working on.
-  const lock: ServerLock = await acquireServerLock(options.port ?? port());
-
+  // Checked before anything else: an unsafe combination (EASY_STUDY_AUTH=off on 0.0.0.0) never starts.
+  const settings = networkSettings({ host: options.host, auth: options.auth, password: options.password, tls: options.tls });
+  const bindHost = settings.host.replace(/^\[(.*)\]$/, '$1');
+  const scheme = settings.tls ? 'https' : 'http';
   const app = express();
   app.disable('x-powered-by');
-  const server = http.createServer(app);
+  app.use(securityHeaders());
+  const server: http.Server = settings.tls ? await createHttpsServer(settings.tls, app) : http.createServer(app);
+
+  // First of all: one server per library. The startup sweeps below and resumed ingests rewrite files
+  // that a running server may be working on (and .auth.json has one writer).
+  const lock: ServerLock = await acquireServerLock(options.port ?? port());
+
   let closeVite: (() => Promise<void>) | undefined;
+  let store: AuthStore | null = null;
   let url: string;
+  let access: RemoteAccess | null = null;
   try {
+    if (settings.authRequired) {
+      store = await AuthStore.open({ password: settings.password, reset: options.resetAccessCode, now: options.authClock });
+    } else if (options.resetAccessCode) {
+      // Local mode: the next remote start generates a new code (and no old session survives).
+      await fs.rm(authFilePath(), { force: true });
+    }
+    const gate = createAuthGate(store, options.loginLimiter);
+
     // Before accepting requests: mark answers and digest jobs interrupted by a previous crash as aborted.
     const repaired = await recoverInterruptedSessions();
     if (log && repaired > 0) console.log(`[chat] marked unfinished answers of ${repaired} session(s) as aborted`);
@@ -720,13 +863,36 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
     const leftovers = await removeDeletedLeftovers();
     if (log && leftovers > 0) console.log(`[library] removed ${leftovers} leftover folder(s) of deleted documents`);
 
-    app.use('/api', createApiRouter(options));
+    // The one-click login link of the startup banner (never logged: it carries the code).
+    app.get('/login', gate.loginLink);
+    app.use('/api', createApiRouter(options, gate));
     if (options.dev) {
+      const remoteDev = gate.required;
+      if (remoteDev) {
+        // Vite may serve any file of the repository (web/vite.config.ts), including the default library.
+        app.use(
+          devServerGuard(
+            {
+              allowRoots: [webDir(), path.join(repoRoot(), 'shared'), path.join(repoRoot(), 'node_modules')],
+              denyRoots: [libraryDir()],
+              denyNames: [AUTH_FILE_NAME, SERVER_LOCK_FILE_NAME],
+            },
+            gate,
+          ),
+        );
+      }
       const { createServer: createViteServer } = await import('vite');
       const vite = await createViteServer({
         configFile: path.join(webDir(), 'vite.config.ts'),
         // HMR websocket shares our HTTP server (Vite 8: server.ws.server, formerly server.hmr.server).
-        server: { middlewareMode: true, ws: { server } },
+        server: {
+          middlewareMode: true,
+          ws: { server },
+          // Remote mode: host names (e.g. my-mac.local) are fine, the login protects the API.
+          ...(remoteDev
+            ? { allowedHosts: true, fs: { deny: [...VITE_DEFAULT_FS_DENY, `**/${AUTH_FILE_NAME}`, `**/${SERVER_LOCK_FILE_NAME}`] } }
+            : {}),
+        },
         appType: 'spa',
       });
       app.use(vite.middlewares);
@@ -735,12 +901,25 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
       mountProductionClient(app, log);
     }
 
-    await listen(server, options.port ?? port(), host());
+    await listen(server, options.port ?? port(), bindHost);
     const { port: actualPort } = server.address() as AddressInfo;
-    url = `http://${host()}:${actualPort}`;
+    const localHost = isWildcardHost(bindHost) ? '127.0.0.1' : bindHost;
+    url = `${scheme}://${isIPv6(localHost) ? `[${localHost}]` : localHost}:${actualPort}`;
     await lock.setPort(actualPort);
+    if (store) {
+      access = {
+        scheme,
+        bindHost: settings.host,
+        urls: reachableUrls(scheme, settings.host, actualPort),
+        accessCode: store.accessCode,
+        codeSource: store.codeSource,
+        codeIsNew: store.codeIsNew,
+        sessionsRevoked: store.sessionsRevoked,
+      };
+    }
   } catch (err) {
     await closeVite?.().catch(() => {});
+    await store?.flush();
     await lock.release();
     throw err;
   }
@@ -764,9 +943,10 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
         server.close(() => resolve());
         server.closeAllConnections();
       });
+      await store?.flush();
       await lock.release();
     })());
-  return { server, url, close };
+  return { server, url, access, close };
 }
 
 /**
@@ -786,7 +966,7 @@ function libraryLockedMessage(err: LibraryLockedError, dev: boolean): string {
   const { holder } = err;
   const again = envCommand({ EASY_STUDY_LIBRARY: '<다른 폴더>', PORT: String(holder.port + 1) }, `npm run ${dev ? 'dev' : 'serve'}`);
   return [
-    `easy-study가 이미 이 라이브러리로 실행 중입니다 (pid ${holder.pid}): http://${host()}:${holder.port}`,
+    `easy-study가 이미 이 라이브러리로 실행 중입니다 (pid ${holder.pid}, 포트 ${holder.port})`,
     `  라이브러리: ${libraryDir()}`,
     '  같은 라이브러리에 서버를 두 개 띄우면 서로의 작업(PDF 변환, 정리본, 답변)을 망가뜨리므로 시작하지 않았습니다.',
     '  - 이미 실행 중인 서버를 그대로 쓰거나, 그 서버를 먼저 종료하세요 (Ctrl+C).',
@@ -795,19 +975,43 @@ function libraryLockedMessage(err: LibraryLockedError, dev: boolean): string {
   ].join('\n');
 }
 
+/**
+ * Command line flags: --dev (Vite + HMR), --remote (remote mode: bind 0.0.0.0 with the login on unless
+ * EASY_STUDY_HOST / EASY_STUDY_AUTH say otherwise; the npm scripts then work the same in every shell,
+ * PowerShell included), --reset-access-code (DESIGN §16).
+ */
 async function main(): Promise<void> {
-  const dev = process.argv.includes('--dev');
+  const args = process.argv.slice(2);
+  const dev = args.includes('--dev');
+  const remote = args.includes('--remote');
+  // node --watch (npm run dev) starts the server again after every change with the same flags: a reset
+  // there would end every login at each save. Resetting is for a plain start.
+  const underWatch = process.env.WATCH_REPORT_DEPENDENCIES !== undefined;
+  const resetAccessCode = args.includes('--reset-access-code') && !underWatch;
+  if (underWatch && args.includes('--reset-access-code')) {
+    console.warn(`--reset-access-code 는 개발 모드(node --watch)에서는 무시됩니다: ${authFilePath()} 을(를) 지우고 다시 시작하세요.`);
+  }
+  const script = `${dev ? 'dev' : 'serve'}${remote ? ':remote' : ''}`;
   let running: RunningServer;
   try {
-    running = await startServer({ dev });
+    // --remote: every interface and the login on, unless EASY_STUDY_HOST / EASY_STUDY_AUTH say otherwise
+    // (EASY_STUDY_HOST=127.0.0.1 --remote = behind a reverse proxy such as tailscale serve).
+    running = await startServer({
+      dev,
+      resetAccessCode,
+      host: remote && !process.env.EASY_STUDY_HOST?.trim() ? '0.0.0.0' : undefined,
+      auth: remote && !process.env.EASY_STUDY_AUTH?.trim() ? 'on' : undefined,
+    });
   } catch (err) {
-    if (err instanceof LibraryLockedError) {
+    if (err instanceof ConfigError) {
+      console.error(`설정 오류: ${err.message}`);
+    } else if (err instanceof LibraryLockedError) {
       console.error(libraryLockedMessage(err, dev));
     } else if ((err as NodeJS.ErrnoException).code === 'EADDRINUSE') {
       // Not an easy-study on this library (the library lock would have said so).
       console.error(
         `포트 ${port()}을(를) 다른 프로그램(또는 다른 라이브러리로 실행 중인 easy-study)이 쓰고 있습니다. ` +
-          `다른 포트로 실행하세요: ${envCommand({ PORT: String(port() + 1) }, `npm run ${dev ? 'dev' : 'serve'}`)}`,
+          `다른 포트로 실행하세요: ${envCommand({ PORT: String(port() + 1) }, `npm run ${script}`)}`,
       );
     } else {
       console.error('서버를 시작하지 못했습니다:', err);
@@ -816,6 +1020,19 @@ async function main(): Promise<void> {
   }
 
   console.log(`\n  easy-study ${dev ? '(dev)' : ''}  →  ${running.url}`);
+  if (running.access) {
+    // The only place the access code is ever printed.
+    console.log(
+      formatAccessBanner({
+        ...running.access,
+        store: running.access,
+        dev,
+        resetCommand: underWatch ? `${authFilePath()} 을(를) 지우고 다시 시작` : `npm run ${script} -- --reset-access-code`,
+      }),
+    );
+  } else if (resetAccessCode) {
+    console.log('  접속 코드를 지웠습니다: 다음에 원격 모드로 시작할 때 새 코드가 만들어지고, 이전 로그인은 모두 끊깁니다.');
+  }
   console.log(`  library     →  ${libraryDir()}\n`);
 
   let stopping = false;

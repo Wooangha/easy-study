@@ -55,6 +55,10 @@ async function main() {
           CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC ?? null,
           ENABLE_CLAUDEAI_MCP_SERVERS: process.env.ENABLE_CLAUDEAI_MCP_SERVERS ?? null,
           MIMALLOC_PURGE_DELAY: process.env.MIMALLOC_PURGE_DELAY ?? null,
+          // The server's secrets must never reach a CLI (server/config.ts SERVER_SECRET_ENV).
+          EASY_STUDY_PASSWORD: process.env.EASY_STUDY_PASSWORD ?? null,
+          EASY_STUDY_TLS_KEY: process.env.EASY_STUDY_TLS_KEY ?? null,
+          EASY_STUDY_TLS_CERT: process.env.EASY_STUDY_TLS_CERT ?? null,
         },
       }),
     );

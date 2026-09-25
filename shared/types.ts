@@ -29,6 +29,14 @@ export interface HealthResponse {
   libraryDir: string;
 }
 
+/** GET /api/auth/status (DESIGN §16; answered without a session). */
+export interface AuthStatusResponse {
+  /** Remote mode: the API needs a login (access code). */
+  authRequired: boolean;
+  /** This request carries a valid session (or the access code as a bearer token); always true when no login is required. */
+  authenticated: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Documents (a PDF + its rendered slides)
 // ---------------------------------------------------------------------------

@@ -1,8 +1,10 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, type MouseEvent } from 'react';
 import type { DigestSlide, DocMeta, ProviderInfo } from '../../../shared/types.ts';
 import { digestMarkdownUrl } from '../api.ts';
+import { useAuth } from '../hooks/useAuth.ts';
 import type { DigestState } from '../hooks/useDigest.ts';
 import type { ProviderChoice } from '../hooks/useProviderChoice.ts';
+import { copyText } from '../lib/clipboard.ts';
 import { digestContinueLabel, digestNote, digestStatusLabel, digestView } from '../lib/digestState.ts';
 import { formatTime, providerWithModel } from '../lib/format.ts';
 import { toast } from '../lib/toast.ts';
@@ -43,6 +45,8 @@ export function DigestPanel({
   onGoToSlide,
 }: DigestPanelProps) {
   const { info, error, loading, pending } = digest;
+  // Remote mode: the path is on the server computer, not on the one this page is opened on.
+  const remote = useAuth().authRequired;
   // What the digest looks like right now, derived once for the toolbar, status block and content.
   const s = info ? digestView(info, doc.pageCount) : null;
   const bySlide = new Map((info?.slides ?? []).map((e) => [e.slide, e]));
@@ -61,9 +65,8 @@ export function DigestPanel({
 
   const copyPath = () => {
     if (!info?.markdownPath) return;
-    navigator.clipboard
-      .writeText(info.markdownPath)
-      .then(() => toast('경로를 복사했어요', 'success', 2000))
+    void copyText(info.markdownPath)
+      .then(() => toast(remote ? '서버 컴퓨터의 경로를 복사했어요' : '경로를 복사했어요', 'success', 2000))
       .catch(() => toast('복사하지 못했어요', 'error'));
   };
 
@@ -345,7 +348,12 @@ export function DigestPanel({
               <span className="muted">📄 DIGEST.md</span>
             )}
             {info.markdownPath && (
-              <button type="button" className="path" onClick={copyPath} title="클릭해서 경로 복사">
+              <button
+                type="button"
+                className="path"
+                onClick={copyPath}
+                title={remote ? '서버 컴퓨터의 경로예요. 클릭해서 복사' : '클릭해서 경로 복사'}
+              >
                 {info.markdownPath}
               </button>
             )}

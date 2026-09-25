@@ -27,7 +27,7 @@ import path from 'node:path';
 import { COURSE_ID_RE, DOC_ID_RE } from '../shared/types.ts';
 import type { DigestSlide, DigestStatus, DocMeta } from '../shared/types.ts';
 import { VIEW_WIDTHS, inlinePathFor, thumbPath, viewPath } from './assets.ts';
-import { HttpError, libraryDir } from './config.ts';
+import { HttpError, childProcessEnv, libraryDir } from './config.ts';
 import { isImageWorkerStopped, runImageWorker } from './imageWorker.ts';
 import type { ImageJob, ImageWorkerOptions, ImageWorkerRun, SheetEntry } from './imageWorker.ts';
 import type { CourseContext, CourseLectureRef, CourseRecord, DigestRecord, DocAssets } from './internal-types.ts';
@@ -277,14 +277,19 @@ interface ToolResult {
   stderr: string;
 }
 
-/** PATH with the usual Homebrew locations appended on macOS (GUI-launched shells often lack them). */
-function toolEnv(): NodeJS.ProcessEnv {
-  if (process.platform !== 'darwin') return process.env;
+/**
+ * Environment of the poppler tools (they parse untrusted PDFs): without the server's secrets
+ * (config.ts childProcessEnv), and on macOS with the usual Homebrew locations appended to PATH
+ * (GUI-launched shells often lack them).
+ */
+export function toolEnv(): NodeJS.ProcessEnv {
+  const env = childProcessEnv();
+  if (process.platform !== 'darwin') return env;
   const dirs = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean);
   for (const extra of ['/opt/homebrew/bin', '/usr/local/bin']) {
     if (!dirs.includes(extra)) dirs.push(extra);
   }
-  return { ...process.env, PATH: dirs.join(path.delimiter) };
+  return { ...env, PATH: dirs.join(path.delimiter) };
 }
 
 function lastLine(text: string): string {

@@ -11,6 +11,7 @@ import type { ChildProcess } from 'node:child_process';
 import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { INLINE_MAX_BYTES, INLINE_MAX_EDGE, inlinePathFor } from '../assets.ts';
+import { childProcessEnv } from '../config.ts';
 import type { ProviderAvailability } from './types.ts';
 
 /** Time between SIGTERM and SIGKILL when a turn is aborted. */
@@ -214,11 +215,12 @@ async function regularFileSize(file: string): Promise<number | null> {
 }
 
 /**
- * Environment for child processes: the server's environment without CLAUDECODE (which makes
+ * Environment for child processes: the server's environment without the server's secrets (the remote
+ * access password and the TLS files, config.ts SERVER_SECRET_ENV), without CLAUDECODE (which makes
  * Claude Code believe it runs nested inside another Claude Code session) and without `remove`.
  */
 export function childEnv(remove: readonly string[] = []): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env };
+  const env = childProcessEnv();
   delete env.CLAUDECODE;
   for (const key of remove) delete env[key];
   return env;

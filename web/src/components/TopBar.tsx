@@ -31,6 +31,8 @@ interface TopBarProps {
   choice: ProviderChoice | null;
   onChoiceChange: (choice: ProviderChoice) => void;
   hasNotes: boolean;
+  /** Remote mode (the server asks for an access code): "로그아웃" button. */
+  onLogout?: () => void;
 }
 
 function docOptionLabel(d: DocMeta, index?: number): string {
@@ -184,6 +186,12 @@ export function TopBar(props: TopBarProps) {
         >
           📝 노트 파일
         </a>
+      )}
+
+      {props.onLogout && (
+        <button type="button" className="ghost-btn logout-btn" onClick={props.onLogout} title="이 브라우저에서 로그아웃">
+          로그아웃
+        </button>
       )}
     </header>
   );

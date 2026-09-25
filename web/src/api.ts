@@ -1,5 +1,6 @@
 // Typed client for the easy-study HTTP API (DESIGN.md §4). Same-origin, everything under /api.
 import type {
+  AuthStatusResponse,
   Course,
   CreateCourseRequest,
   CreateSessionRequest,
@@ -15,13 +16,24 @@ import type {
   StreamEvent,
   UpdateCourseRequest,
 } from '../../shared/types.ts';
+import {
+  getAuthSnapshot,
+  loginPending,
+  markLocalOnly,
+  markUnauthorized,
+  parseRetryAfter,
+  waitForLogin,
+} from './lib/auth.ts';
 
 export class ApiError extends Error {
   readonly status: number;
-  constructor(message: string, status: number) {
+  /** Seconds to wait before trying again (429 with Retry-After), else null. */
+  readonly retryAfter: number | null;
+  constructor(message: string, status: number, retryAfter: number | null = null) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    this.retryAfter = retryAfter;
   }
 }
 
@@ -47,20 +59,145 @@ async function toApiError(res: Response): Promise<ApiError> {
     /* body unreadable */
   }
   if (!message) message = res.ok ? '예상하지 못한 응답 형식이에요' : `HTTP ${res.status} ${res.statusText}`.trim();
-  return new ApiError(message, res.ok ? 500 : res.status);
+  const retryAfter = res.status === 429 ? parseRetryAfter(res.headers.get('retry-after')) : null;
+  return new ApiError(message, res.ok ? 500 : res.status, retryAfter);
 }
 
+// ---------------------------------------------------------------------------
+// Login required (remote mode, DESIGN §16)
+// ---------------------------------------------------------------------------
+//
+// A request answered 401 (no session, or it expired) shows the login screen and waits there: it is sent
+// again after the next login and its caller simply gets the answer, so a question, an upload or a list
+// being loaded is not lost, and polling pauses by itself. While the login screen is up, new requests wait
+// before being sent; identical GETs share one request.
+
+/** Resolves once a request can be sent (logged in, or the server needs no login). */
+async function whenLoggedIn(signal?: AbortSignal | null): Promise<void> {
+  while (loginPending()) await waitForLogin(getAuthSnapshot().epoch, signal);
+}
+
+/**
+ * fetch() that waits for a login when the answer is 401 and then sends the request again. `init.body`
+ * must be re-sendable (a string), which every JSON call here is.
+ */
+async function fetchWithLogin(path: string, init?: RequestInit): Promise<Response> {
+  for (;;) {
+    await whenLoggedIn(init?.signal);
+    const epoch = getAuthSnapshot().epoch;
+    let res: Response;
+    try {
+      res = await fetch(path, init);
+    } catch (e) {
+      if (isAbortError(e)) throw e;
+      throw new ApiError('서버에 연결할 수 없어요', 0);
+    }
+    if (res.status !== 401) return res;
+    await res.body?.cancel().catch(() => {});
+    // Answered 401 after a login that happened meanwhile (it was sent without the new cookie): just resend.
+    if (getAuthSnapshot().epoch === epoch) markUnauthorized();
+    await waitForLogin(epoch, init?.signal);
+  }
+}
+
+/** GETs waiting for a login, by path: repeated polls of the same resource share one request. */
+const parkedGets = new Map<string, Promise<unknown>>();
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  let res: Response;
+  const method = (init?.method ?? 'GET').toUpperCase();
+  if (method === 'GET' && !init?.signal && loginPending()) {
+    const parked = parkedGets.get(path);
+    if (parked) return parked as Promise<T>;
+    const shared = (async () => {
+      try {
+        await whenLoggedIn();
+      } finally {
+        parkedGets.delete(path);
+      }
+      return requestNow<T>(path, init);
+    })();
+    parkedGets.set(path, shared);
+    return shared;
+  }
+  return requestNow<T>(path, init);
+}
+
+async function requestNow<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetchWithLogin(path, init);
+  if (!res.ok) throw await toApiError(res);
+  if (res.status === 204) return undefined as T;
+  return (await res.json()) as T;
+}
+
+// ---------------------------------------------------------------------------
+// Auth routes (answered without a session)
+// ---------------------------------------------------------------------------
+
+export type AuthStatus = AuthStatusResponse;
+
+async function authFetch(path: string, init?: RequestInit): Promise<Response> {
   try {
-    res = await fetch(path, init);
+    return await fetch(path, { credentials: 'same-origin', ...init });
   } catch (e) {
     if (isAbortError(e)) throw e;
     throw new ApiError('서버에 연결할 수 없어요', 0);
   }
+}
+
+/**
+ * GET /api/auth/status. A server from before the remote mode (404) needs no login. A 403 means the server
+ * runs in local mode and this page was opened through another address (LAN IP, host name): the login screen
+ * cannot help then, so the phase becomes `local` (the caller shows how to enable remote access).
+ */
+export async function getAuthStatus(): Promise<AuthStatus> {
+  const res = await authFetch('/api/auth/status', { cache: 'no-store' });
+  if (res.status === 404) return { authRequired: false, authenticated: true };
+  if (!res.ok) {
+    const err = await toApiError(res);
+    if (res.status === 403) markLocalOnly(err.message);
+    throw err;
+  }
+  const body = (await res.json()) as Partial<AuthStatus>;
+  return { authRequired: body.authRequired === true, authenticated: body.authenticated !== false };
+}
+
+/** POST /api/auth/login. Throws ApiError 401 (wrong code), 429 (too many attempts; `retryAfter`), 0 (offline). */
+export async function login(code: string): Promise<void> {
+  const res = await authFetch('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code }),
+  });
   if (!res.ok) throw await toApiError(res);
-  if (res.status === 204) return undefined as T;
-  return (await res.json()) as T;
+}
+
+/** POST /api/auth/logout: ends this browser's session. */
+export async function logout(): Promise<void> {
+  const res = await authFetch('/api/auth/logout', { method: 'POST' });
+  if (!res.ok && res.status !== 401) throw await toApiError(res);
+}
+
+let lastSessionCheck = 0;
+const SESSION_CHECK_INTERVAL_MS = 5000;
+
+/**
+ * Something that is not fetched through this module failed (a slide image): if a login is required,
+ * ask whether the session is still valid and show the login screen when it is not. Throttled.
+ */
+export function checkSessionSoon(): void {
+  const auth = getAuthSnapshot();
+  if (auth.phase !== 'ok' || !auth.authRequired) return;
+  const now = Date.now();
+  if (now - lastSessionCheck < SESSION_CHECK_INTERVAL_MS) return;
+  lastSessionCheck = now;
+  const epoch = auth.epoch;
+  getAuthStatus()
+    .then((status) => {
+      if (status.authRequired && !status.authenticated && getAuthSnapshot().epoch === epoch) markUnauthorized();
+    })
+    .catch(() => {
+      /* offline: the next API call says so */
+    });
 }
 
 function sendJSON<T>(method: 'POST' | 'PATCH', path: string, body?: unknown): Promise<T> {
@@ -179,11 +316,34 @@ export const courseSummaryUrl = (courseId: string) => `${coursePath(courseId)}/s
  * With `courseId` the new lecture is added to that course (header X-Course-Id).
  * Resolves with the new DocMeta (status 'processing').
  */
-export function uploadPdf(
+export async function uploadPdf(
   file: File,
   onProgress?: (fraction: number) => void,
   courseId?: string | null,
 ): Promise<DocMeta> {
+  for (;;) {
+    await whenLoggedIn();
+    // A login is required: do not send a large file just to have it refused.
+    if (getAuthSnapshot().authRequired) {
+      const status = await getAuthStatus().catch(() => null);
+      if (status && status.authRequired && !status.authenticated) {
+        markUnauthorized();
+        continue;
+      }
+    }
+    const epoch = getAuthSnapshot().epoch;
+    try {
+      return await uploadOnce(file, onProgress, courseId);
+    } catch (e) {
+      if (!(e instanceof ApiError) || e.status !== 401) throw e;
+      if (getAuthSnapshot().epoch === epoch) markUnauthorized();
+      onProgress?.(0);
+      await waitForLogin(epoch);
+    }
+  }
+}
+
+function uploadOnce(file: File, onProgress?: (fraction: number) => void, courseId?: string | null): Promise<DocMeta> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/api/docs');
@@ -272,18 +432,12 @@ export async function postStream(
   onEvent: (event: StreamEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  let res: Response;
-  try {
-    res = await fetch(path, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-      body: JSON.stringify(body),
-      signal,
-    });
-  } catch (e) {
-    if (isAbortError(e)) throw e;
-    throw new ApiError('서버에 연결할 수 없어요', 0);
-  }
+  const res = await fetchWithLogin(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+    body: JSON.stringify(body),
+    signal,
+  });
 
   const contentType = res.headers.get('content-type') ?? '';
   if (!res.ok || !contentType.includes('text/event-stream')) throw await toApiError(res);
@@ -339,6 +493,7 @@ export const sendMessage = (
 export function errorMessage(e: unknown): string {
   if (e instanceof ApiError) {
     if (e.status === 409) return '이미 답변을 생성하고 있어요. 끝난 뒤에 다시 시도해 주세요.';
+    if (e.status === 401) return '로그인이 필요해요';
     return e.message;
   }
   if (e instanceof Error) return e.message;

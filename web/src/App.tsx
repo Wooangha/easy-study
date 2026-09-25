@@ -25,7 +25,18 @@ import { toast } from './lib/toast.ts';
 
 const isDigestMode = (v: unknown): v is DigestMode => v === 'current' || v === 'all';
 
-export function App() {
+interface AppProps {
+  /**
+   * The login screen is shown over the app (the session ended while it was in use, DESIGN §16): the app
+   * stays mounted so nothing is lost, but ignores input (its API requests wait for the login).
+   */
+  suspended?: boolean;
+  /** The server asks for an access code: offer a logout in the top bar. */
+  authRequired?: boolean;
+  onLogout?: () => Promise<void> | void;
+}
+
+export function App({ suspended = false, authRequired = false, onLogout }: AppProps = {}) {
   const { health, error: healthError, loading: healthLoading, reload: reloadHealth } = useHealth();
   const providers = health?.providers;
   const [choice, setChoice] = useProviderChoice(providers);
@@ -171,11 +182,12 @@ export function App() {
   const handleFilesRef = useLatest(handleFiles);
 
   const [dragOver, setDragOver] = useState(false);
+  const suspendedRef = useLatest(suspended);
   useEffect(() => {
     let depth = 0;
     const hasFiles = (e: DragEvent) => Array.from(e.dataTransfer?.types ?? []).includes('Files');
     const onEnter = (e: DragEvent) => {
-      if (!hasFiles(e)) return;
+      if (!hasFiles(e) || suspendedRef.current) return;
       depth++;
       setDragOver(true);
     };
@@ -192,6 +204,7 @@ export function App() {
       setDragOver(false);
       if (!hasFiles(e) || e.defaultPrevented) return; // the library drop zone already handled it
       e.preventDefault();
+      if (suspendedRef.current) return; // the login screen is up
       void handleFilesRef.current(Array.from(e.dataTransfer?.files ?? []));
     };
     window.addEventListener('dragenter', onEnter);
@@ -204,7 +217,7 @@ export function App() {
       window.removeEventListener('dragover', onOver);
       window.removeEventListener('drop', onDrop);
     };
-  }, [handleFilesRef]);
+  }, [handleFilesRef, suspendedRef]);
 
   // Warn before closing the tab while an answer is streaming (closing aborts it) or an upload runs.
   const busy = study.anyRunning || uploads.length > 0;
@@ -217,6 +230,20 @@ export function App() {
     window.addEventListener('beforeunload', onBeforeUnload);
     return () => window.removeEventListener('beforeunload', onBeforeUnload);
   }, [busy]);
+
+  // ---- Logout (remote mode) ----------------------------------------------------------------------
+  const logout = useCallback(() => {
+    if (!onLogout) return;
+    if (
+      busy &&
+      !window.confirm(
+        '답변을 만들거나 PDF를 올리는 중이에요. 지금 로그아웃하면 이 화면에서는 결과를 볼 수 없어요.\n로그아웃할까요?',
+      )
+    ) {
+      return;
+    }
+    void onLogout();
+  }, [busy, onLogout]);
 
   // ---- Documents whose conversion failed: retry or delete (DESIGN §14) ----------------------------
   const deleteDoc = useCallback(
@@ -395,7 +422,7 @@ export function App() {
   }
 
   return (
-    <div className="app">
+    <div className="app" inert={suspended} aria-hidden={suspended || undefined}>
       <TopBar
         docs={docs}
         doc={doc}
@@ -414,6 +441,7 @@ export function App() {
         choice={choice}
         onChoiceChange={setChoice}
         hasNotes={notesCount > 0}
+        onLogout={authRequired && onLogout ? logout : undefined}
       />
 
       {healthError && (

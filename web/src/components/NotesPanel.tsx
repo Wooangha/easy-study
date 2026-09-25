@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import type { NoteEntry, NotesResponse, ProviderInfo } from '../../../shared/types.ts';
 import { notesMarkdownUrl, thumbUrl } from '../api.ts';
+import { useAuth } from '../hooks/useAuth.ts';
+import { copyText } from '../lib/clipboard.ts';
 import { firstLine, formatTime, providerLabel } from '../lib/format.ts';
 import { toast } from '../lib/toast.ts';
 import { Markdown } from './Markdown.tsx';
@@ -37,6 +39,8 @@ export function NotesPanel({
   // Bumping this remounts the <details> elements with the new default open state. Cards start collapsed
   // (an open card renders its Markdown/KaTeX answer); only a lone Q&A of a single-slide view opens.
   const [expand, setExpand] = useState<{ open: boolean; gen: number }>({ open: false, gen: 0 });
+  // Remote mode: the path is on the server computer, not on the one this page is opened on.
+  const remote = useAuth().authRequired;
 
   const filterSlide = filter === 'current' ? focusedSlide : filter === 'all' ? null : filter;
   const allSlides = notes?.slides ?? [];
@@ -46,9 +50,8 @@ export function NotesPanel({
 
   const copyPath = () => {
     if (!notes) return;
-    navigator.clipboard
-      .writeText(notes.markdownPath)
-      .then(() => toast('경로를 복사했어요', 'success', 2000))
+    void copyText(notes.markdownPath)
+      .then(() => toast(remote ? '서버 컴퓨터의 경로를 복사했어요' : '경로를 복사했어요', 'success', 2000))
       .catch(() => toast('복사하지 못했어요', 'error'));
   };
 
@@ -91,7 +94,12 @@ export function NotesPanel({
           <span className="muted">📄 STUDY_NOTES.md</span>
         )}
         {notes?.markdownPath && (
-          <button type="button" className="path" onClick={copyPath} title="클릭해서 경로 복사">
+          <button
+            type="button"
+            className="path"
+            onClick={copyPath}
+            title={remote ? '서버 컴퓨터의 경로예요. 클릭해서 복사' : '클릭해서 경로 복사'}
+          >
             {notes.markdownPath}
           </button>
         )}
