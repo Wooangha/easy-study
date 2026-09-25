@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import type { ChatMessage, MessageStatus, ProviderInfo } from '../../../shared/types.ts';
 import { PENDING_ASSISTANT_ID, PENDING_USER_ID } from '../hooks/useStudySession.ts';
+import { CHAT_WINDOW, chatWindowStart } from '../lib/chatWindow.ts';
 import { describeContext, formatDuration, formatTime, primeCardState, providerWithModel } from '../lib/format.ts';
 import { toast } from '../lib/toast.ts';
 import { Markdown } from './Markdown.tsx';
@@ -14,7 +15,10 @@ interface MessageListProps {
   liveStatus: string | null;
   stopping: boolean;
   running: boolean;
-  /** Changes when the list should jump to the bottom (session switch, message sent). */
+  /**
+   * Changes when the list should jump to the bottom (session switch, message sent). The window of
+   * rendered messages then shrinks back to the last CHAT_WINDOW ones.
+   */
   scrollKey: string;
   onGoToSlide: (slide: number) => void;
   onRetry: (text: string, slide: number) => void;
@@ -46,6 +50,29 @@ export function MessageList({
   const listRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
   const [showJump, setShowJump] = useState(false);
+
+  // Only the last messages are rendered (lib/chatWindow.ts); the window resets whenever scrollKey changes.
+  const [win, setWin] = useState({ key: scrollKey, limit: CHAT_WINDOW });
+  if (win.key !== scrollKey) setWin({ key: scrollKey, limit: CHAT_WINDOW });
+  const limit = win.key === scrollKey ? win.limit : CHAT_WINDOW;
+  const start = chatWindowStart(messages, limit);
+  const nextStart = chatWindowStart(messages, limit + CHAT_WINDOW);
+  /** Distance from the bottom to keep while older messages are added above (null = nothing pending). */
+  const keepFromBottomRef = useRef<number | null>(null);
+  const showOlder = (all: boolean) => {
+    const el = listRef.current;
+    if (el) keepFromBottomRef.current = el.scrollHeight - el.scrollTop;
+    setWin({ key: scrollKey, limit: all ? messages.length : messages.length - nextStart });
+  };
+  // Keep what the student was looking at in place when older messages appear above it.
+  useLayoutEffect(() => {
+    const el = listRef.current;
+    const keep = keepFromBottomRef.current;
+    keepFromBottomRef.current = null;
+    if (!el || keep === null) return;
+    el.scrollTop = el.scrollHeight - keep;
+    stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < STICK_THRESHOLD;
+  }, [start]);
 
   const onScroll = useCallback(() => {
     const el = listRef.current;
@@ -95,6 +122,7 @@ export function MessageList({
   for (let i = 0; i < messages.length; i++) {
     const m = messages[i];
     if (m.role === 'user') lastUser = m;
+    if (i < start) continue;
     const next = messages[i + 1];
     const pairStatus =
       m.role === 'user' && next?.role === 'assistant' && next.kind === m.kind ? next.status : undefined;
@@ -129,7 +157,21 @@ export function MessageList({
   return (
     <div className="message-list-wrap">
       <div className="message-list" ref={listRef} onScroll={onScroll}>
-        <div className="message-list-inner">{messages.length === 0 ? empty : items}</div>
+        <div className="message-list-inner">
+          {start > 0 && (
+            <div className="older-messages">
+              <button type="button" className="ghost-btn small" onClick={() => showOlder(false)}>
+                ↑ 이전 메시지 {start - nextStart}개 보기
+              </button>
+              {nextStart > 0 && (
+                <button type="button" className="ghost-btn small" onClick={() => showOlder(true)}>
+                  모두 보기 ({start}개)
+                </button>
+              )}
+            </div>
+          )}
+          {messages.length === 0 ? empty : items}
+        </div>
       </div>
       {showJump && messages.length > 0 && (
         <button type="button" className="jump-bottom" onClick={() => scrollToBottom('smooth')}>

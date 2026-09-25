@@ -1,13 +1,29 @@
 // Runtime configuration. Every value is read lazily (functions, not top-level constants) so that
 // tests and tools can set environment variables such as EASY_STUDY_LIBRARY before calling in.
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const DEFAULT_PORT = 5180;
 
-/** Absolute path of the repository root (the directory that contains server/, web/, shared/). */
+let cachedRepoRoot: string | undefined;
+
+/**
+ * The nearest directory at or above `start` that holds a package.json (null when there is none). The
+ * server runs from server/ (TypeScript, development) or from dist-server/server/ (compiled build).
+ */
+export function findPackageRoot(start: string): string | null {
+  for (let dir = path.resolve(start); ; dir = path.dirname(dir)) {
+    if (existsSync(path.join(dir, 'package.json'))) return dir;
+    if (path.dirname(dir) === dir) return null;
+  }
+}
+
+/** Absolute path of the repository root (the directory that contains package.json, server/, web/, shared/). */
 export function repoRoot(): string {
-  return path.resolve(fileURLToPath(new URL('..', import.meta.url)));
+  cachedRepoRoot ??=
+    findPackageRoot(path.dirname(fileURLToPath(import.meta.url))) ?? path.resolve(fileURLToPath(new URL('..', import.meta.url)));
+  return cachedRepoRoot;
 }
 
 /** Absolute path of the library directory (EASY_STUDY_LIBRARY, default <repo>/library). */
@@ -29,20 +45,34 @@ export function host(): string {
   return '127.0.0.1';
 }
 
-const DEFAULT_DIGEST_CONCURRENCY = 2;
+const DEFAULT_DIGEST_CONCURRENCY = 1;
 const MAX_DIGEST_CONCURRENCY = 8;
+const DEFAULT_MAX_CLI_PROCS = 2;
+const MAX_MAX_CLI_PROCS = 16;
+
+function intFromEnv(name: string, fallback: number, max: number): number {
+  const raw = process.env[name]?.trim();
+  const parsed = raw ? Number(raw) : NaN;
+  if (!Number.isInteger(parsed)) return fallback;
+  return Math.min(max, Math.max(1, parsed));
+}
 
 /**
  * Digest provider calls that run at the same time, across ALL digest jobs of the process
- * (EASY_STUDY_DIGEST_CONCURRENCY, default 2, clamped to 1..8): opening several lectures queues their
- * digests instead of multiplying the load. Each call carries a few full-resolution slide images, so
- * keep it small.
+ * (EASY_STUDY_DIGEST_CONCURRENCY, default 1, clamped to 1..8): opening several lectures queues their
+ * digests instead of multiplying the load. Each call carries a few full-resolution slide images, and
+ * with a CLI provider each call is a CLI process of ~150-250 MB, so keep it small.
  */
 export function digestConcurrency(): number {
-  const raw = process.env.EASY_STUDY_DIGEST_CONCURRENCY?.trim();
-  const parsed = raw ? Number(raw) : NaN;
-  if (!Number.isInteger(parsed)) return DEFAULT_DIGEST_CONCURRENCY;
-  return Math.min(MAX_DIGEST_CONCURRENCY, Math.max(1, parsed));
+  return intFromEnv('EASY_STUDY_DIGEST_CONCURRENCY', DEFAULT_DIGEST_CONCURRENCY, MAX_DIGEST_CONCURRENCY);
+}
+
+/**
+ * LLM CLI processes (claude / codex) the whole server runs at a time, chat turns and digest batches
+ * together (EASY_STUDY_MAX_CLI_PROCS, default 2, clamped to 1..16; DESIGN §15, server/cliBudget.ts).
+ */
+export function maxCliProcs(): number {
+  return intFromEnv('EASY_STUDY_MAX_CLI_PROCS', DEFAULT_MAX_CLI_PROCS, MAX_MAX_CLI_PROCS);
 }
 
 /**

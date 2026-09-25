@@ -1,0 +1,16 @@
+{
+  // Production build of the server (npm run build → scripts/build-server.mjs): server/ and shared/ compiled
+  // to plain JavaScript in dist-server/, so Node runs no TypeScript stripper at runtime (DESIGN §15).
+  // Relative `.ts` imports are rewritten to `.js`; comments are dropped (V8 keeps every script's source).
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist-server",
+    "rootDir": ".",
+    "rewriteRelativeImportExtensions": true,
+    "removeComments": true,
+    "sourceMap": false,
+    "declaration": false
+  },
+  "include": ["server/**/*.ts", "shared/**/*.ts"]
+}

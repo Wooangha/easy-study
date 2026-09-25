@@ -13,7 +13,10 @@
 // that would not fit fails with ProviderError 'context_overflow' without calling the API, and the
 // orchestrator continues in a new conversation (re-prime + recap). API errors are classified the same
 // way (413, "prompt is too long", …).
-import Anthropic from '@anthropic-ai/sdk';
+//
+// The SDK is imported on the first call (measured: importing it and the openai SDK at startup costs the
+// server ~12 MB of idle footprint, and most users never use an API provider).
+import type Anthropic from '@anthropic-ai/sdk';
 import type {
   BetaContentBlockParam,
   BetaMessageParam,
@@ -266,7 +269,23 @@ export function classifyAnthropicError(status: number | undefined, message: stri
   return 'other';
 }
 
-function toProviderError(err: unknown): Error {
+type AnthropicSdk = typeof Anthropic;
+
+let sdk: Promise<AnthropicSdk> | null = null;
+
+/** The SDK's client class (with the error classes as statics), imported on first use. */
+function loadAnthropicSdk(): Promise<AnthropicSdk> {
+  sdk ??= import('@anthropic-ai/sdk').then(
+    (mod) => mod.default,
+    (err: unknown) => {
+      sdk = null; // let a later call try again
+      throw err;
+    },
+  );
+  return sdk;
+}
+
+function toProviderError(Anthropic: AnthropicSdk, err: unknown): Error {
   if (err instanceof ProviderError) return err;
   if (err instanceof Anthropic.APIConnectionError) {
     return new ProviderError(`Anthropic API에 연결할 수 없습니다: ${err.message}`, 'other', { cause: err });
@@ -305,6 +324,8 @@ async function runAnthropic(input: ProviderRunInput): Promise<ProviderRunResult>
     model: input.model,
   });
   checkAnthropicRequest(params, input.history.length > 0);
+  const Anthropic = await loadAnthropicSdk();
+  if (input.signal.aborted) throw abortError();
   const client = new Anthropic({ maxRetries: 2 });
   const state = new AnthropicStreamState(input.onDelta, input.onStatus);
 
@@ -326,7 +347,7 @@ async function runAnthropic(input: ProviderRunInput): Promise<ProviderRunResult>
     }
   } catch (err) {
     if (input.signal.aborted || err instanceof Anthropic.APIUserAbortError) throw abortError();
-    throw toProviderError(err);
+    throw toProviderError(Anthropic, err);
   }
   return { text: state.text, resume: {} };
 }

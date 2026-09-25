@@ -27,8 +27,9 @@ interface ChatPanelProps {
   tab: PanelTab;
   onTabChange: (tab: PanelTab) => void;
   notesCount: number;
+  /** Content of the 노트 tab: mounted the first time the tab is opened, then kept. */
   notes: ReactNode;
-  /** Content of the 정리본 tab. */
+  /** Content of the 정리본 tab: mounted only while the tab is shown (its 전체 list can hold dozens of entries). */
   digest: ReactNode;
   /** Digest of this document (for the tab badge and the empty-state copy); null while unknown. */
   digestInfo: DigestInfo | null;
@@ -88,9 +89,12 @@ export function ChatPanel({
   const targetSlide = pinnedSlide ?? focusedSlide;
   const targetRef = useLatest(targetSlide);
   const digestReady = digestInfo?.status === 'ready';
-  // The digest tab can render dozens of Markdown/KaTeX entries: mount it only once it was opened.
-  const [digestMounted, setDigestMounted] = useState(false);
-  if (tab === 'digest' && !digestMounted) setDigestMounted(true);
+  // Hidden tabs cost memory even with display:none (DOM + React trees stay): the notes mount the first
+  // time they are opened for this lecture (their cards start collapsed), the 정리본 only while it is
+  // shown — it scrolls back to the focused slide's entry when it comes back.
+  const [notesOpenedFor, setNotesOpenedFor] = useState<string | null>(null);
+  if (tab === 'notes' && notesOpenedFor !== doc.id) setNotesOpenedFor(doc.id);
+  const notesMounted = notesOpenedFor === doc.id;
 
   // `ask` / `primeCurrent` are stable while streaming, so memoized message items do not re-render on every delta.
   const { ask, primeCurrent } = study;
@@ -311,11 +315,11 @@ export function ChatPanel({
       </div>
 
       <div className="digest-view" hidden={tab !== 'digest'}>
-        {digestMounted && digest}
+        {tab === 'digest' && digest}
       </div>
 
       <div className="notes-view" hidden={tab !== 'notes'}>
-        {notes}
+        {notesMounted && notes}
       </div>
     </section>
   );

@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import type { DigestInfo, DigestSlide, DocMeta, ProviderId, ProviderInfo, Session } from '../shared/types.ts';
+import { createCliBudget } from '../server/cliBudget.ts';
 import { HttpError } from '../server/config.ts';
 import { createCourse, updateCourse } from '../server/courses.ts';
 import {
@@ -737,6 +738,34 @@ describe('digest job', () => {
     for (const docId of docs.slice(0, 2)) assert.equal((await finish(docId)).status, 'ready');
     assert.equal(maxInFlight, 2);
     assert.equal(digestCallsInFlight(), 0);
+  });
+
+  test('with a CLI provider every call also needs a slot of the CLI process budget, where chat turns go first', async () => {
+    const docId = 'cli-budget-000001';
+    await makeDoc(docId, 8);
+    const budget = createCliBudget(() => 1);
+    const provider = fakeProvider(wellBehaved);
+    const chat = await budget.acquire('chat', new AbortController().signal);
+    await startDigest(docId, { provider: 'claude-code' }, depsFor(provider, { concurrency: () => 2, cliSlot: budget.acquire }));
+    await waitFor(() => budget.usage().waitingDigest === 2);
+    await delay(20);
+    assert.equal(provider.calls.length, 0, 'a chat turn holds the only CLI slot');
+    chat();
+    assert.equal((await finish(docId)).status, 'ready');
+    assert.equal(provider.maxInFlight, 1, 'one CLI process at a time although the digest concurrency is 2');
+    assert.deepEqual(budget.usage(), { chat: 0, digest: 0, waitingChat: 0, waitingDigest: 0 });
+
+    // Aborting a job that waits for a CLI slot gives its digest slot back at once.
+    const waiting = 'cli-budget-000002';
+    await makeDoc(waiting, 4);
+    const held = await budget.acquire('chat', new AbortController().signal);
+    await startDigest(waiting, { provider: 'claude-code' }, depsFor(provider, { concurrency: () => 1, cliSlot: budget.acquire }));
+    await waitFor(() => budget.usage().waitingDigest === 1);
+    assert.equal(abortDigest(waiting), true);
+    assert.equal((await finish(waiting)).status, 'aborted');
+    assert.equal(digestCallsInFlight(), 0);
+    assert.equal(budget.usage().waitingDigest, 0);
+    held();
   });
 
   test('all slides done but no summary: only the summary is made', async () => {

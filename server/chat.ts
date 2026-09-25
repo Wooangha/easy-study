@@ -13,6 +13,8 @@
 // turn is rebuilt as a new conversation (re-prime + recap) and retried once within the same request.
 import { randomUUID } from 'node:crypto';
 import type { ChatMessage, ProviderId, Session, StreamEvent } from '../shared/types.ts';
+import { acquireCliSlot } from './cliBudget.ts';
+import type { AcquireCliSlot } from './cliBudget.ts';
 import { HttpError } from './config.ts';
 import { appendHistory, buildTurn, defaultContextSettings } from './context.ts';
 import type { BuildTurnInput, BuildTurnOutput, ContextSettings, ProviderState, SessionRecord } from './internal-types.ts';
@@ -33,6 +35,15 @@ const STATELESS_PROVIDERS: ReadonlySet<ProviderId> = new Set<ProviderId>(['anthr
 /** Provider failures that a new provider conversation can fix (BuildTurnInput.forceNewConversation). */
 type RecoverableKind = NonNullable<BuildTurnInput['forceNewConversation']>;
 
+/** Status line shown while a turn waits for a CLI process slot (server/cliBudget.ts). */
+const WAITING_FOR_SLOT_STATUS = '다른 답변이 끝나기를 기다리는 중…';
+
+/**
+ * Sent once the waiting turn got its slot: an empty status line clears WAITING_FOR_SLOT_STATUS (the client
+ * keeps the latest status and hides an empty one), so the turn looks like one that never waited.
+ */
+const SLOT_GRANTED_STATUS = '';
+
 /** Status line shown while a turn is retried in a new provider conversation. */
 const RECOVERY_STATUS: Readonly<Record<RecoverableKind, string>> = {
   resume_invalid: '이전 대화를 이어갈 수 없어 새 대화로 다시 시작해요',
@@ -52,6 +63,11 @@ export interface ChatDeps {
   buildTurn: (input: BuildTurnInput) => BuildTurnOutput;
   appendHistory: (state: ProviderState, parts: Part[], answer: string) => ProviderState;
   contextSettings: () => ContextSettings;
+  /**
+   * The server-wide budget of LLM CLI processes (DESIGN §15): CLI providers run only with a slot.
+   * Omitted = no limit.
+   */
+  cliSlot?: AcquireCliSlot;
 }
 
 /** The real modules: provider registry (availability cached 60 s) and the context builder. */
@@ -65,6 +81,7 @@ export function defaultChatDeps(): ChatDeps {
     buildTurn,
     appendHistory,
     contextSettings: () => defaultContextSettings(),
+    cliSlot: acquireCliSlot,
   };
 }
 
@@ -281,7 +298,16 @@ async function executeTurn(request: TurnRequest, deps: ChatDeps, signal: AbortSi
   const runAttempt = async (turn: BuildTurnOutput): Promise<Attempt> => {
     let streamed = '';
     let settled = false; // ignore callbacks that arrive after run() settled
+    let releaseSlot: (() => void) | null = null;
     try {
+      if (provider.kind === 'cli' && deps.cliSlot) {
+        let waited = false;
+        releaseSlot = await deps.cliSlot('chat', signal, () => {
+          waited = true;
+          emit({ type: 'status', text: WAITING_FOR_SLOT_STATUS });
+        });
+        if (waited) emit({ type: 'status', text: SLOT_GRANTED_STATUS });
+      }
       const result = await provider.run({
         cwd: doc.dir,
         systemPrompt: turn.systemPrompt,
@@ -306,6 +332,8 @@ async function executeTurn(request: TurnRequest, deps: ChatDeps, signal: AbortSi
     } catch (error) {
       settled = true;
       return { ok: false, error, streamed };
+    } finally {
+      releaseSlot?.();
     }
   };
 

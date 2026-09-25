@@ -8,3 +8,4 @@ library/
 !.env.example
 .claude/*.lock
 .claude/settings.local.json
+dist-server/

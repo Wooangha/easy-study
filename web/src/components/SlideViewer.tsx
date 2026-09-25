@@ -10,10 +10,11 @@ import {
   type Ref,
 } from 'react';
 import type { DocMeta } from '../../../shared/types.ts';
-import { slideUrl } from '../api.ts';
+import { viewSrcSet, viewUrl } from '../api.ts';
 import { useLatest } from '../hooks/useLatest.ts';
-import { clamp } from '../lib/format.ts';
+import { clamp, slideSizes } from '../lib/format.ts';
 import { isNumber, readStorage, storageKeys, writeStorage } from '../lib/storage.ts';
+import { SlideImage } from './SlideImage.tsx';
 
 export interface SlideViewerHandle {
   /** Scroll so that the slide sits in the vertical center of the viewer. */
@@ -54,6 +55,7 @@ export function SlideViewer({ doc, qaCounts, pinnedSlide, onFocusChange, onOpenN
   const aspect = Number.isFinite(doc.aspectRatio) && doc.aspectRatio > 0 ? doc.aspectRatio : 16 / 9;
 
   const scrollerRef = useRef<HTMLDivElement>(null);
+  const trackRef = useRef<HTMLDivElement>(null);
   /** The last pointer press was in the right pane: its scroll keys (↑↓, PageUp/Down, Home/End) stay native. */
   const pointerInOtherPaneRef = useRef(false);
   const slideEls = useRef<(HTMLDivElement | null)[]>([]);
@@ -196,6 +198,24 @@ export function SlideViewer({ doc, qaCounts, pinnedSlide, onFocusChange, onOpenN
     writeStorage(storageKeys.zoom, zoom);
   }, [zoom, restoreAnchor, computeFocus]);
 
+  // The browser picks a WebP rendition (srcset) from the width a slide really has on screen: the viewer's
+  // width times the zoom, which is the track's width. Measured before the first paint, so no image is
+  // requested at a wrong size.
+  const [sizes, setSizes] = useState<string | null>(null);
+  useLayoutEffect(() => {
+    const track = trackRef.current;
+    if (!track) return;
+    const measure = () => {
+      const next = slideSizes(track.getBoundingClientRect().width);
+      if (next) setSizes(next);
+    };
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(track);
+    return () => ro.disconnect();
+  }, []);
+
   // Remember the position per doc.
   useEffect(() => {
     writeStorage(storageKeys.slide(doc.id), focused);
@@ -264,6 +284,7 @@ export function SlideViewer({ doc, qaCounts, pinnedSlide, onFocusChange, onOpenN
         docId={doc.id}
         slide={n}
         aspect={aspect}
+        sizes={sizes}
         focused={n === focused}
         pinned={n === pinnedSlide}
         qaCount={qaCounts.get(n) ?? 0}
@@ -336,7 +357,11 @@ export function SlideViewer({ doc, qaCounts, pinnedSlide, onFocusChange, onOpenN
         tabIndex={0}
         aria-label="슬라이드 (j/k 또는 ↑/↓ 로 이동)"
       >
-        <div className="slides-track" style={{ '--zoom': zoom, '--aspect': aspect } as CSSProperties}>
+        <div
+          className="slides-track"
+          ref={trackRef}
+          style={{ '--zoom': zoom, '--aspect': aspect } as CSSProperties}
+        >
           {slides}
         </div>
       </div>
@@ -348,6 +373,8 @@ interface SlideItemProps {
   docId: string;
   slide: number;
   aspect: number;
+  /** `sizes` of the slide image (its rendered width); null until measured. */
+  sizes: string | null;
   focused: boolean;
   pinned: boolean;
   qaCount: number;
@@ -359,6 +386,7 @@ const SlideItem = memo(function SlideItem({
   docId,
   slide,
   aspect,
+  sizes,
   focused,
   pinned,
   qaCount,
@@ -374,14 +402,18 @@ const SlideItem = memo(function SlideItem({
         {failed ? (
           <div className="slide-error">슬라이드 {slide} 이미지를 불러오지 못했어요</div>
         ) : (
-          <img
-            src={slideUrl(docId, slide)}
-            alt={`슬라이드 ${slide}`}
-            loading="lazy"
-            decoding="async"
-            draggable={false}
-            onError={() => setFailed(true)}
-          />
+          sizes && (
+            <SlideImage
+              docId={docId}
+              slide={slide}
+              src={viewUrl(docId, slide, 1000)}
+              srcSet={viewSrcSet(docId, slide)}
+              sizes={sizes}
+              alt={`슬라이드 ${slide}`}
+              draggable={false}
+              onFail={() => setFailed(true)}
+            />
+          )
         )}
         <span className="slide-label">
           {pinned && <span aria-label="고정됨">📌 </span>}

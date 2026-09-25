@@ -9,6 +9,7 @@ import { after, before, describe, test } from 'node:test';
 import type { ChatMessage, DocMeta, NotesResponse, ProviderId, ProviderInfo, Session, StreamEvent } from '../shared/types.ts';
 import { abortTurn, defaultChatDeps, isTurnRunning, resolveNeighbors, runTurn } from '../server/chat.ts';
 import type { ChatDeps, TurnRequest } from '../server/chat.ts';
+import { createCliBudget } from '../server/cliBudget.ts';
 import { HttpError, repoRoot } from '../server/config.ts';
 import { initialProviderState } from '../server/context.ts';
 import { startServer } from '../server/index.ts';
@@ -256,6 +257,76 @@ describe('runTurn', () => {
     assert.match(notes, /## Slide 5/);
     assert.ok(!notes.includes('answer 1'));
     await fs.access(path.join(docPaths(DOC).notesDir, `${session.id}.md`));
+  });
+
+  test('CLI turns take a slot of the process budget: digests never hold them back, other chat turns do', async () => {
+    const budget = createCliBudget(() => 1);
+    const provider = fakeProvider('claude-code', streamingAnswer((call) => `slot answer ${call}`));
+    const deps = depsFor(provider, { cliSlot: budget.acquire });
+    const session = await createSession(DOC, { provider: 'claude-code', model: '' });
+    const free = () => new AbortController().signal;
+
+    // A digest batch holds the only slot: the chat turn starts anyway (DESIGN §15).
+    const digestSlot = await budget.acquire('digest', free());
+    const first = await turn(deps, { docId: DOC, sessionId: session.id, kind: 'prime', slide: 1 });
+    assert.deepEqual(
+      first.events.map((e) => e.type),
+      ['start', 'delta', 'status', 'delta', 'done'],
+    );
+    digestSlot();
+
+    // Another chat turn holds it: this one says that it waits, and runs once the slot is free.
+    const otherChat = await budget.acquire('chat', free());
+    const events: StreamEvent[] = [];
+    const pending = runTurn(
+      { docId: DOC, sessionId: session.id, kind: 'question', text: 'wait?', slide: 1, onEvent: (e) => events.push(e) },
+      deps,
+    );
+    await waitFor(() => events.length >= 2);
+    assert.deepEqual(events[1], { type: 'status', text: '다른 답변이 끝나기를 기다리는 중…' });
+    assert.equal(provider.calls.length, 1, 'the provider is not started while waiting');
+    otherChat();
+    const result = await pending;
+    assert.equal(result.assistantMessage.status, 'complete');
+    assert.equal(result.assistantMessage.text, 'slot answer 2');
+    // Once the slot is granted the waiting line is cleared (an empty status), before the answer streams:
+    // the client keeps the latest status, so it would otherwise stay under the growing answer.
+    assert.deepEqual(
+      events.map((e) => e.type),
+      ['start', 'status', 'status', 'delta', 'status', 'delta', 'done'],
+    );
+    assert.deepEqual(events[2], { type: 'status', text: '' });
+    assert.deepEqual(budget.usage(), { chat: 0, digest: 0, waitingChat: 0, waitingDigest: 0 });
+
+    // API providers start no process: no slot.
+    const api = fakeProvider('anthropic-api', streamingAnswer(() => 'api'));
+    api.kind = 'api';
+    const apiSession = await createSession(DOC, { provider: 'anthropic-api', model: '' });
+    const held = await budget.acquire('chat', free());
+    const apiTurn = await turn(depsFor(api, { cliSlot: budget.acquire }), { docId: DOC, sessionId: apiSession.id, kind: 'prime', slide: 1 });
+    assert.equal(apiTurn.assistant.status, 'complete');
+    held();
+  });
+
+  test('aborting a turn that waits for a CLI slot ends it as aborted without starting the provider', async () => {
+    const budget = createCliBudget(() => 1);
+    const provider = fakeProvider('claude-code', streamingAnswer(() => 'never'));
+    const deps = depsFor(provider, { cliSlot: budget.acquire });
+    const session = await createSession(DOC, { provider: 'claude-code', model: '' });
+    const held = await budget.acquire('chat', new AbortController().signal);
+    const events: StreamEvent[] = [];
+    const pending = runTurn(
+      { docId: DOC, sessionId: session.id, kind: 'prime', text: '', slide: 1, onEvent: (e) => events.push(e) },
+      deps,
+    );
+    await waitFor(() => events.some((e) => e.type === 'status'));
+    assert.equal(abortTurn(DOC, session.id), true);
+    const result = await pending;
+    assert.equal(result.assistantMessage.status, 'aborted');
+    assert.equal(provider.calls.length, 0);
+    assert.equal(budget.usage().waitingChat, 0);
+    held();
+    assert.deepEqual(budget.usage(), { chat: 0, digest: 0, waitingChat: 0, waitingDigest: 0 });
   });
 
   test('anthropic-api keeps the history via appendHistory', async () => {

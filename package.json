@@ -9,9 +9,10 @@
   },
   "scripts": {
     "dev": "node --watch-path=server --watch-path=shared server/index.ts --dev",
-    "build": "vite build --config web/vite.config.ts",
-    "start": "npm run build && node server/index.ts",
-    "serve": "node server/index.ts",
+    "build": "vite build --config web/vite.config.ts && node scripts/build-server.mjs",
+    "build:server": "node scripts/build-server.mjs",
+    "start": "npm run build && node --max-semi-space-size=2 dist-server/server/index.js",
+    "serve": "node --max-semi-space-size=2 dist-server/server/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p web/tsconfig.json --noEmit",
     "test": "node --test tests/*.test.ts web/tests/*.test.ts",
     "sample": "uv run --with reportlab --with pillow python scripts/make_sample_pdf.py samples/sample-lecture.pdf"

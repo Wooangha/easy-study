@@ -18,6 +18,7 @@ import {
   readCourseRecords,
   readDigestRecord,
   readStoredDoc,
+  rmWithRetry,
   slugify,
   writeFileAtomic,
   writeJsonAtomic,
@@ -221,7 +222,7 @@ export async function deleteCourse(courseId: string): Promise<boolean> {
   return mutationQueue(MUTATIONS, async () => {
     if (!(await readCourseRecord(courseId))) return false;
     // Through the markdown queue so a pending COURSE.md write cannot recreate files in the folder.
-    await markdownQueue(courseId, () => fs.rm(coursePaths(courseId).dir, { recursive: true, force: true }));
+    await markdownQueue(courseId, () => rmWithRetry(coursePaths(courseId).dir, { recursive: true, force: true }));
     return true;
   });
 }

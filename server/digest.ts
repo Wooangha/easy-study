@@ -10,11 +10,15 @@
 //
 // One job per document at a time. Provider calls are one-shot (resume: null, ephemeral, no tools) and
 // never touch the study sessions. All jobs together run at most EASY_STUDY_DIGEST_CONCURRENCY calls at
-// a time (a process-wide limit), so opening several lectures does not multiply the load.
+// a time (a process-wide limit), so opening several lectures does not multiply the load; with a CLI
+// provider each call also needs a slot of the CLI process budget (server/cliBudget.ts), where chat turns
+// go first.
 import fs from 'node:fs/promises';
 import type { DigestInfo, DigestSlide, ProviderId } from '../shared/types.ts';
 import { defaultChatDeps } from './chat.ts';
 import type { ProviderCheck } from './chat.ts';
+import { acquireCliSlot } from './cliBudget.ts';
+import type { AcquireCliSlot } from './cliBudget.ts';
 import { HttpError, digestConcurrency } from './config.ts';
 import { courseOf, writeCourseMarkdown } from './courses.ts';
 import {
@@ -66,6 +70,11 @@ export interface DigestDeps {
   /** Provider calls that all digest jobs together run at the same time (process-wide limit). */
   concurrency: () => number;
   now: () => Date;
+  /**
+   * The server-wide budget of LLM CLI processes (DESIGN §15), shared with chat turns, which go first.
+   * Omitted = no limit beyond `concurrency`.
+   */
+  cliSlot?: AcquireCliSlot;
 }
 
 export const DEFAULT_DIGEST_PROMPTS: Readonly<DigestPrompts> = Object.freeze({
@@ -86,6 +95,7 @@ export function defaultDigestDeps(): DigestDeps {
     prompts: DEFAULT_DIGEST_PROMPTS,
     concurrency: digestConcurrency,
     now: () => new Date(),
+    cliSlot: acquireCliSlot,
   };
 }
 
@@ -461,10 +471,12 @@ async function runJob(docId: string, job: DigestJob, record: DigestRecord, ctx: 
     stamp();
   };
 
-  /** One provider call (waits for a process-wide slot); resolves with the answer text. */
+  /** One provider call (waits for a digest slot, then a CLI process slot); resolves with the answer text. */
   const call = async (systemPrompt: string, parts: Part[]): Promise<string> => {
     const release = await acquireCallSlot(deps.concurrency(), signal);
+    let releaseCli: (() => void) | null = null;
     try {
+      if (provider.kind === 'cli' && deps.cliSlot) releaseCli = await deps.cliSlot('digest', signal);
       let streamed = '';
       const result = await provider.run({
         cwd: assets.dir,
@@ -484,6 +496,7 @@ async function runJob(docId: string, job: DigestJob, record: DigestRecord, ctx: 
       });
       return result.text.trim() ? result.text : streamed;
     } finally {
+      releaseCli?.();
       release();
     }
   };

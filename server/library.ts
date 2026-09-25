@@ -1,12 +1,17 @@
-// The on-disk library: PDF import, the background ingest pipeline (poppler + sharp),
+// The on-disk library: PDF import, the background ingest pipeline (poppler + the image worker),
 // document metadata, read access to course and digest files, and a few filesystem helpers
 // shared with sessions.ts / courses.ts / digest.ts.
 //
-// Layout (docs/DESIGN.md §2, §11, §12):
+// Layout (docs/DESIGN.md §2, §11, §12, §15):
 //   library/<docId>/doc.json, source.pdf, slides/NNN.png, sheets/sheet-NN.png, sheets/sheets.json,
 //   text/NNN.txt, sessions/<sid>.json, notes/<sid>.md, STUDY_NOTES.md,
-//   digest/digest.json, DIGEST.md
+//   digest/digest.json, DIGEST.md,
+//   view/NNN-<w>.webp, thumbs/NNN.webp, inline/<dir>-<name>.jpg (derived images, server/assets.ts)
 //   library/courses/<courseId>/course.json, COURSE.md
+//
+// All image work (contact sheets, derived images) runs in the image worker (server/imageWorker.ts), a
+// short-lived child process: this module never loads sharp. Documents converted before the derived
+// images existed get them from a background backfill, one document at a time.
 //
 // Course and digest files are *read* here (DocMeta.courseId / digestStatus and DocAssets are derived
 // from them) but written only by courses.ts and digest.ts, which import this module — never the
@@ -19,20 +24,42 @@ import { randomBytes } from 'node:crypto';
 import { readFileSync, unlinkSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import sharp from 'sharp';
-import type { OverlayOptions } from 'sharp';
 import { COURSE_ID_RE, DOC_ID_RE } from '../shared/types.ts';
 import type { DigestSlide, DigestStatus, DocMeta } from '../shared/types.ts';
+import { VIEW_WIDTHS, inlinePathFor, thumbPath, viewPath } from './assets.ts';
 import { HttpError, libraryDir } from './config.ts';
+import { isImageWorkerStopped, runImageWorker } from './imageWorker.ts';
+import type { ImageJob, ImageWorkerOptions, ImageWorkerRun, SheetEntry } from './imageWorker.ts';
 import type { CourseContext, CourseLectureRef, CourseRecord, DigestRecord, DocAssets } from './internal-types.ts';
 
-export const POPPLER_MISSING_MESSAGE = 'poppler is not installed (brew install poppler)';
+export type { SheetEntry } from './imageWorker.ts';
+
+/**
+ * Why an import failed when pdftoppm/pdftotext/pdfinfo cannot be found, with the install command of the
+ * platform's usual package manager.
+ */
+export function popplerMissingMessage(platform: NodeJS.Platform = process.platform): string {
+  switch (platform) {
+    case 'darwin':
+      return 'poppler is not installed (brew install poppler)';
+    case 'linux':
+      return (
+        'poppler is not installed (Debian/Ubuntu: sudo apt install poppler-utils · Fedora: sudo dnf install poppler-utils · ' +
+        'Arch: sudo pacman -S poppler)'
+      );
+    case 'win32':
+      return (
+        'poppler is not installed (winget install oschwartz10612.Poppler, or scoop install poppler; ' +
+        'then open a new terminal so pdftoppm.exe is on PATH)'
+      );
+    default:
+      return 'poppler is not installed (install the poppler utilities: pdftoppm, pdftotext, pdfinfo)';
+  }
+}
+
+export const POPPLER_MISSING_MESSAGE = popplerMissingMessage();
 
 const RENDER_LONG_EDGE = 1600;
-const SLIDES_PER_SHEET = 4;
-const SHEET_CELL_WIDTH = 800;
-const SHEET_GUTTER = 8;
-const SHEET_MAX_EDGE = 1600;
 const PROGRESS_POLL_MS = 400;
 const MAX_TITLE_CHARS = 200;
 
@@ -50,9 +77,6 @@ const DELETED_PREFIX = '.deleted-';
 
 const DIGEST_STATUSES: ReadonlySet<DigestStatus> = new Set<DigestStatus>(['none', 'running', 'ready', 'error', 'aborted']);
 
-// Slides are re-rendered in place when an ingest is resumed; never serve stale decoded files.
-sharp.cache({ files: 0 });
-
 // ---------------------------------------------------------------------------
 // Paths
 // ---------------------------------------------------------------------------
@@ -65,6 +89,10 @@ export interface DocPaths {
   sheetsDir: string;
   sheetsJson: string;
   textDir: string;
+  /** Derived images (server/assets.ts): view renditions, thumbnails, inline JPEGs. */
+  viewDir: string;
+  thumbsDir: string;
+  inlineDir: string;
   sessionsDir: string;
   notesDir: string;
   studyNotes: string;
@@ -77,13 +105,6 @@ export interface CoursePaths {
   dir: string;
   courseJson: string;
   courseMd: string;
-}
-
-/** Entry of sheets/sheets.json. */
-export interface SheetEntry {
-  file: string;
-  fromSlide: number;
-  toSlide: number;
 }
 
 /** A syntactically valid document id that does not name a reserved library directory. */
@@ -106,6 +127,9 @@ export function docPaths(docId: string): DocPaths {
     sheetsDir: path.join(dir, 'sheets'),
     sheetsJson: path.join(dir, 'sheets', 'sheets.json'),
     textDir: path.join(dir, 'text'),
+    viewDir: path.join(dir, 'view'),
+    thumbsDir: path.join(dir, 'thumbs'),
+    inlineDir: path.join(dir, 'inline'),
     sessionsDir: path.join(dir, 'sessions'),
     notesDir: path.join(dir, 'notes'),
     studyNotes: path.join(dir, 'STUDY_NOTES.md'),
@@ -154,12 +178,46 @@ export function isNotFound(err: unknown): boolean {
   return isErrnoException(err) && err.code === 'ENOENT';
 }
 
+/** Errors Windows reports while another process (antivirus, indexer, OneDrive, an editor) briefly holds a file. */
+const WINDOWS_LOCK_CODES: ReadonlySet<string> = new Set(['EPERM', 'EBUSY', 'EACCES']);
+/** Waits between attempts: about 1.5 s in total, like graceful-fs. */
+const WINDOWS_LOCK_RETRY_MS = [20, 40, 80, 120, 160, 240, 320, 400];
+
+/**
+ * Runs a filesystem operation; on Windows it is retried for a moment when the file is locked by another
+ * process (EPERM/EBUSY/EACCES). Elsewhere those codes are real permission errors and are thrown at once.
+ */
+export async function withFsRetry<T>(operation: () => Promise<T>, platform: NodeJS.Platform = process.platform): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await operation();
+    } catch (err) {
+      const delay = WINDOWS_LOCK_RETRY_MS[attempt];
+      if (platform !== 'win32' || delay === undefined || !isErrnoException(err) || !WINDOWS_LOCK_CODES.has(err.code ?? '')) throw err;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
+
+export function renameWithRetry(from: string, to: string): Promise<void> {
+  return withFsRetry(() => fs.rename(from, to));
+}
+
+/** fs.rm with retries (Windows file locks; a directory that is still being written to: ENOTEMPTY). */
+export function rmWithRetry(target: string, options: { recursive?: boolean; force?: boolean } = {}): Promise<void> {
+  return withFsRetry(() => fs.rm(target, options.recursive ? { ...options, maxRetries: 3, retryDelay: 100 } : options));
+}
+
+export async function mkdirWithRetry(dir: string): Promise<void> {
+  await withFsRetry(() => fs.mkdir(dir, { recursive: true }));
+}
+
 /** Writes `<file>.<unique>.tmp` and renames it over `file`, so readers never see a partial file. */
 export async function writeFileAtomic(file: string, data: string | Buffer): Promise<void> {
   const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
   try {
     await fs.writeFile(tmp, data);
-    await fs.rename(tmp, file);
+    await renameWithRetry(tmp, file);
   } catch (err) {
     await fs.rm(tmp, { force: true }).catch(() => {});
     throw err;
@@ -219,8 +277,9 @@ interface ToolResult {
   stderr: string;
 }
 
-/** PATH with the usual Homebrew locations appended (GUI-launched shells often lack them). */
+/** PATH with the usual Homebrew locations appended on macOS (GUI-launched shells often lack them). */
 function toolEnv(): NodeJS.ProcessEnv {
+  if (process.platform !== 'darwin') return process.env;
   const dirs = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean);
   for (const extra of ['/opt/homebrew/bin', '/usr/local/bin']) {
     if (!dirs.includes(extra)) dirs.push(extra);
@@ -239,7 +298,7 @@ function lastLine(text: string): string {
  */
 export function runPoppler(tool: string, args: string[]): Promise<ToolResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(tool, args, { env: toolEnv(), stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(tool, args, { env: toolEnv(), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     const stdout: Buffer[] = [];
     let stderr = '';
     let settled = false;
@@ -273,7 +332,10 @@ export function runPoppler(tool: string, args: string[]): Promise<ToolResult> {
 export type StoredDocMeta = Omit<DocMeta, 'courseId' | 'digestStatus'>;
 
 const metaQueue = createKeyedQueue();
+/** Running ingests, from the start until their image worker has exited (derived images included). */
 const activeIngests = new Map<string, Promise<void>>();
+/** Ingests past 'ready' that only write the derived images: the document is usable (and deletable). */
+const derivingDocs = new Set<string>();
 /** Documents being deleted: every read already treats them as missing. */
 const deletingDocs = new Set<string>();
 
@@ -303,12 +365,12 @@ export async function readStoredDoc(docId: string): Promise<StoredDocMeta | null
 export async function getDoc(docId: string): Promise<DocMeta | null> {
   const stored = await readStoredDoc(docId);
   if (!stored) return null;
-  const [courses, digest] = await Promise.all([readCourseRecords(), readDigestRecord(docId)]);
-  return withDerivedFields(stored, courseIdIndex(courses), digest);
+  const [courses, digestStatus] = await Promise.all([readCourseRecords(), readDigestStatus(docId)]);
+  return withDerivedFields(stored, courseIdIndex(courses), digestStatus);
 }
 
-function withDerivedFields(stored: StoredDocMeta, courseIds: Map<string, string>, digest: DigestRecord | null): DocMeta {
-  return { ...stored, courseId: courseIds.get(stored.id) ?? null, digestStatus: digest?.status ?? 'none' };
+function withDerivedFields(stored: StoredDocMeta, courseIds: Map<string, string>, digestStatus: DigestStatus): DocMeta {
+  return { ...stored, courseId: courseIds.get(stored.id) ?? null, digestStatus };
 }
 
 /** Names of the directories of library/ that may hold a document (library/courses excluded). */
@@ -333,7 +395,7 @@ export async function listStoredDocs(): Promise<StoredDocMeta[]> {
 export async function listDocs(): Promise<DocMeta[]> {
   const [stored, courses] = await Promise.all([listStoredDocs(), readCourseRecords()]);
   const courseIds = courseIdIndex(courses);
-  return Promise.all(stored.map(async (meta) => withDerivedFields(meta, courseIds, await readDigestRecord(meta.id))));
+  return Promise.all(stored.map(async (meta) => withDerivedFields(meta, courseIds, await readDigestStatus(meta.id))));
 }
 
 /** Applies a patch to doc.json (serialized per document; `undefined` values remove the key). */
@@ -380,7 +442,7 @@ export async function loadDocAssets(docId: string): Promise<DocAssets> {
     toSlide: entry.toSlide,
   }));
   const courseIds = courseIdIndex(courses);
-  const meta = withDerivedFields(stored, courseIds, digestRecord);
+  const meta = withDerivedFields(stored, courseIds, digestRecord?.status ?? 'none');
   const courseRecord = courses.find((course) => course.id === meta.courseId);
   const digestSlides = (digestRecord?.slides ?? []).filter((entry) => entry.slide <= pageCount);
   return {
@@ -517,6 +579,34 @@ export async function readDigestRecord(docId: string): Promise<DigestRecord | nu
   return normalizeDigestRecord(await readJsonFile<unknown>(docPaths(docId).digestJson));
 }
 
+/**
+ * docId → status of its digest.json, keyed by the file's identity (inode, size, mtime). digest.json is
+ * always replaced atomically (a new inode), so a changed file never matches a stale key.
+ */
+const digestStatusCache = new Map<string, { key: string; status: DigestStatus }>();
+
+/**
+ * Status of a document's digest ('none' when there is none) without parsing digest.json (tens of KB) on
+ * every request: DocMeta.digestStatus of GET /api/docs and GET /api/docs/:docId.
+ */
+export async function readDigestStatus(docId: string): Promise<DigestStatus> {
+  if (!isDocId(docId)) return 'none';
+  let stat;
+  try {
+    stat = await fs.stat(docPaths(docId).digestJson);
+  } catch (err) {
+    digestStatusCache.delete(docId);
+    if (isNotFound(err)) return 'none';
+    throw err;
+  }
+  const key = `${stat.ino}:${stat.size}:${stat.mtimeMs}`;
+  const cached = digestStatusCache.get(docId);
+  if (cached?.key === key) return cached.status;
+  const status = (await readDigestRecord(docId))?.status ?? 'none';
+  digestStatusCache.set(docId, { key, status });
+  return status;
+}
+
 /** Every slide 1..pageCount has a non-failed digest entry. */
 export function isDigestComplete(slides: DigestSlide[], pageCount: number): boolean {
   if (pageCount < 1) return false;
@@ -628,7 +718,7 @@ export async function importPdf(bytes: Buffer, fileName: string): Promise<DocMet
 }
 
 // ---------------------------------------------------------------------------
-// Ingest pipeline (DESIGN §3)
+// Ingest pipeline (DESIGN §3, §15)
 // ---------------------------------------------------------------------------
 
 /** Starts (or joins) the ingest of a document. The promise never rejects; failures end in status 'error'. */
@@ -640,14 +730,14 @@ function startIngest(docId: string): Promise<void> {
   return run;
 }
 
-/** Resolves when the running ingest of `docId` (if any) has finished. */
+/** Resolves when the running ingest of `docId` (if any) has finished, derived images included. */
 export function waitForIngest(docId: string): Promise<void> {
   return activeIngests.get(docId) ?? Promise.resolve();
 }
 
-/** True while the document's PDF is being converted by this process. */
+/** True while the document's PDF is being converted by this process (until it is 'ready' or 'error'). */
 export function isIngestRunning(docId: string): boolean {
-  return activeIngests.has(docId);
+  return activeIngests.has(docId) && !derivingDocs.has(docId);
 }
 
 /** Re-processes documents left in `processing` (e.g. the server stopped mid-ingest). */
@@ -686,26 +776,33 @@ export async function retryIngest(docId: string): Promise<DocMeta> {
 /**
  * Deletes a document and everything stored with it (library/<docId>: slides, sessions, notes, digest).
  * `busyReason` is asked right before the point of no return, with no await in between, so nothing can
- * start in the gap; a non-null answer (or a running ingest) refuses with 409. From then on every read
- * treats the document as missing; its folder is renamed away, then removed. Course membership is not
- * touched here (courses.ts owns the course files). Throws 404 for unknown documents.
+ * start in the gap; a non-null answer (or a PDF conversion) refuses with 409. From then on every read
+ * treats the document as missing; an image worker still writing its derived images is stopped, and its
+ * folder is renamed away, then removed. Course membership is not touched here (courses.ts owns the course
+ * files). Throws 404 for unknown documents.
  */
 export async function deleteDoc(docId: string, busyReason: () => string | null = () => null): Promise<void> {
   if ((await readStoredDoc(docId)) === null) throw new HttpError(404, '문서를 찾을 수 없습니다');
   if (deletingDocs.has(docId)) throw new HttpError(404, '문서를 찾을 수 없습니다');
-  const reason = activeIngests.has(docId) ? 'PDF를 변환하는 중에는 지울 수 없습니다. 변환이 끝난 뒤에 다시 시도해 주세요' : busyReason();
+  const reason = isIngestRunning(docId) ? 'PDF를 변환하는 중에는 지울 수 없습니다. 변환이 끝난 뒤에 다시 시도해 주세요' : busyReason();
   if (reason) throw new HttpError(409, reason);
   deletingDocs.add(docId);
   try {
+    backfillQueue.delete(docId);
+    // Derived images of the ingest or of the backfill are not wanted any more (and on Windows an open
+    // file would make the rename below fail).
+    await stopImageRun(docId);
+    await activeIngests.get(docId);
+    digestStatusCache.delete(docId);
     const dir = docPaths(docId).dir;
     const trash = path.join(libraryDir(), `${DELETED_PREFIX}${docId}-${randomBytes(3).toString('hex')}`);
     try {
-      await fs.rename(dir, trash);
+      await renameWithRetry(dir, trash);
     } catch (err) {
       if (isNotFound(err)) return; // removed by hand meanwhile
       throw err;
     }
-    await fs.rm(trash, { recursive: true, force: true }).catch((err: unknown) => {
+    await rmWithRetry(trash, { recursive: true, force: true }).catch((err: unknown) => {
       // Invisible already; the startup sweep (removeDeletedLeftovers) tries again.
       console.warn(`[library] could not remove ${trash}: ${(err as Error).message}`);
     });
@@ -727,41 +824,67 @@ export async function removeDeletedLeftovers(): Promise<number> {
   let removed = 0;
   for (const entry of entries) {
     if (!entry.isDirectory() || !entry.name.startsWith(DELETED_PREFIX)) continue;
-    await fs.rm(path.join(libraryDir(), entry.name), { recursive: true, force: true });
+    await rmWithRetry(path.join(libraryDir(), entry.name), { recursive: true, force: true });
     removed++;
   }
   return removed;
 }
 
+/** File names of a document's rendered slides, in slide order. */
+function slideFileNames(pageCount: number): string[] {
+  return Array.from({ length: pageCount }, (_, i) => slideFileName(i + 1, pageCount));
+}
+
 async function ingest(docId: string): Promise<void> {
   const paths = docPaths(docId);
+  let images: ImageWorkerRun | null = null;
   try {
+    // First (retryIngest waits for this write): mark the document as being converted.
     await updateMeta(docId, { status: 'processing', progress: 0, error: undefined });
-    // Start from a clean slate: a resumed ingest may have left partial output behind.
-    for (const dir of [paths.slidesDir, paths.sheetsDir, paths.textDir]) {
-      await fs.rm(dir, { recursive: true, force: true });
-      await fs.mkdir(dir, { recursive: true });
+    // A backfill of the previous rendering must not write into the new one.
+    await stopImageRun(docId);
+    // Start from a clean slate: a resumed ingest may have left partial output behind, and derived images
+    // of an earlier rendering must go (the image worker writes only the missing ones).
+    for (const dir of [paths.slidesDir, paths.sheetsDir, paths.textDir, paths.viewDir, paths.thumbsDir, paths.inlineDir]) {
+      await rmWithRetry(dir, { recursive: true, force: true });
     }
+    for (const dir of [paths.slidesDir, paths.textDir]) await mkdirWithRetry(dir);
 
     const info = await readPdfInfo(paths.sourcePdf);
     await updateMeta(docId, { pageCount: info.pageCount, aspectRatio: info.aspectRatio });
 
     await renderSlides(docId, paths, info.pageCount);
     // The rendered image is authoritative (it accounts for rotation, crop boxes, ...).
-    const aspectRatio = await imageAspectRatio(path.join(paths.slidesDir, slideFileName(1, info.pageCount)), info.aspectRatio);
+    const aspectRatio = await pngAspectRatio(path.join(paths.slidesDir, slideFileName(1, info.pageCount)), info.aspectRatio);
 
     await extractTexts(paths, info.pageCount);
-    await buildContactSheets(paths, info.pageCount, aspectRatio);
+    // Contact sheets (required for 'ready'), then the derived images, in one worker process.
+    images = startImageRun(docId, { docDir: paths.dir, slides: slideFileNames(info.pageCount), sheets: { aspectRatio }, derived: true });
+    await images.sheets;
 
     // `error: undefined` drops the message of a failed attempt that another process may have left.
     await updateMeta(docId, { status: 'ready', progress: info.pageCount, pageCount: info.pageCount, aspectRatio, error: undefined });
     console.log(`[library] ${docId}: ready (${info.pageCount} slides)`);
   } catch (err) {
+    images?.kill();
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[library] ingest of ${docId} failed: ${message}`);
     await updateMeta(docId, { status: 'error', error: message }).catch((writeErr: unknown) => {
       console.error(`[library] could not record the failure of ${docId}:`, writeErr);
     });
+    return;
+  }
+
+  // The document is ready; the view renditions, thumbnails and inline JPEGs are a convenience that the
+  // backfill makes later when this part fails (the routes fall back to the slide PNGs meanwhile).
+  derivingDocs.add(docId);
+  try {
+    logDerivedResult(docId, await images.done);
+  } catch (err) {
+    // Stopped on purpose (deletion, shutdown): the backfill writes what is missing on the next start.
+    if (!isImageWorkerStopped(err)) console.warn(`[library] ${docId}: derived images not written: ${(err as Error).message}`);
+  } finally {
+    derivingDocs.delete(docId);
   }
 }
 
@@ -786,9 +909,26 @@ async function readPdfInfo(pdfPath: string): Promise<PdfInfo> {
   return { pageCount, aspectRatio };
 }
 
-async function imageAspectRatio(file: string, fallback: number): Promise<number> {
-  const { width, height } = await sharp(file).metadata();
-  return width && height ? width / height : fallback;
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+/** Width / height of a PNG from its IHDR chunk (no image decoder needed); `fallback` when unreadable. */
+export async function pngAspectRatio(file: string, fallback: number): Promise<number> {
+  let handle;
+  try {
+    handle = await fs.open(file, 'r');
+    const header = Buffer.alloc(24);
+    const { bytesRead } = await handle.read(header, 0, 24, 0);
+    if (bytesRead < 24 || !header.subarray(0, 8).equals(PNG_SIGNATURE) || header.toString('latin1', 12, 16) !== 'IHDR') {
+      return fallback;
+    }
+    const width = header.readUInt32BE(16);
+    const height = header.readUInt32BE(20);
+    return width > 0 && height > 0 ? width / height : fallback;
+  } catch {
+    return fallback;
+  } finally {
+    await handle?.close();
+  }
 }
 
 /**
@@ -837,8 +977,8 @@ async function renderSlides(docId: string, paths: DocPaths, pageCount: number): 
   }
   for (const [n, name] of outputs) {
     const from = path.join(paths.slidesDir, name);
-    if (n >= 1 && n <= pageCount) await fs.rename(from, path.join(paths.slidesDir, slideFileName(n, pageCount)));
-    else await fs.rm(from, { force: true });
+    if (n >= 1 && n <= pageCount) await renameWithRetry(from, path.join(paths.slidesDir, slideFileName(n, pageCount)));
+    else await rmWithRetry(from, { force: true });
   }
   await updateMeta(docId, { progress: pageCount });
 }
@@ -873,82 +1013,159 @@ function cleanPageText(text: string): string {
     .replace(/\n{3,}/g, '\n\n');
 }
 
-interface SlideLabel {
-  svg: Buffer;
-  height: number;
+// ---------------------------------------------------------------------------
+// Derived images: the image worker runs, and the backfill (DESIGN §15)
+// ---------------------------------------------------------------------------
+
+/** The image worker running for a document (its ingest's or the backfill's): at most one per document. */
+const imageRuns = new Map<string, { run: ImageWorkerRun; settled: Promise<void> }>();
+
+/** Documents waiting for the backfill, in order (the backfill works on one at a time). */
+const backfillQueue = new Set<string>();
+let backfillLoop: Promise<void> | null = null;
+/** docId → when the backfill last ran for it: requests for missing files do not start it again sooner. */
+const backfillRanAt = new Map<string, number>();
+const BACKFILL_COOLDOWN_MS = 60_000;
+
+function startImageRun(docId: string, job: ImageJob, options: ImageWorkerOptions = {}): ImageWorkerRun {
+  const run = runImageWorker(job, options);
+  const entry = {
+    run,
+    settled: run.done.then(
+      () => undefined,
+      () => undefined,
+    ),
+  };
+  imageRuns.set(docId, entry);
+  void entry.settled.then(() => {
+    if (imageRuns.get(docId) === entry) imageRuns.delete(docId);
+  });
+  return run;
 }
 
-/** SVG badge "Slide N" (dark, white bold text) for the label band above a sheet cell. */
-function slideLabel(slide: number, fontSize: number): SlideLabel {
-  const text = `Slide ${slide}`;
-  const padX = Math.round(fontSize * 0.45);
-  const padY = Math.round(fontSize * 0.2);
-  const width = Math.round(text.length * fontSize * 0.62 + padX * 2);
-  const height = Math.round(fontSize * 1.2 + padY * 2);
-  const baseline = Math.round(height / 2 + fontSize * 0.36);
-  const svg = Buffer.from(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">` +
-      `<rect x="0" y="0" width="${width}" height="${height}" rx="${Math.round(fontSize * 0.3)}" fill="#111827"/>` +
-      `<text x="${width / 2}" y="${baseline}" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" ` +
-      `font-size="${fontSize}" font-weight="700" fill="#ffffff">${text}</text>` +
-      `</svg>`,
-  );
-  return { svg, height };
+/** Stops the document's image worker (if any) and waits until it has exited. */
+async function stopImageRun(docId: string): Promise<void> {
+  const entry = imageRuns.get(docId);
+  if (!entry) return;
+  entry.run.kill();
+  await entry.settled;
+}
+
+function logDerivedResult(docId: string, result: { written: number; failed: { file: string; error: string }[] }): void {
+  if (result.written > 0) console.log(`[library] ${docId}: wrote ${result.written} derived image file(s)`);
+  if (result.failed.length > 0) {
+    const first = result.failed[0];
+    console.warn(`[library] ${docId}: ${result.failed.length} derived image file(s) failed, e.g. ${first.file}: ${first.error}`);
+  }
+}
+
+/** Every derived file (server/assets.ts) the document should have: slides, then contact sheets. */
+async function derivedFiles(paths: DocPaths, pageCount: number): Promise<string[]> {
+  const files: string[] = [];
+  for (const slide of slideFileNames(pageCount)) {
+    for (const width of VIEW_WIDTHS) files.push(viewPath(paths.dir, slide, width));
+    files.push(thumbPath(paths.dir, slide));
+    const inline = inlinePathFor(path.join(paths.slidesDir, slide));
+    if (inline) files.push(inline);
+  }
+  const sheets = await readJsonFile<SheetEntry[]>(paths.sheetsJson);
+  for (const entry of Array.isArray(sheets) ? sheets : []) {
+    if (typeof entry?.file !== 'string') continue;
+    const inline = inlinePathFor(path.join(paths.sheetsDir, path.basename(entry.file)));
+    if (inline) files.push(inline);
+  }
+  return files;
+}
+
+async function hasMissingDerivedFiles(paths: DocPaths, pageCount: number): Promise<boolean> {
+  for (const file of await derivedFiles(paths, pageCount)) {
+    try {
+      await fs.access(file);
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Busy with the document in another way: its ingest (which writes the derived files itself) or a deletion. */
+function imageWorkBlocked(docId: string): boolean {
+  return activeIngests.has(docId) || imageRuns.has(docId) || deletingDocs.has(docId);
 }
 
 /**
- * Overview contact sheets: groups of 4 consecutive slides laid out 2x2 (800 px wide cells, 8 px
- * white gutter), downscaled so the long edge is <= 1600 px. Each cell starts with a white band
- * holding a dark "Slide N" badge at its top-left, so the label never hides slide content (slide
- * titles usually sit exactly where an overlaid badge would go). Writes sheets.json.
+ * Asks the backfill for the missing derived images of a document (e.g. a view rendition was requested
+ * but does not exist yet). No-op while the document is converted, queued, being backfilled, or when the
+ * backfill ran for it within the last minute (files it could not write are not retried on every request).
  */
-async function buildContactSheets(paths: DocPaths, pageCount: number, aspectRatio: number): Promise<void> {
-  const cellWidth = SHEET_CELL_WIDTH;
-  const imageHeight = Math.max(1, Math.round(cellWidth / aspectRatio));
-  const labelFontSize = Math.max(24, Math.round(cellWidth * 0.042));
-  const bandHeight = slideLabel(1, labelFontSize).height + 6;
-  const cellHeight = bandHeight + imageHeight;
-  const sheetCount = Math.ceil(pageCount / SLIDES_PER_SHEET);
-  const sheetDigits = Math.max(2, String(sheetCount).length);
-  const entries: SheetEntry[] = [];
+export function requestDerivedImages(docId: string): void {
+  if (!isDocId(docId) || backfillQueue.has(docId) || imageWorkBlocked(docId)) return;
+  if (Date.now() - (backfillRanAt.get(docId) ?? -Infinity) < BACKFILL_COOLDOWN_MS) return;
+  backfillQueue.add(docId);
+  pumpBackfill();
+}
 
-  for (let index = 0; index < sheetCount; index++) {
-    const fromSlide = index * SLIDES_PER_SHEET + 1;
-    const toSlide = Math.min(pageCount, fromSlide + SLIDES_PER_SHEET - 1);
-    const count = toSlide - fromSlide + 1;
-    const columns = count === 1 ? 1 : 2;
-    const rows = Math.ceil(count / columns);
-    const width = columns * cellWidth + (columns + 1) * SHEET_GUTTER;
-    const height = rows * cellHeight + (rows + 1) * SHEET_GUTTER;
-
-    const layers: OverlayOptions[] = [];
-    for (let k = 0; k < count; k++) {
-      const slide = fromSlide + k;
-      const left = SHEET_GUTTER + (k % columns) * (cellWidth + SHEET_GUTTER);
-      const top = SHEET_GUTTER + Math.floor(k / columns) * (cellHeight + SHEET_GUTTER);
-      const image = await sharp(path.join(paths.slidesDir, slideFileName(slide, pageCount)))
-        .resize(cellWidth, imageHeight, { fit: 'contain', background: '#ffffff' })
-        .flatten({ background: '#ffffff' })
-        .png()
-        .toBuffer();
-      layers.push({ input: slideLabel(slide, labelFontSize).svg, left, top });
-      layers.push({ input: image, left, top: top + bandHeight });
-    }
-
-    const composed = await sharp({ create: { width, height, channels: 3, background: '#ffffff' } })
-      .composite(layers)
-      .png()
-      .toBuffer();
-    const file = `sheet-${String(index + 1).padStart(sheetDigits, '0')}.png`;
-    // Composite first, then scale: sharp applies resize before composite within one pipeline.
-    await sharp(composed)
-      .resize({ width: SHEET_MAX_EDGE, height: SHEET_MAX_EDGE, fit: 'inside', withoutEnlargement: true })
-      .png()
-      .toFile(path.join(paths.sheetsDir, file));
-    entries.push({ file, fromSlide, toSlide });
+/**
+ * Startup: queues every ready document for the backfill (documents that already have every derived file
+ * cost a few stat calls). The work happens in the background, one document at a time, at low priority.
+ */
+export async function backfillDerivedImages(): Promise<void> {
+  for (const doc of await listStoredDocs()) {
+    if (doc.status === 'ready' && !imageWorkBlocked(doc.id)) backfillQueue.add(doc.id);
   }
+  pumpBackfill();
+}
 
-  await writeJsonAtomic(paths.sheetsJson, entries);
+function pumpBackfill(): void {
+  if (backfillLoop || backfillQueue.size === 0) return;
+  backfillLoop = (async () => {
+    for (const docId of backfillQueue) {
+      backfillQueue.delete(docId);
+      try {
+        await backfillDoc(docId);
+      } catch (err) {
+        console.warn(`[library] ${docId}: backfill of derived images failed: ${(err as Error).message}`);
+      }
+    }
+  })().finally(() => {
+    backfillLoop = null;
+    pumpBackfill(); // queued while the loop was finishing
+  });
+}
+
+async function backfillDoc(docId: string): Promise<void> {
+  if (imageWorkBlocked(docId)) return;
+  const stored = await readStoredDoc(docId);
+  if (stored?.status !== 'ready') return;
+  const paths = docPaths(docId);
+  if (!(await hasMissingDerivedFiles(paths, stored.pageCount))) return;
+  // Checked again right before the start (no await in between): an ingest may have begun meanwhile.
+  if (imageWorkBlocked(docId)) return;
+  backfillRanAt.set(docId, Date.now());
+  const run = startImageRun(docId, { docDir: paths.dir, slides: slideFileNames(stored.pageCount), derived: true }, { lowPriority: true });
+  try {
+    logDerivedResult(docId, await run.done);
+  } catch (err) {
+    // Stopped by a new ingest, a deletion or shutdown: the next start picks the document up again.
+    if (!isImageWorkerStopped(err)) console.warn(`[library] ${docId}: derived images not written: ${(err as Error).message}`);
+  }
+}
+
+/** Resolves once the backfill has nothing queued or running (tests). */
+export async function waitForBackfill(): Promise<void> {
+  while (backfillLoop) await backfillLoop;
+}
+
+/**
+ * Shutdown: empties the backfill queue and stops every image worker that only writes derived images (the
+ * backfill's, and those of ingests whose document is ready already); the next start backfills what is
+ * missing. Workers of ingests still converting are left alone: they end with the process, and the document
+ * (still 'processing') is converted again on the next start.
+ */
+export async function stopImageWork(): Promise<void> {
+  backfillQueue.clear();
+  await Promise.all([...imageRuns.keys()].filter((docId) => !isIngestRunning(docId)).map((docId) => stopImageRun(docId)));
+  await waitForBackfill();
 }
 
 // ---------------------------------------------------------------------------

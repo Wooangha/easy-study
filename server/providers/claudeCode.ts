@@ -34,7 +34,7 @@ import {
   runJsonlProcess,
   stderrSuffix,
 } from './proc.ts';
-import type { JsonObject } from './proc.ts';
+import type { CliBinSpec, JsonObject } from './proc.ts';
 
 /** Read-only tools the CLI may use (to open slide PNGs it has not been shown). */
 export const CLAUDE_TOOLS = 'Read,Glob,Grep';
@@ -239,12 +239,56 @@ function asObject(value: unknown): JsonObject {
 }
 
 /**
- * Environment for the CLI. ANTHROPIC_API_KEY is removed by default: when it is set, Claude Code
- * bills that API key instead of the user's subscription, which is what this provider is for.
- * Set EASY_STUDY_CLAUDE_USE_API_KEY=1 to keep it.
+ * Settings every CLI child gets unless the user's environment sets them (DESIGN §15). Measured with
+ * claude 2.1.280: the first two only work as a pair (-27 MB footprint idle, -14 MB on a real turn, and the
+ * process exits ~0.7 s sooner without the telemetry flush); the app needs neither the non-essential
+ * traffic (telemetry, update checks, feature flags) nor claude.ai connectors (it passes
+ * --strict-mcp-config). MIMALLOC_PURGE_DELAY=0 makes the CLI's allocator return freed pages at once
+ * (about -30 MB footprint on a resumed 90-image conversation).
  */
-function claudeEnv(): NodeJS.ProcessEnv {
-  return process.env.EASY_STUDY_CLAUDE_USE_API_KEY === '1' ? childEnv() : childEnv(['ANTHROPIC_API_KEY']);
+export const CLAUDE_CHILD_ENV_DEFAULTS: Readonly<Record<string, string>> = {
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+  ENABLE_CLAUDEAI_MCP_SERVERS: 'false',
+  MIMALLOC_PURGE_DELAY: '0',
+};
+
+/**
+ * Environment for the CLI: CLAUDE_CHILD_ENV_DEFAULTS where not set. ANTHROPIC_API_KEY is removed by
+ * default: when it is set, Claude Code bills that API key instead of the user's subscription, which is
+ * what this provider is for. Set EASY_STUDY_CLAUDE_USE_API_KEY=1 to keep it.
+ */
+export function claudeEnv(): NodeJS.ProcessEnv {
+  const env = process.env.EASY_STUDY_CLAUDE_USE_API_KEY === '1' ? childEnv() : childEnv(['ANTHROPIC_API_KEY']);
+  for (const [key, value] of Object.entries(CLAUDE_CHILD_ENV_DEFAULTS)) {
+    if (env[key] === undefined) env[key] = value;
+  }
+  return env;
+}
+
+/**
+ * The claude executable (CLAUDE_BIN overrides it). An npm global install on Windows puts a claude.cmd shim
+ * next to node_modules; the package's bin is the native bin/claude.exe that its postinstall copies from
+ * the platform package (a small stub until then, which resolveBin skips).
+ */
+export const CLAUDE_BIN_SPEC: CliBinSpec = {
+  name: 'claude',
+  envVar: 'CLAUDE_BIN',
+  npmShimTargets: (shimDir, arch) => {
+    const pkg = path.win32.join(shimDir, 'node_modules', '@anthropic-ai', 'claude-code');
+    const platformPkg = ['@anthropic-ai', `claude-code-win32-${arch === 'arm64' ? 'arm64' : 'x64'}`, 'claude.exe'];
+    return [
+      path.win32.join(pkg, 'bin', 'claude.exe'),
+      path.win32.join(pkg, 'node_modules', ...platformPkg),
+      path.win32.join(shimDir, 'node_modules', ...platformPkg),
+    ];
+  },
+};
+
+/** How to install Claude Code: the native installer (on Windows an npm install only gives a .cmd shim). */
+export function claudeInstallHint(platform: NodeJS.Platform = process.platform): string {
+  return platform === 'win32'
+    ? 'Claude Code 설치 (PowerShell): irm https://claude.ai/install.ps1 | iex  또는  winget install Anthropic.ClaudeCode'
+    : 'Claude Code 설치: curl -fsSL https://claude.ai/install.sh | bash  (또는 npm install -g @anthropic-ai/claude-code)';
 }
 
 function loginHint(message: string): string {
@@ -316,7 +360,7 @@ async function runClaude(input: ProviderRunInput): Promise<ProviderRunResult> {
 
   const state = new ClaudeStreamState(input.cwd, input.onDelta, input.onStatus);
   const proc = await runJsonlProcess({
-    bin: resolveBin('CLAUDE_BIN', 'claude'),
+    bin: await resolveBin(CLAUDE_BIN_SPEC),
     args,
     cwd: input.cwd,
     stdin,
@@ -365,12 +409,14 @@ export const claudeCodeProvider: Provider = {
     { id: 'fable', label: 'Fable' },
   ],
   defaultModel: '',
-  maxImagesPerConversation: 90,
-  detect(): Promise<ProviderAvailability> {
+  // Each image stays in the CLI's conversation and is resent with every turn: a resumed 90-image conversation
+  // measured ~330 MB RSS in the claude process, so conversations roll over (re-prime + recap) earlier.
+  maxImagesPerConversation: 48,
+  async detect(): Promise<ProviderAvailability> {
     return probeVersion({
-      bin: resolveBin('CLAUDE_BIN', 'claude'),
+      bin: await resolveBin(CLAUDE_BIN_SPEC),
       displayName: 'claude',
-      installHint: 'Claude Code 설치: npm install -g @anthropic-ai/claude-code',
+      installHint: claudeInstallHint(),
       env: claudeEnv(),
     });
   },

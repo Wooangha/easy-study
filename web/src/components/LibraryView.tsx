@@ -1,8 +1,9 @@
 import { useRef, useState, type DragEvent, type FormEvent, type KeyboardEvent } from 'react';
 import type { Course, DigestStatus, DocMeta } from '../../../shared/types.ts';
-import { courseSummaryUrl, slideUrl } from '../api.ts';
+import { courseSummaryUrl, thumbUrl, viewUrl } from '../api.ts';
 import type { UploadItem } from '../hooks/useDocs.ts';
 import { formatBytes, formatDate } from '../lib/format.ts';
+import { SlideImage } from './SlideImage.tsx';
 
 interface LibraryViewProps {
   docs: DocMeta[] | null;
@@ -520,7 +521,7 @@ function LectureRow({
       <button type="button" className="lecture-open" onClick={() => onOpen(doc.id)} title="이 강의 열기">
         <span className="lecture-thumb" style={{ aspectRatio: doc.aspectRatio > 0 ? doc.aspectRatio : 16 / 9 }}>
           {ready ? (
-            <img src={slideUrl(doc.id, 1)} alt="" loading="lazy" decoding="async" />
+            <SlideImage docId={doc.id} slide={1} src={thumbUrl(doc.id, 1)} alt="" />
           ) : (
             <span aria-hidden>{doc.status === 'error' ? '⚠️' : '⏳'}</span>
           )}
@@ -639,7 +640,8 @@ function DocCard({
       <button type="button" className="doc-card-main" onClick={() => onOpen(doc.id)}>
         <div className="doc-thumb" style={{ aspectRatio: doc.aspectRatio > 0 ? doc.aspectRatio : 16 / 9 }}>
           {ready ? (
-            <img src={slideUrl(doc.id, 1)} alt="" loading="lazy" decoding="async" />
+            // Cards are 250–500 CSS px wide: the 1000 px rendition, not the thumbnail.
+            <SlideImage docId={doc.id} slide={1} src={viewUrl(doc.id, 1, 1000)} alt="" />
           ) : (
             <span aria-hidden>{doc.status === 'error' ? '⚠️' : '⏳'}</span>
           )}
@@ -737,7 +739,8 @@ export function DocStatusView({
             <>
               <div className="doc-error">{doc.error ?? '처리 중 오류가 발생했어요'}</div>
               <p className="muted small">
-                업로드한 PDF는 남아 있어요. 원인을 해결했다면(예: <code>brew install poppler</code>) 다시 변환할 수 있어요.
+                업로드한 PDF는 남아 있어요. 위 원인을 해결했다면(예: poppler 설치 — 운영체제별 방법은 README 참고) 다시
+                변환할 수 있어요.
               </p>
               <div className="status-actions">
                 <button type="button" className="primary-btn small" onClick={onRetry}>

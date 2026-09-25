@@ -1,11 +1,19 @@
 // Markdown rendering as the app does it (react-markdown + remark-math + rehype-katex with the exact
 // options of web/src/lib/markdownOptions.ts). Run: node --test web/tests/*.test.ts
+//
+// KaTeX renders HTML only (no MathML); every formula carries its TeX source as aria-label.
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import ReactMarkdown from 'react-markdown';
-import { isAllowedImageSrc, rehypePlugins, remarkPlugins, urlTransform } from '../src/lib/markdownOptions.ts';
+import {
+  highlightLanguages,
+  isAllowedImageSrc,
+  rehypePlugins,
+  remarkPlugins,
+  urlTransform,
+} from '../src/lib/markdownOptions.ts';
 import { normalizeMathDelimiters } from '../src/lib/mathDelimiters.ts';
 
 function render(markdown: string): string {
@@ -14,20 +22,48 @@ function render(markdown: string): string {
   );
 }
 
-/** TeX sources of the rendered formulas (KaTeX keeps them in a MathML annotation). */
+function unescapeHtml(text: string): string {
+  return text
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+/** TeX sources of the rendered formulas (the aria-label of each `.katex` element). */
 function texOf(html: string): string[] {
-  return [...html.matchAll(/<annotation encoding="application\/x-tex">([\s\S]*?)<\/annotation>/g)].map((m) =>
-    m[1].replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#x27;/g, "'"),
-  );
+  return [...html.matchAll(/<span class="katex" role="math" aria-label="([^"]*)">/g)].map((m) => unescapeHtml(m[1]));
+}
+
+/** Replace every KaTeX formula (`<span class="katex…">…</span>`, nested spans included) with ⟨math⟩. */
+function withoutFormulas(html: string): string {
+  let out = '';
+  let i = 0;
+  for (;;) {
+    const start = html.indexOf('<span class="katex', i);
+    if (start === -1) return out + html.slice(i);
+    out += `${html.slice(i, start)}⟨math⟩`;
+    let depth = 0;
+    let j = start;
+    do {
+      const open = html.indexOf('<span', j);
+      const close = html.indexOf('</span>', j);
+      if (open !== -1 && open < close) {
+        depth++;
+        j = open + 5;
+      } else {
+        depth--;
+        j = close + 7;
+      }
+    } while (depth > 0);
+    i = j;
+  }
 }
 
 /** Visible text outside of formulas (KaTeX output removed, tags stripped). */
 function proseOf(html: string): string {
-  return html
-    .replace(/<span class="katex[\s\S]*?<\/annotation><\/semantics><\/math><\/span><span class="katex-html"[\s\S]*?(?=<\/p>|<\/td>|<\/li>|<\/h\d>|$)/g, '⟨math⟩')
-    .replace(/<[^>]+>/g, '')
-    .replace(/&#x27;/g, "'")
-    .replace(/&amp;/g, '&');
+  return unescapeHtml(withoutFormulas(html).replace(/<[^>]+>/g, ''));
 }
 
 function assertRendersMath(markdown: string, expectedFormulas: number): string {
@@ -42,7 +78,7 @@ describe('\\$ (end-of-input marker) inside math', () => {
   test('FOLLOW set in inline $…$', () => {
     const html = assertRendersMath('FOLLOW(Goal) = $\\{ \\$ \\}$', 1);
     assert.deepEqual(texOf(html), ['\\{ {\\char36} \\}']);
-    assert.match(html, /<mi mathvariant="normal">\$<\/mi>/); // KaTeX draws a real "$"
+    assert.match(html, /<span class="mord">\$<\/span>/); // KaTeX draws a real "$"
     assert.equal(proseOf(html).trim(), 'FOLLOW(Goal) = ⟨math⟩');
   });
 
@@ -213,5 +249,44 @@ describe('images in LLM Markdown', () => {
     assert.equal(isAllowedImageSrc('/\\evil.example/api/x.png', origin), false);
     assert.equal(isAllowedImageSrc('data:text/html,<script>', origin), false);
     assert.equal(isAllowedImageSrc('', origin), false);
+  });
+});
+
+describe('KaTeX output (HTML only, DESIGN §15)', () => {
+  test('no MathML copy; every formula is labelled with its TeX source', () => {
+    const html = render('inline $a < b \\land c > "d"$ and\n\n$$\n\\sum_{i=1}^n i\n$$\n\nand \\( x^2 \\)');
+    assert.doesNotMatch(html, /<math|<annotation|katex-mathml/);
+    assert.deepEqual(texOf(html), ['a < b \\land c > "d"', '\\sum_{i=1}^n i', 'x^2']);
+    // Display math: the label sits on the formula inside .katex-display.
+    assert.match(html, /<span class="katex-display"><span class="katex" role="math" aria-label="\\sum_\{i=1\}\^n i">/);
+    assert.match(html, /class="katex-html" aria-hidden="true"/);
+  });
+
+  test('the marker used to carry the source never reaches the DOM', () => {
+    const html = render('$x$, $$y$$, $\\frac{$ and ```math\nz\n```');
+    assert.doesNotMatch(html, /data-easy-study-tex|dataEasyStudyTex/i);
+    assert.match(html, /katex-error/); // the broken formula still shows its source as an error
+    assert.equal(proseOf(render('a $x$ b $$y$$ c')).trim(), 'a ⟨math⟩ b ⟨math⟩ c');
+  });
+});
+
+describe('code highlighting', () => {
+  test('only a small set of CS languages is registered', () => {
+    assert.deepEqual(Object.keys(highlightLanguages).sort(), [
+      'bash', 'c', 'cpp', 'diff', 'go', 'haskell', 'java', 'javascript', 'json', 'llvm', 'makefile', 'ocaml',
+      'plaintext', 'python', 'rust', 'sql', 'typescript', 'x86asm', 'yaml',
+    ]);
+  });
+
+  test('registered languages and their aliases are highlighted', () => {
+    assert.match(render('```python\nx = 1\n```'), /<code class="hljs language-python">x = <span class="hljs-number">1<\/span>/);
+    assert.match(render('```ts\nconst x: number = 1\n```'), /hljs-keyword/);
+    assert.match(render('```asm\nmov eax, 1\n```'), /<span class="hljs-keyword">mov<\/span>/);
+    assert.match(render('```ocaml\nlet rec f x = x\n```'), /hljs-keyword/);
+  });
+
+  test('other languages and fences without a language stay plain (no detection)', () => {
+    assert.doesNotMatch(render('```kotlin\nval x = 1\n```'), /hljs-/);
+    assert.doesNotMatch(render('```\nint main() { return 0; }\n```'), /hljs/);
   });
 });

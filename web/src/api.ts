@@ -104,7 +104,26 @@ export const deleteDoc = (docId: string) => request<void>(docPath(docId), { meth
 /** Run the PDF conversion again for a document whose conversion failed (status 'error'); 409 otherwise. */
 export const retryDoc = (docId: string) => postJSON<DocMeta>(`${docPath(docId)}/retry`).then(normalizeDoc);
 
+/**
+ * Original 1600 px PNG of a slide. The browser only falls back to it when a WebP rendition fails to load:
+ * a decoded PNG costs 4 bytes per pixel in the image cache, lossy WebP about 1.5 (DESIGN §15).
+ */
 export const slideUrl = (docId: string, slide: number) => `${docPath(docId)}/slides/${slide}.png`;
+
+/** Widths of the lossy WebP display renditions — the server's VIEW_WIDTHS (server/assets.ts, checked by a test). */
+export const VIEW_WIDTHS = [1000, 1600] as const;
+export type ViewWidth = (typeof VIEW_WIDTHS)[number];
+
+/** Lossy WebP display rendition of a slide (the server answers the PNG until the rendition exists). */
+export const viewUrl = (docId: string, slide: number, width: ViewWidth) =>
+  `${docPath(docId)}/view/${slide}.webp?w=${width}`;
+
+/** `srcset` with every display rendition; pair it with a `sizes` that matches the rendered width. */
+export const viewSrcSet = (docId: string, slide: number) =>
+  VIEW_WIDTHS.map((w) => `${viewUrl(docId, slide, w)} ${w}w`).join(', ');
+
+/** Small WebP thumbnail (240 px wide) for lists. */
+export const thumbUrl = (docId: string, slide: number) => `${docPath(docId)}/thumbs/${slide}.webp`;
 
 export const listSessions = (docId: string) => request<SessionSummary[]>(`${docPath(docId)}/sessions`);
 

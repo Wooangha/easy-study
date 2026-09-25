@@ -876,6 +876,36 @@ kbd {
   min-width: 0;
 }
 
+/*
+ * Off-screen messages, note cards and 정리본 entries skip layout and paint (DESIGN §15: the chat's layout
+ * objects drop ~20×). `auto` remembers a block's height once it was rendered; the length is only the
+ * estimate for blocks that were never on screen.
+ */
+.msg,
+.note-card,
+.digest-entry {
+  content-visibility: auto;
+}
+
+.msg {
+  contain-intrinsic-size: auto 240px;
+}
+
+.note-card {
+  contain-intrinsic-size: auto 56px;
+}
+
+.digest-entry {
+  contain-intrinsic-size: auto 320px;
+}
+
+.older-messages {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .msg-user {
   align-self: flex-end;
   max-width: 88%;

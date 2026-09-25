@@ -33,10 +33,11 @@
 // profile (the whole disk is readable again), for a Codex version that cannot start with the profile.
 //
 // Hardening (-c config overrides; unknown feature names are ignored by the CLI): integrations that
-// run OUTSIDE the sandbox are always off — plugins, apps, browser / computer use and the MCP servers of
-// the user's config.toml (each disabled by name). Calls that need no tools (ProviderRunInput.allowTools
-// === false, e.g. digest batches that attach every image) also lose the shell, view_image, code mode,
-// sub-agents and image generation. Note: the shell is removed by `features.shell_tool=false`, which
+// run OUTSIDE the sandbox are always off — the `notify` program of the user's config.toml (run after
+// every turn; measured: a 10-15 MB Computer Use client per turn), plugins, apps, browser / computer use
+// and the MCP servers of the user's config.toml (each disabled by name). Calls that need no tools
+// (ProviderRunInput.allowTools === false, e.g. digest batches that attach every image) also lose the
+// shell, view_image, code mode, sub-agents and image generation. Note: the shell is removed by `features.shell_tool=false`, which
 // makes Codex skip registering its shell tools altogether (exec_command / write_stdin included).
 // `features.unified_exec=false` is passed too but codex-cli 0.154 ignores it (`codex features list`
 // still shows unified_exec on), so never drop shell_tool from the list. Tutoring keeps the shell and
@@ -63,7 +64,7 @@ import type {
 } from './types.ts';
 import { ProviderError } from './types.ts';
 import { describeExit, probeVersion, resolveBin, runJsonlProcess, stderrSuffix } from './proc.ts';
-import type { JsonObject } from './proc.ts';
+import type { CliBinSpec, JsonObject } from './proc.ts';
 
 /** Features that reach outside the sandbox; always disabled. */
 export const CODEX_DISABLED_INTEGRATIONS = ['plugins', 'apps', 'browser_use', 'computer_use', 'in_app_browser'];
@@ -122,6 +123,7 @@ export function codexArgs(input: CodexArgsInput): string[] {
     );
   }
   args.push('-c', 'approval_policy="never"', '-c', 'approvals_reviewer="user"', '-c', 'project_root_markers=[]');
+  args.push('-c', 'notify=[]');
   const features = [...CODEX_DISABLED_INTEGRATIONS, ...(input.allowTools === false ? CODEX_DISABLED_TOOLS : [])];
   for (const feature of features) args.push('-c', `features.${feature}=false`);
   for (const server of input.mcpServers ?? []) {
@@ -162,8 +164,39 @@ export function codexConfinementEnabled(): boolean {
 }
 
 /**
+ * The codex executable (CODEX_BIN overrides it). An npm global install puts a codex.cmd shim next to
+ * node_modules that runs `node @openai/codex/bin/codex.js`, which spawns the native binary of the platform
+ * package: `<@openai/codex-win32-<arch>>/vendor/<triple>/bin/codex.exe` (resolved from @openai/codex, else
+ * `@openai/codex/vendor/…`), per codex.js of @openai/codex 0.154. The binary is spawned directly: killing
+ * a node wrapper would leave codex.exe running.
+ */
+export const CODEX_BIN_SPEC: CliBinSpec = {
+  name: 'codex',
+  envVar: 'CODEX_BIN',
+  npmShimTargets: (shimDir, arch) => {
+    const arm = arch === 'arm64';
+    const exe = ['vendor', arm ? 'aarch64-pc-windows-msvc' : 'x86_64-pc-windows-msvc', 'bin', 'codex.exe'];
+    const platformPkg = ['@openai', arm ? 'codex-win32-arm64' : 'codex-win32-x64'];
+    const pkg = path.win32.join(shimDir, 'node_modules', '@openai', 'codex');
+    return [
+      path.win32.join(pkg, 'node_modules', ...platformPkg, ...exe),
+      path.win32.join(shimDir, 'node_modules', ...platformPkg, ...exe),
+      path.win32.join(pkg, ...exe),
+    ];
+  },
+};
+
+/** How to install Codex: the standalone installer (on Windows an npm install only gives a .cmd shim). */
+export function codexInstallHint(platform: NodeJS.Platform = process.platform): string {
+  return platform === 'win32'
+    ? 'Codex CLI 설치 (PowerShell): powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"'
+    : 'Codex CLI 설치: curl -fsSL https://chatgpt.com/codex/install.sh | sh  (또는 npm install -g @openai/codex)';
+}
+
+/**
  * The real path of the Codex executable (`bin` as given, or found on PATH like the OS would, symlinks
  * resolved); `bin` unchanged when it cannot be found (the spawn then reports it). See the top of the file.
+ * On Windows resolveBin already returns the executable's path.
  */
 export async function codexExecutable(bin: string): Promise<string> {
   if (process.platform === 'win32') return bin;
@@ -508,7 +541,7 @@ async function runCodex(input: ProviderRunInput): Promise<ProviderRunResult> {
   const state = new CodexStreamState(input.onDelta, input.onStatus, threadId);
   const proc = await runJsonlProcess({
     // The real path, not a symlink on PATH: see the top of the file.
-    bin: await codexExecutable(resolveBin('CODEX_BIN', 'codex')),
+    bin: await codexExecutable(await resolveBin(CODEX_BIN_SPEC)),
     args,
     cwd: input.cwd,
     stdin: prompt,
@@ -549,11 +582,11 @@ export const codexProvider: Provider = {
   models: [{ id: '', label: 'Codex 설정 기본값' }],
   defaultModel: '',
   maxImagesPerConversation: 90,
-  detect(): Promise<ProviderAvailability> {
+  async detect(): Promise<ProviderAvailability> {
     return probeVersion({
-      bin: resolveBin('CODEX_BIN', 'codex'),
+      bin: await resolveBin(CODEX_BIN_SPEC),
       displayName: 'codex',
-      installHint: 'Codex CLI 설치: npm install -g @openai/codex',
+      installHint: codexInstallHint(),
     });
   },
   run: runCodex,

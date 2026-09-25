@@ -1,0 +1,95 @@
+// The production build (npm run build → scripts/build-server.mjs, DESIGN §15): the server compiled to plain
+// JavaScript runs on its own — imports resolve, the repository paths are right, and the image worker is
+// found as compiled JavaScript too.
+import assert from 'node:assert/strict';
+import { execFile, spawn } from 'node:child_process';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { after, before, describe, test } from 'node:test';
+import { promisify } from 'node:util';
+import { repoRoot } from '../server/config.ts';
+
+const run = promisify(execFile);
+
+describe('compiled server (dist-server)', () => {
+  // Inside the repository like dist-server/ (the compiled server finds package.json upwards) but ignored by git.
+  const outDir = path.join(repoRoot(), 'node_modules', '.cache', `easy-study-build-test-${process.pid}`);
+  let library = '';
+
+  before(async () => {
+    library = await fs.mkdtemp(path.join(os.tmpdir(), 'easy-study-build-'));
+  });
+
+  after(async () => {
+    await fs.rm(outDir, { recursive: true, force: true });
+    await fs.rm(library, { recursive: true, force: true });
+  });
+
+  test('builds, starts with a small young generation, converts a PDF and serves the derived images', async () => {
+    await run(process.execPath, [path.join(repoRoot(), 'scripts', 'build-server.mjs'), '--out', outDir], { cwd: repoRoot() });
+    const entry = path.join(outDir, 'server', 'index.js');
+    const source = await fs.readFile(entry, 'utf8');
+    assert.doesNotMatch(source, /from '\.[^']*\.ts'/, 'relative imports point at .js files');
+    await fs.access(path.join(outDir, 'server', 'imageWorker.js'));
+    await fs.access(path.join(outDir, 'shared', 'types.js'));
+
+    const child = spawn(process.execPath, ['--max-semi-space-size=2', entry], {
+      cwd: os.tmpdir(), // nothing may depend on the working directory
+      env: { ...process.env, EASY_STUDY_LIBRARY: library, PORT: '0', EASY_STUDY_AUTO_DIGEST: '0' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString()));
+    child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
+    const exited = new Promise<number | null>((resolve) => child.once('exit', resolve));
+    try {
+      const deadline = Date.now() + 20_000;
+      let base = '';
+      while (!base) {
+        base = /→\s+(http:\/\/127\.0\.0\.1:\d+)/.exec(stdout)?.[1] ?? '';
+        if (!base && (Date.now() > deadline || child.exitCode !== null)) assert.fail(`server did not start:\n${stdout}\n${stderr}`);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+
+      const health = (await (await fetch(`${base}/api/health`)).json()) as { ok: boolean; libraryDir: string };
+      assert.equal(health.ok, true);
+      assert.equal(health.libraryDir, path.resolve(library));
+
+      const pdf = await fs.readFile(path.join(repoRoot(), 'samples', 'sample-lecture.pdf'));
+      const created = (await (
+        await fetch(`${base}/api/docs`, { method: 'POST', headers: { 'Content-Type': 'application/pdf' }, body: pdf })
+      ).json()) as { id: string };
+      const docDir = path.join(library, created.id);
+      // Ready, and the last derived file (the inline JPEG of the last contact sheet) written by the compiled worker.
+      const lastDerived = path.join(docDir, 'inline', 'sheets-sheet-03.jpg');
+      while (
+        (await fs.access(lastDerived).then(
+          () => false,
+          () => true,
+        )) ||
+        ((await (await fetch(`${base}/api/docs/${created.id}`)).json()) as { status: string }).status !== 'ready'
+      ) {
+        if (Date.now() > deadline + 40_000) assert.fail(`ingest did not finish:\n${stdout}\n${stderr}`);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      for (const [p, type] of [
+        ['/slides/1.png', 'image/png'],
+        ['/view/1.webp?w=1000', 'image/webp'],
+        ['/thumbs/9.webp', 'image/webp'],
+      ]) {
+        const res = await fetch(`${base}/api/docs/${created.id}${p}`);
+        assert.equal(res.status, 200, p);
+        assert.equal(res.headers.get('content-type'), type, p);
+        assert.equal(res.headers.get('cache-control'), 'public, max-age=31536000, immutable', p);
+        await res.arrayBuffer();
+      }
+      assert.equal((await fs.readdir(path.join(docDir, 'view'))).length, 18);
+    } finally {
+      child.kill('SIGTERM');
+    }
+    assert.equal(await exited, 0, stderr);
+    await assert.rejects(fs.access(path.join(library, '.server.lock')), 'the lock is released on SIGTERM');
+  });
+});

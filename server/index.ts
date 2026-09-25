@@ -1,7 +1,7 @@
 // HTTP server (DESIGN §4): JSON API, SSE chat turns, slide images and the web client.
 //
-//   node server/index.ts --dev   Express + Vite in middleware mode (HMR)
-//   node server/index.ts         serves the production build in web/dist
+//   node server/index.ts --dev          Express + Vite in middleware mode (HMR), TypeScript run directly
+//   node dist-server/server/index.js    production: the compiled server (npm run build) serving web/dist
 import { existsSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import http from 'node:http';
@@ -10,6 +10,8 @@ import path from 'node:path';
 import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
 import { COURSE_ID_RE, DOC_ID_RE, SESSION_ID_RE } from '../shared/types.ts';
+import { VIEW_WIDTHS, thumbPath, viewPath } from './assets.ts';
+import type { ViewWidth } from './assets.ts';
 import type {
   CreateSessionRequest,
   DocMeta,
@@ -56,18 +58,22 @@ import type { DigestDeps } from './digest.ts';
 import {
   LibraryLockedError,
   acquireServerLock,
+  backfillDerivedImages,
   coursePaths,
   deleteDoc,
   docPaths,
   getDoc,
   importPdf,
   listDocs,
+  readStoredDoc,
   removeDeletedLeftovers,
+  requestDerivedImages,
   resumePendingIngests,
   retryIngest,
   slideFileName,
+  stopImageWork,
 } from './library.ts';
-import type { ServerLock } from './library.ts';
+import type { ServerLock, StoredDocMeta } from './library.ts';
 import { providerInfos } from './providers/index.ts';
 import {
   buildNotes,
@@ -106,10 +112,34 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** DocMeta with its derived fields (course, digest status): only GET /docs/:docId needs them. */
 async function requireDoc(docId: string): Promise<DocMeta> {
   const doc = await getDoc(docId);
   if (!doc) throw new HttpError(404, '문서를 찾을 수 없습니다');
   return doc;
+}
+
+/** doc.json alone (no course or digest file is read): for routes that only need the document to exist. */
+async function requireStoredDoc(docId: string): Promise<StoredDocMeta> {
+  const doc = await readStoredDoc(docId);
+  if (!doc) throw new HttpError(404, '문서를 찾을 수 없습니다');
+  return doc;
+}
+
+interface SlideRequest {
+  doc: StoredDocMeta;
+  slide: number;
+  /** e.g. `007.png`. */
+  slideFile: string;
+}
+
+/** The slide named by `<n>.<ext>` of a document (404 when the document or the slide does not exist). */
+async function requireSlide(docId: string, file: string, ext: 'png' | 'webp'): Promise<SlideRequest> {
+  const doc = await readStoredDoc(docId);
+  const match = /^(\d{1,6})\.([a-z]+)$/.exec(file);
+  const slide = match && match[2] === ext ? Number(match[1]) : 0;
+  if (!doc || slide < 1 || slide > doc.pageCount) throw new HttpError(404, '슬라이드를 찾을 수 없습니다');
+  return { doc, slide, slideFile: slideFileName(slide, doc.pageCount) };
 }
 
 /** X-Filename carries the URI-encoded original file name (headers cannot hold raw unicode). */
@@ -162,6 +192,56 @@ function sendFile(res: Response, file: string, options: Parameters<Response['sen
   return new Promise((resolve, reject) => {
     res.sendFile(file, options ?? {}, (err) => (err ? reject(err) : resolve()));
   });
+}
+
+/** Logs a failed transfer unless the client simply went away. */
+function warnTransfer(req: Request, err: unknown): void {
+  if ((err as NodeJS.ErrnoException).code !== 'ECONNABORTED') console.warn(`[http] ${req.path}: ${errorMessage(err)}`);
+}
+
+/** A file that never changes under its URL (slides of a converted document); 404 when it does not exist. */
+async function sendImmutable(req: Request, res: Response, file: string): Promise<void> {
+  try {
+    await sendFile(res, file, { maxAge: IMMUTABLE_MAX_AGE_MS, immutable: true });
+  } catch (err) {
+    // Not rendered yet (still processing) or the client went away mid-transfer.
+    if (!res.headersSent) throw new HttpError(404, '슬라이드를 찾을 수 없습니다');
+    warnTransfer(req, err);
+  }
+}
+
+/**
+ * A derived image of a slide (server/assets.ts), cached for good. When it does not exist yet (a document
+ * converted before derived images existed, or its image worker is still busy), the backfill is asked for
+ * it and the original PNG is sent instead with `Cache-Control: no-store`, so the browser asks again later.
+ */
+async function sendDerivedFile(req: Request, res: Response, doc: StoredDocMeta, slideFile: string, file: string): Promise<void> {
+  try {
+    await sendFile(res, file, { maxAge: IMMUTABLE_MAX_AGE_MS, immutable: true });
+    return;
+  } catch (err) {
+    if (res.headersSent) return warnTransfer(req, err);
+  }
+  if (doc.status === 'ready') requestDerivedImages(doc.id);
+  try {
+    await sendFile(res, path.join(docPaths(doc.id).slidesDir, slideFile), {
+      cacheControl: false,
+      lastModified: false,
+      etag: false,
+      headers: { 'Cache-Control': 'no-store' },
+    });
+  } catch (err) {
+    if (!res.headersSent) throw new HttpError(404, '슬라이드를 찾을 수 없습니다');
+    warnTransfer(req, err);
+  }
+}
+
+/** `?w=` of a view rendition: one of VIEW_WIDTHS, default the largest. */
+function parseViewWidth(value: unknown): ViewWidth {
+  if (value === undefined || value === '') return VIEW_WIDTHS[VIEW_WIDTHS.length - 1];
+  const width = VIEW_WIDTHS.find((candidate) => String(candidate) === value);
+  if (width === undefined) throw new HttpError(400, `w는 ${VIEW_WIDTHS.join(', ')} 중 하나여야 합니다`);
+  return width;
 }
 
 interface LazySse {
@@ -327,31 +407,35 @@ export function createApiRouter(options: AppOptions = {}): express.Router {
     res.status(202).json(await retryIngest(req.params.docId));
   });
 
+  /** The original render (PNG): kept for compatibility and as the fallback of the WebP routes below. */
   api.get('/docs/:docId/slides/:file', async (req, res) => {
-    const doc = await getDoc(req.params.docId);
-    const match = /^(\d{1,6})\.png$/.exec(req.params.file);
-    const slide = match ? Number(match[1]) : 0;
-    if (!doc || slide < 1 || slide > doc.pageCount) throw new HttpError(404, '슬라이드를 찾을 수 없습니다');
-    const file = path.join(docPaths(doc.id).slidesDir, slideFileName(slide, doc.pageCount));
-    try {
-      await sendFile(res, file, { maxAge: IMMUTABLE_MAX_AGE_MS, immutable: true });
-    } catch (err) {
-      // Not rendered yet (still processing) or the client went away mid-transfer.
-      if (!res.headersSent) throw new HttpError(404, '슬라이드를 찾을 수 없습니다');
-      if ((err as NodeJS.ErrnoException).code !== 'ECONNABORTED') console.warn(`[http] ${req.path}: ${errorMessage(err)}`);
-    }
+    const { doc, slideFile } = await requireSlide(req.params.docId, req.params.file, 'png');
+    await sendImmutable(req, res, path.join(docPaths(doc.id).slidesDir, slideFile));
+  });
+
+  /** Display rendition (lossy WebP, `?w=1000|1600`, default the largest) of a slide (DESIGN §15). */
+  api.get('/docs/:docId/view/:file', async (req, res) => {
+    const width = parseViewWidth(req.query.w);
+    const { doc, slideFile } = await requireSlide(req.params.docId, req.params.file, 'webp');
+    await sendDerivedFile(req, res, doc, slideFile, viewPath(docPaths(doc.id).dir, slideFile, width));
+  });
+
+  /** Small thumbnail (WebP) of a slide for the notes and digest lists (DESIGN §15). */
+  api.get('/docs/:docId/thumbs/:file', async (req, res) => {
+    const { doc, slideFile } = await requireSlide(req.params.docId, req.params.file, 'webp');
+    await sendDerivedFile(req, res, doc, slideFile, thumbPath(docPaths(doc.id).dir, slideFile));
   });
 
   // --- sessions ----------------------------------------------------------------------------------
 
   api.get('/docs/:docId/sessions', async (req, res) => {
-    await requireDoc(req.params.docId);
+    await requireStoredDoc(req.params.docId);
     res.json(await listSessions(req.params.docId));
   });
 
   api.post('/docs/:docId/sessions', async (req, res) => {
     const docId = req.params.docId;
-    await requireDoc(docId);
+    await requireStoredDoc(docId);
     const body = jsonBody(req) as Partial<Record<keyof CreateSessionRequest, unknown>>;
     const { info, model } = resolveProviderChoice(await getProviderInfos(), body.provider, body.model);
     const record = await createSession(docId, {
@@ -442,7 +526,7 @@ export function createApiRouter(options: AppOptions = {}): express.Router {
 
   api.get('/docs/:docId/notes.md', async (req, res) => {
     const docId = req.params.docId;
-    await requireDoc(docId);
+    await requireStoredDoc(docId);
     const file = docPaths(docId).studyNotes;
     if (!existsSync(file)) await writeNotes(docId);
     sendMarkdown(res, await fs.readFile(file, 'utf8'));
@@ -457,7 +541,7 @@ export function createApiRouter(options: AppOptions = {}): express.Router {
 
   api.post('/docs/:docId/digest', async (req, res) => {
     const docId = req.params.docId;
-    await requireDoc(docId);
+    await requireStoredDoc(docId);
     const body = jsonBody(req) as Partial<Record<keyof StartDigestRequest, unknown>>;
     if (body.force !== undefined && typeof body.force !== 'boolean') throw new HttpError(400, 'force는 true/false 여야 합니다');
     const { info, model } = resolveProviderChoice(await getProviderInfos(), body.provider, body.model);
@@ -465,7 +549,7 @@ export function createApiRouter(options: AppOptions = {}): express.Router {
   });
 
   api.post('/docs/:docId/digest/abort', async (req, res) => {
-    await requireDoc(req.params.docId);
+    await requireStoredDoc(req.params.docId);
     abortDigest(req.params.docId);
     res.status(204).end();
   });
@@ -584,6 +668,12 @@ export interface ServerOptions extends AppOptions {
   dev?: boolean;
   /** Re-process documents left in 'processing' (default true). */
   resumeIngests?: boolean;
+  /**
+   * Write the missing derived images (view renditions, thumbnails, inline JPEGs) of converted documents
+   * in the background, one document at a time (default: like `resumeIngests`). Requests for a missing
+   * derived image ask for them either way.
+   */
+  backfillImages?: boolean;
   /** Print startup information (default true). */
   log?: boolean;
 }
@@ -658,14 +748,17 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
   if (options.resumeIngests ?? true) {
     resumePendingIngests().catch((err: unknown) => console.error('[library] resuming ingests failed:', err));
   }
+  if (options.backfillImages ?? options.resumeIngests ?? true) {
+    backfillDerivedImages().catch((err: unknown) => console.error('[library] backfill of derived images failed:', err));
+  }
 
   let closing: Promise<void> | undefined;
   const close = () =>
     (closing ??= (async () => {
       abortAllTurns();
       abortAllDigests();
-      // Let aborted turns and digest jobs persist their partial results.
-      await Promise.all([waitForIdle(4_000), waitForDigestsIdle(4_000)]);
+      // Let aborted turns and digest jobs persist their partial results; stop the image workers.
+      await Promise.all([waitForIdle(4_000), waitForDigestsIdle(4_000), stopImageWork()]);
       await closeVite?.();
       await new Promise<void>((resolve) => {
         server.close(() => resolve());
@@ -676,15 +769,28 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
   return { server, url, close };
 }
 
+/**
+ * A command line that runs `command` with environment variables, in the syntax of the platform's usual
+ * shell: POSIX shells (`A=1 npm run dev`) or, on Windows, PowerShell (`$env:A="1"; npm run dev`).
+ */
+export function envCommand(vars: Record<string, string>, command: string, platform: NodeJS.Platform = process.platform): string {
+  const entries = Object.entries(vars);
+  if (platform === 'win32') {
+    return `${entries.map(([name, value]) => `$env:${name}="${value}"; `).join('')}${command}  (PowerShell)`;
+  }
+  return `${entries.map(([name, value]) => `${name}=${/[\s<>'"$&|;]/.test(value) ? `'${value}'` : value} `).join('')}${command}`;
+}
+
 /** Why the server did not start because another one uses the library, and what to do about it. */
 function libraryLockedMessage(err: LibraryLockedError, dev: boolean): string {
   const { holder } = err;
+  const again = envCommand({ EASY_STUDY_LIBRARY: '<다른 폴더>', PORT: String(holder.port + 1) }, `npm run ${dev ? 'dev' : 'serve'}`);
   return [
     `easy-study가 이미 이 라이브러리로 실행 중입니다 (pid ${holder.pid}): http://${host()}:${holder.port}`,
     `  라이브러리: ${libraryDir()}`,
     '  같은 라이브러리에 서버를 두 개 띄우면 서로의 작업(PDF 변환, 정리본, 답변)을 망가뜨리므로 시작하지 않았습니다.',
     '  - 이미 실행 중인 서버를 그대로 쓰거나, 그 서버를 먼저 종료하세요 (Ctrl+C).',
-    `  - 다른 라이브러리로 하나 더 띄우려면: EASY_STUDY_LIBRARY=<다른 폴더> PORT=${holder.port + 1} npm run ${dev ? 'dev' : 'serve'}`,
+    `  - 다른 라이브러리로 하나 더 띄우려면: ${again}`,
     `  - 실행 중인 easy-study가 없는데도 이 메시지가 나오면 잠금 파일을 지우세요: ${err.lockFile}`,
   ].join('\n');
 }
@@ -701,7 +807,7 @@ async function main(): Promise<void> {
       // Not an easy-study on this library (the library lock would have said so).
       console.error(
         `포트 ${port()}을(를) 다른 프로그램(또는 다른 라이브러리로 실행 중인 easy-study)이 쓰고 있습니다. ` +
-          `다른 포트로 실행하세요: PORT=${port() + 1} npm run ${dev ? 'dev' : 'serve'}`,
+          `다른 포트로 실행하세요: ${envCommand({ PORT: String(port() + 1) }, `npm run ${dev ? 'dev' : 'serve'}`)}`,
       );
     } else {
       console.error('서버를 시작하지 못했습니다:', err);
@@ -724,8 +830,10 @@ async function main(): Promise<void> {
       .catch((err: unknown) => console.error('종료 중 오류:', err))
       .finally(() => process.exit(0));
   };
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+  // SIGHUP: the terminal window was closed. SIGBREAK: Ctrl+Break in a Windows console (Windows has no SIGTERM).
+  const signals: NodeJS.Signals[] = ['SIGINT', 'SIGTERM', 'SIGHUP'];
+  if (process.platform === 'win32') signals.push('SIGBREAK');
+  for (const signal of signals) process.on(signal, shutdown);
 }
 
 if (import.meta.main) {

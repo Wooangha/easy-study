@@ -1,4 +1,4 @@
-import { memo, useCallback, useLayoutEffect, useRef, type MouseEvent } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, type MouseEvent } from 'react';
 import type { DigestSlide, DocMeta, ProviderInfo } from '../../../shared/types.ts';
 import { digestMarkdownUrl } from '../api.ts';
 import type { DigestState } from '../hooks/useDigest.ts';
@@ -20,7 +20,10 @@ interface DigestPanelProps {
   /** Why no provider can be used, or null. */
   providerProblem: string | null;
   focusedSlide: number;
-  /** The tab is visible (auto-scrolling only happens then). */
+  /**
+   * The tab is visible (auto-scrolling only happens then). ChatPanel mounts the panel only while its tab
+   * is shown, so on every return it lands on the focused slide's entry again.
+   */
   active: boolean;
   mode: DigestMode;
   onModeChange: (mode: DigestMode) => void;
@@ -81,6 +84,23 @@ export function DigestPanel({
   const clickTarget = useRef<{ slide: number; at: number } | null>(null);
   const wasActive = useRef(false);
   const entriesReady = s?.hasAny ?? false;
+  /**
+   * Entries that were never on screen have an estimated height (content-visibility, styles.css). After a
+   * jump, the ones around the target get rendered at their real size; browsers without scroll anchoring
+   * then leave the target off by that difference, so re-align on the next few frames.
+   */
+  const settleFrame = useRef(0);
+  const settleOn = useCallback((scroller: HTMLElement, el: HTMLElement) => {
+    cancelAnimationFrame(settleFrame.current);
+    let frames = 0;
+    const step = () => {
+      const off = el.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 8;
+      if (Math.abs(off) > 1) scroller.scrollTop += off;
+      if (++frames < 3) settleFrame.current = requestAnimationFrame(step);
+    };
+    settleFrame.current = requestAnimationFrame(step);
+  }, []);
+  useEffect(() => () => cancelAnimationFrame(settleFrame.current), []);
 
   useLayoutEffect(() => {
     const becameVisible = active && !wasActive.current;
@@ -99,8 +119,10 @@ export function DigestPanel({
     if (!el) return;
     const top = scroller.scrollTop + el.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 8;
     const far = Math.abs(top - scroller.scrollTop) > scroller.clientHeight * 3;
-    scroller.scrollTo({ top, behavior: becameVisible || far ? 'auto' : 'smooth' });
-  }, [focusedSlide, mode, active, entriesReady]);
+    const instant = becameVisible || far;
+    scroller.scrollTo({ top, behavior: instant ? 'auto' : 'smooth' });
+    if (instant) settleOn(scroller, el);
+  }, [focusedSlide, mode, active, entriesReady, settleOn]);
 
   const goTo = useCallback(
     (slide: number) => {

@@ -123,3 +123,13 @@ export function firstLine(text: string, max = 120): string {
 export function clamp(n: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, n));
 }
+
+/**
+ * `sizes` attribute for a slide rendered `width` CSS px wide (zoom included): rounded up to 50 px, so a
+ * divider drag does not re-render every slide on each pixel, and a little generous rather than blurry.
+ * Null while the width is unknown (the image is then not rendered yet).
+ */
+export function slideSizes(width: number): string | null {
+  if (!Number.isFinite(width) || width <= 0) return null;
+  return `${Math.ceil(width / 50) * 50}px`;
+}

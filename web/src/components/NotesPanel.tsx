@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import type { NoteEntry, NotesResponse, ProviderInfo } from '../../../shared/types.ts';
-import { notesMarkdownUrl, slideUrl } from '../api.ts';
+import { notesMarkdownUrl, thumbUrl } from '../api.ts';
 import { firstLine, formatTime, providerLabel } from '../lib/format.ts';
 import { toast } from '../lib/toast.ts';
 import { Markdown } from './Markdown.tsx';
+import { SlideImage } from './SlideImage.tsx';
 
 /** 'all' | 'current' (follows the focused slide) | a fixed slide number (opened from a viewer badge). */
 export type NotesFilter = 'all' | 'current' | number;
@@ -33,7 +34,8 @@ export function NotesPanel({
   onGoToSlide,
   onRefresh,
 }: NotesPanelProps) {
-  // Bumping this remounts the <details> elements with the new default open state.
+  // Bumping this remounts the <details> elements with the new default open state. Cards start collapsed
+  // (an open card renders its Markdown/KaTeX answer); only a lone Q&A of a single-slide view opens.
   const [expand, setExpand] = useState<{ open: boolean; gen: number }>({ open: false, gen: 0 });
 
   const filterSlide = filter === 'current' ? focusedSlide : filter === 'all' ? null : filter;
@@ -119,7 +121,12 @@ export function NotesPanel({
                 onClick={() => onGoToSlide(group.slide)}
                 title={`슬라이드 ${group.slide}로 이동`}
               >
-                <img src={slideUrl(docId, group.slide)} alt={`슬라이드 ${group.slide}`} loading="lazy" decoding="async" />
+                <SlideImage
+                  docId={docId}
+                  slide={group.slide}
+                  src={thumbUrl(docId, group.slide)}
+                  alt={`슬라이드 ${group.slide}`}
+                />
               </button>
               <div className="note-group-title">
                 <button type="button" className="slide-chip" onClick={() => onGoToSlide(group.slide)}>
@@ -131,10 +138,10 @@ export function NotesPanel({
             <div className="note-entries">
               {group.entries.map((entry) => (
                 <NoteCard
-                  key={`${entry.question.id}:${expand.gen}`}
+                  key={`${entry.question.id}:${expand.gen}:${filterSlide === null ? 'all' : 'one'}`}
                   entry={entry}
                   providers={providers}
-                  defaultOpen={expand.gen === 0 ? group.entries.length === 1 : expand.open}
+                  defaultOpen={expand.gen === 0 ? filterSlide !== null && group.entries.length === 1 : expand.open}
                 />
               ))}
             </div>

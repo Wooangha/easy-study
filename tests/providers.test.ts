@@ -3,18 +3,32 @@
 // - API providers talk to a local mock HTTP server (via ANTHROPIC_BASE_URL / OPENAI_BASE_URL).
 // Run: node --test tests/providers.test.ts
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { after, afterEach, before, beforeEach, describe, test } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { promisify } from 'node:util';
 import sharp from 'sharp';
+import { inlinePathFor } from '../server/assets.ts';
 import type { Part, Provider, ProviderRunInput, ProviderRunResult } from '../server/providers/types.ts';
 import { ProviderError, providerErrorKind } from '../server/providers/types.ts';
-import { CLAUDE_TOOLS, claudeArgs, claudeCodeProvider, classifyClaudeFailure, toolStatus } from '../server/providers/claudeCode.ts';
 import {
+  CLAUDE_BIN_SPEC,
+  CLAUDE_CHILD_ENV_DEFAULTS,
+  CLAUDE_TOOLS,
+  claudeArgs,
+  claudeCodeProvider,
+  claudeEnv,
+  claudeInstallHint,
+  classifyClaudeFailure,
+  toolStatus,
+} from '../server/providers/claudeCode.ts';
+import {
+  CODEX_BIN_SPEC,
   CODEX_DISABLED_INTEGRATIONS,
   CODEX_DISABLED_TOOLS,
   CODEX_PERMISSION_PROFILE,
@@ -24,6 +38,7 @@ import {
   codexArgs,
   codexConfinementEnabled,
   codexExecutable,
+  codexInstallHint,
   codexMcpServerNames,
   codexPrompt,
   codexProvider,
@@ -47,14 +62,28 @@ import {
   JsonlParser,
   clearInlineImageCache,
   loadInlineImage,
+  resolveBin,
   runJsonlProcess,
+  stopProcess,
+  taskkillPath,
 } from '../server/providers/proc.ts';
+import type { ExecFileLike } from '../server/providers/proc.ts';
+
+const execFileAsync = promisify(execFile);
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
 const FAKE_CLAUDE = path.join(FIXTURES, 'fake-claude.mjs');
 const FAKE_CODEX = path.join(FIXTURES, 'fake-codex.mjs');
 fs.chmodSync(FAKE_CLAUDE, 0o755);
 fs.chmodSync(FAKE_CODEX, 0o755);
+
+/**
+ * Tests that execute the fake CLIs (or rely on POSIX symlinks and exec bits). The providers spawn the CLI
+ * without a shell, and Windows cannot start a .mjs script that way (it only runs .exe / .com files).
+ */
+const FAKE_CLI = {
+  skip: process.platform === 'win32' ? 'the fake CLIs are .mjs scripts, which Windows cannot spawn without a shell' : false,
+};
 
 // A 1x1 PNG (slide) and a small red PNG (overview sheet), created in `before`.
 const PNG = Buffer.from(
@@ -72,8 +101,8 @@ async function inline(file: string): Promise<{ type: 'base64'; media_type: strin
   return { type: 'base64', media_type: image.mediaType, data: image.data };
 }
 
-/** The feature overrides every codex call carries (no MCP servers configured in the test CODEX_HOME). */
-const CODEX_HARDENING = CODEX_DISABLED_INTEGRATIONS.flatMap((f) => ['-c', `features.${f}=false`]);
+/** The hardening overrides every codex call carries (no MCP servers configured in the test CODEX_HOME). */
+const CODEX_HARDENING = ['-c', 'notify=[]', ...CODEX_DISABLED_INTEGRATIONS.flatMap((f) => ['-c', `features.${f}=false`])];
 /** Overrides every codex call carries whether or not reads are confined. */
 const CODEX_NO_ESCALATION = ['-c', 'approval_policy="never"', '-c', 'approvals_reviewer="user"', '-c', 'project_root_markers=[]'];
 
@@ -108,6 +137,9 @@ const ENV_KEYS = [
   'EASY_STUDY_CLAUDE_USE_API_KEY',
   'EASY_STUDY_CODEX_CONFINE',
   'CODEX_HOME',
+  'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
+  'ENABLE_CLAUDEAI_MCP_SERVERS',
+  'MIMALLOC_PURGE_DELAY',
 ];
 let savedEnv: Record<string, string | undefined> = {};
 let workDir = '';
@@ -275,6 +307,190 @@ describe('proc', () => {
     assert.deepEqual(await loadInlineImage(bogus), { mediaType: 'image/png', data: Buffer.from('not a png').toString('base64') });
     await assert.rejects(loadInlineImage(path.join(workDir, 'missing.png')), /슬라이드 이미지를 읽을 수 없습니다/);
   });
+
+  test("loadInlineImage: the image worker's JPEG is sent as it is (never cached); an empty or stale one is ignored", async () => {
+    clearInlineImageCache();
+    const b64 = (text: string) => Buffer.from(text).toString('base64');
+    const jpeg = inlinePathFor(slidePng)!;
+    assert.equal(jpeg, path.join(workDir, 'inline', 'slides-003.jpg'));
+    fs.mkdirSync(path.dirname(jpeg));
+    fs.writeFileSync(jpeg, 'pre-encoded v1');
+    assert.deepEqual(await loadInlineImage(slidePng), { mediaType: 'image/jpeg', data: b64('pre-encoded v1') });
+    fs.writeFileSync(jpeg, 'pre-encoded v2');
+    assert.deepEqual(await loadInlineImage(slidePng), { mediaType: 'image/jpeg', data: b64('pre-encoded v2') });
+
+    const isJpeg = async (data: string) => (await sharp(Buffer.from(data, 'base64')).metadata()).format === 'jpeg';
+    // Empty (e.g. being written): encoded here instead.
+    fs.writeFileSync(jpeg, '');
+    const fallback = await loadInlineImage(slidePng);
+    assert.equal(fallback.mediaType, 'image/jpeg');
+    assert.ok(await isJpeg(fallback.data));
+    // Older than the PNG (the slide was re-rendered): encoded here instead.
+    fs.writeFileSync(jpeg, 'pre-encoded v3');
+    const later = new Date(Date.now() + 60_000);
+    fs.utimesSync(slidePng, later, later);
+    const fresh = await loadInlineImage(slidePng);
+    assert.notEqual(fresh.data, b64('pre-encoded v3'));
+    assert.ok(await isJpeg(fresh.data));
+  });
+
+  test('the SDKs and sharp are only loaded when needed (idle memory)', async () => {
+    const jpeg = inlinePathFor(slidePng)!;
+    fs.mkdirSync(path.dirname(jpeg));
+    fs.writeFileSync(jpeg, 'pre-encoded');
+    const url = (file: string) => JSON.stringify(pathToFileURL(path.join(FIXTURES, '..', '..', 'server', 'providers', file)).href);
+    // Records every bare import of the watched packages, then reports after each step.
+    const script = `
+      import { registerHooks } from 'node:module';
+      const watched = ['@anthropic-ai/sdk', 'openai', 'sharp'];
+      const loaded = new Set();
+      registerHooks({
+        resolve(specifier, context, next) {
+          for (const name of watched) if (specifier === name || specifier.startsWith(name + '/')) loaded.add(name);
+          return next(specifier, context);
+        },
+      });
+      const steps = {};
+      const report = (step) => (steps[step] = [...loaded].sort());
+      await import(${url('index.ts')});
+      report('import');
+      const proc = await import(${url('proc.ts')});
+      await proc.loadInlineImage(${JSON.stringify(slidePng)});
+      report('preEncoded');
+      await proc.loadInlineImage(${JSON.stringify(sheetPng)});
+      report('encoded');
+      console.log(JSON.stringify(steps));
+    `;
+    const { stdout } = await execFileAsync(process.execPath, ['--input-type=module', '-e', script], { cwd: workDir });
+    assert.deepEqual(JSON.parse(stdout), { import: [], preEncoded: [], encoded: ['sharp'] });
+  });
+});
+
+describe('resolveBin', () => {
+  const NPM = 'C:\\Users\\hong\\AppData\\Roaming\\npm';
+  const LOCAL = 'C:\\Users\\hong\\.local\\bin';
+  const CLAUDE_PKG = `${NPM}\\node_modules\\@anthropic-ai\\claude-code`;
+  const CODEX_PKG = `${NPM}\\node_modules\\@openai\\codex`;
+  /** Size of a native CLI binary (anything ≥ 4 KB counts as real). */
+  const BIG = 200_000_000;
+
+  function disk(files: Record<string, number>): (file: string) => Promise<number | null> {
+    return async (file) => (Object.hasOwn(files, file) ? files[file] : null);
+  }
+
+  function win(env: NodeJS.ProcessEnv, files: Record<string, number>, arch = 'x64') {
+    return { platform: 'win32' as const, arch, env: { PATHEXT: '.COM;.EXE;.BAT;.CMD', ...env }, fileSize: disk(files) };
+  }
+
+  test('POSIX: the override or the bare name, without looking at the disk', async () => {
+    const fileSize = async (): Promise<number | null> => {
+      throw new Error('no lookup expected');
+    };
+    assert.equal(await resolveBin(CLAUDE_BIN_SPEC, { platform: 'darwin', env: { PATH: '/usr/bin' }, fileSize }), 'claude');
+    assert.equal(await resolveBin(CODEX_BIN_SPEC, { platform: 'linux', env: { CODEX_BIN: ' /opt/codex ' }, fileSize }), '/opt/codex');
+    assert.equal(await resolveBin(CLAUDE_BIN_SPEC, { platform: 'darwin', env: { CLAUDE_BIN: 'x.cmd' }, fileSize }), 'x.cmd');
+  });
+
+  test('Windows: a native .exe anywhere on PATH wins over an npm .cmd shim earlier on PATH', async () => {
+    const files = { [`${NPM}\\claude.cmd`]: 300, [`${CLAUDE_PKG}\\bin\\claude.exe`]: BIG, [`${LOCAL}\\claude.exe`]: BIG };
+    // "Path" is the usual spelling; quoted, relative and empty entries are tolerated.
+    const env = { Path: `${NPM};relative\\bin;;"${LOCAL}"` };
+    assert.equal(await resolveBin(CLAUDE_BIN_SPEC, win(env, files)), `${LOCAL}\\claude.exe`);
+    // .com / .exe in PATHEXT order within a directory; other PATHEXT entries are never spawned.
+    const both = { [`${LOCAL}\\claude.com`]: BIG, [`${LOCAL}\\claude.exe`]: BIG, [`${LOCAL}\\claude.bat`]: 10 };
+    assert.equal(await resolveBin(CLAUDE_BIN_SPEC, win({ PATH: LOCAL }, both)), `${LOCAL}\\claude.com`);
+    assert.equal(await resolveBin(CLAUDE_BIN_SPEC, win({ PATH: LOCAL, PATHEXT: '.EXE;.COM;.BAT' }, both)), `${LOCAL}\\claude.exe`);
+    assert.equal(await resolveBin(CLAUDE_BIN_SPEC, win({ PATH: LOCAL }, { [`${LOCAL}\\claude.bat`]: 10 })), 'claude');
+  });
+
+  test("Windows: an npm claude.cmd shim maps to the package's native claude.exe (not its pre-postinstall stub)", async () => {
+    const env = { PATH: `${NPM};${LOCAL}` };
+    const shim = { [`${NPM}\\claude.cmd`]: 300 };
+    assert.equal(
+      await resolveBin(CLAUDE_BIN_SPEC, win(env, { ...shim, [`${CLAUDE_PKG}\\bin\\claude.exe`]: BIG })),
+      `${CLAUDE_PKG}\\bin\\claude.exe`,
+    );
+    const nested = `${CLAUDE_PKG}\\node_modules\\@anthropic-ai\\claude-code-win32-x64\\claude.exe`;
+    assert.equal(await resolveBin(CLAUDE_BIN_SPEC, win(env, { ...shim, [`${CLAUDE_PKG}\\bin\\claude.exe`]: 500, [nested]: BIG })), nested);
+    const hoisted = `${NPM}\\node_modules\\@anthropic-ai\\claude-code-win32-arm64\\claude.exe`;
+    assert.equal(await resolveBin(CLAUDE_BIN_SPEC, win(env, { ...shim, [hoisted]: BIG }, 'arm64')), hoisted);
+    // A shim whose target is missing: the bare name, which spawn reports as not found.
+    assert.equal(await resolveBin(CLAUDE_BIN_SPEC, win(env, shim)), 'claude');
+    assert.equal(await resolveBin(CLAUDE_BIN_SPEC, win(env, {})), 'claude');
+  });
+
+  test('Windows: an npm codex.cmd shim maps to the vendored codex.exe that bin/codex.js would spawn', async () => {
+    const env = { PATH: NPM };
+    const shim = { [`${NPM}\\codex.cmd`]: 400 };
+    const x64 = `@openai\\codex-win32-x64\\vendor\\x86_64-pc-windows-msvc\\bin\\codex.exe`;
+    const nested = `${CODEX_PKG}\\node_modules\\${x64}`;
+    const hoisted = `${NPM}\\node_modules\\${x64}`;
+    assert.equal(await resolveBin(CODEX_BIN_SPEC, win(env, { ...shim, [nested]: BIG, [hoisted]: BIG })), nested);
+    assert.equal(await resolveBin(CODEX_BIN_SPEC, win(env, { ...shim, [hoisted]: BIG })), hoisted);
+    const legacy = `${CODEX_PKG}\\vendor\\aarch64-pc-windows-msvc\\bin\\codex.exe`;
+    assert.equal(await resolveBin(CODEX_BIN_SPEC, win(env, { ...shim, [legacy]: BIG }, 'arm64')), legacy);
+    assert.equal(await resolveBin(CODEX_BIN_SPEC, win(env, { ...shim, [hoisted]: BIG }, 'arm64')), 'codex', 'wrong architecture');
+  });
+
+  test('Windows overrides: a .cmd path is mapped, other paths are kept, a bare name is searched on PATH', async () => {
+    const files = {
+      [`${NPM}\\claude.cmd`]: 300,
+      [`${CLAUDE_PKG}\\bin\\claude.exe`]: BIG,
+      [`${LOCAL}\\codex-beta.exe`]: BIG,
+    };
+    const env = (vars: NodeJS.ProcessEnv) => win({ PATH: `${NPM};${LOCAL}`, ...vars }, files);
+    assert.equal(await resolveBin(CLAUDE_BIN_SPEC, env({ CLAUDE_BIN: `${NPM}\\claude.cmd` })), `${CLAUDE_PKG}\\bin\\claude.exe`);
+    assert.equal(await resolveBin(CLAUDE_BIN_SPEC, env({ CLAUDE_BIN: 'D:\\tools\\claude.exe' })), 'D:\\tools\\claude.exe');
+    // Not mappable: kept, and spawning it fails with a message about batch files.
+    assert.equal(await resolveBin(CLAUDE_BIN_SPEC, env({ CLAUDE_BIN: 'D:\\tools\\claude.cmd' })), 'D:\\tools\\claude.cmd');
+    assert.equal(await resolveBin(CODEX_BIN_SPEC, env({ CODEX_BIN: 'codex-beta' })), `${LOCAL}\\codex-beta.exe`);
+    assert.equal(await resolveBin(CODEX_BIN_SPEC, env({ CODEX_BIN: 'codex-gone' })), 'codex-gone');
+    assert.equal(await resolveBin(CLAUDE_BIN_SPEC, env({ CLAUDE_BIN: 'claude.cmd' })), `${CLAUDE_PKG}\\bin\\claude.exe`);
+  });
+
+  test('install hints recommend the native installers on Windows', () => {
+    assert.match(claudeInstallHint('win32'), /irm https:\/\/claude\.ai\/install\.ps1 \| iex/);
+    assert.match(claudeInstallHint('win32'), /winget install Anthropic\.ClaudeCode/);
+    assert.match(codexInstallHint('win32'), /irm https:\/\/chatgpt\.com\/codex\/install\.ps1 \| iex/);
+    for (const hint of [claudeInstallHint('win32'), codexInstallHint('win32')]) assert.doesNotMatch(hint, /npm/);
+    assert.match(claudeInstallHint('darwin'), /install\.sh/);
+    assert.match(codexInstallHint('linux'), /install\.sh/);
+  });
+});
+
+describe('stopProcess', () => {
+  test('POSIX: SIGTERM; Windows: taskkill of the whole process tree, the child alone if taskkill fails', () => {
+    const kills: string[] = [];
+    const child = {
+      pid: 4321,
+      kill: (signal?: NodeJS.Signals | number) => {
+        kills.push(String(signal ?? 'default'));
+        return true;
+      },
+    };
+    const calls: unknown[][] = [];
+    const record: ExecFileLike = (file, args, options, callback) => {
+      calls.push([file, args, options]);
+      callback(null);
+    };
+    stopProcess(child, 'darwin', record);
+    assert.deepEqual(kills, ['SIGTERM']);
+    assert.deepEqual(calls, []);
+
+    kills.length = 0;
+    stopProcess(child, 'win32', record);
+    assert.deepEqual(calls, [[taskkillPath(), ['/PID', '4321', '/T', '/F'], { windowsHide: true }]]);
+    assert.deepEqual(kills, []);
+    stopProcess(child, 'win32', (_file, _args, _options, callback) => callback(new Error('taskkill: access denied')));
+    assert.deepEqual(kills, ['default']);
+    stopProcess(child, 'win32', () => {
+      throw new Error('spawn EPERM');
+    });
+    assert.deepEqual(kills, ['default', 'default']);
+
+    assert.equal(taskkillPath({ SystemRoot: 'C:\\Windows' }), 'C:\\Windows\\System32\\taskkill.exe');
+    assert.equal(taskkillPath({}), 'taskkill.exe');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -286,7 +502,7 @@ describe('claude-code provider', () => {
     process.env.CLAUDE_BIN = FAKE_CLAUDE;
   });
 
-  test('new conversation: exact argv, stdin message with base64 images, streamed text', async () => {
+  test('new conversation: exact argv, stdin message with base64 images, streamed text', FAKE_CLI, async () => {
     process.env.CLAUDECODE = '1';
     process.env.ANTHROPIC_API_KEY = 'sk-should-not-leak';
     const out = await run(claudeCodeProvider, { model: 'sonnet' });
@@ -315,6 +531,9 @@ describe('claude-code provider', () => {
     ]);
     assert.equal(rec.env?.CLAUDECODE, null, 'CLAUDECODE is removed from the child env');
     assert.equal(rec.env?.ANTHROPIC_API_KEY, null, 'the subscription is used, not an API key');
+    assert.equal(rec.env?.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, '1');
+    assert.equal(rec.env?.ENABLE_CLAUDEAI_MCP_SERVERS, 'false');
+    assert.equal(rec.env?.MIMALLOC_PURGE_DELAY, '0');
 
     assert.ok(rec.stdin.endsWith('\n'));
     const lines = rec.stdin.trim().split('\n');
@@ -341,7 +560,7 @@ describe('claude-code provider', () => {
     assert.deepEqual(out.result?.resume, { cliSessionId: sessionId });
   });
 
-  test('resume: --resume <id>, no --model when the model is empty, reported session id wins', async () => {
+  test('resume: --resume <id>, no --model when the model is empty, reported session id wins', FAKE_CLI, async () => {
     const out = await run(claudeCodeProvider, { resume: { cliSessionId: 'sess-123' } });
     assert.ifError(out.error);
     const rec = record();
@@ -351,7 +570,7 @@ describe('claude-code provider', () => {
     assert.deepEqual(out.result?.resume, { cliSessionId: 'sess-123-next' });
   });
 
-  test('falls back to result.result when no deltas were streamed', async () => {
+  test('falls back to result.result when no deltas were streamed', FAKE_CLI, async () => {
     process.env.FAKE_CLI_MODE = 'no-deltas';
     const out = await run(claudeCodeProvider);
     assert.ifError(out.error);
@@ -359,7 +578,7 @@ describe('claude-code provider', () => {
     assert.deepEqual(out.deltas, ['최종 답변']);
   });
 
-  test('is_error result rejects with the CLI message', async () => {
+  test('is_error result rejects with the CLI message', FAKE_CLI, async () => {
     process.env.FAKE_CLI_MODE = 'is_error';
     const out = await run(claudeCodeProvider);
     assert.ok(out.error);
@@ -367,7 +586,7 @@ describe('claude-code provider', () => {
     assert.match(out.error.message, /로그인/);
   });
 
-  test('non-zero exit rejects with the stderr tail', async () => {
+  test('non-zero exit rejects with the stderr tail', FAKE_CLI, async () => {
     process.env.FAKE_CLI_MODE = 'exit1';
     const out = await run(claudeCodeProvider);
     assert.ok(out.error);
@@ -375,7 +594,7 @@ describe('claude-code provider', () => {
     assert.match(out.error.message, /fatal: something went badly wrong/);
   });
 
-  test('abort kills the child and rejects with AbortError', async () => {
+  test('abort kills the child and rejects with AbortError', FAKE_CLI, async () => {
     process.env.FAKE_CLI_MODE = 'hang';
     const out = await run(claudeCodeProvider, {}, (_t, controller) => controller.abort());
     assert.equal(out.error?.name, 'AbortError');
@@ -383,7 +602,7 @@ describe('claude-code provider', () => {
     assertDead(record().pid);
   });
 
-  test('abort escalates to SIGKILL when SIGTERM is ignored', async () => {
+  test('abort escalates to SIGKILL when SIGTERM is ignored', FAKE_CLI, async () => {
     process.env.FAKE_CLI_MODE = 'hang-ignore-term';
     const started = Date.now();
     const out = await run(claudeCodeProvider, {}, (_t, controller) => controller.abort());
@@ -392,12 +611,36 @@ describe('claude-code provider', () => {
     assertDead(record().pid);
   });
 
-  test('detect reports the version, or unavailability', async () => {
+  test('detect reports the version, or unavailability', FAKE_CLI, async () => {
     assert.deepEqual(await claudeCodeProvider.detect(), { available: true, version: '9.9.9 (Claude Code fake)' });
     process.env.CLAUDE_BIN = path.join(workDir, 'missing-claude');
     const missing = await claudeCodeProvider.detect();
     assert.equal(missing.available, false);
     assert.match(missing.reason ?? '', /찾을 수 없습니다/);
+  });
+
+  test('claudeEnv: memory-saving defaults unless the user set them; no CLAUDECODE, no API key', () => {
+    assert.deepEqual(CLAUDE_CHILD_ENV_DEFAULTS, {
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+      ENABLE_CLAUDEAI_MCP_SERVERS: 'false',
+      MIMALLOC_PURGE_DELAY: '0',
+    });
+    process.env.CLAUDECODE = '1';
+    process.env.ANTHROPIC_API_KEY = 'sk-test';
+    let env = claudeEnv();
+    for (const [key, value] of Object.entries(CLAUDE_CHILD_ENV_DEFAULTS)) assert.equal(env[key], value, key);
+    assert.equal(env.CLAUDECODE, undefined);
+    assert.equal(env.ANTHROPIC_API_KEY, undefined);
+    process.env.MIMALLOC_PURGE_DELAY = '500';
+    process.env.ENABLE_CLAUDEAI_MCP_SERVERS = '';
+    process.env.EASY_STUDY_CLAUDE_USE_API_KEY = '1';
+    env = claudeEnv();
+    assert.equal(env.MIMALLOC_PURGE_DELAY, '500', "the user's value wins");
+    assert.equal(env.ENABLE_CLAUDEAI_MCP_SERVERS, '', 'an empty value is still a setting of the user');
+    assert.equal(env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, '1');
+    assert.equal(env.ANTHROPIC_API_KEY, 'sk-test');
+    // Every image stays in the CLI conversation and is resent each turn: roll over sooner than the API providers.
+    assert.equal(claudeCodeProvider.maxImagesPerConversation, 48);
   });
 
   test('claudeArgs generates a session id when none is given', () => {
@@ -406,7 +649,7 @@ describe('claude-code provider', () => {
     assert.match(args[args.length - 1], UUID_RE);
   });
 
-  test('ephemeral: --no-session-persistence without --session-id; the reported session id is returned', async () => {
+  test('ephemeral: --no-session-persistence without --session-id; the reported session id is returned', FAKE_CLI, async () => {
     const out = await run(claudeCodeProvider, { ephemeral: true, model: 'haiku' });
     assert.ifError(out.error);
     const rec = record();
@@ -417,14 +660,14 @@ describe('claude-code provider', () => {
     assert.equal(out.result?.text, '안녕 세계\n\n두 번째 블록');
   });
 
-  test('ephemeral without a reported session id resolves with an empty resume handle', async () => {
+  test('ephemeral without a reported session id resolves with an empty resume handle', FAKE_CLI, async () => {
     process.env.FAKE_CLI_MODE = 'no-session-id';
     const out = await run(claudeCodeProvider, { ephemeral: true });
     assert.ifError(out.error);
     assert.deepEqual(out.result?.resume, {});
   });
 
-  test('extraReadDirs: one --add-dir per existing directory (deduplicated), before the session flags', async () => {
+  test('extraReadDirs: one --add-dir per existing directory (deduplicated), before the session flags', FAKE_CLI, async () => {
     const other = path.join(workDir, 'lectures', 'l6-parsing-2');
     const third = path.join(workDir, 'lectures', 'l8-bottom-up');
     fs.mkdirSync(other, { recursive: true });
@@ -447,7 +690,7 @@ describe('claude-code provider', () => {
     assert.ok(!args.includes('--session-id'));
   });
 
-  test('allowTools: false runs without any tool (--tools "") and without --add-dir', async () => {
+  test('allowTools: false runs without any tool (--tools "") and without --add-dir', FAKE_CLI, async () => {
     const other = path.join(workDir, 'lectures', 'l6');
     fs.mkdirSync(other, { recursive: true });
     const out = await run(claudeCodeProvider, { allowTools: false, ephemeral: true, extraReadDirs: [other] });
@@ -461,7 +704,7 @@ describe('claude-code provider', () => {
     assert.deepEqual(tutor.slice(tutor.indexOf('--tools'), tutor.indexOf('--tools') + 2), ['--tools', CLAUDE_TOOLS]);
   });
 
-  test('a --resume of a CLI session that no longer exists is resume_invalid (result event or stderr)', async () => {
+  test('a --resume of a CLI session that no longer exists is resume_invalid (result event or stderr)', FAKE_CLI, async () => {
     process.env.FAKE_CLI_MODE = 'resume-missing';
     let out = await run(claudeCodeProvider, { resume: { cliSessionId: 'gone-1' } });
     assert.ok(out.error instanceof ProviderError);
@@ -477,7 +720,7 @@ describe('claude-code provider', () => {
     assert.match(out.error?.message ?? '', /gone-2/);
   });
 
-  test('size, model and login failures are classified', async () => {
+  test('size, model and login failures are classified', FAKE_CLI, async () => {
     const failure = async (mode: string) => {
       process.env.FAKE_CLI_MODE = mode;
       const out = await run(claudeCodeProvider, { resume: { cliSessionId: 's-1' } });
@@ -528,7 +771,7 @@ describe('codex provider', () => {
     process.env.CODEX_BIN = FAKE_CODEX;
   });
 
-  test('new conversation: exact argv (reads confined to the document), instructions + image markers on stdin', async () => {
+  test('new conversation: exact argv (reads confined to the document), instructions + image markers on stdin', FAKE_CLI, async () => {
     const out = await run(codexProvider, { model: 'gpt-5-codex' });
     assert.ifError(out.error);
     const rec = record();
@@ -566,7 +809,7 @@ describe('codex provider', () => {
     ]);
   });
 
-  test("resume: 'exec resume <id> -', sandbox and profile via -c, no -C, no -m, no instructions", async () => {
+  test("resume: 'exec resume <id> -', sandbox and profile via -c, no -C, no -m, no instructions", FAKE_CLI, async () => {
     const out = await run(codexProvider, {
       resume: { cliSessionId: 'thread-42' },
       parts: [
@@ -594,27 +837,27 @@ describe('codex provider', () => {
     assert.deepEqual(out.result?.resume, { cliSessionId: 'thread-42' });
   });
 
-  test('turn.failed rejects', async () => {
+  test('turn.failed rejects', FAKE_CLI, async () => {
     process.env.FAKE_CLI_MODE = 'turn-failed';
     const out = await run(codexProvider);
     assert.match(out.error?.message ?? '', /stream disconnected before completion/);
   });
 
-  test('an error event without a completed turn rejects', async () => {
+  test('an error event without a completed turn rejects', FAKE_CLI, async () => {
     process.env.FAKE_CLI_MODE = 'error';
     const out = await run(codexProvider);
     assert.match(out.error?.message ?? '', /401 Unauthorized/);
     assert.match(out.error?.message ?? '', /codex login/);
   });
 
-  test('an error event followed by a completed turn is not fatal', async () => {
+  test('an error event followed by a completed turn is not fatal', FAKE_CLI, async () => {
     process.env.FAKE_CLI_MODE = 'error-recovered';
     const out = await run(codexProvider);
     assert.ifError(out.error);
     assert.equal(out.result?.text, '최종 답변입니다.');
   });
 
-  test('a stream that ends without turn.completed still delivers the last message', async () => {
+  test('a stream that ends without turn.completed still delivers the last message', FAKE_CLI, async () => {
     process.env.FAKE_CLI_MODE = 'no-turn-completed';
     const out = await run(codexProvider);
     assert.ifError(out.error);
@@ -622,19 +865,19 @@ describe('codex provider', () => {
     assert.equal(out.result?.text, '끝 이벤트 없는 답변');
   });
 
-  test('non-zero exit rejects with the stderr tail', async () => {
+  test('non-zero exit rejects with the stderr tail', FAKE_CLI, async () => {
     process.env.FAKE_CLI_MODE = 'exit1';
     const out = await run(codexProvider);
     assert.match(out.error?.message ?? '', /fatal config error/);
   });
 
-  test('a new conversation without a thread id is an error', async () => {
+  test('a new conversation without a thread id is an error', FAKE_CLI, async () => {
     process.env.FAKE_CLI_MODE = 'no-thread';
     const out = await run(codexProvider);
     assert.match(out.error?.message ?? '', /thread id/);
   });
 
-  test('abort kills the child and rejects with AbortError', async () => {
+  test('abort kills the child and rejects with AbortError', FAKE_CLI, async () => {
     process.env.FAKE_CLI_MODE = 'hang';
     const out = await run(codexProvider, {}, undefined, (_t, controller) => controller.abort());
     assert.equal(out.error?.name, 'AbortError');
@@ -643,7 +886,7 @@ describe('codex provider', () => {
     assertDead(record().pid);
   });
 
-  test('ephemeral: --ephemeral on a new conversation; extraReadDirs become read roots of the profile', async () => {
+  test('ephemeral: --ephemeral on a new conversation; extraReadDirs become read roots of the profile', FAKE_CLI, async () => {
     const out = await run(codexProvider, { ephemeral: true, extraReadDirs: ['/library/other-lecture'] });
     assert.ifError(out.error);
     assert.deepEqual(record().argv, [
@@ -663,7 +906,7 @@ describe('codex provider', () => {
     assert.deepEqual(out.result?.resume, { cliSessionId: 'thread-new-1' });
   });
 
-  test('ephemeral runs do not need a thread id', async () => {
+  test('ephemeral runs do not need a thread id', FAKE_CLI, async () => {
     process.env.FAKE_CLI_MODE = 'no-thread';
     const out = await run(codexProvider, { ephemeral: true });
     assert.ifError(out.error);
@@ -710,7 +953,7 @@ describe('codex provider', () => {
     assert.deepEqual(images, []);
   });
 
-  test('detect reports the version', async () => {
+  test('detect reports the version', FAKE_CLI, async () => {
     assert.deepEqual(await codexProvider.detect(), { available: true, version: 'codex-cli 9.9.9' });
   });
 
@@ -752,7 +995,7 @@ describe('codex provider', () => {
     assert.ok(digest.includes(`permissions.${CODEX_PERMISSION_PROFILE}.filesystem={":minimal"="read","/lib/doc"="read"}`));
   });
 
-  test('EASY_STUDY_CODEX_CONFINE=0: the legacy read-only sandbox without the profile, still without escalation', async () => {
+  test('EASY_STUDY_CODEX_CONFINE=0: the legacy read-only sandbox without the profile, still without escalation', FAKE_CLI, async () => {
     assert.equal(codexConfinementEnabled(), process.platform !== 'win32');
     for (const off of ['0', 'off', 'false']) {
       process.env.EASY_STUDY_CODEX_CONFINE = off;
@@ -804,7 +1047,7 @@ describe('codex provider', () => {
     assert.equal(codexReadRootsToml([]), '{":minimal"="read"}');
   });
 
-  test('codexExecutable: the real path of the CLI (PATH lookup like the OS, symlinks resolved)', async () => {
+  test('codexExecutable: the real path of the CLI (PATH lookup like the OS, symlinks resolved)', FAKE_CLI, async () => {
     const real = fs.realpathSync(FAKE_CODEX);
     const binDir = path.join(workDir, 'bin');
     const shadowDir = path.join(workDir, 'shadow');
@@ -827,7 +1070,7 @@ describe('codex provider', () => {
     }
   });
 
-  test('the CLI is spawned by its real path, not through a symlink (Codex re-executes itself inside the sandbox)', async () => {
+  test('the CLI is spawned by its real path, not through a symlink (Codex re-executes itself inside the sandbox)', FAKE_CLI, async () => {
     const link = path.join(workDir, 'codex-link');
     fs.symlinkSync(FAKE_CODEX, link);
     process.env.CODEX_BIN = link;
@@ -836,7 +1079,7 @@ describe('codex provider', () => {
     assert.equal(record().script, fs.realpathSync(FAKE_CODEX));
   });
 
-  test('a session that cannot start under the permissions profile says how to turn the confinement off', async () => {
+  test('a session that cannot start under the permissions profile says how to turn the confinement off', FAKE_CLI, async () => {
     process.env.FAKE_CLI_MODE = 'sandbox-init-failed';
     const confined = await run(codexProvider);
     assert.ok(confined.error instanceof ProviderError);
@@ -855,7 +1098,7 @@ describe('codex provider', () => {
     assert.ok(other.error && !other.error.message.includes(CONFINEMENT_HINT));
   });
 
-  test("the MCP servers of the user's config.toml are disabled by name", async () => {
+  test("the MCP servers of the user's config.toml are disabled by name", FAKE_CLI, async () => {
     const home = process.env.CODEX_HOME!;
     fs.mkdirSync(home, { recursive: true });
     fs.writeFileSync(
@@ -895,7 +1138,7 @@ describe('codex provider', () => {
     assert.deepEqual(codexMcpServerNames(''), []);
   });
 
-  test('a resume that silently starts a new thread is resume_invalid, and nothing is streamed', async () => {
+  test('a resume that silently starts a new thread is resume_invalid, and nothing is streamed', FAKE_CLI, async () => {
     process.env.FAKE_CLI_MODE = 'resume-new-thread';
     const out = await run(codexProvider, { resume: { cliSessionId: 'thread-old' } });
     assert.ok(out.error instanceof ProviderError);
@@ -908,7 +1151,7 @@ describe('codex provider', () => {
     assert.deepEqual(fresh.result?.resume, { cliSessionId: 'thread-new-1' });
   });
 
-  test('a missing thread, context overflow, login and model errors are classified', async () => {
+  test('a missing thread, context overflow, login and model errors are classified', FAKE_CLI, async () => {
     const failure = async (mode: string, resume: string | null) => {
       process.env.FAKE_CLI_MODE = mode;
       const out = await run(codexProvider, { resume: resume ? { cliSessionId: resume } : null });
@@ -1415,7 +1658,7 @@ describe('openai-api provider', () => {
 // ---------------------------------------------------------------------------
 
 describe('provider registry', () => {
-  test('lists the four providers and their availability (never throws)', async () => {
+  test('lists the four providers and their availability (never throws)', FAKE_CLI, async () => {
     process.env.CLAUDE_BIN = FAKE_CLAUDE;
     process.env.CODEX_BIN = path.join(workDir, 'no-codex-here');
     process.env.OPENAI_API_KEY = 'k';

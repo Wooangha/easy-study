@@ -52,6 +52,9 @@ async function main() {
         env: {
           CLAUDECODE: process.env.CLAUDECODE ?? null,
           ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? null,
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC ?? null,
+          ENABLE_CLAUDEAI_MCP_SERVERS: process.env.ENABLE_CLAUDEAI_MCP_SERVERS ?? null,
+          MIMALLOC_PURGE_DELAY: process.env.MIMALLOC_PURGE_DELAY ?? null,
         },
       }),
     );

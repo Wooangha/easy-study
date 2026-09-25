@@ -24,6 +24,7 @@ import {
   listStoredDocs,
   readJsonFile,
   readStoredDoc,
+  rmWithRetry,
   slideFileName,
   writeFileAtomic,
   writeJsonAtomic,
@@ -201,8 +202,8 @@ export async function deleteSession(docId: string, sessionId: string): Promise<b
   if ((await getSession(docId, sessionId)) === null) return false;
   const file = sessionFile(docId, sessionId);
   // Queue behind pending writes so a late save cannot resurrect the file.
-  await sessionQueue(`${docId}/${sessionId}`, () => fs.rm(file, { force: true }));
-  await fs.rm(path.join(docPaths(docId).notesDir, `${sessionId}.md`), { force: true });
+  await sessionQueue(`${docId}/${sessionId}`, () => rmWithRetry(file, { force: true }));
+  await rmWithRetry(path.join(docPaths(docId).notesDir, `${sessionId}.md`), { force: true });
   await writeNotes(docId);
   return true;
 }
@@ -387,7 +388,7 @@ async function regenerateNotes(docId: string): Promise<void> {
   // Drop notes of sessions that no longer exist.
   for (const name of await fs.readdir(paths.notesDir)) {
     if (name.endsWith('.md') && !current.has(name) && SESSION_ID_RE.test(name.slice(0, -'.md'.length))) {
-      await fs.rm(path.join(paths.notesDir, name), { force: true });
+      await rmWithRetry(path.join(paths.notesDir, name), { force: true });
     }
   }
   await writeFileAtomic(paths.studyNotes, studyNotesMarkdown(doc, records, groupBySlide(records)));

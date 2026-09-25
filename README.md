@@ -17,7 +17,7 @@ LLM은 이미 로그인된 **Claude Code**(Claude 구독)나 **Codex**(ChatGPT �
 
 필요한 것:
 
-- Node.js 22.18 이상 (개발 환경은 Node 26)
+- Node.js 22.18 이상 (macOS의 Node 26, Linux Docker의 Node 22.18·26에서 확인했어요)
 - poppler (`pdftoppm`, `pdftotext`, `pdfinfo`)
 - 아래 중 하나 이상
   - `claude` CLI 로그인 (Claude Code)
@@ -25,32 +25,59 @@ LLM은 이미 로그인된 **Claude Code**(Claude 구독)나 **Codex**(ChatGPT �
   - `ANTHROPIC_API_KEY`
   - `OPENAI_API_KEY`
 
-poppler 설치:
+poppler 설치는 OS마다 달라요.
+
+macOS:
 
 ```bash
 brew install poppler
 ```
 
-의존성 설치:
+Ubuntu / Debian:
 
 ```bash
-npm install
+sudo apt install poppler-utils
 ```
 
-개발 모드 실행 (http://127.0.0.1:5180):
+Fedora는 `sudo dnf install poppler-utils`, Arch는 `sudo pacman -S poppler`예요. 글꼴을 내장하지 않은 PDF가 macOS와 똑같이 보이게 하려면 `fonts-urw-base35`도 설치하세요.
+
+Windows는 `winget install oschwartz10612.Poppler`(또는 `scoop install poppler`)로 설치하고 PATH에 넣어요.
+
+의존성 설치 (`node_modules`는 OS마다 다르니 다른 컴퓨터에서 복사하지 말고 그 OS에서 직접 설치하세요):
 
 ```bash
-npm run dev
+npm ci
 ```
 
-빌드 후 실행:
+공부할 때는 이렇게 실행해요 (빌드한 뒤 가벼운 프로덕션 서버로 실행, http://127.0.0.1:5180):
 
 ```bash
 npm start
 ```
 
+이미 빌드했다면 다시 빌드하지 않고 바로 켤 수 있어요:
+
+```bash
+npm run serve
+```
+
+코드를 고칠 때만 개발 모드를 쓰세요 (Vite가 같이 떠서 메모리를 약 100MB 더 써요):
+
+```bash
+npm run dev
+```
+
 브라우저에서 PDF를 끌어다 놓으면 슬라이드가 PNG로 변환되고, 바로 질문할 수 있어요.
 처음 써 볼 때는 `samples/sample-lecture.pdf`(합성 강의 9장)로 시험해 보세요.
+
+### 다른 OS
+
+- **macOS**: 개발하고 실제로 쓰면서 확인한 환경이에요.
+- **Linux**: Docker(Node 22.18, 26)에서 설치, 테스트, 빌드, 서버 실행, PDF 변환까지 확인했어요. Codex의 읽기 제한은 macOS에서만 실제로 확인했어요. Linux에서 Codex가 시작하지 못하면 아래 `EASY_STUDY_CODEX_CONFINE=0`을 참고하세요.
+- **Windows**: 실제 Windows에서는 테스트하지 못했어요. 가장 확실한 방법은 **WSL2(Ubuntu)** 안에서 Linux 방법대로 설치하는 거예요. Windows에서 바로 실행한다면:
+  - `claude`·`codex`는 공식 설치 프로그램(`.exe`)을 권장해요. npm으로 설치한 `.cmd`도 실제 실행 파일을 찾아 쓰도록 해 뒀지만 검증하지는 못했어요.
+  - Windows에서는 Codex의 읽기 제한이 꺼져 있어서 Codex가 사용자 파일 전체를 읽을 수 있어요. 민감한 파일이 있는 계정이라면 Claude Code를 쓰세요.
+  - 환경 변수는 PowerShell에서 `$env:PORT=5181; npm start`처럼 지정해요.
 
 ## 동작 방식
 
@@ -74,7 +101,7 @@ LLM은 전체 흐름을 요약해 주고, 이후 질문을 기다려요.
 
 - 질문하면 그 슬라이드와 앞뒤 ±N장(기본 ±1)을 고해상도 이미지로 같이 보내요. 슬라이드 내용은 페이지를 넘어 이어지는 경우가 많기 때문이에요.
 - 최근에 이미 보낸 슬라이드는 다시 보내지 않아요. 순서대로 읽어 나가면 한 장 넘길 때마다 새 이미지가 1장 정도만 추가돼요.
-- 한 대화에 쌓인 이미지가 한도(약 90장)를 넘으면 새 대화로 넘어가요. 이때 덱과 최근 질의응답 요약을 다시 전달해요.
+- 한 대화에 쌓인 이미지가 한도(Claude Code 48장, Codex 90장)를 넘거나 대화가 너무 길어지면 새 대화로 넘어가요. 이때 덱과 최근 질의응답 요약을 다시 전달해요. 이전 대화를 잃었을 때도 자동으로 새 대화를 시작해요.
 
 ### 4. 정리본 (`DIGEST.md`)
 
@@ -152,7 +179,8 @@ library/
 | `EASY_STUDY_RECENT_WINDOW` | `16` | 최근 보낸 슬라이드 중 몇 장까지 다시 보내지 않을지 |
 | `EASY_STUDY_PRIME_IMAGES` | `auto` | 프라이밍에 목차 이미지를 쓸지 (`auto`: 정리본이 없을 때만, `always`, `never`) |
 | `EASY_STUDY_AUTO_DIGEST` | `1` | 첫 세션을 만들 때 정리본 자동 생성 (`0`이면 끔) |
-| `EASY_STUDY_DIGEST_CONCURRENCY` | `2` | 정리본 생성 동시 호출 수 |
+| `EASY_STUDY_DIGEST_CONCURRENCY` | `1` | 정리본 생성 동시 호출 수. 올리면 빨라지지만 CLI 프로세스(개당 약 150MB)가 늘어요. |
+| `EASY_STUDY_MAX_CLI_PROCS` | `2` | 동시에 띄우는 claude/codex 프로세스 최대 수(채팅 우선, 정리본은 기다려요) |
 | `EASY_STUDY_CODEX_CONFINE` | `1` | `0`이면 Codex의 읽기 제한(강의 폴더만 읽기)을 끄고 예전처럼 읽기 전용 샌드박스만 써요. 이때 Codex는 **컴퓨터의 모든 파일**(예: `~/.ssh`)을 읽을 수 있어요. 읽기 제한 때문에 Codex가 시작하지 못할 때만 쓰세요. |
 | `CLAUDE_BIN` / `CODEX_BIN` | PATH | CLI 경로 지정 |
 
@@ -160,8 +188,26 @@ library/
 
 - **`Claude Code 2.1.x does not support this model … Run 'claude update'`**: `~/.claude/settings.json`의 기본 모델이 설치된 CLI보다 새 버전을 요구하는 경우예요. `claude update`로 CLI를 업데이트하거나, 새 세션을 만들 때 모델을 `Sonnet`/`Opus`로 지정하세요.
 - **Codex가 `Failed to initialize session` / `fs sandbox helper` 오류로 바로 멈출 때**: 설치된 Codex CLI가 읽기 제한(권한 프로필)을 지원하지 않는 경우예요. Codex CLI를 업데이트하고(0.154에서 확인), 그래도 안 되면 `EASY_STUDY_CODEX_CONFINE=0`으로 서버를 다시 시작하세요 (위 표의 경고 참고).
-- **`poppler is not installed`**: `brew install poppler`
+- **`poppler is not installed`**: 위 [빠른 시작](#빠른-시작)의 OS별 poppler 설치 명령을 실행하세요.
 - 답변이 이상하거나 멈췄을 때: ■ 중지를 누른 뒤 다시 질문하세요. 실패한 턴은 LLM 대화 상태를 바꾸지 않아요.
+
+## 메모리 사용
+
+측정해 보고 줄였어요 (macOS, 49장 강의 기준).
+
+| 항목 | 이전 | 지금 |
+|---|---|---|
+| 서버 (대기 중) | 66–69MB | 31–34MB (`npm start`로 실행한 빌드 버전) |
+| 서버 (49장 PDF 변환 중 최대) | 약 170MB | 약 36MB (이미지 처리는 변환하는 몇 초 동안만 뜨는 별도 프로세스가 약 110MB를 쓰고 돌려줘요) |
+| 동시에 뜨는 claude/codex 프로세스 | 최대 3개 | 최대 2개 (채팅 우선) |
+| 브라우저 탭 (긴 채팅 열기) | 약 300MB | 약 135MB |
+| 브라우저 GPU 이미지 캐시 (슬라이드 49장 스크롤 후) | 약 250MB | 약 140MB (WebP 표시용 이미지) |
+
+가장 큰 비용은 claude CLI 프로세스(개당 약 150MB)예요. 메모리가 더 빠듯하다면:
+
+- `EASY_STUDY_MAX_CLI_PROCS=1`로 켜면 정리본 생성과 채팅이 번갈아 실행돼요.
+- Codex CLI는 프로세스당 약 35MB로 claude보다 훨씬 가벼워요.
+- `npm start` 대신 `node --max-semi-space-size=2 dist-server/server/index.js`로 직접 실행하면 npm 프로세스(약 26MB)도 아낄 수 있어요 (`npm run build`를 먼저 한 번 실행해 두세요).
 
 ## 개발
 

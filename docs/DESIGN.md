@@ -200,7 +200,7 @@ stdout events: `{"type":"stream_event","event":{"type":"content_block_delta","de
 → onDelta (insert `\n\n` between separate text blocks); `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{…}}]}}`
 → onStatus; final `{"type":"result","subtype":"success","is_error":false,"result":"…","session_id":"…"}`.
 `is_error: true` or non-zero exit → error. Models: `''` (CLI default), `sonnet`, `opus`, `haiku`, `fable`.
-maxImagesPerConversation: 90.
+maxImagesPerConversation: 48 (round 4; was 90).
 
 ### codex (ChatGPT subscription via Codex CLI) — verified with codex-cli 0.154
 
@@ -473,3 +473,31 @@ Recap/rollover behaviour is unchanged.
   (re-runs the ingest for a doc whose status is 'error'; 409 otherwise).
 - Single-instance guard: `library/.server.lock` with `{pid, port, startedAt}`; startup refuses (clear message) when the
   lock's pid is alive, and replaces a stale lock; removed on shutdown.
+
+## 15. Round 4 — memory (RAM) and portability
+
+Measured first (see the memory profile): the biggest consumers were concurrent claude CLI children (~145 MB footprint
+each; 3 at session start), decoded 1600 px PNG slides in the browser's GPU cache (~250 MB after scrolling a lecture),
+KaTeX-heavy DOM (chat/notes/digest always mounted), and in the server: libvips/malloc fragmentation from sharp work
+in the long-lived process, runtime TS stripping (+31 MB), per-request digest.json parsing, eager SDK imports.
+
+Contracts:
+- `server/assets.ts` (fixed): derived image files (view WebP renditions, thumbs, inline JPEGs) and their paths.
+- **Image worker**: all sharp work (contact sheets, view renditions, thumbs, inline JPEGs) runs in a short-lived child
+  process (`server/imageWorker.ts`, spawned with `process.execPath`), at ingest and as a background backfill for docs
+  created before this round (one doc at a time). The server process does not import sharp in the normal path.
+- **HTTP**: `GET /api/docs/:docId/view/:n.webp?w=1000|1600` and `GET /api/docs/:docId/thumbs/:n.webp` (immutable
+  cache headers when the file exists; if it does not exist yet: enqueue a backfill for the doc and answer with the PNG
+  bytes and `Cache-Control: no-store`). The PNG route stays for compatibility and for the LLM path.
+- **CLI process budget**: at most `EASY_STUDY_MAX_CLI_PROCS` (default 2) LLM CLI children at a time across the whole
+  server; chat turns have priority (a digest batch only starts when a slot is free and no chat turn is waiting;
+  chat turns never wait for digest batches beyond the limit — if the limit is reached by digests, the chat turn still
+  starts and digest waits). A chat turn that waits for another chat turn streams the status
+  "다른 답변이 끝나기를 기다리는 중…" and, once it gets the slot, an empty status that clears it (the client hides an
+  empty status). `EASY_STUDY_DIGEST_CONCURRENCY` default 1.
+- claude children get `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, `ENABLE_CLAUDEAI_MCP_SERVERS=false`,
+  `MIMALLOC_PURGE_DELAY=0`; claude-code `maxImagesPerConversation` 48. codex children get `-c notify=[]`.
+- Production runs precompiled JS (`dist-server/`, built by `npm run build`), started with a small young generation
+  (`--max-semi-space-size=2`). `npm run dev` keeps running TS + Vite (development only).
+- Portability: platform-specific poppler hints; Windows CLI resolution (.exe on PATH, npm `.cmd` shims mapped to the
+  real executable), tree-kill on abort, windowsHide, rename/rm retries on EPERM/EBUSY, SIGHUP/SIGBREAK handling.

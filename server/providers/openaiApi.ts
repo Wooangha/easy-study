@@ -10,7 +10,10 @@
 // Failures are classified (ProviderError): an expired / deleted previous_response_id (stored
 // responses are kept for a limited time) is 'resume_invalid'; context_length_exceeded / HTTP 413 is
 // 'context_overflow' — both make the orchestrator continue in a new conversation (re-prime + recap).
-import OpenAI from 'openai';
+//
+// The SDK is imported on the first call (measured: importing it and the Anthropic SDK at startup costs the
+// server ~12 MB of idle footprint, and most users never use an API provider).
+import type OpenAI from 'openai';
 import type {
   ResponseCreateParamsStreaming,
   ResponseInputContent,
@@ -218,7 +221,23 @@ function openaiFailure(info: OpenAIErrorInfo, resumed: boolean, cause?: unknown)
   return new ProviderError(message, kind, cause === undefined ? undefined : { cause });
 }
 
-function toProviderError(err: unknown, resumed: boolean): Error {
+type OpenAISdk = typeof OpenAI;
+
+let sdk: Promise<OpenAISdk> | null = null;
+
+/** The SDK's client class (with the error classes as statics), imported on first use. */
+function loadOpenAISdk(): Promise<OpenAISdk> {
+  sdk ??= import('openai').then(
+    (mod) => mod.default,
+    (err: unknown) => {
+      sdk = null; // let a later call try again
+      throw err;
+    },
+  );
+  return sdk;
+}
+
+function toProviderError(OpenAI: OpenAISdk, err: unknown, resumed: boolean): Error {
   if (err instanceof ProviderError) return err;
   if (err instanceof OpenAI.APIConnectionError) {
     return new ProviderError(`OpenAI API에 연결할 수 없습니다: ${err.message}`, 'other', { cause: err });
@@ -240,6 +259,8 @@ async function runOpenAI(input: ProviderRunInput): Promise<ProviderRunResult> {
     model: input.model,
     ephemeral: input.ephemeral,
   });
+  const OpenAI = await loadOpenAISdk();
+  if (input.signal.aborted) throw abortError();
   const client = new OpenAI({ maxRetries: 2 });
   const state = new OpenAIStreamState(input.onDelta, input.onStatus);
 
@@ -248,7 +269,7 @@ async function runOpenAI(input: ProviderRunInput): Promise<ProviderRunResult> {
     for await (const event of stream) state.handle(event);
   } catch (err) {
     if (input.signal.aborted || err instanceof OpenAI.APIUserAbortError) throw abortError();
-    throw toProviderError(err, Boolean(params.previous_response_id));
+    throw toProviderError(OpenAI, err, Boolean(params.previous_response_id));
   }
   // The SDK may end the stream quietly instead of throwing when the request is aborted.
   if (input.signal.aborted) throw abortError();
