@@ -110,6 +110,12 @@ export interface LibraryLayout {
 export interface PutLayoutRequest {
   groups: Array<{ id: string; courseIds: string[] }>;
   order: LayoutItem[];
+  /**
+   * layoutRevision() (shared/layoutRevision.ts) of the arrangement this one was made from. When given and the
+   * current arrangement is a different one (changed in another tab or on another device), the answer is 409 and
+   * nothing is written.
+   */
+  baseRevision?: string;
 }
 
 export interface CreateGroupRequest {
@@ -129,6 +135,12 @@ export interface UpdateCourseRequest {
    * listed here are removed from any other course; documents omitted become uncategorized.
    */
   docIds?: string[];
+  /**
+   * The course's lecture list that `docIds` was made from (as GET /api/courses showed it). When given and the
+   * course's list is a different one now (changed in another tab or on another device), the answer is 409 and
+   * nothing is written.
+   */
+  baseDocIds?: string[];
 }
 
 // ---------------------------------------------------------------------------

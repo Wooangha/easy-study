@@ -2419,34 +2419,89 @@ kbd {
   border-bottom: 1px solid var(--border);
 }
 
-.course-title {
-  border: 0;
-  background: none;
-  padding: 2px 4px;
-  border-radius: 6px;
-  font-size: 15px;
-  font-weight: 700;
-  text-align: left;
-  min-width: 0;
+.course-head,
+.group-head {
+  cursor: pointer;
+}
+
+.course-card.is-collapsed .course-head {
+  border-bottom: 0;
+}
+
+/* Chevron + icon + title: toggles collapse (✎ renames). */
+.collapse-toggle {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 2px 6px 2px 2px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  font-size: 15px;
+  font-weight: 700;
+  text-align: left;
+  color: var(--text);
 }
 
-.course-title:hover {
+.collapse-toggle:hover:not(:disabled) {
   background: var(--surface-2);
 }
 
-.course-title-edit {
-  font-size: 12px;
+.collapse-toggle:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+.collapse-toggle:disabled {
+  cursor: inherit;
+}
+
+.collapse-chevron {
+  flex: none;
+  display: block;
   color: var(--muted);
+  transition: transform 0.15s ease;
+}
+
+.collapse-toggle[aria-expanded='true'] .collapse-chevron,
+.collapse-chevron.is-static {
+  transform: rotate(90deg);
+}
+
+.course-title-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.icon-btn.tiny {
+  width: 22px;
+  height: 22px;
+  font-size: 12px;
+  border-radius: 6px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+
+.rename-btn {
   opacity: 0;
   transition: opacity 0.12s;
 }
 
-.course-title:hover .course-title-edit,
-.course-title:focus-visible .course-title-edit {
+.course-head:hover .rename-btn,
+.group-head:hover .rename-btn,
+.rename-btn:focus-visible {
   opacity: 1;
+}
+
+@media (hover: none) {
+  .rename-btn {
+    opacity: 0.6;
+  }
 }
 
 .course-count {
@@ -2457,8 +2512,12 @@ kbd {
 
 .course-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 4px;
+  /* On a narrow screen the buttons wrap instead of pushing 🗑 off the screen. */
+  min-width: 0;
+  max-width: 100%;
 }
 
 .lecture-list {
@@ -2578,6 +2637,429 @@ kbd {
   font-weight: 700;
   font-size: 14px;
   pointer-events: none;
+}
+
+.course-badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.course-badges .digest-badge {
+  margin-left: 0;
+}
+
+.digest-badge.is-muted {
+  background: var(--surface-3);
+  color: var(--text-2);
+}
+
+/* ---------------------------------------------------------------- course groups (§18) */
+
+.section-tip {
+  align-self: center;
+}
+
+.section-tools {
+  display: inline-flex;
+  gap: 4px;
+  align-self: center;
+}
+
+.group-card {
+  position: relative;
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  background: var(--surface-2);
+  transition:
+    border-color 0.12s,
+    background 0.12s,
+    box-shadow 0.12s;
+}
+
+.group-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  padding: 9px 12px;
+}
+
+.group-toggle {
+  font-size: 15.5px;
+}
+
+.group-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 10px 10px;
+}
+
+.group-empty {
+  margin: 0;
+  padding: 16px 12px;
+  border: 1.5px dashed var(--border-strong);
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+.group-empty.is-target {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.uncategorized {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0 -8px;
+  padding: 0 8px 8px;
+  border-radius: 14px;
+  border: 2px solid transparent;
+  transition:
+    border-color 0.12s,
+    background 0.12s;
+}
+
+.uncategorized-empty,
+.top-end-zone {
+  padding: 16px 12px;
+  border: 1.5px dashed var(--border-strong);
+  border-radius: 12px;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+/* ---------------------------------------------------------------- drag & drop (§18) */
+
+.drag-handle {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 30px;
+  margin-left: -6px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: grab;
+  /* Touch: a short press still scrolls; press and hold (200 ms) starts dragging. */
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.drag-handle:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.drag-handle:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+  color: var(--accent);
+}
+
+.drag-handle[aria-pressed='true'] {
+  cursor: grabbing;
+  color: var(--accent);
+}
+
+@media (pointer: coarse) {
+  .drag-handle {
+    width: 32px;
+    height: 40px;
+    font-size: 21px;
+  }
+}
+
+.doc-card-move {
+  flex: 1 1 100%;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.doc-card-move .drag-handle {
+  margin-left: -4px;
+}
+
+.doc-card-move .picker {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+/* The original stays in place, faded, while its ghost follows the pointer. */
+.is-drag-source {
+  opacity: 0.4;
+}
+
+/* Insertion line: before/after the item it is drawn on. */
+.lecture-row,
+.doc-card {
+  position: relative;
+}
+
+.drop-before::before,
+.drop-after::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  height: 3px;
+  border-radius: 3px;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
+  pointer-events: none;
+  z-index: 3;
+}
+
+.drop-before::before {
+  top: -2px;
+}
+
+.drop-after::after {
+  bottom: -2px;
+}
+
+/* Cards are separated by a gap: draw the line in the middle of it. */
+.library-inner > .drop-before::before {
+  top: -8.5px;
+}
+
+.library-inner > .drop-after::after {
+  bottom: -8.5px;
+}
+
+.group-body > .drop-before::before {
+  top: -6.5px;
+}
+
+.group-body > .drop-after::after {
+  bottom: -6.5px;
+}
+
+/* "Into" this course / group / 미분류. */
+.course-card.drop-into,
+.group-card.drop-into,
+.uncategorized.drop-into,
+.top-end-zone.drop-into {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: var(--ring);
+}
+
+.drop-into-label {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-size: 11.5px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.drag-overlay {
+  pointer-events: none;
+}
+
+/* Fills the overlay (= the dragged item's box, what @dnd-kit measures); the ghost is drawn inside it. */
+.drag-overlay-box {
+  position: absolute;
+  inset: 0;
+}
+
+/*
+ * The ghost is drawn just below and right of the pointer (where the item was grabbed), so that what is under
+ * the pointer — an insertion line, "놓으면 …" — stays readable; InViewport keeps it inside the window.
+ */
+.drag-ghost-anchor {
+  position: absolute;
+  transform: translate(14px, 12px);
+}
+
+.drag-ghost {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: max-content;
+  max-width: min(340px, calc(100vw - 32px));
+  padding: 7px 12px 7px 8px;
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+  font-weight: 700;
+  cursor: grabbing;
+}
+
+.drag-ghost-handle {
+  flex: none;
+  width: 22px;
+  text-align: center;
+  color: var(--accent);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.drag-ghost-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lecture-ghost .lecture-thumb {
+  width: 56px;
+}
+
+.lecture-ghost .lecture-main {
+  min-width: 0;
+}
+
+/* ---------------------------------------------------------------- popover menu (⋯) */
+
+.menu-btn {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.popover-menu {
+  position: fixed;
+  z-index: 70;
+  min-width: 200px;
+  max-width: min(340px, calc(100vw - 16px));
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.popover-section + .popover-section {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+
+.popover-heading {
+  padding: 4px 10px 2px;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.popover-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  text-align: left;
+  font-size: 13px;
+}
+
+.popover-item:hover,
+.popover-item:focus-visible {
+  outline: none;
+  background: var(--accent-soft);
+}
+
+.popover-item.is-danger {
+  color: var(--danger);
+}
+
+.popover-item-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.popover-item-hint {
+  margin-left: auto;
+  flex: none;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+/* ---------------------------------------------------------------- confirmation dialog */
+
+.confirm-dialog {
+  width: min(440px, calc(100vw - 32px));
+  max-height: calc(100dvh - 48px);
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-lg);
+}
+
+.confirm-dialog::backdrop {
+  background: var(--overlay);
+}
+
+.confirm-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 20px 20px 16px;
+  max-height: calc(100dvh - 50px);
+}
+
+.confirm-title {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.45;
+}
+
+.confirm-message {
+  overflow-y: auto;
+  color: var(--text-2);
+  font-size: 13.5px;
+}
+
+.confirm-message p {
+  margin: 0 0 6px;
+  white-space: pre-wrap;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.primary-btn.is-danger {
+  background: var(--danger);
+  border-color: var(--danger);
+}
+
+.primary-btn.is-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 85%, black);
 }
 
 /* ---------------------------------------------------------------- overlays */
@@ -2930,15 +3412,25 @@ kbd {
 
 @media (max-width: 560px) {
   .lecture-row {
+    gap: 6px;
+    padding: 6px 8px 6px 10px;
+  }
+
+  /* Failed lectures have "다시 변환 / 삭제": put them on their own line. */
+  .lecture-row.status-error {
     flex-wrap: wrap;
   }
 
-  .lecture-open {
-    flex-basis: calc(100% - 30px);
+  .lecture-row.status-error .lecture-open {
+    flex-basis: calc(100% - 64px);
   }
 
-  .lecture-actions {
-    margin-left: 30px;
+  .lecture-row.status-error .lecture-actions {
+    margin-left: 52px;
+  }
+
+  .lecture-index {
+    width: 16px;
   }
 
   .lecture-thumb {
@@ -2947,6 +3439,18 @@ kbd {
 
   .library-inner {
     padding: 20px 12px 40px;
+  }
+
+  .group-body {
+    padding: 0 6px 8px;
+  }
+
+  .section-tip {
+    display: none;
+  }
+
+  .hide-narrow {
+    display: none;
   }
 }
 

@@ -2,19 +2,24 @@
 import type {
   AuthStatusResponse,
   Course,
+  CourseGroup,
   CreateCourseRequest,
+  CreateGroupRequest,
   CreateSessionRequest,
   DigestInfo,
   DocMeta,
   HealthResponse,
+  LibraryLayout,
   NotesResponse,
   PrimeRequest,
+  PutLayoutRequest,
   SendMessageRequest,
   Session,
   SessionSummary,
   StartDigestRequest,
   StreamEvent,
   UpdateCourseRequest,
+  UpdateGroupRequest,
 } from '../../shared/types.ts';
 import {
   getAuthSnapshot,
@@ -200,7 +205,7 @@ export function checkSessionSoon(): void {
     });
 }
 
-function sendJSON<T>(method: 'POST' | 'PATCH', path: string, body?: unknown): Promise<T> {
+function sendJSON<T>(method: 'POST' | 'PATCH' | 'PUT', path: string, body?: unknown): Promise<T> {
   return request<T>(path, {
     method,
     headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
@@ -216,6 +221,7 @@ const enc = encodeURIComponent;
 const docPath = (docId: string) => `/api/docs/${enc(docId)}`;
 const sessionPath = (docId: string, sid: string) => `${docPath(docId)}/sessions/${enc(sid)}`;
 const coursePath = (courseId: string) => `/api/courses/${enc(courseId)}`;
+const groupPath = (groupId: string) => `/api/groups/${enc(groupId)}`;
 
 // ---------------------------------------------------------------------------
 // Plain JSON endpoints
@@ -297,9 +303,10 @@ export const digestMarkdownUrl = (docId: string) => `${docPath(docId)}/digest.md
 // Courses ("과목" folders, DESIGN.md §12)
 // ---------------------------------------------------------------------------
 
-/** Courses in creation order (oldest first). */
+/** Courses in creation order (oldest first); the library orders them with the layout (§18). */
 export const listCourses = () => request<Course[]>('/api/courses');
 
+/** New course at the end of the top level, or of `groupId` when given (400 for an unknown group). */
 export const createCourse = (body: CreateCourseRequest) => postJSON<Course>('/api/courses', body);
 
 /** Rename and/or replace the full ordered lecture list (documents omitted become uncategorized). */
@@ -310,6 +317,25 @@ export const updateCourse = (courseId: string, body: UpdateCourseRequest) =>
 export const deleteCourse = (courseId: string) => request<void>(coursePath(courseId), { method: 'DELETE' });
 
 export const courseSummaryUrl = (courseId: string) => `${coursePath(courseId)}/summary.md`;
+
+// ---------------------------------------------------------------------------
+// Library organization: course groups and the order of courses (DESIGN.md §18)
+// ---------------------------------------------------------------------------
+
+/** Groups and the top-level order, normalised by the server (every course exactly once). */
+export const getLayout = () => request<LibraryLayout>('/api/layout');
+
+/** Replace the whole arrangement (must mention every existing course and group exactly once, else 400). */
+export const putLayout = (body: PutLayoutRequest) => sendJSON<LibraryLayout>('PUT', '/api/layout', body);
+
+/** New group at the end of the top level; `courseIds` move into it. */
+export const createGroup = (body: CreateGroupRequest) => postJSON<CourseGroup>('/api/groups', body);
+
+export const updateGroup = (groupId: string, body: UpdateGroupRequest) =>
+  sendJSON<CourseGroup>('PATCH', groupPath(groupId), body);
+
+/** Delete a group. Its courses move to the top level where the group was (nothing else is deleted). */
+export const deleteGroup = (groupId: string) => request<void>(groupPath(groupId), { method: 'DELETE' });
 
 /**
  * Upload a PDF as raw bytes. Uses XMLHttpRequest (not fetch) to get upload progress events.

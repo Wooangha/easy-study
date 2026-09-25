@@ -2,11 +2,25 @@
 // Lec 1, Lec 2, … Stored as library/courses/<courseId>/course.json (CourseRecord) plus a generated
 // COURSE.md. The course files are the single source of truth for membership: DocMeta.courseId and
 // DocAssets.course are derived from them by library.ts, which also owns the read side.
+//
+// The arrangement of the courses (groups of courses and the top-level order, DESIGN §18) lives in
+// library/layout.json, written here too so that it is serialized with the course mutations (creating a course
+// inside a group, deleting a course). It never affects lecture membership, COURSE.md or what the LLM sees.
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
-import type { Course } from '../shared/types.ts';
-import { HttpError } from './config.ts';
-import type { CourseRecord } from './internal-types.ts';
+import path from 'node:path';
+import type { Course, CourseGroup, LibraryLayout } from '../shared/types.ts';
+import { COURSE_ID_RE } from '../shared/types.ts';
+import { HttpError, libraryDir } from './config.ts';
+import type { CourseRecord, LayoutRecord } from './internal-types.ts';
+import {
+  normalizeLayout,
+  validateGroupCourseIds,
+  validateLayoutRequest,
+  withCourseInGroup,
+  withGroupAppended,
+  withoutGroup,
+} from './layout.ts';
 import {
   courseIdIndex,
   coursePaths,
@@ -14,9 +28,11 @@ import {
   createKeyedQueue,
   demoteHeadings,
   isDocId,
+  mkdirWithRetry,
   readCourseRecord,
   readCourseRecords,
   readDigestRecord,
+  readJsonFile,
   readStoredDoc,
   rmWithRetry,
   slugify,
@@ -24,10 +40,17 @@ import {
   writeJsonAtomic,
 } from './library.ts';
 
-const MAX_TITLE_CHARS = 100;
+/** Longest course or group title (after trimming); the web inputs use the same limit. */
+const MAX_TITLE_CHARS = 120;
 const MAX_LECTURES = 500;
 
-/** Every mutation runs through one queue: an update can touch several course files at once. */
+/** library/layout.json: groups of courses and the top-level order (DESIGN §18). */
+export const LAYOUT_FILE_NAME = 'layout.json';
+
+/**
+ * Every mutation runs through one queue: an update can touch several course files at once, and the layout
+ * (library/layout.json) is read-modify-written by course and group mutations alike.
+ */
 const mutationQueue = createKeyedQueue();
 const MUTATIONS = 'courses';
 /** Serializes COURSE.md regeneration (and the removal of the folder) per course. */
@@ -44,16 +67,17 @@ export function compareTitles(a: string, b: string): number {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function cleanTitle(value: unknown): string {
-  if (typeof value !== 'string') throw new HttpError(400, '과목 이름을 입력해 주세요');
+/** A course or group title: one line, trimmed, 1–MAX_TITLE_CHARS characters (400 otherwise). */
+function cleanTitle(value: unknown, noun: '과목' | '그룹' = '과목'): string {
+  if (typeof value !== 'string') throw new HttpError(400, `${noun} 이름을 입력해 주세요`);
   const title = value
     .normalize('NFC')
     // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u001f\u007f]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-  if (!title) throw new HttpError(400, '과목 이름을 입력해 주세요');
-  if (title.length > MAX_TITLE_CHARS) throw new HttpError(400, `과목 이름이 너무 깁니다 (최대 ${MAX_TITLE_CHARS}자)`);
+  if (!title) throw new HttpError(400, `${noun} 이름을 입력해 주세요`);
+  if (title.length > MAX_TITLE_CHARS) throw new HttpError(400, `${noun} 이름이 너무 깁니다 (최대 ${MAX_TITLE_CHARS}자)`);
   return title;
 }
 
@@ -162,10 +186,21 @@ export async function courseOf(docId: string): Promise<Course | null> {
 // Mutations (serialized)
 // ---------------------------------------------------------------------------
 
-/** Creates an empty course. Id = slug(title) + '-' + 6 hex; unicode titles are kept as they are. */
-export async function createCourse(title: unknown, now: Date = new Date()): Promise<Course> {
+/**
+ * Creates an empty course. Id = slug(title) + '-' + 6 hex; unicode titles are kept as they are. With a
+ * `groupId` (CreateCourseRequest.groupId) the course goes to the end of that group (400 when there is no such
+ * group), otherwise it shows at the end of the top level.
+ */
+export async function createCourse(title: unknown, now: Date = new Date(), groupId: unknown = undefined): Promise<Course> {
   const cleaned = cleanTitle(title);
+  const targetGroup = cleanGroupId(groupId);
   const record = await mutationQueue(MUTATIONS, async () => {
+    // The group is checked before anything is written. Without one, nothing is written to the layout: a course
+    // that the layout does not mention is shown at the end of the top level.
+    const layout = targetGroup === null ? null : await currentLayout();
+    if (layout && !layout.groups.some((group) => group.id === targetGroup)) {
+      throw new HttpError(400, `그룹을 찾을 수 없습니다: ${targetGroup}`);
+    }
     await fs.mkdir(coursesDir(), { recursive: true });
     const slug = slugify(cleaned, 'course');
     let courseId = '';
@@ -179,7 +214,14 @@ export async function createCourse(title: unknown, now: Date = new Date()): Prom
       }
     }
     const created: CourseRecord = { version: 1, id: courseId, title: cleaned, createdAt: now.toISOString(), docIds: [] };
-    await writeRecord(created);
+    try {
+      await writeRecord(created);
+      if (layout && targetGroup !== null) await writeLayout(withCourseInGroup(layout, courseId, targetGroup));
+    } catch (err) {
+      // No half-made course (e.g. one that should be in a group but shows at the top level).
+      await rmWithRetry(coursePaths(courseId).dir, { recursive: true, force: true }).catch(() => {});
+      throw err;
+    }
     return created;
   });
   await refreshMarkdown([record.id]);
@@ -189,18 +231,38 @@ export async function createCourse(title: unknown, now: Date = new Date()): Prom
 export interface CoursePatch {
   title?: unknown;
   docIds?: unknown;
+  baseDocIds?: unknown;
 }
+
+/** UpdateCourseRequest.baseDocIds: absent (undefined) = no precondition, otherwise a list of ids (400 else). */
+function cleanBaseDocIds(value: unknown): string[] | null {
+  if (value === undefined) return null;
+  if (!Array.isArray(value) || value.some((id) => typeof id !== 'string')) {
+    throw new HttpError(400, 'baseDocIds는 문서 id 목록이어야 합니다');
+  }
+  return value as string[];
+}
+
+const sameIds = (a: readonly string[], b: readonly string[]): boolean =>
+  a.length === b.length && a.every((id, i) => id === b[i]);
 
 /**
  * Renames a course and/or replaces its ordered lecture list (UpdateCourseRequest). Documents
  * newly listed are removed from any other course; documents left out become uncategorized.
+ * With `baseDocIds` the course's lecture list (as the API shows it) must still be that list: 409 otherwise
+ * (it was changed in another tab or on another device, and this request would silently undo that).
  * Throws 404 for an unknown course, 400 for invalid titles, unknown doc ids or duplicates.
  */
 export async function updateCourse(courseId: string, patch: CoursePatch): Promise<Course> {
   const title = patch.title === undefined ? undefined : cleanTitle(patch.title);
+  const base = cleanBaseDocIds(patch.baseDocIds);
   const touched = await mutationQueue(MUTATIONS, async () => {
-    const record = await readCourseRecord(courseId);
+    const records = await readCourseRecords();
+    const record = records.find((candidate) => candidate.id === courseId);
     if (!record) throw new HttpError(404, '과목을 찾을 수 없습니다');
+    if (base && !sameIds((await toCourse(record, courseIdIndex(records))).docIds, base)) {
+      throw new HttpError(409, '다른 곳에서 이 과목의 강의 목록이 바뀌었습니다. 새로 불러온 뒤 다시 시도해 주세요');
+    }
     const next: CourseRecord = { ...record };
     if (title !== undefined) next.title = title;
     let others: string[] = [];
@@ -217,12 +279,23 @@ export async function updateCourse(courseId: string, patch: CoursePatch): Promis
   return course;
 }
 
-/** Deletes a course folder (course.json + COURSE.md). Its lectures are kept. False when missing. */
+/**
+ * Deletes a course folder (course.json + COURSE.md) and takes the course out of the layout. Its lectures are
+ * kept. False when missing.
+ */
 export async function deleteCourse(courseId: string): Promise<boolean> {
   return mutationQueue(MUTATIONS, async () => {
     if (!(await readCourseRecord(courseId))) return false;
     // Through the markdown queue so a pending COURSE.md write cannot recreate files in the folder.
     await markdownQueue(courseId, () => rmWithRetry(coursePaths(courseId).dir, { recursive: true, force: true }));
+    // Rewritten without the course (the normalisation drops it); no layout.json yet = nothing to clean up.
+    // The course is gone either way: reads drop unknown ids, so a failure here is only logged.
+    try {
+      const stored = await readStoredLayout();
+      if (stored !== null) await writeLayout(normalizeLayout(stored, await courseIdsOldestFirst()));
+    } catch (err) {
+      console.error(`[courses] could not remove ${courseId} from ${LAYOUT_FILE_NAME}:`, err);
+    }
     return true;
   });
 }
@@ -270,6 +343,118 @@ export async function removeDocFromCourses(docId: string): Promise<string[]> {
   const touched = await mutationQueue(MUTATIONS, () => removeFromOtherCourses([docId], ''));
   await refreshMarkdown(touched);
   return touched;
+}
+
+// ---------------------------------------------------------------------------
+// Layout: groups of courses and the top-level order (DESIGN §18)
+// ---------------------------------------------------------------------------
+
+export function layoutFile(): string {
+  return path.join(libraryDir(), LAYOUT_FILE_NAME);
+}
+
+/** What library/layout.json holds, or null when it is missing or unreadable (normalizeLayout decides the rest). */
+function readStoredLayout(): Promise<unknown> {
+  return readJsonFile<unknown>(layoutFile());
+}
+
+async function courseIdsOldestFirst(): Promise<string[]> {
+  return (await readCourseRecords()).map((record) => record.id);
+}
+
+/** The normalised layout of the courses that exist now. Callers hold the mutation queue. */
+async function currentLayout(): Promise<LibraryLayout> {
+  const [stored, courseIds] = await Promise.all([readStoredLayout(), courseIdsOldestFirst()]);
+  return normalizeLayout(stored, courseIds);
+}
+
+async function writeLayout(layout: LibraryLayout): Promise<void> {
+  await mkdirWithRetry(libraryDir());
+  await writeJsonAtomic(layoutFile(), { version: 1, groups: layout.groups, order: layout.order } satisfies LayoutRecord);
+}
+
+/** CreateCourseRequest.groupId: absent (undefined, null, '') = top level; otherwise a group id (400 when malformed). */
+function cleanGroupId(value: unknown): string | null {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string') throw new HttpError(400, 'groupId는 그룹 id여야 합니다');
+  if (!COURSE_ID_RE.test(value)) throw new HttpError(400, '그룹을 찾을 수 없습니다');
+  return value;
+}
+
+/**
+ * GET /api/layout: every existing course exactly once (in a group or at the top level), every group once.
+ * Read through the mutation queue so that it never shows half of a mutation. Never writes.
+ */
+export function getLayout(): Promise<LibraryLayout> {
+  return mutationQueue(MUTATIONS, currentLayout);
+}
+
+/**
+ * PUT /api/layout (PutLayoutRequest): replaces the whole arrangement. 400 when an id is unknown or listed twice,
+ * or when an existing course or group is missing (see validateLayoutRequest); nothing is written then.
+ */
+export function putLayout(body: unknown): Promise<LibraryLayout> {
+  return mutationQueue(MUTATIONS, async () => {
+    const [stored, courseIds] = await Promise.all([readStoredLayout(), courseIdsOldestFirst()]);
+    const next = validateLayoutRequest(body, normalizeLayout(stored, courseIds), courseIds);
+    await writeLayout(next);
+    return next;
+  });
+}
+
+/**
+ * Creates a group (CreateGroupRequest) at the end of the top level. Listed courses move into it, in the given
+ * order, from wherever they were. Id = slug(title) + '-' + 6 hex (COURSE_ID_RE), never the id of another group
+ * or of a course. 400 for a bad title, unknown or duplicated course ids.
+ */
+export async function createGroup(title: unknown, courseIds: unknown = undefined, now: Date = new Date()): Promise<CourseGroup> {
+  const cleaned = cleanTitle(title, '그룹');
+  return mutationQueue(MUTATIONS, async () => {
+    const [stored, existing] = await Promise.all([readStoredLayout(), courseIdsOldestFirst()]);
+    const moving = validateGroupCourseIds(courseIds, existing);
+    const layout = normalizeLayout(stored, existing);
+    const taken = new Set([...existing, ...layout.groups.map((group) => group.id)]);
+    const slug = slugify(cleaned, 'group');
+    let id = '';
+    for (let attempt = 0; !id; attempt++) {
+      const candidate = `${slug}-${randomBytes(3).toString('hex')}`;
+      if (!taken.has(candidate)) id = candidate;
+      else if (attempt >= 10) throw new Error('could not find a free group id');
+    }
+    const group: CourseGroup = { id, title: cleaned, createdAt: now.toISOString(), courseIds: moving };
+    await writeLayout(withGroupAppended(layout, group));
+    return group;
+  });
+}
+
+export interface GroupPatch {
+  title?: unknown;
+}
+
+/** Renames a group (UpdateGroupRequest). 404 for an unknown group, 400 for a bad title. */
+export async function updateGroup(groupId: string, patch: GroupPatch): Promise<CourseGroup> {
+  const title = cleanTitle(patch.title, '그룹');
+  return mutationQueue(MUTATIONS, async () => {
+    const layout = await currentLayout();
+    const group = layout.groups.find((candidate) => candidate.id === groupId);
+    if (!group) throw new HttpError(404, '그룹을 찾을 수 없습니다');
+    const renamed: CourseGroup = { ...group, title };
+    await writeLayout({ ...layout, groups: layout.groups.map((candidate) => (candidate.id === groupId ? renamed : candidate)) });
+    return renamed;
+  });
+}
+
+/**
+ * Deletes a group: its courses move to the top level at the group's position (courses and lectures are never
+ * deleted with it). False when there is no such group.
+ */
+export async function deleteGroup(groupId: string): Promise<boolean> {
+  return mutationQueue(MUTATIONS, async () => {
+    const layout = await currentLayout();
+    if (!layout.groups.some((group) => group.id === groupId)) return false;
+    await writeLayout(withoutGroup(layout, groupId));
+    return true;
+  });
 }
 
 // ---------------------------------------------------------------------------

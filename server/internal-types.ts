@@ -1,5 +1,5 @@
 // Server-internal contracts shared by sessions.ts, context.ts and chat.ts.
-import type { ChatMessage, ContextInfo, DigestSlide, DigestStatus, DocMeta, ProviderId } from '../shared/types.ts';
+import type { ChatMessage, ContextInfo, CourseGroup, DigestSlide, DigestStatus, DocMeta, LayoutItem, ProviderId } from '../shared/types.ts';
 import type { HistoryTurn, Part, ResumeHandle } from './providers/types.ts';
 
 /** State of the conversation held *inside the provider* (CLI session / API thread). */
@@ -166,4 +166,14 @@ export interface CourseRecord {
   title: string;
   createdAt: string;
   docIds: string[];
+}
+
+/**
+ * Persisted as library/layout.json (DESIGN §18): the LibraryLayout (groups of courses and the top-level order)
+ * plus a version. Normalised on read (server/layout.ts); lecture membership stays in the course files.
+ */
+export interface LayoutRecord {
+  version: 1;
+  groups: CourseGroup[];
+  order: LayoutItem[];
 }

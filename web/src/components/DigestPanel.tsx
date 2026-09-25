@@ -5,6 +5,7 @@ import { useAuth } from '../hooks/useAuth.ts';
 import type { DigestState } from '../hooks/useDigest.ts';
 import type { ProviderChoice } from '../hooks/useProviderChoice.ts';
 import { copyText } from '../lib/clipboard.ts';
+import { confirmDialog } from '../lib/confirm.ts';
 import { digestContinueLabel, digestNote, digestStatusLabel, digestView } from '../lib/digestState.ts';
 import { formatTime, providerWithModel } from '../lib/format.ts';
 import { toast } from '../lib/toast.ts';
@@ -51,12 +52,14 @@ export function DigestPanel({
   const s = info ? digestView(info, doc.pageCount) : null;
   const bySlide = new Map((info?.slides ?? []).map((e) => [e.slide, e]));
 
-  const start = (force: boolean) => {
+  const start = async (force: boolean) => {
     if (
       force &&
-      !window.confirm(
-        '정리본을 처음부터 다시 만들까요?\n모든 슬라이드를 다시 LLM에게 보여 주고 정리해요 (시간과 사용량이 들어요).',
-      )
+      !(await confirmDialog({
+        title: '정리본을 처음부터 다시 만들까요?',
+        message: '모든 슬라이드를 다시 LLM에게 보여 주고 정리해요 (시간과 사용량이 들어요).',
+        confirmLabel: '다시 만들기',
+      }))
     ) {
       return;
     }
@@ -170,7 +173,7 @@ export function DigestPanel({
           <li>📁 과목에 넣어 두면 다음 강의를 공부할 때 이 강의의 요약이 함께 전달돼요</li>
           <li>💬 새 세션을 처음 만들면 자동으로 만들기 시작해요</li>
         </ul>
-        <button type="button" className="primary-btn" onClick={() => start(false)} disabled={startDisabled} title={startTitle}>
+        <button type="button" className="primary-btn" onClick={() => void start(false)} disabled={startDisabled} title={startTitle}>
           📝 정리본 만들기
         </button>
         <p className="muted small">{chosen ? `${chosen}(으)로 만들어요 · 몇 분 걸릴 수 있어요` : startTitle}</p>
@@ -304,7 +307,7 @@ export function DigestPanel({
                   <button
                     type="button"
                     className="ghost-btn small accent"
-                    onClick={() => start(false)}
+                    onClick={() => void start(false)}
                     disabled={startDisabled}
                     title={startTitle}
                   >
@@ -314,7 +317,7 @@ export function DigestPanel({
                 <button
                   type="button"
                   className="ghost-btn small"
-                  onClick={() => start(true)}
+                  onClick={() => void start(true)}
                   disabled={startDisabled}
                   title={startTitle}
                 >

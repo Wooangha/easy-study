@@ -61,6 +61,7 @@ const PNG_1X1 = Buffer.from(
 const DOC_ID = 'deck-aaa111';
 const SESSION_ID = '20260101-000000-abcd';
 const COURSE_ID = 'course-bbb222';
+const GROUP_ID = 'group-ccc333';
 
 let tmpRoot = '';
 
@@ -724,6 +725,7 @@ describe('remote mode over HTTP', () => {
       ['GET', `${d}/digest.md`],
       ['GET', '/api/courses'],
       ['GET', `/api/courses/${COURSE_ID}/summary.md`],
+      ['GET', '/api/layout'],
       ['GET', '/api/docs/NOT_VALID'],
       ['GET', '/api/nope'],
       ['POST', '/api/docs'],
@@ -736,9 +738,14 @@ describe('remote mode over HTTP', () => {
       ['POST', `${d}/digest/abort`],
       ['POST', '/api/courses'],
       ['PATCH', `/api/courses/${COURSE_ID}`],
+      ['PUT', '/api/layout'],
+      ['POST', '/api/groups'],
+      ['PATCH', `/api/groups/${GROUP_ID}`],
+      ['PATCH', '/api/groups/NOT_VALID'],
       ['DELETE', d],
       ['DELETE', s],
       ['DELETE', `/api/courses/${COURSE_ID}`],
+      ['DELETE', `/api/groups/${GROUP_ID}`],
     ];
     for (const [method, target] of routes) {
       const body = method === 'POST' && target === '/api/docs' ? Buffer.from('%PDF-1.4 fake') : JSON.stringify({ slide: 1, text: 'hi', provider: 'claude-code' });

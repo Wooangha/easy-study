@@ -692,26 +692,43 @@ CreateCourseRequest.groupId)
 
 ### HTTP (remote-mode auth applies like every /api route)
 | GET `/api/layout` | – | `LibraryLayout` |
-| PUT `/api/layout` | `PutLayoutRequest` | `LibraryLayout` (400 when an id is unknown, duplicated, or an existing course/group is missing) |
+| PUT `/api/layout` | `PutLayoutRequest` | `LibraryLayout` (400 when an id is unknown, duplicated, or an existing course/group is missing; 409 when `baseRevision` is not the current arrangement's) |
 | POST `/api/groups` | `CreateGroupRequest` | 201 `CourseGroup` (appended to the top level; listed courses move into it) |
 | PATCH `/api/groups/:groupId` | `UpdateGroupRequest` | `CourseGroup` |
 | DELETE `/api/groups/:groupId` | – | 204 |
 | POST `/api/courses` | `CreateCourseRequest` (+ optional `groupId`) | as before; placed at the end of that group when given (400 unknown group) |
 `GET /api/courses` stays (createdAt order) for compatibility; the client orders courses with the layout.
 
+Other tabs and devices (remote mode) change the same library, so a change made from stale data must not silently undo theirs
+(lost update). Both requests a drag sends carry what they were computed from:
+- `PutLayoutRequest.baseRevision` = `layoutRevision(layout)` (shared/layoutRevision.ts: a hash of the normalised top-level order
+  and the courses of each group; titles are not part of it). Server and client compute it from the normalised layout, so no
+  response carries it.
+- `UpdateCourseRequest.baseDocIds` = the course's lecture list the new `docIds` were computed from (as GET /api/courses shows it).
+When given and not current, the answer is 409 and nothing is written (both are optional for other clients). The client then loads
+courses and layout again and makes the same (anchored) move once more on top of them; a second 409, or a target course/group
+that no longer exists, rolls the move back with a toast. The client also reloads both when its tab becomes visible or focused.
+
 ### Web
 - Library view renders the layout: groups (collapsible header: `≡` handle, title with inline rename, course count, delete with an in-page
   confirmation, "＋ 과목" to create a course inside the group) containing course cards; top-level course cards; then 미분류 lectures.
 - Course cards are collapsible (header click / chevron / Enter): when collapsed show title, lecture count and digest summary badges only.
-  Collapse state is per device (localStorage `easy-study:collapsed`), plus "모두 접기 / 모두 펼치기".
-- Drag & drop with an accessible library (@dnd-kit/core + @dnd-kit/sortable): pointer, touch (press-and-hold ~200 ms so scrolling still
+  Collapse state is per device (localStorage `easy-study:collapsed`), plus "모두 접기 / 모두 펼치기". It is the same in every tab
+  of the device: each toggle is applied to what is stored at that moment and other tabs follow `storage` events; keys of deleted
+  courses/groups are forgotten (on the first load all unknown keys, later only keys the tab saw disappear). Renaming is the ✎
+  button only; a double-click on a header counts as one toggle.
+- Drag & drop with an accessible library (@dnd-kit/core): pointer, touch (press-and-hold ~200 ms so scrolling still
   works) and keyboard sensors (Space/Enter pick up, arrows move, Space/Enter drop, Esc cancel) with screen-reader announcements in Korean.
   - Lectures (`≡` handle): reorder inside a course, move to another course (single PATCH of the target course — the server removes it
     from the old one), drop into 미분류 (PATCH of the source course without it).
   - Courses (`≡` handle on the card header): reorder at the top level, move into/out of groups and between groups (PUT /api/layout).
   - Groups (`≡` handle): reorder at the top level (PUT /api/layout).
-  - Dragging over a collapsed course/group for ~600 ms expands it; a clear insertion indicator shows where the item will land; optimistic
-    update with rollback + toast on server error; while a request is in flight further drops queue in order.
+  - Dragging over a collapsed course/group for ~600 ms expands it (for a lecture a collapsed group's header is only that: releasing
+    there moves nothing); screen readers then hear that it opened and the item's new place. A clear insertion indicator shows
+    where the item will land (the ghost follows just below-right of the pointer, inside the window); optimistic update with
+    rollback + toast on server error; while a request is in flight further drops queue in order.
+  - Keyboard focus never falls back to the page: after a "⋯"/select move it goes to the lecture in its new place (or its
+    collapsed course/group), after deleting a course/group to the nearest card (or the "과목" heading).
   - Native file drops (uploading PDFs onto a course card) keep working alongside (they use HTML5 file drag events, not pointer drags).
 - The ▲▼ buttons are removed; "과목에서 빼기" moves into a small per-lecture "⋯" menu (together with "과목으로 이동 ▸" for keyboard-free
   alternatives). Uncategorised lectures keep a "과목으로 이동" control.

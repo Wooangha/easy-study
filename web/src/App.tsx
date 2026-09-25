@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DocMeta } from '../../shared/types.ts';
 import { ApiError, errorMessage, startDigest } from './api.ts';
 import { ChatPanel, type PanelTab } from './components/ChatPanel.tsx';
+import { ConfirmHost } from './components/ConfirmDialog.tsx';
 import { DigestPanel, type DigestMode } from './components/DigestPanel.tsx';
 import { DocStatusView, LibraryView } from './components/LibraryView.tsx';
 import { NotesPanel, type NotesFilter } from './components/NotesPanel.tsx';
@@ -18,7 +19,9 @@ import { useNeighbors } from './hooks/useNeighbors.ts';
 import { useNotes } from './hooks/useNotes.ts';
 import { useProviderChoice } from './hooks/useProviderChoice.ts';
 import { useStudySession } from './hooks/useStudySession.ts';
+import { confirmDialog } from './lib/confirm.ts';
 import { earlierLectures } from './lib/courseContext.ts';
+import { withParticle } from './lib/korean.ts';
 import { providerWithModel } from './lib/format.ts';
 import { isString, readStorage, storageKeys, writeStorage } from './lib/storage.ts';
 import { toast } from './lib/toast.ts';
@@ -232,13 +235,15 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
   }, [busy]);
 
   // ---- Logout (remote mode) ----------------------------------------------------------------------
-  const logout = useCallback(() => {
+  const logout = useCallback(async () => {
     if (!onLogout) return;
     if (
       busy &&
-      !window.confirm(
-        '답변을 만들거나 PDF를 올리는 중이에요. 지금 로그아웃하면 이 화면에서는 결과를 볼 수 없어요.\n로그아웃할까요?',
-      )
+      !(await confirmDialog({
+        title: '로그아웃할까요?',
+        message: '답변을 만들거나 PDF를 올리는 중이에요. 지금 로그아웃하면 이 화면에서는 결과를 볼 수 없어요.',
+        confirmLabel: '로그아웃',
+      }))
     ) {
       return;
     }
@@ -248,10 +253,13 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
   // ---- Documents whose conversion failed: retry or delete (DESIGN §14) ----------------------------
   const deleteDoc = useCallback(
     async (target: DocMeta) => {
-      const msg =
-        `‘${target.title}’을(를) 삭제할까요?\n` +
-        '업로드한 PDF와 여기서 만든 파일(슬라이드 이미지, 대화, 노트, 정리본)이 모두 지워지고, 과목에서도 빠져요.';
-      if (!window.confirm(msg)) return;
+      const ok = await confirmDialog({
+        title: `${withParticle(`‘${target.title}’`, '을', '를')} 삭제할까요?`,
+        message: '업로드한 PDF와 여기서 만든 파일(슬라이드 이미지, 대화, 노트, 정리본)이 모두 지워지고, 과목에서도 빠져요.',
+        confirmLabel: '삭제',
+        danger: true,
+      });
+      if (!ok) return;
       if (await removeDoc(target.id)) {
         void refreshCourses(); // the server also removed it from its course
         toast(`‘${target.title}’을(를) 삭제했어요.`, 'success');
@@ -269,11 +277,14 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
         return;
       }
       const who = providerWithModel(providers, choice.provider, choice.model);
-      const msg =
-        `강의 ${targets.length}개의 정리본을 ${who}(으)로 만들까요?\n\n` +
-        targets.map((d) => `• ${d.title}`).join('\n') +
-        '\n\nLLM이 강의마다 모든 슬라이드를 읽어서 시간이 걸리고 사용량이 들어요. 완성된 강의의 요약은 같은 과목의 뒤 강의를 공부할 때 LLM에게 함께 전달돼요.';
-      if (!window.confirm(msg)) return;
+      const ok = await confirmDialog({
+        title: `강의 ${targets.length}개의 정리본을 ${who}(으)로 만들까요?`,
+        message:
+          targets.map((d) => `• ${d.title}`).join('\n') +
+          '\nLLM이 강의마다 모든 슬라이드를 읽어서 시간이 걸리고 사용량이 들어요. 완성된 강의의 요약은 같은 과목의 뒤 강의를 공부할 때 LLM에게 함께 전달돼요.',
+        confirmLabel: '정리본 만들기',
+      });
+      if (!ok) return;
       let started = 0;
       const failed: string[] = [];
       for (const d of targets) {
@@ -394,8 +405,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
       <LibraryView
         docs={docs}
         loadError={loadError}
-        courses={courses}
-        coursesError={coursesState.loadError}
+        org={coursesState}
         uploads={uploads}
         libraryDir={health?.libraryDir ?? null}
         uploadCourseId={uploadTarget?.id ?? null}
@@ -404,11 +414,6 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
         onPickFiles={pickFiles}
         onDropFiles={(files) => void handleFiles(files)}
         onUploadToCourse={(courseId, files) => void uploadFiles(files, courseId, false)}
-        onCreateCourse={coursesState.create}
-        onRenameCourse={(courseId, title) => void coursesState.rename(courseId, title)}
-        onDeleteCourse={(courseId) => void coursesState.remove(courseId)}
-        onSetLectures={(courseId, ids) => void coursesState.setLectures(courseId, ids)}
-        onMoveLecture={(id, courseId) => void coursesState.moveLecture(id, courseId)}
         onRetryDoc={(id) => void retryDoc(id)}
         onDeleteDoc={(d) => void deleteDoc(d)}
         canDigest={choice !== null}
@@ -427,6 +432,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
         docs={docs}
         doc={doc}
         courses={courses}
+        layout={coursesState.layout}
         onSelectDoc={setDocId}
         onUploadClick={pickFiles}
         uploadCourse={uploadTarget}
@@ -441,7 +447,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
         choice={choice}
         onChoiceChange={setChoice}
         hasNotes={notesCount > 0}
-        onLogout={authRequired && onLogout ? logout : undefined}
+        onLogout={authRequired && onLogout ? () => void logout() : undefined}
       />
 
       {healthError && (
@@ -495,6 +501,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
         </div>
       )}
       <Toaster />
+      <ConfirmHost suspended={suspended} />
     </div>
   );
 }

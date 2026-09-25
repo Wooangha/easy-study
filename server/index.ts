@@ -64,11 +64,16 @@ import type { TlsFiles } from './config.ts';
 import {
   addDocToCourse,
   createCourse,
+  createGroup,
   deleteCourse,
+  deleteGroup,
   getCourse,
+  getLayout,
   listCourses,
+  putLayout,
   removeDocFromCourses,
   updateCourse,
+  updateGroup,
   writeCourseMarkdown,
 } from './courses.ts';
 import {
@@ -417,6 +422,9 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
   api.param('courseId', (_req, _res, next, value: string) => {
     next(COURSE_ID_RE.test(value) ? undefined : new HttpError(404, '과목을 찾을 수 없습니다'));
   });
+  api.param('groupId', (_req, _res, next, value: string) => {
+    next(COURSE_ID_RE.test(value) ? undefined : new HttpError(404, '그룹을 찾을 수 없습니다'));
+  });
   // Only parses application/json bodies; the raw PDF upload passes through untouched.
   api.use(express.json({ limit: '2mb' }));
 
@@ -642,13 +650,15 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
     res.json(await listCourses());
   });
 
+  /** CreateCourseRequest; with `groupId` the course goes to the end of that group (400 when unknown). */
   api.post('/courses', async (req, res) => {
-    res.status(201).json(await createCourse(jsonBody(req).title));
+    const body = jsonBody(req);
+    res.status(201).json(await createCourse(body.title, new Date(), body.groupId));
   });
 
   api.patch('/courses/:courseId', async (req, res) => {
     const body = jsonBody(req);
-    res.json(await updateCourse(req.params.courseId, { title: body.title, docIds: body.docIds }));
+    res.json(await updateCourse(req.params.courseId, { title: body.title, docIds: body.docIds, baseDocIds: body.baseDocIds }));
   });
 
   api.delete('/courses/:courseId', async (req, res) => {
@@ -668,6 +678,32 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
       throw new HttpError(404, '과목을 찾을 수 없습니다'); // deleted in the meantime
     }
     sendMarkdown(res, markdown);
+  });
+
+  // --- library layout: groups of courses and their order (DESIGN §18) -------------------------------
+
+  api.get('/layout', async (_req, res) => {
+    res.json(await getLayout());
+  });
+
+  /** PutLayoutRequest: the full arrangement (400 for unknown or duplicated ids and for missing courses/groups). */
+  api.put('/layout', async (req, res) => {
+    res.json(await putLayout(req.body));
+  });
+
+  api.post('/groups', async (req, res) => {
+    const body = jsonBody(req);
+    res.status(201).json(await createGroup(body.title, body.courseIds));
+  });
+
+  api.patch('/groups/:groupId', async (req, res) => {
+    res.json(await updateGroup(req.params.groupId, { title: jsonBody(req).title }));
+  });
+
+  /** Its courses move to the top level where the group was; nothing else is deleted. */
+  api.delete('/groups/:groupId', async (req, res) => {
+    if (!(await deleteGroup(req.params.groupId))) throw new HttpError(404, '그룹을 찾을 수 없습니다');
+    res.status(204).end();
   });
 
   api.use((_req, _res, next) => next(new HttpError(404, 'API 경로를 찾을 수 없습니다')));

@@ -1,11 +1,12 @@
-// Courses ("과목" folders): ordered lists of lecture documents (DESIGN.md §12).
+// Courses ("과목" folders, DESIGN §12), course groups and their arrangement (DESIGN §18).
 //
-// Membership is derived on the client from the course list (the course files are the source of
-// truth; a document listed in several courses belongs to the oldest one, like on the server), so
-// moving/reordering lectures never needs a documents refresh.
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+// Membership is derived on the client from the course list (the course files are the source of truth; a
+// document listed in several courses belongs to the oldest one, like on the server), so moving/reordering
+// lectures never needs a documents refresh. Changes are queued and shown optimistically (lib/organizer.ts).
+import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import type { Course } from '../../../shared/types.ts';
 import * as api from '../api.ts';
+import { createOrganizer } from '../lib/organizer.ts';
 import { toast } from '../lib/toast.ts';
 
 export interface CourseMembership {
@@ -27,131 +28,74 @@ export function indexCourses(courses: Course[] | null): Map<string, CourseMember
   return map;
 }
 
-/** Replace one course and drop its lectures from every other course (a lecture is in at most one). */
-function applyCourse(list: Course[], updated: Course): Course[] {
-  const taken = new Set(updated.docIds);
-  const known = list.some((c) => c.id === updated.id);
-  const next = list.map((c) =>
-    c.id === updated.id ? updated : { ...c, docIds: c.docIds.filter((id) => !taken.has(id)) },
-  );
-  return known ? next : [...next, updated];
-}
+/** Focus and visibilitychange usually come together: one reload for both. */
+const REFRESH_ON_RETURN_MS = 2000;
 
 export function useCourses() {
-  const [courses, setCourses] = useState<Course[] | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-
-  const refresh = useCallback(async () => {
-    try {
-      setCourses(await api.listCourses());
-      setLoadError(null);
-    } catch (e) {
-      setLoadError(api.errorMessage(e));
-      setCourses((prev) => prev ?? []);
-    }
-  }, []);
+  const [store] = useState(() =>
+    createOrganizer({
+      api: {
+        listCourses: api.listCourses,
+        getLayout: api.getLayout,
+        createCourse: api.createCourse,
+        updateCourse: api.updateCourse,
+        deleteCourse: api.deleteCourse,
+        putLayout: api.putLayout,
+        createGroup: api.createGroup,
+        updateGroup: api.updateGroup,
+        deleteGroup: api.deleteGroup,
+      },
+      notifyError: (message) => toast(message, 'error'),
+      errorMessage: api.errorMessage,
+      isConflict: (e) => e instanceof api.ApiError && e.status === 409,
+    }),
+  );
+  const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot);
 
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    void store.refresh();
+  }, [store]);
 
-  const membership = useMemo(() => indexCourses(courses), [courses]);
+  // Another tab or device (remote mode) may have rearranged the library meanwhile: load it again when this tab
+  // comes back, so that what is shown — and what the next drag is computed from — is current.
+  useEffect(() => {
+    let last = Date.now();
+    const onBack = () => {
+      if (document.visibilityState !== 'visible' || Date.now() - last < REFRESH_ON_RETURN_MS) return;
+      last = Date.now();
+      void store.refresh();
+    };
+    document.addEventListener('visibilitychange', onBack);
+    window.addEventListener('focus', onBack);
+    return () => {
+      document.removeEventListener('visibilitychange', onBack);
+      window.removeEventListener('focus', onBack);
+    };
+  }, [store]);
 
-  const create = useCallback(async (title: string): Promise<Course | null> => {
-    try {
-      const course = await api.createCourse({ title });
-      setCourses((prev) => applyCourse(prev ?? [], course));
-      return course;
-    } catch (e) {
-      toast(`과목을 만들지 못했어요: ${api.errorMessage(e)}`, 'error');
-      return null;
-    }
-  }, []);
+  const membership = useMemo(() => indexCourses(snapshot.courses), [snapshot.courses]);
 
-  // PATCHes of one course are sent one after another (rapid ▲▼ clicks must reach the server in
-  // order), and only the response to the latest one is applied (older ones would undo newer clicks).
-  const queues = useRef(new Map<string, Promise<unknown>>());
-  const latest = useRef(new Map<string, number>());
-  const seq = useRef(0);
-
-  /** PATCH with an optimistic local update; on failure the list is reloaded from the server. */
-  const update = useCallback(
-    (courseId: string, patch: { title?: string; docIds?: string[] }, failMessage: string): Promise<boolean> => {
-      setCourses((prev) => {
-        const current = prev?.find((c) => c.id === courseId);
-        return prev && current ? applyCourse(prev, { ...current, ...patch }) : prev;
-      });
-      const mine = ++seq.current;
-      latest.current.set(courseId, mine);
-      const run = async (): Promise<boolean> => {
-        try {
-          const saved = await api.updateCourse(courseId, patch);
-          if (latest.current.get(courseId) === mine) setCourses((prev) => applyCourse(prev ?? [], saved));
-          return true;
-        } catch (e) {
-          toast(`${failMessage}: ${api.errorMessage(e)}`, 'error');
-          void refresh();
-          return false;
-        }
-      };
-      const result = (queues.current.get(courseId) ?? Promise.resolve()).then(run);
-      queues.current.set(courseId, result);
-      return result;
-    },
-    [refresh],
-  );
-
-  const rename = useCallback(
-    (courseId: string, title: string) => update(courseId, { title }, '과목 이름을 바꾸지 못했어요'),
-    [update],
-  );
-
-  const setLectures = useCallback(
-    (courseId: string, docIds: string[]) => update(courseId, { docIds }, '강의 목록을 바꾸지 못했어요'),
-    [update],
-  );
-
-  /** Move a lecture into a course (appended; removed from its previous course) or out of every course (null). */
-  const moveLecture = useCallback(
-    (docId: string, courseId: string | null): Promise<boolean> => {
-      const list = courses ?? [];
-      if (courseId === null) {
-        const from = list.find((c) => c.docIds.includes(docId));
-        if (!from) return Promise.resolve(true);
-        return update(from.id, { docIds: from.docIds.filter((id) => id !== docId) }, '과목에서 빼지 못했어요');
-      }
-      const to = list.find((c) => c.id === courseId);
-      if (!to || to.docIds.includes(docId)) return Promise.resolve(!!to);
-      return update(to.id, { docIds: [...to.docIds, docId] }, '과목으로 옮기지 못했어요');
-    },
-    [courses, update],
-  );
-
-  const remove = useCallback(
-    async (courseId: string): Promise<boolean> => {
-      try {
-        await api.deleteCourse(courseId);
-        setCourses((prev) => (prev ?? []).filter((c) => c.id !== courseId));
-        return true;
-      } catch (e) {
-        toast(`과목을 삭제하지 못했어요: ${api.errorMessage(e)}`, 'error');
-        void refresh();
-        return false;
-      }
-    },
-    [refresh],
-  );
-
-  /** Show a lecture that the server just added to a course (upload with X-Course-Id) until the next refresh. */
-  const addLocally = useCallback((courseId: string, docId: string) => {
-    setCourses((prev) => {
-      const course = prev?.find((c) => c.id === courseId);
-      if (!prev || !course || course.docIds.includes(docId)) return prev;
-      return applyCourse(prev, { ...course, docIds: [...course.docIds, docId] });
-    });
-  }, []);
-
-  return { courses, loadError, membership, refresh, create, rename, setLectures, moveLecture, remove, addLocally };
+  return {
+    courses: snapshot.courses,
+    layout: snapshot.layout,
+    loadError: snapshot.coursesError,
+    layoutError: snapshot.layoutError,
+    /** Changes still being saved. */
+    pending: snapshot.pending,
+    membership,
+    refresh: store.refresh,
+    create: store.createCourse,
+    rename: store.renameCourse,
+    remove: store.deleteCourse,
+    moveLecture: store.moveLecture,
+    moveCourse: store.moveCourse,
+    moveGroup: store.moveGroup,
+    move: store.move,
+    createGroup: store.createGroup,
+    renameGroup: store.renameGroup,
+    removeGroup: store.deleteGroup,
+    addLocally: store.addLectureLocally,
+  };
 }
 
 export type CoursesState = ReturnType<typeof useCourses>;

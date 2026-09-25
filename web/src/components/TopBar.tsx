@@ -1,8 +1,11 @@
 import { useState } from 'react';
-import type { Course, DocMeta, ProviderId, ProviderInfo, SessionSummary } from '../../../shared/types.ts';
+import type { Course, DocMeta, LibraryLayout, ProviderId, ProviderInfo, SessionSummary } from '../../../shared/types.ts';
 import { notesMarkdownUrl } from '../api.ts';
+import { indexCourses } from '../hooks/useCourses.ts';
 import type { ProviderChoice } from '../hooks/useProviderChoice.ts';
+import { confirmDialog } from '../lib/confirm.ts';
 import { formatTime, providerWithModel } from '../lib/format.ts';
+import { courseLabel, layoutEntries } from '../lib/libraryLayout.ts';
 
 const UPLOAD = '__upload__';
 const NEW_SESSION = '__new__';
@@ -13,6 +16,8 @@ interface TopBarProps {
   doc: DocMeta | null;
   /** Courses in creation order (null while loading / unavailable). */
   courses: Course[] | null;
+  /** Groups and order of the courses (DESIGN §18). */
+  layout: LibraryLayout;
   onSelectDoc: (docId: string | null) => void;
   onUploadClick: () => void;
   /** Course that "＋ PDF 추가" uploads into (null = uncategorized). */
@@ -46,8 +51,11 @@ function docOptionLabel(d: DocMeta, index?: number): string {
   return `${name} · ${d.pageCount}장${badge}`;
 }
 
-/** Document picker options: one <optgroup> per course (lectures in order) + "미분류" (only when courses exist). */
-function DocOptions({ docs, courses }: { docs: DocMeta[]; courses: Course[] }) {
+/**
+ * Document picker options: one <optgroup> per course in library order ("📁 그룹 › 과목" for grouped courses),
+ * lectures in order, + "미분류" (only when courses exist).
+ */
+function DocOptions({ docs, courses, layout }: { docs: DocMeta[]; courses: Course[]; layout: LibraryLayout }) {
   if (courses.length === 0) {
     return docs.map((d) => (
       <option key={d.id} value={d.id}>
@@ -56,15 +64,18 @@ function DocOptions({ docs, courses }: { docs: DocMeta[]; courses: Course[] }) {
     ));
   }
   const byId = new Map(docs.map((d) => [d.id, d]));
+  // A document listed in two courses (data error) shows under the one it belongs to (the oldest).
+  const owner = indexCourses(courses);
   const placed = new Set<string>();
-  const groups = courses.map((c) => {
+  const groups = layoutEntries(layout, courses).map((entry) => {
+    const c = entry.course;
     const lectures = c.docIds
-      .filter((id) => !placed.has(id))
+      .filter((id) => owner.get(id)?.course.id === c.id)
       .map((id) => byId.get(id))
       .filter((d): d is DocMeta => d !== undefined);
     for (const d of lectures) placed.add(d.id);
     return (
-      <optgroup key={c.id} label={`📁 ${c.title}`}>
+      <optgroup key={c.id} label={`📁 ${courseLabel(entry)}`}>
         {lectures.length === 0 ? (
           <option disabled value={`__empty:${c.id}`}>
             (강의 없음)
@@ -117,7 +128,7 @@ export function TopBar(props: TopBarProps) {
         }}
       >
         <option value="">{docs && docs.length > 0 ? '📚 문서 선택…' : '📚 문서 없음'}</option>
-        <DocOptions docs={docs ?? []} courses={props.courses ?? []} />
+        <DocOptions docs={docs ?? []} courses={props.courses ?? []} layout={props.layout} />
         <option value={UPLOAD}>{props.uploadCourse ? `＋ PDF 추가 (📁 ${props.uploadCourse.title})` : '＋ PDF 추가'}</option>
       </select>
 
@@ -152,9 +163,14 @@ export function TopBar(props: TopBarProps) {
               title="이 세션 삭제"
               disabled={props.sessionBusy}
               onClick={() => {
-                if (window.confirm('이 세션과 대화 기록(노트 포함)을 삭제할까요? 되돌릴 수 없어요.')) {
-                  props.onDeleteSession(sessionId);
-                }
+                void confirmDialog({
+                  title: '이 세션을 삭제할까요?',
+                  message: '세션과 대화 기록(노트 포함)이 지워지고 되돌릴 수 없어요.',
+                  confirmLabel: '세션 삭제',
+                  danger: true,
+                }).then((ok) => {
+                  if (ok) props.onDeleteSession(sessionId);
+                });
               }}
             >
               🗑

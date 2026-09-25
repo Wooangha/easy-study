@@ -127,7 +127,7 @@ describe('course storage', () => {
   });
 
   test('create validates the title', async () => {
-    for (const title of ['', '   ', 42, null, undefined, 'x'.repeat(101)]) {
+    for (const title of ['', '   ', 42, null, undefined, 'x'.repeat(121)]) {
       await assert.rejects(createCourse(title), isHttpError(400), String(title));
     }
   });
