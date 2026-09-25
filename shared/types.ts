@@ -79,6 +79,47 @@ export interface Course {
 
 export interface CreateCourseRequest {
   title: string;
+  /** Put the new course at the end of this group (otherwise at the end of the top level). */
+  groupId?: string;
+}
+
+/**
+ * A group of courses (e.g. a semester "2026-2학기" containing Compiler, OS, …). Purely organisational: it does not change
+ * what the LLM sees. Persisted in library/layout.json together with the top-level order.
+ */
+export interface CourseGroup {
+  /** Same format as COURSE_ID_RE. */
+  id: string;
+  title: string;
+  createdAt: string;
+  /** Courses in this group, in display order. A course is either in exactly one group or at the top level. */
+  courseIds: string[];
+}
+
+/** One entry of the top-level library order. */
+export type LayoutItem = { type: 'group'; id: string } | { type: 'course'; id: string };
+
+/** GET /api/layout — normalised: every existing course appears exactly once (in a group or as a top-level item). */
+export interface LibraryLayout {
+  groups: CourseGroup[];
+  /** Top-level order of groups and ungrouped courses. */
+  order: LayoutItem[];
+}
+
+/** PUT /api/layout — the full arrangement; must mention every existing course and group exactly once. */
+export interface PutLayoutRequest {
+  groups: Array<{ id: string; courseIds: string[] }>;
+  order: LayoutItem[];
+}
+
+export interface CreateGroupRequest {
+  title: string;
+  /** Courses to move into the new group (removed from wherever they were). */
+  courseIds?: string[];
+}
+
+export interface UpdateGroupRequest {
+  title: string;
 }
 
 export interface UpdateCourseRequest {

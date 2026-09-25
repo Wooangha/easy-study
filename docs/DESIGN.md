@@ -674,3 +674,46 @@ Contracts:
 - **Packaging notes** (desktop app): ship `node_modules/@embedpdf/pdfium/dist/{index.js,pdfium.wasm}` (the wasm is
   found with `createRequire(import.meta.url).resolve('@embedpdf/pdfium/pdfium.wasm')`; a single-file bundle must
   pass its bytes from a resource path instead) and `THIRD_PARTY_NOTICES.md`.
+
+## 18. Library organization — collapsible courses, drag & drop, course groups
+
+User request: course folders can be collapsed; lectures are reordered by dragging a `≡` handle instead of ▲▼ buttons ("알잘딱");
+courses can themselves be grouped (e.g. a semester group containing several courses).
+
+### Data (contracts in shared/types.ts: CourseGroup, LayoutItem, LibraryLayout, PutLayoutRequest, CreateGroupRequest, UpdateGroupRequest,
+CreateCourseRequest.groupId)
+- `library/layout.json` = `{ version: 1, groups: CourseGroup[], order: LayoutItem[] }`, atomic writes, serialized with course mutations.
+- Lecture membership/order stays in the course files (§12). Groups/ordering of courses live only in layout.json.
+- Normalisation on read: unknown/deleted course or group ids are dropped; a course listed twice keeps its first position; courses that
+  exist but are not mentioned are appended to the top level in createdAt order; groups missing from `order` are appended. A missing
+  layout.json = all courses top-level by createdAt (today's behaviour). Deleting a course removes it from the layout; deleting a group
+  moves its courses to the top level at the group's position (courses and lectures are never deleted by deleting a group).
+- Group ids: slug(title) + '-' + 6 hex (COURSE_ID_RE); titles 1–120 chars after trim (same rule as course titles).
+
+### HTTP (remote-mode auth applies like every /api route)
+| GET `/api/layout` | – | `LibraryLayout` |
+| PUT `/api/layout` | `PutLayoutRequest` | `LibraryLayout` (400 when an id is unknown, duplicated, or an existing course/group is missing) |
+| POST `/api/groups` | `CreateGroupRequest` | 201 `CourseGroup` (appended to the top level; listed courses move into it) |
+| PATCH `/api/groups/:groupId` | `UpdateGroupRequest` | `CourseGroup` |
+| DELETE `/api/groups/:groupId` | – | 204 |
+| POST `/api/courses` | `CreateCourseRequest` (+ optional `groupId`) | as before; placed at the end of that group when given (400 unknown group) |
+`GET /api/courses` stays (createdAt order) for compatibility; the client orders courses with the layout.
+
+### Web
+- Library view renders the layout: groups (collapsible header: `≡` handle, title with inline rename, course count, delete with an in-page
+  confirmation, "＋ 과목" to create a course inside the group) containing course cards; top-level course cards; then 미분류 lectures.
+- Course cards are collapsible (header click / chevron / Enter): when collapsed show title, lecture count and digest summary badges only.
+  Collapse state is per device (localStorage `easy-study:collapsed`), plus "모두 접기 / 모두 펼치기".
+- Drag & drop with an accessible library (@dnd-kit/core + @dnd-kit/sortable): pointer, touch (press-and-hold ~200 ms so scrolling still
+  works) and keyboard sensors (Space/Enter pick up, arrows move, Space/Enter drop, Esc cancel) with screen-reader announcements in Korean.
+  - Lectures (`≡` handle): reorder inside a course, move to another course (single PATCH of the target course — the server removes it
+    from the old one), drop into 미분류 (PATCH of the source course without it).
+  - Courses (`≡` handle on the card header): reorder at the top level, move into/out of groups and between groups (PUT /api/layout).
+  - Groups (`≡` handle): reorder at the top level (PUT /api/layout).
+  - Dragging over a collapsed course/group for ~600 ms expands it; a clear insertion indicator shows where the item will land; optimistic
+    update with rollback + toast on server error; while a request is in flight further drops queue in order.
+  - Native file drops (uploading PDFs onto a course card) keep working alongside (they use HTML5 file drag events, not pointer drags).
+- The ▲▼ buttons are removed; "과목에서 빼기" moves into a small per-lecture "⋯" menu (together with "과목으로 이동 ▸" for keyboard-free
+  alternatives). Uncategorised lectures keep a "과목으로 이동" control.
+- Top-bar document picker: optgroup label "📁 <group> › <course>" for grouped courses, in layout order.
+- Replace window.confirm() in the library view with an in-page confirmation dialog (it does not work inside the upcoming desktop app).
