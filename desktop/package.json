@@ -1,0 +1,21 @@
+{
+  "name": "easy-study-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "easy-study desktop app (Tauri 2): starts the bundled server or connects to another computer's (DESIGN §19)",
+  "type": "module",
+  "easyStudy": {
+    "nodeVersion": "26.10.0"
+  },
+  "scripts": {
+    "tauri": "tauri",
+    "resources": "node scripts/prepare.mjs",
+    "icons": "node scripts/make-icons.mjs",
+    "dev": "node scripts/prepare.mjs && tauri dev",
+    "build": "node scripts/build.mjs",
+    "test": "node --test scripts/*.test.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.5"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "bundle": {
+    "targets": ["deb", "rpm", "appimage"],
+    "externalBin": ["../resources/bin/es-node"],
+    "resources": {
+      "../resources/node/": "node/",
+      "../resources/server/": "server/"
+    },
+    "linux": {
+      "deb": {
+        "depends": ["libatomic1", "libssl3"],
+        "recommends": ["fonts-noto-cjk", "fonts-noto-color-emoji", "xdg-utils"]
+      },
+      "rpm": {
+        "depends": ["libatomic", "openssl-libs"],
+        "recommends": ["xdg-utils"],
+        "compression": {
+          "type": "none"
+        }
+      }
+    }
+  }
+}

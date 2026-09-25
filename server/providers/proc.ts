@@ -11,6 +11,7 @@ import type { ChildProcess } from 'node:child_process';
 import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { INLINE_MAX_BYTES, INLINE_MAX_EDGE, inlinePathFor } from '../assets.ts';
+import { taskkillPath, trackChild } from '../children.ts';
 import { childProcessEnv } from '../config.ts';
 import type { ProviderAvailability } from './types.ts';
 
@@ -337,12 +338,16 @@ export function runJsonlProcess(opts: JsonlProcessOptions): Promise<JsonlProcess
 
     let child: ChildProcess;
     try {
-      child = spawn(opts.bin, opts.args, {
-        cwd: opts.cwd,
-        env: opts.env ?? childEnv(),
-        stdio: ['pipe', 'pipe', 'pipe'],
-        windowsHide: true,
-      });
+      // Registered until it exits: no way out of the server leaves a CLI running (server/children.ts).
+      child = trackChild(
+        spawn(opts.bin, opts.args, {
+          cwd: opts.cwd,
+          env: opts.env ?? childEnv(),
+          stdio: ['pipe', 'pipe', 'pipe'],
+          windowsHide: true,
+        }),
+        { tree: true },
+      );
     } catch (err) {
       reject(spawnError(opts.bin, err));
       return;
@@ -448,11 +453,7 @@ export type ExecFileLike = (
 const execFileQuiet: ExecFileLike = (file, args, options, callback) =>
   execFile(file, args, options, (err) => callback(err));
 
-/** taskkill.exe of the Windows system directory (not whatever `taskkill` the working directory offers). */
-export function taskkillPath(env: NodeJS.ProcessEnv = process.env): string {
-  const root = env.SystemRoot || env.SYSTEMROOT || env.windir;
-  return root ? path.win32.join(root, 'System32', 'taskkill.exe') : 'taskkill.exe';
-}
+export { taskkillPath };
 
 /**
  * First step of stopping a CLI (abort, or a failing event handler). POSIX: SIGTERM, so the CLI can clean
@@ -522,7 +523,7 @@ export interface VersionProbeOptions {
 export function probeVersion(opts: VersionProbeOptions): Promise<ProviderAvailability> {
   return new Promise<ProviderAvailability>((resolve) => {
     try {
-      execFile(
+      const probe = execFile(
         opts.bin,
         ['--version'],
         {
@@ -553,6 +554,7 @@ export function probeVersion(opts: VersionProbeOptions): Promise<ProviderAvailab
           resolve(version ? { available: true, version } : { available: true });
         },
       );
+      trackChild(probe);
     } catch (err) {
       // spawn throws synchronously for a .cmd/.bat without a shell (EINVAL).
       const problem = (err as NodeJS.ErrnoException).code === 'EINVAL' ? batchFileProblem(opts.bin) : '';

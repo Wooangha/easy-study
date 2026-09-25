@@ -18,7 +18,10 @@
     "serve:remote": "node --max-semi-space-size=2 dist-server/server/index.js --remote",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p web/tsconfig.json --noEmit && tsc -p web/tests/tsconfig.json --noEmit",
     "test": "node --test tests/*.test.ts web/tests/*.test.ts",
-    "sample": "uv run --with reportlab --with pillow python scripts/make_sample_pdf.py samples/sample-lecture.pdf"
+    "sample": "uv run --with reportlab --with pillow python scripts/make_sample_pdf.py samples/sample-lecture.pdf",
+    "desktop:dev": "node desktop/scripts/build.mjs --dev",
+    "desktop:build": "node desktop/scripts/build.mjs",
+    "desktop:test": "node --test desktop/scripts/*.test.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.128.0",

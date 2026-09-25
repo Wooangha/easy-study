@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "chooser",
+  "description": "The main window, and in it only the bundled chooser page (the app's own origin), may use IPC. The chooser calls nothing but the app's own commands (get_state, connect_local, connect_remote, pick_library, set_library, open_library), which Tauri allows for the app's own origin because there is no app ACL manifest and no capability has a `remote` key: so this grants no core or plugin permission at all. Pages served over http(s) — the local server's UI and other computers' servers — get no IPC, and in-app windows for links (labels page-N) match no capability.",
+  "windows": ["main"],
+  "permissions": []
+}

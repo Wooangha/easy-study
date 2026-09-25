@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>easy-study</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="chooser.css">
+</head>
+<body>
+<!-- The desktop app's own start page (DESIGN §19): the ONLY page with IPC. It picks where the easy-study
+     server runs; the server's pages (this computer or another one) get no IPC. -->
+<main>
+  <header class="brand">
+    <img src="icon.svg" alt="" width="48" height="48">
+    <div>
+      <h1>easy-study</h1>
+      <p class="sub">어디에서 공부할까요?</p>
+    </div>
+  </header>
+
+  <section id="status" class="status" role="status" aria-live="polite" hidden>
+    <p id="status-text"></p>
+    <details id="log" hidden>
+      <summary>서버 로그 (마지막 줄)</summary>
+      <pre id="log-tail"></pre>
+      <p class="hint">전체 로그: <code id="log-file"></code></p>
+    </details>
+  </section>
+
+  <form id="form" novalidate>
+    <fieldset>
+      <legend class="sr-only">연결 방식</legend>
+
+      <div class="option" data-mode="local">
+        <label class="option-head">
+          <input type="radio" name="mode" value="local" checked>
+          <span>
+            <b>이 컴퓨터에서 실행</b>
+            <span class="hint">앱이 이 컴퓨터에서 easy-study 서버를 실행해요. 강의 자료와 기록은 아래 라이브러리 폴더에 저장돼요.</span>
+          </span>
+        </label>
+        <div class="option-body" data-body>
+          <div class="library">
+            <span class="label">라이브러리</span>
+            <code id="library-path" class="path">…</code>
+            <span id="library-note" class="hint"></span>
+          </div>
+          <div class="buttons">
+            <button type="button" id="pick-library" class="secondary">라이브러리 폴더 선택…</button>
+            <button type="button" id="default-library" class="secondary" hidden>기본 위치로</button>
+            <button type="button" id="open-library" class="link">폴더 열기</button>
+          </div>
+          <div id="library-confirm" class="confirm" role="alertdialog" aria-labelledby="library-confirm-text" hidden>
+            <p id="library-confirm-text"></p>
+            <div class="buttons">
+              <button type="button" id="library-confirm-yes">이 폴더 쓰기</button>
+              <button type="button" id="library-confirm-no" class="secondary">취소</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="option" data-mode="remote">
+        <label class="option-head">
+          <input type="radio" name="mode" value="remote">
+          <span>
+            <b>다른 컴퓨터에 연결</b>
+            <span class="hint">다른 컴퓨터에서 원격 모드로 실행 중인 easy-study 서버에 접속해요.</span>
+          </span>
+        </label>
+        <div class="option-body" data-body>
+          <label class="field">
+            <span class="label">주소</span>
+            <input id="url" type="text" inputmode="url" placeholder="http://192.168.0.10:5180" autocomplete="off" autocapitalize="off" spellcheck="false">
+          </label>
+          <label class="field">
+            <span class="label">접속 코드</span>
+            <input id="code" type="password" placeholder="처음 연결할 때만 (예: k7qm2-x9fda-…)" autocomplete="off" autocapitalize="off" spellcheck="false">
+          </label>
+          <p class="hint">주소와 접속 코드는 그 컴퓨터에서 <code>npm run start:remote</code>를 실행한 터미널에 표시돼요. 로그인은 30일 동안 유지돼요.
+            http는 같은 네트워크(집·학교 Wi-Fi, Tailscale)에서만 쓸 수 있고, https는 이 컴퓨터가 신뢰하는 인증서(예: <code>tailscale serve</code>)여야 해요.</p>
+        </div>
+      </div>
+    </fieldset>
+
+    <div class="actions">
+      <label class="remember"><input type="checkbox" id="remember" checked> 다음에도 바로 연결</label>
+      <button type="submit" id="connect">연결</button>
+    </div>
+  </form>
+
+
+  <footer class="hint" id="footer">연결 대상은 나중에 메뉴 <b>연결 › 연결 대상 바꾸기…</b> (<kbd id="shortcut">Ctrl+Shift+K</kbd>)에서 바꿀 수 있어요.</footer>
+</main>
+<script src="chooser.js"></script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Merged into the app's Info.plist by Tauri. App Transport Security blocks plain http to dotted host
+       names (Tailscale MagicDNS names, nip.io) in WKWebView; another computer's easy-study server is often
+       reached exactly like that (DESIGN §19). IP addresses and .local names work without it. -->
+  <key>NSAppTransportSecurity</key>
+  <dict>
+    <key>NSAllowsArbitraryLoadsInWebContent</key>
+    <true/>
+  </dict>
+  <!-- macOS 15+: shown when the app first connects to another computer on this network. -->
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>다른 컴퓨터에서 실행 중인 easy-study 서버에 연결하려면 로컬 네트워크에 접근해야 해요.</string>
+</dict>
+</plist>

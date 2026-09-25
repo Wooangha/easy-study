@@ -332,6 +332,29 @@ describe('ingest of the sample deck', () => {
     assert.equal(resumed?.progress, 9);
     assert.equal((await fs.readdir(target.slidesDir)).length, 9);
   });
+
+  test('resumed documents waiting for their turn show progress 0, not the progress of the interrupted run', async () => {
+    const source = docPaths(meta.id);
+    const ids = ['stalled-aaa111', 'stalled-bbb222', 'stalled-ccc333'];
+    for (const [i, docId] of ids.entries()) {
+      const target = docPaths(docId);
+      await fs.mkdir(target.dir, { recursive: true });
+      await fs.copyFile(source.sourcePdf, target.sourcePdf);
+      const stale: DocMeta = { ...meta, id: docId, status: 'processing', progress: 5 + i, createdAt: new Date().toISOString() };
+      await fs.writeFile(target.docJson, JSON.stringify(stale));
+    }
+    const run = resumePendingIngests();
+    // One converts at a time; the others wait.
+    await waitFor(() => ids.some((id) => isIngestRunning(id)));
+    const waiting = ids.filter((id) => !isIngestRunning(id));
+    assert.equal(waiting.length, 2);
+    for (const id of waiting) {
+      const doc = await readStoredDoc(id);
+      if (doc?.status === 'processing') assert.equal(doc.progress, 0, `${id} waits at 0`);
+    }
+    await run;
+    for (const id of ids) assert.equal((await readStoredDoc(id))?.status, 'ready');
+  });
 });
 
 describe('ingest progress (PDF worker → doc.json)', () => {

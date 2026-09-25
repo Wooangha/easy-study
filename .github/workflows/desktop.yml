@@ -1,0 +1,233 @@
+# Desktop app (DESIGN §19): Tauri 2 shell + official Node runtime + the packed server, for macOS (arm64, x64),
+# Windows (x64) and Linux (x64, arm64). The repo's tests run first. Bundles are uploaded as workflow artifacts; a
+# `v*` tag also creates a DRAFT GitHub release with them. Unsigned by default (macOS ad-hoc signature, no
+# notarization; unsigned Windows installer): macOS signing and notarization turn on when the APPLE_* secrets exist.
+# (A secret that is not configured arrives as an empty variable; desktop/scripts/build.mjs drops empty APPLE_*
+# variables, which the Tauri CLI would otherwise take as the signing identity "" and as notarization credentials.)
+name: desktop
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - 'desktop/**'
+      - '.github/workflows/desktop.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # `secrets` cannot be used in `if:`; expose "is it configured" as plain env instead.
+  HAS_APPLE_CERT: ${{ secrets.APPLE_CERTIFICATE != '' }}
+
+jobs:
+  test:
+    name: repo tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run desktop:test # desktop/ configuration invariants (IPC only for the chooser, targets, bundles)
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64
+            runner: macos-latest # Apple silicon
+            target: aarch64-apple-darwin
+            smoke: true
+          - name: macos-x64
+            runner: macos-latest # cross-compiled on Apple silicon (runs under Rosetta)
+            target: x86_64-apple-darwin
+            smoke: false
+          - name: windows-x64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            smoke: true
+          - name: linux-x64
+            runner: ubuntu-22.04 # the oldest glibc we support; the AppImage bundles its libraries from here
+            target: x86_64-unknown-linux-gnu
+            smoke: true
+          - name: linux-arm64
+            runner: ubuntu-22.04-arm # native: ARM AppImages cannot be cross-built
+            target: aarch64-unknown-linux-gnu
+            smoke: true
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    env:
+      BUNDLE: desktop/src-tauri/target/${{ matrix.target }}/release/bundle
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            desktop/package-lock.json
+
+      # rustup comes with GitHub's runners: no third-party action that follows a branch (this job gets the
+      # APPLE_* secrets once they are configured).
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
+          key: ${{ matrix.target }}
+
+      - name: Linux build dependencies (v2.tauri.app/start/prerequisites; xdg-utils for the AppImage) + Xvfb
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev xdg-utils xvfb
+
+      - run: npm ci
+      - run: npm ci
+        working-directory: desktop
+
+      # web/dist + dist-server, then the official Node runtime (SHASUMS256-checked) and the packed server with
+      # production node_modules for THIS target (sharp's @img/sharp-<os>-<cpu>).
+      - name: Build and prepare resources
+        run: node desktop/scripts/prepare.mjs --target ${{ matrix.target }}
+
+      # macOS signing (optional). Nested Mach-O files in Resources must be signed BEFORE the bundle is: Tauri
+      # signs only the app binary and the bundle. Node's own signature carries get-task-allow, which
+      # notarization rejects, so it is re-signed with node.entitlements.
+      - name: Import signing certificate (macOS)
+        if: runner.os == 'macOS' && env.HAS_APPLE_CERT == 'true'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p ci build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p ci build.keychain
+          security import "$RUNNER_TEMP/cert.p12" -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k ci build.keychain
+          rm "$RUNNER_TEMP/cert.p12"
+      - name: Sign the bundled Node and native addons (macOS)
+        if: runner.os == 'macOS' && env.HAS_APPLE_CERT == 'true'
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          codesign --force --timestamp --options runtime --entitlements desktop/src-tauri/node.entitlements \
+            --sign "$APPLE_SIGNING_IDENTITY" desktop/resources/node/bin/node
+          find desktop/resources/server/node_modules \( -name '*.node' -o -name '*.dylib' \) -print0 |
+            xargs -0 codesign --force --timestamp --options runtime --sign "$APPLE_SIGNING_IDENTITY"
+
+      - name: tauri build
+        env: # empty when not configured: build.mjs drops empty APPLE_* variables (ad-hoc signature, no notarization)
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: node desktop/scripts/build.mjs --target ${{ matrix.target }} --skip-prepare
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: easy-study-${{ matrix.name }}
+          path: |
+            ${{ env.BUNDLE }}/dmg/*.dmg
+            ${{ env.BUNDLE }}/nsis/*.exe
+            ${{ env.BUNDLE }}/deb/*.deb
+            ${{ env.BUNDLE }}/rpm/*.rpm
+            ${{ env.BUNDLE }}/appimage/*.AppImage
+          if-no-files-found: error
+
+      # Smoke tests (EASY_STUDY_DESKTOP_SMOKE, src-tauri/src/main.rs): =chooser-local submits the chooser's own
+      # form (IPC, script, styles, connect_local), =1 starts the server the way a remembered choice does. The
+      # bundled server starts in desktop mode, its page renders, /api/health answers, the page has no IPC and a
+      # PDF uploads, converts and its slide images load; nothing is left running afterwards. The library is in a
+      # dot folder, like the Linux default (~/.local/share/…). No claude/codex CLI on the runners: that is fine.
+      - name: Smoke test (macOS)
+        if: matrix.smoke && runner.os == 'macOS'
+        run: |
+          app="$BUNDLE/macos/easy-study.app/Contents/MacOS/easy-study"
+          export EASY_STUDY_DESKTOP_HOME="$RUNNER_TEMP/es-home" EASY_STUDY_DESKTOP_LIBRARY="$RUNNER_TEMP/.es/library"
+          EASY_STUDY_DESKTOP_SMOKE=chooser-local EASY_STUDY_DESKTOP_SMOKE_TIMEOUT=180 "$app"
+          EASY_STUDY_DESKTOP_SMOKE=1 EASY_STUDY_DESKTOP_SMOKE_TIMEOUT=180 "$app"
+          sleep 1
+          ! pgrep -f 'dist-server/server/index.js'
+      - name: Smoke test (Linux, installed .deb)
+        if: matrix.smoke && runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y ./"$BUNDLE"/deb/*.deb
+          export EASY_STUDY_DESKTOP_HOME="$RUNNER_TEMP/es-home" EASY_STUDY_DESKTOP_LIBRARY="$RUNNER_TEMP/.es/library"
+          EASY_STUDY_DESKTOP_SMOKE=chooser-local EASY_STUDY_DESKTOP_SMOKE_TIMEOUT=180 xvfb-run -a easy-study
+          EASY_STUDY_DESKTOP_SMOKE=1 EASY_STUDY_DESKTOP_SMOKE_TIMEOUT=180 xvfb-run -a easy-study
+          sleep 1
+          ! pgrep -f 'dist-server/server/index.js'
+      # With FUSE the AppImage runs from /tmp/.mount_<name>…, a dot folder; extracted into one, it runs from the
+      # same kind of path without FUSE on the runner.
+      - name: Smoke test (Linux, AppImage from a dot folder)
+        if: matrix.smoke && runner.os == 'Linux'
+        run: |
+          appimage=$(find "$GITHUB_WORKSPACE/$BUNDLE/appimage" -name '*.AppImage' | head -n 1)
+          mkdir -p "$RUNNER_TEMP/.mount_easy-study" && cd "$RUNNER_TEMP/.mount_easy-study"
+          "$appimage" --appimage-extract >/dev/null
+          export EASY_STUDY_DESKTOP_HOME="$RUNNER_TEMP/es-home-appimage" EASY_STUDY_DESKTOP_LIBRARY="$RUNNER_TEMP/.es-appimage/library"
+          EASY_STUDY_DESKTOP_SMOKE=1 EASY_STUDY_DESKTOP_SMOKE_TIMEOUT=180 xvfb-run -a ./squashfs-root/AppRun
+          sleep 1
+          ! pgrep -f 'dist-server/server/index.js'
+      - name: Smoke test (Windows)
+        if: matrix.smoke && runner.os == 'Windows'
+        continue-on-error: true # not run on a real Windows machine yet
+        shell: pwsh
+        run: |
+          $exe = "desktop/src-tauri/target/${{ matrix.target }}/release/easy-study.exe"
+          $env:EASY_STUDY_DESKTOP_HOME = "$env:RUNNER_TEMP\es-home"
+          $env:EASY_STUDY_DESKTOP_LIBRARY = "$env:RUNNER_TEMP\.es\library"
+          foreach ($mode in @('chooser-local', '1')) {
+            $env:EASY_STUDY_DESKTOP_SMOKE = $mode
+            $env:EASY_STUDY_DESKTOP_SMOKE_TIMEOUT = '180'
+            $p = Start-Process -FilePath $exe -Wait -PassThru
+            Get-Content "$env:EASY_STUDY_DESKTOP_HOME\logs\shell.log" -Tail 8
+            if ($p.ExitCode -ne 0) { throw "smoke ($mode) exited with $($p.ExitCode)" }
+          }
+
+      - name: Rust unit tests
+        if: matrix.name == 'linux-x64'
+        run: cargo test --manifest-path desktop/src-tauri/Cargo.toml
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Every bundle kind comes in its own folder (dist/dmg, dist/nsis, dist/deb…): gh takes files, not folders.
+          mapfile -t files < <(find dist -type f | sort)
+          printf '%s\n' "${files[@]}"
+          gh release create "$GITHUB_REF_NAME" "${files[@]}" --repo "$GITHUB_REPOSITORY" --draft --generate-notes \
+            --title "easy-study $GITHUB_REF_NAME"

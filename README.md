@@ -96,6 +96,64 @@ Chrome/Edge는 **안전한 주소에서만** 설치를 허용해요.
 - 서버를 실행한 컴퓨터: `http://127.0.0.1:5180`에서 바로 설치돼요.
 - 다른 컴퓨터: `http://192.168.x.x:5180` 같은 일반 HTTP 주소에서는 설치 메뉴가 나오지 않아요. 위의 Tailscale(`https://….ts.net`)이나 인증서를 지정한 HTTPS 주소로 접속해서 설치하세요. Safari의 ‘Dock에 추가’는 HTTP 주소에서도 돼요.
 
+## 데스크톱 앱
+
+브라우저 없이 쓰는 설치형 앱이에요 (macOS·Windows·Linux, [Tauri 2](https://v2.tauri.app)). 서버 구조는 그대로이고, 앱을 켜면 둘 중 하나를 골라요.
+
+- **이 컴퓨터에서 실행**: 앱에 들어 있는 Node.js와 easy-study 서버를 앱이 직접 켜요. Node·npm을 따로 설치할 필요가 없어요. `claude`·`codex` CLI는 평소처럼 이 컴퓨터에 설치하고 로그인해 두세요. Finder·Dock·시작 메뉴에서 켜도 로그인 셸(`$SHELL -ilc`)의 PATH와 흔한 설치 위치(`~/.local/bin`, Homebrew, npm 전역 폴더 등)에서 찾아요.
+- **다른 컴퓨터에 연결**: 다른 컴퓨터에서 `npm run start:remote`로 켠 easy-study 서버([원격 모드](#다른-컴퓨터에서-쓰기-원격-모드))의 주소와 접속 코드를 넣어요. 로그인은 30일 동안 유지돼서 코드는 처음 한 번만 넣으면 돼요. (데스크톱 앱이 켠 서버는 그 컴퓨터에서만 열려서, 다른 컴퓨터에서는 연결할 수 없어요.)
+  - `http://`는 같은 네트워크(집·학교 Wi‑Fi, Tailscale의 `100.x` 주소나 `.ts.net` 이름)의 컴퓨터에만 연결해요. 인터넷을 거친다면 `https://`를 쓰세요.
+  - `https://`는 이 컴퓨터가 믿는 인증서만 돼요 (`tailscale serve`, `tailscale cert`, 루트 인증서를 설치한 mkcert). 자체 서명 인증서는 앱 창이 받아들이지 못해서, 연결하기 전에 앱이 확인하고 이유를 알려 줘요.
+  - macOS 15 이상에서는 같은 네트워크의 컴퓨터에 처음 연결할 때 ‘로컬 네트워크’ 접근을 허용할지 물어봐요. 허용하지 않았다면 **시스템 설정 › 개인정보 보호 및 보안 › 로컬 네트워크**에서 easy-study를 켜세요.
+
+‘다음에도 바로 연결’을 켜 두면 다음부터는 고른 화면이 바로 열려요. 연결 대상은 메뉴 **연결 › 연결 대상 바꾸기…**(macOS `⌘⇧K`, Windows·Linux `Ctrl+Shift+K`)에서 언제든 바꿀 수 있어요. 같은 메뉴에 ‘브라우저에서 열기’와 ‘라이브러리 폴더 열기’도 있어요. 다른 사이트로 가는 링크는 기본 브라우저에서 열리고, 노트·정리본 파일 링크는 앱 창으로 열려요.
+
+### 설치
+
+GitHub Releases(또는 Actions의 빌드 결과)에서 OS에 맞는 파일을 받으세요. 아직 코드 서명과 공증을 하지 않은 앱이라, 처음 열 때 OS가 한 번 막아요.
+
+- **macOS 13.5 이상** (Apple silicon `easy-study_<버전>_aarch64.dmg`, Intel `easy-study_<버전>_x64.dmg`): dmg를 열고 easy-study를 ‘응용 프로그램’으로 끌어다 놓아요. 처음 열 때 “확인되지 않은 개발자” 경고가 나오면 **시스템 설정 › 개인정보 보호 및 보안**에서 ‘그래도 열기’를 누르세요. 또는 터미널에서 `xattr -dr com.apple.quarantine /Applications/easy-study.app`.
+- **Windows 10/11** (`easy-study_<버전>_x64-setup.exe`): 관리자 권한 없이 내 사용자 계정에만 설치돼요. SmartScreen의 “Windows의 PC 보호” 창이 뜨면 ‘추가 정보’ → ‘실행’. WebView2 런타임이 없으면(Windows 10 일부) 설치하면서 받아요.
+- **Linux** (x86_64, arm64):
+  - Ubuntu 22.04 이상·Debian 12 이상: `sudo apt install ./easy-study_<버전>_amd64.deb` (WebKitGTK, `libatomic1` 등 필요한 패키지가 같이 설치되고, 한글 글꼴 `fonts-noto-cjk`도 권장 패키지로 설치돼요).
+  - Fedora: `sudo dnf install ./easy-study-<버전>-1.x86_64.rpm`.
+  - AppImage: `chmod +x easy-study_<버전>_amd64.AppImage` 후 실행 (FUSE가 필요해요. 없으면 `--appimage-extract-and-run`을 붙이세요). deb/rpm은 배포판의 WebKitGTK 보안 업데이트를 그대로 받으니 되도록 deb/rpm을 쓰세요.
+  - 창이 하얗게만 보이면(일부 NVIDIA 드라이버) `WEBKIT_DISABLE_DMABUF_RENDERER=1 easy-study`로 켜 보세요.
+
+### 데이터 위치
+
+‘이 컴퓨터에서 실행’의 라이브러리는 기본으로 앱 데이터 폴더에 있어요. 시작 화면의 **라이브러리 폴더 선택…**으로 이미 쓰던 폴더(예: 저장소의 `library/`)를 고를 수도 있어요. 다만 같은 폴더를 `npm start`로 켠 서버와 동시에 쓸 수는 없어요: 앱이 서버를 켜지 못하고 시작 화면에 이유(서버 로그의 마지막 줄)를 보여 줘요.
+
+| | 라이브러리 (기본) | 앱 설정 (`desktop.json`) | 로그 (`shell.log`, `server.log`) |
+|---|---|---|---|
+| macOS | `~/Library/Application Support/dev.easystudy.desktop/library` | `~/Library/Application Support/dev.easystudy.desktop` | `~/Library/Logs/dev.easystudy.desktop` |
+| Windows | `%LOCALAPPDATA%\dev.easystudy.desktop\library` | `%APPDATA%\dev.easystudy.desktop` | `%LOCALAPPDATA%\dev.easystudy.desktop\logs` |
+| Linux | `~/.local/share/dev.easystudy.desktop/library` | `~/.config/dev.easystudy.desktop` | `~/.local/share/dev.easystudy.desktop/logs` |
+
+앱의 서버는 `http://127.0.0.1:5350`(쓰고 있으면 5351–5359)에서 이 컴퓨터에만 열려요. 포트를 기억해 두기 때문에 화면 설정(마지막으로 본 강의 등)이 다음 실행에도 이어져요. 앱을 끄면(강제 종료나 충돌이어도) 서버와 그 서버가 띄운 CLI도 같이 꺼져요.
+
+### 직접 빌드하기
+
+필요한 것: Node.js 26, Rust (stable, `rustup`), 그리고 OS별 도구 — macOS는 Xcode Command Line Tools, Windows는 Visual Studio C++ Build Tools, Linux는 [Tauri의 패키지 목록](https://v2.tauri.app/start/prerequisites/)(`libwebkit2gtk-4.1-dev` 등)과 AppImage용 `xdg-utils`.
+
+```bash
+npm ci
+npm run desktop:build        # 이 컴퓨터용: macOS .app + .dmg, Windows NSIS 설치 파일, Linux .deb/.rpm/AppImage
+npm run desktop:build -- --target x86_64-apple-darwin   # Apple silicon Mac에서 Intel Mac용 (rustup target add x86_64-apple-darwin)
+npm run desktop:dev          # 개발용으로 바로 실행 (tauri dev)
+npm run desktop:test         # 앱 설정 검사 (IPC는 시작 화면에만, 대상별 번들 설정); 셸 자체는 desktop/src-tauri에서 cargo test
+```
+
+`desktop:build`는 저장소를 빌드하고(`npm run build`), 앱에 넣을 공식 Node.js(nodejs.org, SHA-256 확인, 버전은 `desktop/package.json`의 `easyStudy.nodeVersion`)와 그 대상 OS용 `node_modules`를 담은 서버를 `desktop/resources/`에 준비한 뒤 Tauri로 묶어요. 결과는 `desktop/src-tauri/target/<대상>/release/bundle/`에 나와요. Windows 설치 파일은 Windows에서, Linux 패키지는 Linux에서 빌드하세요. GitHub Actions(`.github/workflows/desktop.yml`)는 테스트를 먼저 돌린 뒤 macOS(arm64·x64)·Windows·Linux(x64·arm64)용을 모두 빌드하고, `v*` 태그를 올리면 초안(draft) 릴리스를 만들어요. `APPLE_*` 시크릿을 넣으면 macOS 앱을 서명·공증해요.
+
+시험용 환경 변수: `EASY_STUDY_DESKTOP_LIBRARY`(라이브러리 폴더 지정), `EASY_STUDY_DESKTOP_HOME`(설정·로그·기본 라이브러리를 다른 폴더에), `EASY_STUDY_DESKTOP_SMOKE`(확인한 뒤 앱이 스스로 종료해요. 결과는 `EASY_STUDY_DESKTOP_SMOKE`로 시작하는 줄과 종료 코드: 0 성공, 2 서버·연결 실패, 3 시간 초과(`EASY_STUDY_DESKTOP_SMOKE_TIMEOUT`, 기본 120초), 4 확인 실패, 5 실패 뒤에도 시작 화면이 ‘진행 중’에 멈춤).
+
+- `=1`: 서버를 바로 켜고, 화면이 뜨는지, `/api/health`가 답하는지, 서버 화면에 IPC가 없는지, 작은 PDF를 올려 변환하고 슬라이드 이미지를 받아지는지 확인해요 (올린 강의는 다시 지워요). `EASY_STUDY_DESKTOP_SMOKE_URL`/`_CODE`를 주면 그 서버에 연결해서 확인해요 (PDF는 올리지 않아요).
+- `=chooser`: 시작 화면만 확인해요 (IPC로 받은 라이브러리 경로, 스타일).
+- `=chooser-local`, `=chooser-remote`: 시작 화면의 양식을 채우고 ‘연결’을 눌러요. 버튼을 누를 때와 같은 길(IPC `connect_local`/`connect_remote`)로 연결한 뒤 `=1`과 같은 확인을 해요. `=chooser-remote`는 `EASY_STUDY_DESKTOP_SMOKE_URL`/`_CODE`를 써요. 실패는 시작 화면에 보이는 오류로 판단해요.
+
+앱을 시험할 때 알아 둘 것: 스모크 실행은 이미 켜진 easy-study에 넘기지 않고 따로 실행돼요. 하지만 보통 실행은 컴퓨터 전체에서 하나만 돼요(두 번째 실행은 켜진 창을 앞으로 가져오고 끝나요). WebView의 쿠키·저장소는 `EASY_STUDY_DESKTOP_HOME`과 상관없이 OS의 앱 폴더를 같이 써요. 그러니 앱 시험은 한 번에 하나씩 하세요. macOS에서 `CFFIXED_USER_HOME`으로 WebView 데이터를 옮기면 쿠키가 저장되지 않으니 로그인 유지 시험에는 쓰지 마세요. Linux에서 WebDriver(tauri-driver)로 시험하면 `target=_blank` 링크의 새 창이 열리지 않고, 시작 화면 스크린숏이 스크립트 실행 전 모습으로 찍혀요. 새 창과 화면 모습은 앱을 직접 실행해서 xdotool과 X 스크린숏으로 확인하세요. Docker 같은 곳에서 Linux 패키지를 빌드할 때는 `xdg-utils`도 설치하세요 (AppImage에 `xdg-open`이 들어가요). 구조와 계약은 [docs/DESIGN.md](docs/DESIGN.md) §19에 있어요.
+
 ## 동작 방식
 
 ### 1. 슬라이드 → 이미지

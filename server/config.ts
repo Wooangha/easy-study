@@ -54,6 +54,15 @@ export function fallbackFontProblem(env: NodeJS.ProcessEnv = process.env): strin
     : null;
 }
 
+/**
+ * Desktop mode (DESIGN §19): the server runs as the back end of the desktop app, whose shell starts it with
+ * EASY_STUDY_DESKTOP=1 (1 / true / on / yes; `--desktop` on the command line counts too). See server/desktop.ts.
+ */
+export function desktopMode(env: NodeJS.ProcessEnv = process.env, args: readonly string[] = process.argv.slice(2)): boolean {
+  const raw = env.EASY_STUDY_DESKTOP?.trim().toLowerCase() ?? '';
+  return ['1', 'true', 'on', 'yes'].includes(raw) || args.includes('--desktop');
+}
+
 /** HTTP port (PORT, default 5180). */
 export function port(): number {
   const raw = process.env.PORT?.trim();

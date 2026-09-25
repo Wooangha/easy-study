@@ -651,6 +651,12 @@ export function isIngestRunning(docId: string): boolean {
 /** Re-processes documents left in `processing` (e.g. the server stopped mid-ingest). */
 export async function resumePendingIngests(): Promise<void> {
   const pending = (await listStoredDocs()).filter((doc) => doc.status === 'processing');
+  // Every one starts over from the first page: show that while it waits, not the progress of the interrupted
+  // conversion (which would jump back when its turn comes).
+  for (const doc of pending) {
+    if (doc.progress === 0 || activeIngests.has(doc.id)) continue;
+    await updateMeta(doc.id, { progress: 0 }).catch(() => {}); // deleted meanwhile: skipped below
+  }
   // One at a time: rendering is CPU heavy and this runs while the server starts.
   for (const doc of pending) {
     // The list is a snapshot: the document may have been deleted meanwhile.

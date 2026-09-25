@@ -94,5 +94,33 @@ describe('compiled server (dist-server)', () => {
     }
     assert.equal(await exited, 0, stderr);
     await assert.rejects(fs.access(path.join(library, '.server.lock')), 'the lock is released on SIGTERM');
+
+    // The desktop app runs this compiled server in desktop mode (DESIGN §19): one ready line, stop on stdin EOF.
+    const desktop = spawn(process.execPath, ['--max-semi-space-size=2', entry], {
+      cwd: os.tmpdir(),
+      env: { ...process.env, EASY_STUDY_DESKTOP: '1', EASY_STUDY_LIBRARY: library, PORT: '0', EASY_STUDY_AUTO_DIGEST: '0' },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let desktopOut = '';
+    let desktopErr = '';
+    desktop.stdout.on('data', (chunk: Buffer) => (desktopOut += chunk.toString()));
+    desktop.stderr.on('data', (chunk: Buffer) => (desktopErr += chunk.toString()));
+    const desktopExited = new Promise<number | null>((resolve) => desktop.once('exit', resolve));
+    try {
+      const deadline = Date.now() + 20_000;
+      let ready: { url: string; port: number } | null = null;
+      while (!ready) {
+        const line = /^EASY_STUDY_READY (\{.*\})$/m.exec(desktopOut)?.[1];
+        if (line) ready = JSON.parse(line) as { url: string; port: number };
+        else if (Date.now() > deadline || desktop.exitCode !== null) assert.fail(`no ready line:\n${desktopOut}\n${desktopErr}`);
+        else await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      assert.equal(ready.url, `http://127.0.0.1:${ready.port}`);
+      assert.equal(((await (await fetch(`${ready.url}/api/health`)).json()) as { ok: boolean }).ok, true);
+    } finally {
+      desktop.stdin.end();
+    }
+    assert.equal(await desktopExited, 0, desktopErr);
+    await assert.rejects(fs.access(path.join(library, '.server.lock')), 'the lock is released on stdin EOF');
   });
 });

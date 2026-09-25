@@ -9,3 +9,10 @@ library/
 .claude/*.lock
 .claude/settings.local.json
 dist-server/
+
+# Desktop app (desktop/, DESIGN §19): generated resources (Node runtime, packed server, download cache),
+# Rust build output, the Tauri CLI, generated ACL schemas.
+desktop/resources/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+desktop/node_modules/

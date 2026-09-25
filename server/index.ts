@@ -2,6 +2,7 @@
 //
 //   node server/index.ts --dev          Express + Vite in middleware mode (HMR), TypeScript run directly
 //   node dist-server/server/index.js    production: the compiled server (npm run build) serving web/dist
+//   EASY_STUDY_DESKTOP=1 ...            desktop mode, started by the desktop app (DESIGN §19, server/desktop.ts)
 import { existsSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import http from 'node:http';
@@ -50,6 +51,7 @@ import {
   ConfigError,
   HttpError,
   autoDigestEnabled,
+  desktopMode,
   fallbackFontProblem,
   isLoopbackHost,
   isWildcardHost,
@@ -76,6 +78,7 @@ import {
   updateGroup,
   writeCourseMarkdown,
 } from './courses.ts';
+import { runDesktopServer } from './desktop.ts';
 import {
   abortAllDigests,
   abortDigest,
@@ -224,9 +227,24 @@ function jsonBody(req: Request): Record<string, unknown> {
   return typeof body === 'object' && body !== null && !Buffer.isBuffer(body) ? (body as Record<string, unknown>) : {};
 }
 
+/**
+ * res.sendFile(file) with the file's folder as `root`. Express's `send` refuses (404) every path with a segment
+ * that starts with a dot, but checks only the part below `root`: an absolute path alone would fail for a
+ * library or an install under a dot folder (the Linux desktop app's ~/.local/share/…, the AppImage's
+ * /tmp/.mount_…, a repository under ~/.projects).
+ */
+function sendFileFrom(
+  res: Response,
+  file: string,
+  options: Parameters<Response['sendFile']>[1],
+  callback: (err?: Error) => void,
+): void {
+  res.sendFile(path.basename(file), { ...options, root: path.dirname(file) }, callback);
+}
+
 function sendFile(res: Response, file: string, options: Parameters<Response['sendFile']>[1]): Promise<void> {
   return new Promise((resolve, reject) => {
-    res.sendFile(file, options ?? {}, (err) => (err ? reject(err) : resolve()));
+    sendFileFrom(res, file, options, (err) => (err ? reject(err) : resolve()));
   });
 }
 
@@ -740,8 +758,11 @@ function apiErrorHandler(err: unknown, req: Request, res: Response, _next: NextF
 // Web client
 // ---------------------------------------------------------------------------
 
-function mountProductionClient(app: express.Express, log: boolean): void {
-  const dist = webDistDir();
+/**
+ * Serves the production build of the web client (`dist`, default web/dist) with the SPA fallback, and ends
+ * with the error handler of everything outside /api (plain text, never a stack trace or a path).
+ */
+export function mountProductionClient(app: express.Express, log: boolean, dist = webDistDir()): void {
   const indexHtml = path.join(dist, 'index.html');
   if (!existsSync(indexHtml)) {
     if (log) {
@@ -756,6 +777,7 @@ function mountProductionClient(app: express.Express, log: boolean): void {
         .type('text/plain; charset=utf-8')
         .send('웹 클라이언트가 빌드되지 않았습니다 (web/dist 없음).\n`npm start` 또는 `npm run dev` 로 실행하세요.\n');
     });
+    app.use(clientErrorHandler);
     return;
   }
   // Vite emits content-hashed file names under assets/.
@@ -765,8 +787,32 @@ function mountProductionClient(app: express.Express, log: boolean): void {
   app.use((req, res, next) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') return next();
     res.set('Cache-Control', 'no-cache');
-    res.sendFile(indexHtml);
+    sendFileFrom(res, indexHtml, {}, (err) => {
+      if (err && !res.headersSent) next(err);
+      else if (err) warnTransfer(req, err);
+    });
   });
+  app.use(clientErrorHandler);
+}
+
+/**
+ * The last error handler outside /api (the API has its own, JSON). Express's default one would show the stack
+ * trace, with the absolute paths of the install, unless NODE_ENV=production.
+ */
+function clientErrorHandler(err: unknown, req: Request, res: Response, _next: NextFunction): void {
+  const fields = (typeof err === 'object' && err !== null ? err : {}) as { status?: unknown; statusCode?: unknown };
+  const candidate = fields.status ?? fields.statusCode;
+  const status = typeof candidate === 'number' && candidate >= 400 && candidate < 600 ? candidate : 500;
+  if (status >= 500) console.error(`[http] ${req.method} ${req.originalUrl} failed:`, err);
+  if (res.headersSent) {
+    res.end();
+    return;
+  }
+  res
+    .status(status)
+    .set('Cache-Control', 'no-store')
+    .type('text/plain; charset=utf-8')
+    .send(status === 404 ? '페이지를 찾을 수 없습니다.\n' : status < 500 ? '요청을 처리할 수 없습니다.\n' : '서버 오류가 발생했습니다.\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -1024,6 +1070,11 @@ function libraryLockedMessage(err: LibraryLockedError, dev: boolean): string {
  */
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
+  // The desktop app's server (DESIGN §19): ready line, stop on stdin EOF, errors for the app (server/desktop.ts).
+  if (desktopMode(process.env, args)) {
+    await runDesktopServer(startServer);
+    return;
+  }
   const dev = args.includes('--dev');
   const remote = args.includes('--remote');
   // node --watch (npm run dev) starts the server again after every change with the same flags: a reset

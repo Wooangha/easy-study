@@ -746,14 +746,18 @@ Layout: `desktop/` — `package.json` (@tauri-apps/cli 2.x), `ui/` (the chooser 
 (official nodejs.org binary per target, SHASUMS256 verified; never Homebrew's node), `scripts/pack-server.mjs` (dist-server + web/dist +
 production node_modules for the target os/cpu via `npm ci --omit=dev --os --cpu`, dropping sharp-wasm32/@emnapi), `resources/` (generated,
 git-ignored), `src-tauri/` (Cargo.toml, build.rs, tauri.conf.json, Info.plist with NSAllowsArbitraryLoadsInWebContent, node.entitlements,
-capabilities/chooser.json with NO `remote` key, icons from web/public icon, src/main.rs), `.github/workflows/desktop.yml`.
+capabilities/chooser.json with NO `remote` key and no permissions (the chooser calls only the app's own commands), icons from the
+web/public icon, src/main.rs), `.github/workflows/desktop.yml`.
 
 Server "desktop mode" (`EASY_STUDY_DESKTOP=1`, set only by the shell):
 - after listening, print exactly one machine-readable line `EASY_STUDY_READY {"url":"http://127.0.0.1:<port>","port":<port>}` on stdout;
 - exit gracefully on stdin EOF (the shell keeps a pipe; this covers app crash/kill on every OS), plus the existing SIGTERM path;
 - library dir comes from `EASY_STUDY_LIBRARY` (the shell passes `<app data dir>/library` unless the user picked another folder);
 - errors before listening (e.g. library locked by `npm start`) are printed on stderr in Korean and the process exits non-zero — the
-  shell shows the stderr tail in the chooser.
+  shell shows the stderr tail in the chooser;
+- the library and the install may sit under dot folders (Linux ~/.local/share/…, the AppImage's /tmp/.mount_…): files are sent
+  relative to their own folder (Express refuses any dot segment of an absolute path), and errors outside /api are plain text
+  without stack traces or paths.
 
 Shell (Rust, src/main.rs):
 - single instance (focus the existing window); stable local port remembered in the app config (not 5180; fall back to a free port) so
@@ -762,11 +766,16 @@ Shell (Rust, src/main.rs):
   background, plus known install dirs (~/.local/bin, ~/.claude/local, /opt/homebrew/bin, /usr/local/bin, ~/.npm-global/bin, npm prefix
   bin, Linuxbrew) — Finder/desktop launches otherwise miss claude/codex; Windows inherits PATH from Explorer;
 - child lifecycle: POSIX process group + PR_SET_PDEATHSIG (Linux), Windows Job Object KILL_ON_JOB_CLOSE + CREATE_NO_WINDOW, SIGTERM/
-  SIGINT/SIGHUP handler that calls app.exit(0); on exit close stdin and wait briefly; strip AppImage variables from the child env;
+  SIGINT/SIGHUP handler that calls app.exit(0); on exit close stdin and wait briefly; strip AppImage variables from the child env
+  and from the login shell's;
 - windows: main window created in code; chooser at the bundled `ui/` (IPC allowed only there); the server page (local or remote) gets no
   IPC; on_new_window: same-origin → in-app window, other → system browser (tauri-plugin-opener); drag-drop handler disabled so the
-  page's own PDF drop upload works; remote URL validated (http on LAN/.local/IP, https only with a certificate the OS trusts — probe
-  before navigating and explain failures); "다음에도 바로 연결" remembers the choice; a menu item / shortcut to return to the chooser;
+  page's own PDF drop upload works; downloads are refused (the web client has none); remote URL validated (http on
+  LAN/.local/IP, https only with a certificate the OS trusts — probe before navigating and explain failures); "다음에도 바로 연결"
+  remembers the choice; a menu item / shortcut to return to the chooser;
+- smoke hooks for CI (`EASY_STUDY_DESKTOP_SMOKE=1|chooser|chooser-local|chooser-remote`, README): never handed over to a running
+  instance; the local ones also upload a one-page PDF and load its slide images; a failure shown by the chooser must leave it
+  usable;
 - library location: default app data dir; the chooser offers "라이브러리 폴더 선택…" (tauri-plugin-dialog) to use an existing folder
   such as the repo's library/ (the single-instance lock prevents running together with `npm start` on the same folder).
 

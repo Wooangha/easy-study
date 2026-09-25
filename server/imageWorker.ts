@@ -36,6 +36,7 @@ import {
   thumbPath,
   viewPath,
 } from './assets.ts';
+import { trackChild } from './children.ts';
 import { childProcessEnv } from './config.ts';
 import { TEXT_ENGINE, TEXT_ENGINE_FILE, slideFileName, textFileName } from './pageNames.ts';
 import type { PdfDocument, PdfPage } from './pdf.ts';
@@ -191,15 +192,18 @@ interface WorkerProcess {
  * names the worker in error messages ("image worker", "PDF worker").
  */
 function forkWorker(job: ImageJob | PdfJob | TextJob, label: string, options: ImageWorkerOptions, onMessage: (message: ChildMessage) => void): WorkerProcess {
-  const child = fork(imageWorkerPath(), [], {
-    execPath: process.execPath,
-    // Never inherit the server's own flags (--test, --watch-path, --inspect, ...).
-    execArgv: [],
-    stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
-    serialization: 'json',
-    windowsHide: true,
-    env: workerEnv(),
-  });
+  // Registered until it exits: no way out of the server leaves a worker running (server/children.ts).
+  const child = trackChild(
+    fork(imageWorkerPath(), [], {
+      execPath: process.execPath,
+      // Never inherit the server's own flags (--test, --watch-path, --inspect, ...).
+      execArgv: [],
+      stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+      serialization: 'json',
+      windowsHide: true,
+      env: workerEnv(),
+    }),
+  );
   let killed = false;
   const kill = () => {
     killed = true;
