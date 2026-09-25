@@ -734,3 +734,45 @@ that no longer exists, rolls the move back with a toast. The client also reloads
   alternatives). Uncategorised lectures keep a "과목으로 이동" control.
 - Top-bar document picker: optgroup label "📁 <group> › <course>" for grouped courses, in layout order.
 - Replace window.confirm() in the library view with an in-page confirmation dialog (it does not work inside the upcoming desktop app).
+
+## 19. Round 8 — desktop app (Tauri 2) for macOS, Windows and Linux
+
+User decision: a real installable app (no browser) for macOS, Windows and Linux that keeps the server architecture: the app either
+starts a bundled copy of this server ("이 컴퓨터") or connects to an easy-study server on another computer ("다른 컴퓨터": URL +
+access code, §16). Based on three verified spikes (macOS shell, Linux shell in Docker, PDF engine) whose reports live in the session
+scratchpad (`desktop/spikes-mac-pdf.json` key `shell`, `desktop/spike-linux.json`); the recipe and pitfalls there are normative.
+
+Layout: `desktop/` — `package.json` (@tauri-apps/cli 2.x), `ui/` (the chooser page: the ONLY origin with IPC), `scripts/fetch-node.mjs`
+(official nodejs.org binary per target, SHASUMS256 verified; never Homebrew's node), `scripts/pack-server.mjs` (dist-server + web/dist +
+production node_modules for the target os/cpu via `npm ci --omit=dev --os --cpu`, dropping sharp-wasm32/@emnapi), `resources/` (generated,
+git-ignored), `src-tauri/` (Cargo.toml, build.rs, tauri.conf.json, Info.plist with NSAllowsArbitraryLoadsInWebContent, node.entitlements,
+capabilities/chooser.json with NO `remote` key, icons from web/public icon, src/main.rs), `.github/workflows/desktop.yml`.
+
+Server "desktop mode" (`EASY_STUDY_DESKTOP=1`, set only by the shell):
+- after listening, print exactly one machine-readable line `EASY_STUDY_READY {"url":"http://127.0.0.1:<port>","port":<port>}` on stdout;
+- exit gracefully on stdin EOF (the shell keeps a pipe; this covers app crash/kill on every OS), plus the existing SIGTERM path;
+- library dir comes from `EASY_STUDY_LIBRARY` (the shell passes `<app data dir>/library` unless the user picked another folder);
+- errors before listening (e.g. library locked by `npm start`) are printed on stderr in Korean and the process exits non-zero — the
+  shell shows the stderr tail in the chooser.
+
+Shell (Rust, src/main.rs):
+- single instance (focus the existing window); stable local port remembered in the app config (not 5180; fall back to a free port) so
+  the origin — and with it localStorage/cookies — stays the same between launches;
+- PATH for the server = cached PATH from the previous launch immediately, refreshed from `$SHELL -ilc` (marker lines, 3 s timeout) in the
+  background, plus known install dirs (~/.local/bin, ~/.claude/local, /opt/homebrew/bin, /usr/local/bin, ~/.npm-global/bin, npm prefix
+  bin, Linuxbrew) — Finder/desktop launches otherwise miss claude/codex; Windows inherits PATH from Explorer;
+- child lifecycle: POSIX process group + PR_SET_PDEATHSIG (Linux), Windows Job Object KILL_ON_JOB_CLOSE + CREATE_NO_WINDOW, SIGTERM/
+  SIGINT/SIGHUP handler that calls app.exit(0); on exit close stdin and wait briefly; strip AppImage variables from the child env;
+- windows: main window created in code; chooser at the bundled `ui/` (IPC allowed only there); the server page (local or remote) gets no
+  IPC; on_new_window: same-origin → in-app window, other → system browser (tauri-plugin-opener); drag-drop handler disabled so the
+  page's own PDF drop upload works; remote URL validated (http on LAN/.local/IP, https only with a certificate the OS trusts — probe
+  before navigating and explain failures); "다음에도 바로 연결" remembers the choice; a menu item / shortcut to return to the chooser;
+- library location: default app data dir; the chooser offers "라이브러리 폴더 선택…" (tauri-plugin-dialog) to use an existing folder
+  such as the repo's library/ (the single-instance lock prevents running together with `npm start` on the same folder).
+
+Packaging: macOS .app/.dmg (arm64 and x64, ad-hoc signed `signingIdentity "-"`; notarization later), Windows NSIS (currentUser,
+WebView2 bootstrapper), Linux .deb (Depends += libatomic1; Recommends fonts-noto-cjk) + .rpm (compression none or skip if slow) +
+AppImage (secondary). Node ships as a resource (macOS/Windows) or externalBin `es-node` (Linux) per the spike findings.
+CI (`.github/workflows/desktop.yml`): build on macos-latest (arm64 + x64), windows-latest, ubuntu-22.04 and ubuntu-22.04-arm; run the
+repo tests first; upload artifacts; on a `v*` tag create a draft GitHub release. (There is no GitHub remote yet: the workflow file is
+added now and runs once a repository exists.)
