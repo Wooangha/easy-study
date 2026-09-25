@@ -32,6 +32,9 @@ describe('compiled server (dist-server)', () => {
     const source = await fs.readFile(entry, 'utf8');
     assert.doesNotMatch(source, /from '\.[^']*\.ts'/, 'relative imports point at .js files');
     await fs.access(path.join(outDir, 'server', 'imageWorker.js'));
+    // The PDF engine is compiled too, and the worker imports it as JavaScript (DESIGN §17).
+    await fs.access(path.join(outDir, 'server', 'pdf.js'));
+    assert.match(await fs.readFile(path.join(outDir, 'server', 'imageWorker.js'), 'utf8'), /import\('\.\/pdf\.js'\)/);
     await fs.access(path.join(outDir, 'shared', 'types.js'));
 
     const child = spawn(process.execPath, ['--max-semi-space-size=2', entry], {

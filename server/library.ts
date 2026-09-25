@@ -1,17 +1,19 @@
-// The on-disk library: PDF import, the background ingest pipeline (poppler + the image worker),
+// The on-disk library: PDF import, the background ingest pipeline (the PDF and image workers),
 // document metadata, read access to course and digest files, and a few filesystem helpers
 // shared with sessions.ts / courses.ts / digest.ts.
 //
-// Layout (docs/DESIGN.md §2, §11, §12, §15):
+// Layout (docs/DESIGN.md §2, §11, §12, §15, §17):
 //   library/<docId>/doc.json, source.pdf, slides/NNN.png, sheets/sheet-NN.png, sheets/sheets.json,
-//   text/NNN.txt, sessions/<sid>.json, notes/<sid>.md, STUDY_NOTES.md,
+//   text/NNN.txt, text/.engine, sessions/<sid>.json, notes/<sid>.md, STUDY_NOTES.md,
 //   digest/digest.json, DIGEST.md,
 //   view/NNN-<w>.webp, thumbs/NNN.webp, inline/<dir>-<name>.jpg (derived images, server/assets.ts)
 //   library/courses/<courseId>/course.json, COURSE.md
 //
-// All image work (contact sheets, derived images) runs in the image worker (server/imageWorker.ts), a
-// short-lived child process: this module never loads sharp. Documents converted before the derived
-// images existed get them from a background backfill, one document at a time.
+// The PDF (PDFium-wasm, server/pdf.ts) and all image work (contact sheets, derived images) run in the worker
+// of server/imageWorker.ts, a short-lived child process: this module never loads PDFium or sharp. Documents
+// converted by an older version are brought up to date by a background backfill, one document at a time:
+// their text is extracted again when poppler or an earlier extraction wrote it (§17), and missing derived images
+// are written (§15).
 //
 // Course and digest files are *read* here (DocMeta.courseId / digestStatus and DocAssets are derived
 // from them) but written only by courses.ts and digest.ts, which import this module — never the
@@ -19,45 +21,22 @@
 //
 // Also: deleting a document / retrying a failed ingest (DESIGN §14), and the single-instance lock
 // library/.server.lock that keeps a second server away from a library another one is using.
-import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { readFileSync, unlinkSync } from 'node:fs';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { COURSE_ID_RE, DOC_ID_RE } from '../shared/types.ts';
 import type { DigestSlide, DigestStatus, DocMeta } from '../shared/types.ts';
 import { VIEW_WIDTHS, inlinePathFor, thumbPath, viewPath } from './assets.ts';
-import { HttpError, childProcessEnv, libraryDir } from './config.ts';
-import { isImageWorkerStopped, runImageWorker } from './imageWorker.ts';
-import type { ImageJob, ImageWorkerOptions, ImageWorkerRun, SheetEntry } from './imageWorker.ts';
+import { HttpError, libraryDir } from './config.ts';
+import { isImageWorkerStopped, runImageWorker, runPdfWorker, runTextWorker } from './imageWorker.ts';
+import type { ImageJob, ImageWorkerOptions, ImageWorkerRun, PdfInfo, PdfWorkerHandlers, SheetEntry } from './imageWorker.ts';
+import { TEXT_ENGINE, TEXT_ENGINE_FILE, slideFileName, textFileName } from './pageNames.ts';
 import type { CourseContext, CourseLectureRef, CourseRecord, DigestRecord, DocAssets } from './internal-types.ts';
 
 export type { SheetEntry } from './imageWorker.ts';
-
-/**
- * Why an import failed when pdftoppm/pdftotext/pdfinfo cannot be found, with the install command of the
- * platform's usual package manager.
- */
-export function popplerMissingMessage(platform: NodeJS.Platform = process.platform): string {
-  switch (platform) {
-    case 'darwin':
-      return 'poppler is not installed (brew install poppler)';
-    case 'linux':
-      return (
-        'poppler is not installed (Debian/Ubuntu: sudo apt install poppler-utils · Fedora: sudo dnf install poppler-utils · ' +
-        'Arch: sudo pacman -S poppler)'
-      );
-    case 'win32':
-      return (
-        'poppler is not installed (winget install oschwartz10612.Poppler, or scoop install poppler; ' +
-        'then open a new terminal so pdftoppm.exe is on PATH)'
-      );
-    default:
-      return 'poppler is not installed (install the poppler utilities: pdftoppm, pdftotext, pdfinfo)';
-  }
-}
-
-export const POPPLER_MISSING_MESSAGE = popplerMissingMessage();
+export { slideFileName, textFileName } from './pageNames.ts';
 
 const RENDER_LONG_EDGE = 1600;
 const PROGRESS_POLL_MS = 400;
@@ -149,21 +128,6 @@ export function coursePaths(courseId: string): CoursePaths {
   if (!COURSE_ID_RE.test(courseId)) throw new HttpError(404, '과목을 찾을 수 없습니다');
   const dir = path.join(coursesDir(), courseId);
   return { dir, courseJson: path.join(dir, 'course.json'), courseMd: path.join(dir, 'COURSE.md') };
-}
-
-/** 1-based page number, zero padded to 3 digits (more when the deck has > 999 pages). */
-function pageBaseName(n: number, pageCount: number): string {
-  return String(n).padStart(Math.max(3, String(pageCount).length), '0');
-}
-
-/** File name of a rendered slide, e.g. `007.png`. */
-export function slideFileName(n: number, pageCount: number): string {
-  return `${pageBaseName(n, pageCount)}.png`;
-}
-
-/** File name of a slide's extracted text, e.g. `007.txt`. */
-export function textFileName(n: number, pageCount: number): string {
-  return `${pageBaseName(n, pageCount)}.txt`;
 }
 
 // ---------------------------------------------------------------------------
@@ -266,67 +230,6 @@ export function createKeyedQueue(): KeyedQueue {
     });
     return result;
   };
-}
-
-// ---------------------------------------------------------------------------
-// Poppler
-// ---------------------------------------------------------------------------
-
-interface ToolResult {
-  stdout: Buffer;
-  stderr: string;
-}
-
-/**
- * Environment of the poppler tools (they parse untrusted PDFs): without the server's secrets
- * (config.ts childProcessEnv), and on macOS with the usual Homebrew locations appended to PATH
- * (GUI-launched shells often lack them).
- */
-export function toolEnv(): NodeJS.ProcessEnv {
-  const env = childProcessEnv();
-  if (process.platform !== 'darwin') return env;
-  const dirs = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean);
-  for (const extra of ['/opt/homebrew/bin', '/usr/local/bin']) {
-    if (!dirs.includes(extra)) dirs.push(extra);
-  }
-  return { ...env, PATH: dirs.join(path.delimiter) };
-}
-
-function lastLine(text: string): string {
-  const lines = text.trim().split('\n').filter((line) => line.trim() !== '');
-  return lines.at(-1)?.trim() ?? '';
-}
-
-/**
- * Runs a poppler command line tool (argument array, never a shell). A missing binary rejects
- * with POPPLER_MISSING_MESSAGE; a non-zero exit rejects with the last stderr line.
- */
-export function runPoppler(tool: string, args: string[]): Promise<ToolResult> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(tool, args, { env: toolEnv(), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
-    const stdout: Buffer[] = [];
-    let stderr = '';
-    let settled = false;
-    child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
-    child.stderr.on('data', (chunk: Buffer) => {
-      stderr = (stderr + chunk.toString('utf8')).slice(-8192);
-    });
-    child.on('error', (err) => {
-      if (settled) return;
-      settled = true;
-      reject(isErrnoException(err) && err.code === 'ENOENT' ? new Error(POPPLER_MISSING_MESSAGE) : err);
-    });
-    child.on('close', (code, signal) => {
-      if (settled) return;
-      settled = true;
-      if (code === 0) {
-        resolve({ stdout: Buffer.concat(stdout), stderr });
-      } else {
-        const detail = lastLine(stderr) || (signal ? `killed by ${signal}` : `exit code ${code}`);
-        reject(new Error(`${tool} failed: ${detail}`));
-      }
-    });
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -711,7 +614,7 @@ export async function importPdf(bytes: Buffer, fileName: string): Promise<DocMet
     title,
     fileName: name,
     pageCount: 0,
-    aspectRatio: 16 / 9, // placeholder until pdfinfo has run
+    aspectRatio: 16 / 9, // placeholder until the PDF worker has opened the PDF
     status: 'processing',
     progress: 0,
     createdAt: new Date().toISOString(),
@@ -758,7 +661,7 @@ export async function resumePendingIngests(): Promise<void> {
 }
 
 /**
- * Converts a document whose conversion failed (status 'error') again, e.g. after installing poppler
+ * Converts a document whose conversion failed (status 'error') again, e.g. after replacing a broken source.pdf
  * (POST /api/docs/:docId/retry). Resolves with the document in status 'processing'; the ingest runs in
  * the background. Throws 404 (unknown document) or 409 (not in status 'error').
  */
@@ -840,12 +743,98 @@ function slideFileNames(pageCount: number): string[] {
   return Array.from({ length: pageCount }, (_, i) => slideFileName(i + 1, pageCount));
 }
 
+/** Releases a slot of createSlots(); calling it again does nothing. */
+export type SlotRelease = () => void;
+
+export interface Slots {
+  /**
+   * Resolves with the release function once one of the `limit` slots is free (first come, first served), or
+   * with null when cancelWaiting() turned the waiting caller away.
+   */
+  acquire(): Promise<SlotRelease | null>;
+  /** Turns away every caller still waiting (shutdown); slots already held are not affected. */
+  cancelWaiting(): void;
+  /** Slots held, and callers waiting for one. */
+  load(): { running: number; waiting: number };
+}
+
+/** A counting semaphore: at most `limit` holders, the others wait in FIFO order. */
+export function createSlots(limit: number): Slots {
+  let running = 0;
+  const waiting: ((release: SlotRelease | null) => void)[] = [];
+  const releaser = (): SlotRelease => {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      // Handed straight to the next waiter: the count stays, and nobody can overtake it in between.
+      const next = waiting.shift();
+      if (next) next(releaser());
+      else running--;
+    };
+  };
+  return {
+    acquire() {
+      if (running < limit) {
+        running++;
+        return Promise.resolve(releaser());
+      }
+      return new Promise((resolve) => waiting.push(resolve));
+    },
+    cancelWaiting() {
+      for (const resolve of waiting.splice(0)) resolve(null);
+    },
+    load: () => ({ running, waiting: waiting.length }),
+  };
+}
+
+/**
+ * How many ingests run their workers at once (DESIGN §3, §17): half the CPU threads, 2 to 4. An ingest holds its
+ * slot from the PDF worker through the image worker's derived files, so at most this many worker processes
+ * convert at a time (each ~150-300 MB RSS: PDFium's heap, then sharp) however many PDFs one upload drops; the
+ * others wait in 'processing' at progress 0. 16 lecture PDFs dropped together: 2.4 GB of workers at the peak
+ * without a limit, 0.7 GB with 4 slots (26 s instead of 20 s; poppler's pipeline: 1.7 GB, 38 s).
+ */
+export const MAX_INGEST_WORKERS = Math.max(2, Math.min(4, Math.floor(os.availableParallelism() / 2)));
+const ingestSlots = createSlots(MAX_INGEST_WORKERS);
+
+/** Ingests holding a worker slot, ingests waiting for one, and worker processes running (tests). */
+export function ingestLoad(): { running: number; waiting: number; workers: number } {
+  return { ...ingestSlots.load(), workers: imageRuns.size };
+}
+
 async function ingest(docId: string): Promise<void> {
-  const paths = docPaths(docId);
-  let images: ImageWorkerRun | null = null;
   try {
     // First (retryIngest waits for this write): mark the document as being converted.
     await updateMeta(docId, { status: 'processing', progress: 0, error: undefined });
+  } catch (err) {
+    await recordIngestFailure(docId, err);
+    return;
+  }
+  // Then wait for a worker slot (MAX_INGEST_WORKERS). Turned away at shutdown, the document stays 'processing'
+  // and is converted on the next start (resumePendingIngests).
+  const release = await ingestSlots.acquire();
+  if (!release) return;
+  try {
+    await convert(docId);
+  } finally {
+    release();
+  }
+}
+
+async function recordIngestFailure(docId: string, err: unknown): Promise<void> {
+  const message = err instanceof Error ? err.message : String(err);
+  console.error(`[library] ingest of ${docId} failed: ${message}`);
+  await updateMeta(docId, { status: 'error', error: message }).catch((writeErr: unknown) => {
+    console.error(`[library] could not record the failure of ${docId}:`, writeErr);
+  });
+}
+
+/** The ingest's work once it holds a worker slot: the PDF worker, then the image worker. */
+async function convert(docId: string): Promise<void> {
+  const paths = docPaths(docId);
+  let images: ImageWorkerRun | null = null;
+  try {
     // A backfill of the previous rendering must not write into the new one.
     await stopImageRun(docId);
     // Start from a clean slate: a resumed ingest may have left partial output behind, and derived images
@@ -855,14 +844,11 @@ async function ingest(docId: string): Promise<void> {
     }
     for (const dir of [paths.slidesDir, paths.textDir]) await mkdirWithRetry(dir);
 
-    const info = await readPdfInfo(paths.sourcePdf);
-    await updateMeta(docId, { pageCount: info.pageCount, aspectRatio: info.aspectRatio });
-
-    await renderSlides(docId, paths, info.pageCount);
+    // Page count, slides/NNN.png and text/NNN.txt in one PDF worker run (PDFium-wasm, server/pdf.ts).
+    const info = await renderPdf(docId, paths);
     // The rendered image is authoritative (it accounts for rotation, crop boxes, ...).
     const aspectRatio = await pngAspectRatio(path.join(paths.slidesDir, slideFileName(1, info.pageCount)), info.aspectRatio);
 
-    await extractTexts(paths, info.pageCount);
     // Contact sheets (required for 'ready'), then the derived images, in one worker process.
     images = startImageRun(docId, { docDir: paths.dir, slides: slideFileNames(info.pageCount), sheets: { aspectRatio }, derived: true });
     await images.sheets;
@@ -872,11 +858,7 @@ async function ingest(docId: string): Promise<void> {
     console.log(`[library] ${docId}: ready (${info.pageCount} slides)`);
   } catch (err) {
     images?.kill();
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`[library] ingest of ${docId} failed: ${message}`);
-    await updateMeta(docId, { status: 'error', error: message }).catch((writeErr: unknown) => {
-      console.error(`[library] could not record the failure of ${docId}:`, writeErr);
-    });
+    await recordIngestFailure(docId, err);
     return;
   }
 
@@ -891,27 +873,6 @@ async function ingest(docId: string): Promise<void> {
   } finally {
     derivingDocs.delete(docId);
   }
-}
-
-interface PdfInfo {
-  pageCount: number;
-  aspectRatio: number;
-}
-
-async function readPdfInfo(pdfPath: string): Promise<PdfInfo> {
-  const { stdout } = await runPoppler('pdfinfo', [pdfPath]);
-  const text = stdout.toString('utf8');
-  const pages = /^Pages:\s+(\d+)/m.exec(text);
-  const pageCount = pages ? Number(pages[1]) : 0;
-  if (!pageCount) throw new Error('could not read the page count of the PDF');
-
-  const size = /^Page size:\s+([\d.]+)\s+x\s+([\d.]+)/m.exec(text);
-  const rotation = /^Page rot:\s+(\d+)/m.exec(text);
-  let width = size ? Number(size[1]) : 0;
-  let height = size ? Number(size[2]) : 0;
-  if (rotation && Number(rotation[1]) % 180 === 90) [width, height] = [height, width];
-  const aspectRatio = width > 0 && height > 0 ? width / height : 4 / 3;
-  return { pageCount, aspectRatio };
 }
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -937,93 +898,56 @@ export async function pngAspectRatio(file: string, fallback: number): Promise<nu
 }
 
 /**
- * `pdftoppm -png -scale-to 1600 source.pdf slides/p`, then renames the outputs to `%03d.png`.
- * pdftoppm pads the page number depending on the page count (p-1 / p-01 / p-001), so outputs are
- * matched by number rather than by an expected name. Progress is reported while it runs.
+ * Decides which progress reports of the PDF worker reach doc.json: the first one at once, then at most one
+ * per `intervalMs`, and always the last page (a finished rendering never shows less than it did).
  */
-async function renderSlides(docId: string, paths: DocPaths, pageCount: number): Promise<void> {
-  const outputPattern = /^p-(\d+)\.png$/;
-  const countOutputs = async () =>
-    (await fs.readdir(paths.slidesDir).catch(() => [] as string[])).filter((name) => outputPattern.test(name)).length;
+export function progressThrottle(intervalMs: number, now: () => number = Date.now): (rendered: number, pageCount: number) => boolean {
+  let last = -Infinity;
+  return (rendered, pageCount) => {
+    const time = now();
+    if (rendered < pageCount && time - last < intervalMs) return false;
+    last = time;
+    return true;
+  };
+}
 
-  let lastProgress = 0;
-  let inFlight: Promise<void> | null = null;
-  const timer = setInterval(() => {
-    if (inFlight) return; // previous tick still running
-    inFlight = (async () => {
-      // The newest file may still be being written, so it does not count yet.
-      const progress = Math.min(pageCount, Math.max(0, (await countOutputs()) - 1));
-      if (progress > lastProgress) {
-        lastProgress = progress;
-        await updateMeta(docId, { progress });
-      }
-    })()
-      .catch(() => {})
-      .finally(() => {
-        inFlight = null;
-      });
-  }, PROGRESS_POLL_MS);
-
+/**
+ * Runs the PDF worker for a document (slides/NNN.png, text/NNN.txt, text/.engine): doc.json gets the page
+ * count and aspect ratio as soon as the PDF is open, then `progress` (slides written) at most every
+ * PROGRESS_POLL_MS. Registered like an image run, so a deletion or a new ingest stops it.
+ */
+async function renderPdf(docId: string, paths: DocPaths): Promise<PdfInfo> {
+  let metaWrites: Promise<unknown> = Promise.resolve();
+  let pageCount = 0;
+  const shouldWrite = progressThrottle(PROGRESS_POLL_MS);
+  const handlers: PdfWorkerHandlers = {
+    onInfo: (info) => {
+      pageCount = info.pageCount;
+      metaWrites = metaWrites.then(() => updateMeta(docId, { pageCount: info.pageCount, aspectRatio: info.aspectRatio }));
+    },
+    onProgress: (rendered) => {
+      if (!shouldWrite(rendered, pageCount)) return;
+      metaWrites = metaWrites.then(() => updateMeta(docId, { progress: rendered }));
+    },
+    onWarning: (message) => console.warn(`[library] ${docId}: ${message}`),
+  };
+  const run = startRun(docId, runPdfWorker({ kind: 'pdf', docDir: paths.dir, longEdge: RENDER_LONG_EDGE }, handlers));
   try {
-    await runPoppler('pdftoppm', ['-png', '-scale-to', String(RENDER_LONG_EDGE), paths.sourcePdf, path.join(paths.slidesDir, 'p')]);
+    return await run.done;
   } finally {
-    clearInterval(timer);
-    await inFlight;
+    await metaWrites.catch(() => {});
   }
-
-  const outputs = new Map<number, string>();
-  for (const name of await fs.readdir(paths.slidesDir)) {
-    const match = outputPattern.exec(name);
-    if (match) outputs.set(Number(match[1]), name);
-  }
-  const missing = Array.from({ length: pageCount }, (_, i) => i + 1).filter((n) => !outputs.has(n));
-  if (missing.length > 0) {
-    throw new Error(`pdftoppm rendered ${pageCount - missing.length} of ${pageCount} pages`);
-  }
-  for (const [n, name] of outputs) {
-    const from = path.join(paths.slidesDir, name);
-    if (n >= 1 && n <= pageCount) await renameWithRetry(from, path.join(paths.slidesDir, slideFileName(n, pageCount)));
-    else await rmWithRetry(from, { force: true });
-  }
-  await updateMeta(docId, { progress: pageCount });
-}
-
-/** `pdftotext -layout`, split on form feeds, one trimmed file per page ('' when a page has no text). */
-async function extractTexts(paths: DocPaths, pageCount: number): Promise<void> {
-  let raw = '';
-  try {
-    raw = (await runPoppler('pdftotext', ['-layout', '-enc', 'UTF-8', paths.sourcePdf, '-'])).stdout.toString('utf8');
-  } catch (err) {
-    if (err instanceof Error && err.message === POPPLER_MISSING_MESSAGE) throw err;
-    // Slides still work from their images; the text is only a helper.
-    console.warn(`[library] text extraction failed, continuing without text: ${(err as Error).message}`);
-  }
-  const pages = raw.split('\f');
-  for (let n = 1; n <= pageCount; n++) {
-    await fs.writeFile(path.join(paths.textDir, textFileName(n, pageCount)), cleanPageText(pages[n - 1] ?? ''));
-  }
-}
-
-/** Trims trailing spaces, surrounding blank lines and the common left margin that -layout adds. */
-function cleanPageText(text: string): string {
-  const lines = text.replace(/\r\n?/g, '\n').split('\n').map((line) => line.trimEnd());
-  while (lines.length > 0 && lines[0] === '') lines.shift();
-  while (lines.length > 0 && lines.at(-1) === '') lines.pop();
-  const indents = lines.filter((line) => line !== '').map((line) => line.length - line.trimStart().length);
-  const margin = indents.length > 0 ? Math.min(...indents) : 0;
-  // Runs of blank lines carry no information for the model; keep at most one.
-  return lines
-    .map((line) => line.slice(margin))
-    .join('\n')
-    .replace(/\n{3,}/g, '\n\n');
 }
 
 // ---------------------------------------------------------------------------
 // Derived images: the image worker runs, and the backfill (DESIGN §15)
 // ---------------------------------------------------------------------------
 
-/** The image worker running for a document (its ingest's or the backfill's): at most one per document. */
-const imageRuns = new Map<string, { run: ImageWorkerRun; settled: Promise<void> }>();
+/**
+ * The worker running for a document — its ingest's PDF or image run, or the backfill's text or image run: at
+ * most one per document.
+ */
+const imageRuns = new Map<string, { run: { kill(): void }; settled: Promise<void> }>();
 
 /** Documents waiting for the backfill, in order (the backfill works on one at a time). */
 const backfillQueue = new Set<string>();
@@ -1032,8 +956,8 @@ let backfillLoop: Promise<void> | null = null;
 const backfillRanAt = new Map<string, number>();
 const BACKFILL_COOLDOWN_MS = 60_000;
 
-function startImageRun(docId: string, job: ImageJob, options: ImageWorkerOptions = {}): ImageWorkerRun {
-  const run = runImageWorker(job, options);
+/** Registers a worker run of a document in imageRuns (until it has exited), so it can be stopped. */
+function startRun<T extends { done: Promise<unknown>; kill(): void }>(docId: string, run: T): T {
   const entry = {
     run,
     settled: run.done.then(
@@ -1046,6 +970,10 @@ function startImageRun(docId: string, job: ImageJob, options: ImageWorkerOptions
     if (imageRuns.get(docId) === entry) imageRuns.delete(docId);
   });
   return run;
+}
+
+function startImageRun(docId: string, job: ImageJob, options: ImageWorkerOptions = {}): ImageWorkerRun {
+  return startRun(docId, runImageWorker(job, options));
 }
 
 /** Stops the document's image worker (if any) and waits until it has exited. */
@@ -1093,7 +1021,20 @@ async function hasMissingDerivedFiles(paths: DocPaths, pageCount: number): Promi
   return false;
 }
 
-/** Busy with the document in another way: its ingest (which writes the derived files itself) or a deletion. */
+/**
+ * True when the document's text files were written by another text extraction than the current one (e.g.
+ * poppler's pdftotext: no text/.engine) and its source.pdf is there to extract them again from.
+ */
+async function needsTextExtraction(paths: DocPaths): Promise<boolean> {
+  const marker = await fs.readFile(path.join(paths.textDir, TEXT_ENGINE_FILE), 'utf8').catch(() => '');
+  if (marker.trim() === TEXT_ENGINE) return false;
+  return fs.access(paths.sourcePdf).then(
+    () => true,
+    () => false,
+  );
+}
+
+/** Busy with the document in another way: its ingest (which writes every file itself) or a deletion. */
 function imageWorkBlocked(docId: string): boolean {
   return activeIngests.has(docId) || imageRuns.has(docId) || deletingDocs.has(docId);
 }
@@ -1111,10 +1052,12 @@ export function requestDerivedImages(docId: string): void {
 }
 
 /**
- * Startup: queues every ready document for the backfill (documents that already have every derived file
- * cost a few stat calls). The work happens in the background, one document at a time, at low priority.
+ * Startup: queues every ready document for the backfill, which brings documents converted by an older
+ * version up to date — text extracted by poppler or by an earlier PDFium extraction (DESIGN §17) and the missing
+ * derived images (§15). Documents that need neither cost a few stat calls. The work happens in the background,
+ * one document at a time, at low priority.
  */
-export async function backfillDerivedImages(): Promise<void> {
+export async function startBackfill(): Promise<void> {
   for (const doc of await listStoredDocs()) {
     if (doc.status === 'ready' && !imageWorkBlocked(doc.id)) backfillQueue.add(doc.id);
   }
@@ -1129,7 +1072,7 @@ function pumpBackfill(): void {
       try {
         await backfillDoc(docId);
       } catch (err) {
-        console.warn(`[library] ${docId}: backfill of derived images failed: ${(err as Error).message}`);
+        console.warn(`[library] ${docId}: backfill failed: ${(err as Error).message}`);
       }
     }
   })().finally(() => {
@@ -1138,11 +1081,32 @@ function pumpBackfill(): void {
   });
 }
 
+/**
+ * One document of the backfill: first its text, when an older engine extracted it (a PDF worker run that
+ * rewrites text/NNN.txt only: no rendering, and the digest is left as it is), then its missing derived
+ * images. Each step starts only while nothing else works on the document (no await in between).
+ */
 async function backfillDoc(docId: string): Promise<void> {
   if (imageWorkBlocked(docId)) return;
   const stored = await readStoredDoc(docId);
-  if (stored?.status !== 'ready') return;
+  if (stored?.status !== 'ready' || stored.pageCount < 1) return;
   const paths = docPaths(docId);
+
+  if (await needsTextExtraction(paths)) {
+    if (imageWorkBlocked(docId)) return;
+    backfillRanAt.set(docId, Date.now());
+    const run = startRun(docId, runTextWorker({ kind: 'text', docDir: paths.dir, pageCount: stored.pageCount }, { lowPriority: true }));
+    try {
+      const { written } = await run.done;
+      console.log(`[library] ${docId}: extracted the text of ${written} page(s) again (PDFium)`);
+    } catch (err) {
+      // Stopped by a new ingest, a deletion or shutdown: the next start picks the document up again.
+      if (isImageWorkerStopped(err)) return;
+      // The old text stays; the next start tries again.
+      console.warn(`[library] ${docId}: text not extracted again: ${(err as Error).message}`);
+    }
+  }
+
   if (!(await hasMissingDerivedFiles(paths, stored.pageCount))) return;
   // Checked again right before the start (no await in between): an ingest may have begun meanwhile.
   if (imageWorkBlocked(docId)) return;
@@ -1162,12 +1126,14 @@ export async function waitForBackfill(): Promise<void> {
 }
 
 /**
- * Shutdown: empties the backfill queue and stops every image worker that only writes derived images (the
- * backfill's, and those of ingests whose document is ready already); the next start backfills what is
- * missing. Workers of ingests still converting are left alone: they end with the process, and the document
- * (still 'processing') is converted again on the next start.
+ * Shutdown: empties the backfill queue and stops every worker that only brings a usable document up to date
+ * (the backfill's text and image runs, and the image runs of ingests whose document is ready already); the
+ * next start backfills what is missing. Workers of ingests still converting are left alone: they end with the
+ * process, and the document (still 'processing') is converted again on the next start. Ingests still waiting
+ * for a worker slot never start (they stay 'processing' too), even when the stopped runs free their slots.
  */
 export async function stopImageWork(): Promise<void> {
+  ingestSlots.cancelWaiting();
   backfillQueue.clear();
   await Promise.all([...imageRuns.keys()].filter((docId) => !isIngestRunning(docId)).map((docId) => stopImageRun(docId)));
   await waitForBackfill();

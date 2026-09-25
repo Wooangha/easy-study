@@ -47,7 +47,7 @@ import {
 import { workerEnv } from '../server/imageWorker.ts';
 import { startServer } from '../server/index.ts';
 import type { RunningServer, ServerOptions } from '../server/index.ts';
-import { LibraryLockedError, SERVER_LOCK_FILE_NAME, toolEnv } from '../server/library.ts';
+import { LibraryLockedError, SERVER_LOCK_FILE_NAME } from '../server/library.ts';
 import { claudeEnv } from '../server/providers/claudeCode.ts';
 import { childEnv } from '../server/providers/proc.ts';
 
@@ -509,7 +509,7 @@ describe('login rate limit', () => {
 });
 
 describe('the server’s secrets stay out of child processes', () => {
-  test('no CLI, poppler tool or image worker inherits the access password or the TLS files', () => {
+  test('no CLI or worker (PDF, text, images) inherits the access password or the TLS files', () => {
     const names = ['EASY_STUDY_PASSWORD', 'EASY_STUDY_TLS_KEY', 'EASY_STUDY_TLS_CERT', 'EASY_STUDY_CLAUDE_USE_API_KEY'];
     const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
     try {
@@ -524,7 +524,6 @@ describe('the server’s secrets stay out of child processes', () => {
           ['childEnv', childEnv()],
           ['childEnv(remove)', childEnv(['ANTHROPIC_API_KEY'])],
           ['claudeEnv', claudeEnv()],
-          ['toolEnv', toolEnv()],
           ['workerEnv', workerEnv()],
           ['childProcessEnv', childProcessEnv()],
         ];
@@ -1202,9 +1201,14 @@ describe('startup refusals', () => {
     const library = await useLibrary();
     await assert.rejects(start({ auth: 'on', password: 'short' }), ConfigError);
     const missing = path.join(tmpRoot, 'missing.pem');
-    await assert.rejects(start({ auth: 'on', tls: { certFile: missing, keyFile: missing } }), /EASY_STUDY_TLS_CERT/);
+    // Both missing: always the certificate, never whichever read happened to fail first (repeated: it was a race).
+    for (let attempt = 0; attempt < 20; attempt++) {
+      await assert.rejects(start({ auth: 'on', tls: { certFile: missing, keyFile: missing } }), /EASY_STUDY_TLS_CERT/);
+    }
     const garbage = path.join(tmpRoot, 'garbage.pem');
     await fs.writeFile(garbage, 'not a certificate');
+    // A readable certificate and a missing key: the key.
+    await assert.rejects(start({ auth: 'on', tls: { certFile: garbage, keyFile: missing } }), /EASY_STUDY_TLS_KEY/);
     await assert.rejects(start({ auth: 'on', tls: { certFile: garbage, keyFile: garbage } }), ConfigError);
     assert.deepEqual(await fs.readdir(library), []);
   });

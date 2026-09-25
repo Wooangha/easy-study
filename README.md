@@ -18,30 +18,13 @@ LLM은 이미 로그인된 **Claude Code**(Claude 구독)나 **Codex**(ChatGPT �
 필요한 것:
 
 - Node.js 22.18 이상 (macOS의 Node 26, Linux Docker의 Node 22.18·26에서 확인했어요)
-- poppler (`pdftoppm`, `pdftotext`, `pdfinfo`)
 - 아래 중 하나 이상
   - `claude` CLI 로그인 (Claude Code)
   - `codex` CLI 로그인 (Codex)
   - `ANTHROPIC_API_KEY`
   - `OPENAI_API_KEY`
 
-poppler 설치는 OS마다 달라요.
-
-macOS:
-
-```bash
-brew install poppler
-```
-
-Ubuntu / Debian:
-
-```bash
-sudo apt install poppler-utils
-```
-
-Fedora는 `sudo dnf install poppler-utils`, Arch는 `sudo pacman -S poppler`예요. 글꼴을 내장하지 않은 PDF가 macOS와 똑같이 보이게 하려면 `fonts-urw-base35`도 설치하세요.
-
-Windows는 `winget install oschwartz10612.Poppler`(또는 `scoop install poppler`)로 설치하고 PATH에 넣어요.
+PDF를 읽는 도구는 따로 설치하지 않아도 돼요. PDF 엔진(PDFium을 WebAssembly로 빌드한 것)이 npm 패키지에 들어 있어서 모든 OS에서 똑같이 동작해요.
 
 의존성 설치 (`node_modules`는 OS마다 다르니 다른 컴퓨터에서 복사하지 말고 그 OS에서 직접 설치하세요):
 
@@ -67,13 +50,13 @@ npm run serve
 npm run dev
 ```
 
-브라우저에서 PDF를 끌어다 놓으면 슬라이드가 PNG로 변환되고, 바로 질문할 수 있어요.
+브라우저에서 PDF를 끌어다 놓으면 슬라이드가 PNG로 변환되고, 바로 질문할 수 있어요. 여러 개를 한꺼번에 놓으면 몇 개씩(CPU에 따라 2~4개) 차례로 변환하고, 나머지는 "PDF 분석 중…"으로 기다려요.
 처음 써 볼 때는 `samples/sample-lecture.pdf`(합성 강의 9장)로 시험해 보세요.
 
 ### 다른 OS
 
 - **macOS**: 개발하고 실제로 쓰면서 확인한 환경이에요.
-- **Linux**: Docker(Node 22.18, 26)에서 설치, 테스트, 빌드, 서버 실행, PDF 변환까지 확인했어요. Codex의 읽기 제한은 macOS에서만 실제로 확인했어요. Linux에서 Codex가 시작하지 못하면 아래 `EASY_STUDY_CODEX_CONFINE=0`을 참고하세요.
+- **Linux**: Docker(Node 22.18, 26, poppler 없음)에서 설치, 테스트, 빌드, 서버 실행, PDF 변환까지 확인했어요. 슬라이드 이미지와 텍스트는 macOS에서 만든 것과 바이트 단위로 같았어요. 글꼴이 하나도 없는 시스템(슬림 Docker 이미지 등)에서도 변환과 목차 이미지는 그대로 돼요. 다만 글꼴을 내장하지 않은 한글·일본어·중국어 PDF를 위해 `fonts-noto-cjk`(또는 `fonts-nanum`)을 설치해 두세요. Codex의 읽기 제한은 macOS에서만 실제로 확인했어요. Linux에서 Codex가 시작하지 못하면 아래 `EASY_STUDY_CODEX_CONFINE=0`을 참고하세요.
 - **Windows**: 실제 Windows에서는 테스트하지 못했어요. 가장 확실한 방법은 **WSL2(Ubuntu)** 안에서 Linux 방법대로 설치하는 거예요. Windows에서 바로 실행한다면:
   - `claude`·`codex`는 공식 설치 프로그램(`.exe`)을 권장해요. npm으로 설치한 `.cmd`도 실제 실행 파일을 찾아 쓰도록 해 뒀지만 검증하지는 못했어요.
   - Windows에서는 Codex의 읽기 제한이 꺼져 있어서 Codex가 사용자 파일 전체를 읽을 수 있어요. 민감한 파일이 있는 계정이라면 Claude Code를 쓰세요.
@@ -117,8 +100,10 @@ Chrome/Edge는 **안전한 주소에서만** 설치를 허용해요.
 
 ### 1. 슬라이드 → 이미지
 
-PDF를 올리면 `pdftoppm`이 각 페이지를 1600px PNG로 렌더링하고, `pdftotext`로 텍스트도 같이 뽑아요.
-텍스트 추출만으로는 그림·표·수식 기호(α ε ∪ ∈ …)가 깨지거나 빠지기 때문에, LLM에게는 **슬라이드 이미지**를 보여줘요.
+PDF를 올리면 PDF 엔진(PDFium)이 각 페이지를 1600px PNG로 렌더링하고, 텍스트도 같이 뽑아요. PowerPoint가 Symbol 글꼴로 넣은 기호(α ε ∪ ∈ …)도 제대로 된 문자로 바꾸고, 위첨자·아래첨자(1st, Aᵢ)는 줄을 나누지 않아요. 채워 넣은 양식 필드와 PDF에 직접 입력한 메모도 이미지와 텍스트에 들어가요.
+텍스트만으로는 그림·표·수식이 빠지거나 흐트러지기 때문에, LLM에게는 **슬라이드 이미지**를 보여줘요.
+
+예전 버전(poppler, 또는 이전 PDFium 추출)으로 변환한 문서는 서버를 켤 때 백그라운드에서 텍스트만 한 번 다시 뽑아요. 슬라이드 이미지와 정리본은 그대로예요. 정리본은 예전 텍스트로 만든 그대로라서, 기호가 빠져 있던 정리본은 다시 만들면 새 텍스트가 반영돼요.
 
 ### 2. 처음에 전체 슬라이드 전달 (프라이밍)
 
@@ -181,7 +166,7 @@ library/
     source.pdf, doc.json
     slides/001.png …           슬라이드 이미지
     sheets/sheet-01.png …      목차 이미지 (2×2)
-    text/001.txt …             추출 텍스트
+    text/001.txt …             추출 텍스트 (text/.engine: 텍스트를 뽑은 엔진)
     digest/digest.json         정리본 데이터
     DIGEST.md                  정리본
     sessions/<id>.json         세션 (대화 + LLM 대화 핸들)
@@ -222,12 +207,15 @@ library/
 | `EASY_STUDY_MAX_CLI_PROCS` | `2` | 동시에 띄우는 claude/codex 프로세스 최대 수(채팅 우선, 정리본은 기다려요) |
 | `EASY_STUDY_CODEX_CONFINE` | `1` | `0`이면 Codex의 읽기 제한(강의 폴더만 읽기)을 끄고 예전처럼 읽기 전용 샌드박스만 써요. 이때 Codex는 **컴퓨터의 모든 파일**(예: `~/.ssh`)을 읽을 수 있어요. 읽기 제한 때문에 Codex가 시작하지 못할 때만 쓰세요. |
 | `CLAUDE_BIN` / `CODEX_BIN` | PATH | CLI 경로 지정 |
+| `EASY_STUDY_PDF_FALLBACK_FONT` | OS 글꼴 | 글꼴을 내장하지 않은 한글·일본어·중국어 PDF를 그릴 글꼴 파일(`.ttf`/`.otf`/`.ttc`). 지정하지 않으면 macOS는 Arial Unicode·Apple SD Gothic Neo, Windows는 맑은 고딕·굴림·MS Gothic·Microsoft YaHei, Linux는 Noto Sans CJK·나눔고딕 중 있는 것을 써요. |
 
 ## 문제 해결
 
 - **`Claude Code 2.1.x does not support this model … Run 'claude update'`**: `~/.claude/settings.json`의 기본 모델이 설치된 CLI보다 새 버전을 요구하는 경우예요. `claude update`로 CLI를 업데이트하거나, 새 세션을 만들 때 모델을 `Sonnet`/`Opus`로 지정하세요.
 - **Codex가 `Failed to initialize session` / `fs sandbox helper` 오류로 바로 멈출 때**: 설치된 Codex CLI가 읽기 제한(권한 프로필)을 지원하지 않는 경우예요. Codex CLI를 업데이트하고(0.154에서 확인), 그래도 안 되면 `EASY_STUDY_CODEX_CONFINE=0`으로 서버를 다시 시작하세요 (위 표의 경고 참고).
-- **`poppler is not installed`**: 위 [빠른 시작](#빠른-시작)의 OS별 poppler 설치 명령을 실행하세요.
+- **`the PDF is password protected`**: 암호가 걸린 PDF예요. 암호를 푼 PDF로 다시 저장해서(예: 미리보기에서 열고 암호 없이 내보내기) 올리세요.
+- **`could not read the PDF: the file is damaged or is not a PDF`**: 파일이 깨졌거나 PDF가 아니에요. 원본에서 PDF로 다시 내보내 올리세요.
+- **한글·일본어·중국어가 슬라이드 이미지에서 안 보일 때**: 글꼴을 내장하지 않은 PDF예요. 이때 서버 로그에 `[library] <문서>: the PDF uses a CJK font it does not embed, and no fallback font could be read (…)`가 한 번 찍혀요. 위 `EASY_STUDY_PDF_FALLBACK_FONT` 설명의 글꼴(Linux는 `fonts-noto-cjk`)을 설치하거나 지정한 뒤, 문서를 지우고 다시 올리세요. 텍스트는 글꼴이 없어도 제대로 뽑혀요. `EASY_STUDY_PDF_FALLBACK_FONT`에 읽을 수 없는 경로를 지정하면 서버를 켤 때 경고가 나와요.
 - 답변이 이상하거나 멈췄을 때: ■ 중지를 누른 뒤 다시 질문하세요. 실패한 턴은 LLM 대화 상태를 바꾸지 않아요.
 
 ## 메모리 사용
@@ -237,7 +225,8 @@ library/
 | 항목 | 이전 | 지금 |
 |---|---|---|
 | 서버 (대기 중) | 66–69MB | 31–34MB (`npm start`로 실행한 빌드 버전) |
-| 서버 (49장 PDF 변환 중 최대) | 약 170MB | 약 36MB (이미지 처리는 변환하는 몇 초 동안만 뜨는 별도 프로세스가 약 110MB를 쓰고 돌려줘요) |
+| 서버 (49장 PDF 변환 중 최대) | 약 170MB | 약 36MB (PDF 렌더링(약 120MB)과 이미지 처리(약 110MB)는 변환하는 몇 초 동안만 차례로 뜨는 별도 프로세스가 맡고, 끝나면 메모리를 돌려줘요) |
+| PDF 여러 개를 한꺼번에 올릴 때 | 개수만큼 동시에 변환 | CPU에 따라 2~4개씩 차례로 변환해서, 변환 프로세스(개당 약 150–300MB)가 그 이상 늘지 않아요 |
 | 동시에 뜨는 claude/codex 프로세스 | 최대 3개 | 최대 2개 (채팅 우선) |
 | 브라우저 탭 (긴 채팅 열기) | 약 300MB | 약 135MB |
 | 브라우저 GPU 이미지 캐시 (슬라이드 49장 스크롤 후) | 약 250MB | 약 140MB (WebP 표시용 이미지) |
@@ -273,7 +262,9 @@ npm run sample
 ```
 server/            Express 서버 (Node가 TypeScript를 바로 실행)
   index.ts         라우트, SSE, Vite 미들웨어
-  library.ts       PDF 변환 (poppler + sharp)
+  library.ts       라이브러리, PDF 변환 파이프라인, 백그라운드 백필
+  imageWorker.ts   PDF 렌더링·텍스트(PDFium)와 이미지(sharp) 작업을 하는 짧게 사는 자식 프로세스
+  pdf.ts           PDF 엔진 (PDFium WebAssembly: 렌더링, 텍스트, 한중일 대체 글꼴)
   sessions.ts      세션 저장, 노트 마크다운
   chat.ts          질문 한 턴 실행
   context.ts       무엇을 LLM에게 보낼지 결정 (프라이밍, 포커스, 앞뒤 슬라이드, 과목 컨텍스트)
@@ -284,3 +275,7 @@ shared/types.ts    서버와 웹이 같이 쓰는 API 타입
 web/               React + Vite UI
 tests/             node:test 테스트
 ```
+
+## 라이선스
+
+PDF 엔진으로 PDFium(BSD-3-Clause / Apache-2.0, `@embedpdf/pdfium` 패키지는 MIT)을 함께 배포해요. PDFium과 그 안에 들어 있는 라이브러리(FreeType, OpenJPEG, Little CMS, libjpeg-turbo, libpng, zlib, AGG)의 라이선스 전문은 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)에 있어요.

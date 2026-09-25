@@ -50,6 +50,7 @@ import {
   ConfigError,
   HttpError,
   autoDigestEnabled,
+  fallbackFontProblem,
   isLoopbackHost,
   isWildcardHost,
   libraryDir,
@@ -86,7 +87,7 @@ import {
   LibraryLockedError,
   SERVER_LOCK_FILE_NAME,
   acquireServerLock,
-  backfillDerivedImages,
+  startBackfill,
   coursePaths,
   deleteDoc,
   docPaths,
@@ -477,7 +478,7 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
     res.status(204).end();
   });
 
-  /** Converts a document whose conversion failed again (e.g. after installing poppler). 409 otherwise. */
+  /** Converts a document whose conversion failed again (e.g. after replacing its source.pdf). 409 otherwise. */
   api.post('/docs/:docId/retry', async (req, res) => {
     res.status(202).json(await retryIngest(req.params.docId));
   });
@@ -744,9 +745,10 @@ export interface ServerOptions extends AppOptions {
   /** Re-process documents left in 'processing' (default true). */
   resumeIngests?: boolean;
   /**
-   * Write the missing derived images (view renditions, thumbnails, inline JPEGs) of converted documents
-   * in the background, one document at a time (default: like `resumeIngests`). Requests for a missing
-   * derived image ask for them either way.
+   * Bring converted documents up to date in the background, one document at a time (default: like
+   * `resumeIngests`): the text of documents converted before PDFium (DESIGN §17) and the missing derived
+   * images (view renditions, thumbnails, inline JPEGs). Requests for a missing derived image ask for them
+   * either way.
    */
   backfillImages?: boolean;
   /** Print startup information (default true). */
@@ -805,7 +807,10 @@ function listen(server: http.Server, portNumber: number, hostname: string): Prom
 /** Vite's default server.fs.deny (Vite 8), which a configured list replaces rather than extends. */
 const VITE_DEFAULT_FS_DENY = ['.env', '.env.*', '*.{crt,pem,key,p12,pfx,cer,der}', '.npmrc', '.yarnrc.yml', '**/.git/**'];
 
-/** Reads the TLS certificate and key and checks that they make a server (ConfigError otherwise). */
+/**
+ * Reads the TLS certificate, then the key, and checks that they make a server (ConfigError otherwise). One after
+ * the other, so a problem with both always names the certificate first (read together, whichever failed first won).
+ */
 async function createHttpsServer(files: TlsFiles, app: express.Express): Promise<https.Server> {
   const read = async (file: string, what: string) => {
     try {
@@ -814,7 +819,8 @@ async function createHttpsServer(files: TlsFiles, app: express.Express): Promise
       throw new ConfigError(`HTTPS ${what} 파일을 읽을 수 없습니다: ${file} (${errorMessage(err)})`);
     }
   };
-  const [cert, key] = await Promise.all([read(files.certFile, '인증서(EASY_STUDY_TLS_CERT)'), read(files.keyFile, '키(EASY_STUDY_TLS_KEY)')]);
+  const cert = await read(files.certFile, '인증서(EASY_STUDY_TLS_CERT)');
+  const key = await read(files.keyFile, '키(EASY_STUDY_TLS_KEY)');
   try {
     return https.createServer({ cert, key }, app);
   } catch (err) {
@@ -928,7 +934,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
     resumePendingIngests().catch((err: unknown) => console.error('[library] resuming ingests failed:', err));
   }
   if (options.backfillImages ?? options.resumeIngests ?? true) {
-    backfillDerivedImages().catch((err: unknown) => console.error('[library] backfill of derived images failed:', err));
+    startBackfill().catch((err: unknown) => console.error('[library] backfill failed:', err));
   }
 
   let closing: Promise<void> | undefined;
@@ -1034,6 +1040,8 @@ async function main(): Promise<void> {
     console.log('  접속 코드를 지웠습니다: 다음에 원격 모드로 시작할 때 새 코드가 만들어지고, 이전 로그인은 모두 끊깁니다.');
   }
   console.log(`  library     →  ${libraryDir()}\n`);
+  const fontProblem = fallbackFontProblem();
+  if (fontProblem) console.warn(`  ${fontProblem}\n`);
 
   let stopping = false;
   const shutdown = (signal: NodeJS.Signals) => {

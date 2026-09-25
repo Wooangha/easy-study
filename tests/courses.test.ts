@@ -480,7 +480,7 @@ describe('HTTP routes', () => {
     const docId = await makeDoc('Broken L8');
     const paths = docPaths(docId);
     const broken = JSON.parse(await fs.readFile(paths.docJson, 'utf8')) as StoredDocMeta;
-    await fs.writeFile(paths.docJson, JSON.stringify({ ...broken, status: 'error', error: 'poppler is not installed (brew install poppler)' }));
+    await fs.writeFile(paths.docJson, JSON.stringify({ ...broken, status: 'error', error: 'could not read the PDF: the file is damaged or is not a PDF' }));
     await fs.copyFile(path.join(repoRoot(), 'samples', 'sample-lecture.pdf'), paths.sourcePdf);
 
     const res = await api(`/docs/${docId}/retry`, { method: 'POST' });

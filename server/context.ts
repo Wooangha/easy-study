@@ -855,9 +855,9 @@ function cloneTurn(turn: HistoryTurn): HistoryTurn {
 // ---------------------------------------------------------------------------
 
 /**
- * Normalises pdftotext -layout output: unix newlines, no control chars, no trailing spaces,
- * at most one blank line, and long runs of layout padding shortened to 4 spaces (columns stay
- * separated, but padding no longer eats the prime text budget).
+ * Normalises extracted page text (text/NNN.txt: PDFium's, or pdftotext -layout's in documents converted before
+ * DESIGN §17): unix newlines, no control chars, no trailing spaces, at most one blank line, and long runs of
+ * layout padding shortened to 4 spaces (columns stay separated, but padding no longer eats the prime text budget).
  */
 export function cleanExtractedText(text: string): string {
   return text

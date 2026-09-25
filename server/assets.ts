@@ -2,7 +2,7 @@
 // providers/proc.ts). All of them are produced OUTSIDE the long-lived server process by the image
 // worker (sharp in a short-lived child), so the server never keeps libvips' memory around.
 //
-//   library/<docId>/slides/NNN.png            original render (pdftoppm, long edge 1600) — kept as the source of truth
+//   library/<docId>/slides/NNN.png            original render (PDFium, long edge 1600) — kept as the source of truth
 //   library/<docId>/view/NNN-<w>.webp         display renditions for the browser (lossy WebP, see VIEW_WIDTHS)
 //   library/<docId>/thumbs/NNN.webp           small thumbnails (THUMB_WIDTH) for notes/digest lists
 //   library/<docId>/inline/<dir>-<name>.jpg   pre-encoded JPEGs sent to LLMs (long edge ≤ INLINE_MAX_EDGE,

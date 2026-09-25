@@ -25,8 +25,9 @@ knows which slide you are looking at. Every Q&A is saved and can be reviewed lat
   - `npm run dev`: Express + Vite in middleware mode (HMR).
   - `npm start`: builds `web/dist` then Express serves it statically.
 - Tests: `node --test` (`tests/*.test.ts`). Type check: `npm run typecheck`.
-- External tools: poppler (`pdftoppm`, `pdftotext`, `pdfinfo`) — `brew install poppler`.
-  Image compositing/resizing: `sharp`.
+- External tools: none. PDFs are read by PDFium compiled to WebAssembly (`@embedpdf/pdfium`, pinned to an exact
+  version, the same files on every platform; §17). Image compositing/resizing: `sharp`. Both run only in the
+  short-lived worker process (§15), never in the server process. Licenses: `THIRD_PARTY_NOTICES.md`.
 - Everything the user creates lives in the **library dir** (`EASY_STUDY_LIBRARY`, default
   `<repo>/library`, git-ignored).
 
@@ -36,11 +37,12 @@ knows which slide you are looking at. Every Q&A is saved and can be reviewed lat
 library/<docId>/
   doc.json                 DocMeta (shared/types.ts)
   source.pdf
-  slides/001.png ...       full resolution, long edge 1600px (pdftoppm -scale-to 1600)
+  slides/001.png ...       full resolution, long edge 1600px (PDFium, /Rotate applied, annotations drawn)
   sheets/sheet-01.png ...  overview contact sheets, 2x2 slides per image, each cell labelled
                            with its slide number; long edge <= 1600px
   sheets/sheets.json       [{ "file": "sheet-01.png", "fromSlide": 1, "toSlide": 4 }, ...]
-  text/001.txt ...         pdftotext -layout output per page ('' if none)
+  text/001.txt ...         page text in content order, trimmed ('' if none; PDFium, §17)
+  text/.engine             which extraction wrote text/*.txt (`pdfium-2`); missing = poppler's pdftotext (§17)
   sessions/<sessionId>.json   SessionRecord (server/internal-types.ts)
   notes/<sessionId>.md        per-session transcript (regenerated after every turn)
   STUDY_NOTES.md              all sessions' Q&A grouped by slide (regenerated after every turn)
@@ -56,15 +58,26 @@ library/<docId>/
 `POST /api/docs` with the raw PDF bytes → write `source.pdf`, create `doc.json`
 (`status: 'processing'`, `progress: 0`), respond immediately, then in the background:
 
-1. `pdfinfo source.pdf` → page count (`Pages:`) and page size (`Page size: W x H pts`) → aspectRatio.
-2. `pdftoppm -png -scale-to 1600 source.pdf slides/p` → rename outputs (`p-01.png`, `p-1.png`, … padding
-   varies with page count) to `slides/%03d.png`. Update `progress` periodically (count files while it runs).
-3. `pdftotext -layout source.pdf -` → split on form feed `\f` → `text/%03d.txt` (trimmed).
+0. Wait for one of `MAX_INGEST_WORKERS` worker slots (half the CPU threads, 2 to 4; §17 "Concurrency"). The ingest
+   holds it through steps 1-4 and the derived images, so a multi-file upload converts a few PDFs at a time; the
+   others wait in `processing` at progress 0 ("PDF 분석 중…").
+1-3. One PDF worker run (`runPdfWorker`, PDFium-wasm in the worker process of §15; `server/pdf.ts`):
+   - open `source.pdf` (read on demand through `FPDF_LoadCustomDocument`, never copied whole into the wasm heap) →
+     page count and the size of page 1 (points, /Rotate applied) → aspectRatio; `doc.json` gets `pageCount` and
+     `aspectRatio` at once, before any page is rendered;
+   - per page: render at 1600px on the long edge (white background, annotations, form fields), PNG-encode with sharp while the
+     next page is rasterized → `slides/%03d.png`; its text (content order, Symbol-font PUA mapped back, super- and
+     subscripts kept on their line, then the text of form fields and typed notes, §17) →
+     `text/%03d.txt` (trimmed); `progress` = slides written, stored in `doc.json` at most every 400 ms (and for the
+     last page);
+   - finally `text/.engine`.
 4. Build contact sheets with sharp: groups of 4 consecutive slides, 2 columns x 2 rows, each cell
-   800px wide (height by aspect), 8px white gutter, and a readable label "Slide N" (dark badge,
-   top-left; render the label as an SVG overlay composited by sharp). Write `sheets.json`.
-5. `status: 'ready'` (or `'error'` with `error` message; a missing poppler binary must produce the
-   message `poppler is not installed (brew install poppler)`).
+   800px wide (height by aspect, the cell shape kept between 1:4 and 4:1: more extreme slides are letterboxed), 8px
+   white gutter, and a readable label "Slide N" (dark badge, top-left; an SVG overlay composited by sharp whose glyphs
+   are stroke paths, not `<text>`: no font needed, the same pixels on every system — on one without any font,
+   `<text>` came out as boxes and the model could not read the slide numbers). Write `sheets.json`.
+5. `status: 'ready'` (or `'error'` with `error` message: `the PDF is password protected`, `could not read the PDF:
+   the file is damaged or is not a PDF`, … — readable, no tool to install).
 
 On server start, any doc left in `processing` (crash mid-ingest) is re-processed.
 
@@ -360,8 +373,8 @@ Sequential reading therefore costs about one new image per step. `recentWindow` 
 
 Goal (user request): feed the whole deck once and turn it into reusable **text**: a careful per-slide
 transcription + explanation produced by an LLM that looks at every slide image. It is saved and reused:
-priming later sessions (text instead of overview images — cheaper/faster, and it fixes symbols that
-pdftotext garbles, e.g. α ε ∪ ∈), the focused-slide material, the course context (§12), and the student
+priming later sessions (text instead of overview images — cheaper/faster, and it reads formulas, tables and
+symbols from the images, which plain text extraction garbles or drops), the focused-slide material, the course context (§12), and the student
 reads it in the UI next to the focused slide.
 
 Storage: `library/<docId>/digest/digest.json` (`DigestRecord`), `library/<docId>/DIGEST.md`.
@@ -499,7 +512,7 @@ Contracts:
   `MIMALLOC_PURGE_DELAY=0`; claude-code `maxImagesPerConversation` 48. codex children get `-c notify=[]`.
 - Production runs precompiled JS (`dist-server/`, built by `npm run build`), started with a small young generation
   (`--max-semi-space-size=2`). `npm run dev` keeps running TS + Vite (development only).
-- Portability: platform-specific poppler hints; Windows CLI resolution (.exe on PATH, npm `.cmd` shims mapped to the
+- Portability: no external PDF tool (§17); Windows CLI resolution (.exe on PATH, npm `.cmd` shims mapped to the
   real executable), tree-kill on abort, windowsHide, rename/rm retries on EPERM/EBUSY, SIGHUP/SIGBREAK handling.
 
 ## 16. Round 5 — access from other computers (remote mode) + installable app (PWA)
@@ -522,7 +535,7 @@ other computers, and get an "app" on macOS/Windows. The app is the same web clie
   `X-Frame-Options: DENY`, `Content-Security-Policy: frame-ancestors 'none'` (clickjacking: a framed app would send
   same-origin requests that pass the Host/Origin checks; frame-ancestors cannot be set by `<meta>`),
   `Referrer-Policy: no-referrer` and `X-Content-Type-Options: nosniff`.
-- Child processes (claude/codex CLIs, poppler, the image worker) never inherit `EASY_STUDY_PASSWORD`,
+- Child processes (claude/codex CLIs, the PDF/image worker) never inherit `EASY_STUDY_PASSWORD`,
   `EASY_STUDY_TLS_KEY` or `EASY_STUDY_TLS_CERT` (`config.ts` `childProcessEnv`): the CLIs read untrusted PDFs.
 
 ### Access code and sessions
@@ -576,3 +589,88 @@ covered by the cookie automatically (same origin).
   the notes/digest "copy path" buttons say that the path is on the server computer.
 - Layout must remain usable on tablets/phones (existing ≤800px stacked layout) — check that the login screen and the
   main view work at 390×844.
+
+## 17. Round 6 — PDFium (no external PDF tools)
+
+Goal: the app needs nothing but Node and `npm ci` on macOS, Windows and Linux (prerequisite for the desktop app).
+poppler (`pdfinfo` / `pdftoppm` / `pdftotext`, found on PATH) is gone from the runtime entirely; PDFs are read by
+**PDFium compiled to WebAssembly**, `@embedpdf/pdfium` pinned to an exact version (`2.15.1`): one 4.6 MB
+`pdfium.wasm` for every platform, no native binary, BSD-3/Apache-2.0 (PDFium) + MIT (the package); the licenses of
+PDFium and the libraries it bundles are in `THIRD_PARTY_NOTICES.md`. Chosen after a spike against pdf.js + a native
+canvas (a native addon per platform, more memory), MuPDF (AGPL) and other PDFium packages; measured on a 49-slide
+deck: 1.5 s instead of 5.7 s (pdftoppm) for the whole conversion, identical per-page characters to `pdftotext`.
+
+Contracts:
+- **Where it runs**: only in the worker process of §15 (`server/imageWorker.ts` imports `server/pdf.ts`
+  dynamically). The server process never instantiates the wasm module (checked by a test with a resolve hook), and
+  its memory goes back to the OS when the worker exits. Jobs: `PdfJob` (ingest, §3 steps 1-3) and `TextJob`
+  (backfill, below); the worker sends `info` (page count, aspect ratio), `progress` (slides written) and at most one
+  `warning` (Fonts, below) message.
+- **Loading**: `FPDF_LoadCustomDocument` with an `FPDF_FILEACCESS` whose `getBlock` callback reads the requested
+  range with `fs.readSync` straight into the wasm heap: a 150 MB PDF peaks at ~260–310 MB RSS (305 MB measured on
+  Linux arm64, sharp's PNG encoding included) instead of ~540 MB
+  when the whole file is copied into the heap. The file (≤ 4 GB: `m_FileLen` is 32-bit on wasm32) stays open until
+  the document is closed. Every page, text page, bitmap and document is closed right after use (a test checks that
+  the wasm heap and the open file descriptors do not grow).
+- **Errors** (`FPDF_GetLastError`): 4 → `the PDF is password protected`; 3 → `could not read the PDF: the file is
+  damaged or is not a PDF`; 5 → `…encrypted with an unsupported security handler`; others → `could not read the PDF
+  (PDFium error N)`. A PDF without pages → `the PDF has no pages`. They end the ingest in status `error`.
+- **Rendering**: long edge 1600 px (`round(w·s) × round(h·s)`, like `pdftoppm -scale-to`), `FPDF_ANNOT |
+  FPDF_REVERSE_BYTE_ORDER` (RGBx for sharp), white background, RGB PNG without alpha. Form fields (widget
+  annotations) are never drawn by `FPDF_RenderPageBitmap`: a document with a form (`FPDF_GetFormType` ≠ 0) gets a
+  form-fill environment (`PDFiumExt_InitFormFillEnvironment`, released before the document; `FORM_OnAfterLoadPage` /
+  `FORM_OnBeforeClosePage` per page) and its fields are drawn on top with `FPDF_FFLDraw` (same flags), with or
+  without an appearance stream, as poppler drew them.
+- **Concurrency**: at most `MAX_INGEST_WORKERS` ingests run their workers at a time (`library.ts`: half of
+  `os.availableParallelism()`, 2 to 4; a FIFO counting semaphore, `createSlots`). A slot is taken after `doc.json`
+  says `processing` and held from the PDF worker through the image worker's derived files, so at most that many worker
+  processes convert at once, whatever the number of PDFs: a PDF worker holds PDFium's heap and sharp from its first
+  page on (~150–300 MB RSS), an image worker ~200 MB. Measured with 16 lecture PDFs (31–49 slides) dropped at once on
+  a 10-thread M4: no limit 20 s and 2.4 GB of workers at the peak (17 processes); 4 slots 26 s, 0.71 GB; 2 slots
+  44 s, 0.38 GB (poppler's pipeline, unlimited: 38 s, 1.7 GB; limiting the PDF stage alone: 1.9 GB, as the image
+  workers pile up behind it). Waiting ingests stay `processing` at progress 0 (not deletable, like any conversion);
+  at shutdown (`stopImageWork`) they are turned away before they start and converted on the next start.
+- **Fonts**: PDFium's built-in substitutes cover the base-14 fonts (Helvetica, Times, Courier, Symbol, …). Non-embedded
+  **CJK** fonts would not be drawn at all (PDFium-wasm cannot see system fonts), so `FPDF_SetSystemFontInfo` gets JS
+  callbacks that offer one host font for the CJK charsets only (SHIFTJIS 128, HANGEUL 129, GB2312 134, BIG5 136); any
+  other font request keeps the built-in substitutes (same pixels with or without the fallback font). The file is the
+  first that exists of `fallbackFontFiles()` — macOS: Arial Unicode.ttf, AppleSDGothicNeo.ttc; Windows:
+  `%WINDIR%\Fonts\malgun.ttf`, gulim.ttc, msgothic.ttc, msyh.ttc; Linux: Noto Sans CJK (Debian/Ubuntu, Arch,
+  Fedora paths), Nanum Gothic — or `EASY_STUDY_PDF_FALLBACK_FONT` instead of the list. It is read lazily (only when a
+  PDF asks for a CJK font); when none exists such text stays undrawn (its extracted text is still right), and the PDF
+  worker says so once per run (`fallbackFontWarning`: the files looked for and the remedy) → `[library] <docId>: the
+  PDF uses a CJK font it does not embed, and no fallback font could be read (…)` in the server log. At startup an
+  `EASY_STUDY_PDF_FALLBACK_FONT` that is not a readable file is reported as well (`fallbackFontProblem`, config.ts).
+- **Text**: content order (not `pdftotext -layout`'s columns: table rows stay on one line, side-by-side boxes are not
+  interleaved), `\r\n` → `\n`, then `cleanPageText` (trim, common margin, at most one blank line). Office writes
+  Symbol-font glyphs (SymbolMT) with ToUnicode entries in the Private Use Area (U+F000 + code); code points
+  U+F020–U+F0FF of a font whose name matches `/symbol/i` (`FPDFText_GetFontInfo`, subset prefix ignored) are mapped
+  through the Adobe Symbol encoding (α ε ∪ ∈ ∩ ∅ → …). Other PUA fonts (Wingdings, Webdings) are left alone.
+  PDFium generates a line break (`\r\n`, `FPDFText_IsGenerated`) wherever the baseline moves, so superscripts and
+  subscripts came out on lines of their own ("1\nst", "FIRST+\n.", "A\ni\n → …"). `lineBreakJoint` drops such a
+  break when the characters on either side (their loose boxes, `FPDFText_GetLooseCharBox`, both upright within
+  ~34°) overlap vertically by at least half the smaller height and the next one starts between ¼ em before and 1 em
+  after the end of the last one: replaced by nothing, or by one space when the gap is ≥ 0.15 em and the text has no
+  space there. Real line ends (the next line starts left of the last one's end, or lower down) stay. On the three
+  parsing lectures: lines of punctuation only 44 → 22, same characters.
+  Then, one per line, the text annotations draw on the page (pdftotext extracted it too): FreeText `/Contents`
+  (typed notes) and the values of text fields, combo and list boxes; hidden / no-view annotations are skipped.
+- **Text backfill** (existing libraries): text files written by poppler contain those PUA code points. Every text
+  extraction ends by writing `text/.engine` (`TEXT_ENGINE` in `server/pageNames.ts`: `pdfium-1` first, `pdfium-2`
+  with the super/subscript joins and the annotations' text; bump it when the text output changes, and every
+  document is re-extracted once). The backfill of §15 (startup: every `ready` document; one document at a time, low priority, never
+  while the document is converted or deleted — a new ingest or a deletion stops it) first runs a `TextJob` for a
+  document whose marker is missing or different and whose `source.pdf` exists: it rewrites `text/NNN.txt` (atomic
+  writes; pages past the PDF's page count keep their file) and the marker, and nothing else — no rendering, and the
+  digest is **not** regenerated (a digest made from poppler's text keeps what the model made of the blank PUA
+  symbols until the user makes it again, which then uses the new text). A failure keeps the old text (logged; tried again on the next start). Then the
+  missing derived images, as before.
+- **No PATH lookups**: the worker is forked with `process.execPath`; conversion works with an empty PATH (tested). To
+  run the whole suite as on a machine without poppler, put only a folder with a `node` symlink on PATH (`env
+  PATH=<dir>:/usr/bin:/bin node --test tests/*.test.ts web/tests/*.test.ts`): Homebrew keeps node, npm and poppler
+  in the same `/opt/homebrew/bin`. The
+  Homebrew PATH additions existed only for the poppler tools and went with them; the claude/codex CLIs never used
+  them (they are resolved from the server's own PATH, or `CLAUDE_BIN` / `CODEX_BIN`).
+- **Packaging notes** (desktop app): ship `node_modules/@embedpdf/pdfium/dist/{index.js,pdfium.wasm}` (the wasm is
+  found with `createRequire(import.meta.url).resolve('@embedpdf/pdfium/pdfium.wasm')`; a single-file bundle must
+  pass its bytes from a resource path instead) and `THIRD_PARTY_NOTICES.md`.

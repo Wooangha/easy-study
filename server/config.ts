@@ -1,6 +1,6 @@
 // Runtime configuration. Every value is read lazily (functions, not top-level constants) so that
 // tests and tools can set environment variables such as EASY_STUDY_LIBRARY before calling in.
-import { existsSync } from 'node:fs';
+import { accessSync, constants, existsSync, statSync } from 'node:fs';
 import { BlockList, isIP, isIPv4, isIPv6 } from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -31,6 +31,27 @@ export function repoRoot(): string {
 export function libraryDir(): string {
   const fromEnv = process.env.EASY_STUDY_LIBRARY?.trim();
   return fromEnv ? path.resolve(fromEnv) : path.join(repoRoot(), 'library');
+}
+
+/**
+ * What is wrong with EASY_STUDY_PDF_FALLBACK_FONT (the CJK fallback font of server/pdf.ts), for a warning at
+ * startup: a path that is not a readable file. null when it is unset or fine. PDFium reads the font only when a PDF
+ * needs it, and a mistyped path would otherwise just leave such text off the slide images.
+ */
+export function fallbackFontProblem(env: NodeJS.ProcessEnv = process.env): string | null {
+  const file = env.EASY_STUDY_PDF_FALLBACK_FONT?.trim();
+  if (!file) return null;
+  let reason: string | null = null;
+  try {
+    if (!statSync(file).isFile()) reason = '파일이 아닙니다';
+    else accessSync(file, constants.R_OK);
+  } catch (err) {
+    reason = (err as NodeJS.ErrnoException).code ?? (err as Error).message;
+  }
+  return reason
+    ? `EASY_STUDY_PDF_FALLBACK_FONT 글꼴 파일을 읽을 수 없습니다: ${file} (${reason}). ` +
+        '글꼴을 내장하지 않은 한글·일본어·중국어 PDF는 그 글자가 슬라이드 이미지에서 빠져요 (텍스트는 괜찮아요).'
+    : null;
 }
 
 /** HTTP port (PORT, default 5180). */
@@ -83,7 +104,7 @@ export const MIN_PASSWORD_LENGTH = 8;
 
 /**
  * Environment variables only the server itself may see: the access password and the HTTPS key and
- * certificate. Child processes (the claude/codex CLIs that read untrusted lecture PDFs, poppler, the image
+ * certificate. Child processes (the claude/codex CLIs that read untrusted lecture PDFs, the PDF and image
  * worker) never need them, and a prompt injection or a tool the CLI runs could read its environment.
  */
 export const SERVER_SECRET_ENV: readonly string[] = ['EASY_STUDY_PASSWORD', 'EASY_STUDY_TLS_KEY', 'EASY_STUDY_TLS_CERT'];

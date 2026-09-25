@@ -608,7 +608,7 @@ function FailedDocActions({
         type="button"
         className="ghost-btn small"
         onClick={() => onRetry(doc.id)}
-        title="업로드한 PDF로 변환을 다시 해요 (예: poppler를 설치한 뒤)"
+        title="업로드한 PDF로 변환을 다시 해요"
       >
         ↻ 다시 변환
       </button>
@@ -739,8 +739,8 @@ export function DocStatusView({
             <>
               <div className="doc-error">{doc.error ?? '처리 중 오류가 발생했어요'}</div>
               <p className="muted small">
-                업로드한 PDF는 남아 있어요. 위 원인을 해결했다면(예: poppler 설치 — 운영체제별 방법은 README 참고) 다시
-                변환할 수 있어요.
+                업로드한 PDF는 남아 있어요. 일시적인 문제였다면 다시 변환해 보세요. 암호가 걸렸거나 손상된 PDF라면 암호를 풀거나
+                다시 내보낸 PDF를 새로 올려 주세요.
               </p>
               <div className="status-actions">
                 <button type="button" className="primary-btn small" onClick={onRetry}>

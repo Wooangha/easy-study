@@ -1,4 +1,4 @@
-// Ingest pipeline end-to-end on samples/sample-lecture.pdf (needs poppler), plus import validation,
+// Ingest pipeline end-to-end on samples/sample-lecture.pdf (PDFium-wasm, no external tools), plus import validation,
 // deleting / retrying documents and the single-instance library lock.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -10,35 +10,38 @@ import sharp from 'sharp';
 import { DOC_ID_RE } from '../shared/types.ts';
 import type { DigestSlide, DocMeta } from '../shared/types.ts';
 import { INLINE_MAX_BYTES, INLINE_MAX_EDGE, THUMB_WIDTH, VIEW_WIDTHS, inlinePathFor, thumbPath, viewPath } from '../server/assets.ts';
-import { HttpError, autoDigestEnabled, digestConcurrency, findPackageRoot, libraryDir, repoRoot } from '../server/config.ts';
+import { HttpError, autoDigestEnabled, digestConcurrency, fallbackFontProblem, findPackageRoot, libraryDir, repoRoot } from '../server/config.ts';
 import { envCommand, startServer } from '../server/index.ts';
 import type { RunningServer } from '../server/index.ts';
 import type { CourseRecord, DigestRecord, SessionRecord } from '../server/internal-types.ts';
 import {
   LibraryLockedError,
-  POPPLER_MISSING_MESSAGE,
+  MAX_INGEST_WORKERS,
   acquireServerLock,
   coursePaths,
+  createSlots,
   deleteDoc,
   demoteHeadings,
   docPaths,
   getDoc,
   importPdf,
+  ingestLoad,
   isDigestComplete,
   isIngestRunning,
   listDocs,
   loadDocAssets,
   pngAspectRatio,
-  popplerMissingMessage,
+  progressThrottle,
   readDigestRecord,
   readStoredDoc,
   removeDeletedLeftovers,
   resumePendingIngests,
   retryIngest,
-  runPoppler,
   serverLockPath,
   slideFileName,
   slugify,
+  startBackfill,
+  stopImageWork,
   textFileName,
   waitForBackfill,
   waitForIngest,
@@ -46,6 +49,8 @@ import {
   writeFileAtomic,
 } from '../server/library.ts';
 import type { ServerLockInfo, StoredDocMeta } from '../server/library.ts';
+import { TEXT_ENGINE, TEXT_ENGINE_FILE } from '../server/pageNames.ts';
+import { GARBAGE_PDF, baselinePdf, cjkPdf, deckPdf, encryptedPdf, symbolFontPdf } from './pdfFixtures.ts';
 
 const SAMPLE_PDF = path.join(repoRoot(), 'samples', 'sample-lecture.pdf');
 let tmpRoot = '';
@@ -134,6 +139,18 @@ describe('config', () => {
   });
 });
 
+test('fallbackFontProblem: EASY_STUDY_PDF_FALLBACK_FONT must name a readable file (checked at startup)', async () => {
+  const font = path.join(tmpRoot, 'font-check.ttf');
+  await fs.writeFile(font, 'not really a font, but a readable file');
+  assert.equal(fallbackFontProblem({}), null);
+  assert.equal(fallbackFontProblem({ EASY_STUDY_PDF_FALLBACK_FONT: '  ' }), null);
+  assert.equal(fallbackFontProblem({ EASY_STUDY_PDF_FALLBACK_FONT: font }), null);
+  const missing = path.join(tmpRoot, 'no-such-font.ttf');
+  const problem = fallbackFontProblem({ EASY_STUDY_PDF_FALLBACK_FONT: missing }) ?? '';
+  assert.ok(problem.includes(`${missing} (ENOENT)`), problem);
+  assert.match(fallbackFontProblem({ EASY_STUDY_PDF_FALLBACK_FONT: tmpRoot }) ?? '', /파일이 아닙니다/);
+});
+
 test('repoRoot is the directory with package.json, from server/ and from the compiled dist-server/server/', async () => {
   await fs.access(path.join(repoRoot(), 'package.json'));
   await fs.access(path.join(repoRoot(), 'server', 'index.ts'));
@@ -198,10 +215,11 @@ describe('ingest of the sample deck', () => {
     assert.equal(Math.max(width ?? 0, height ?? 0), 1600);
   });
 
-  test('9 text files, split per page and trimmed', async () => {
+  test('9 text files, split per page and trimmed, then the marker of the text engine', async () => {
     const paths = docPaths(meta.id);
     const files = (await fs.readdir(paths.textDir)).sort();
-    assert.equal(files.length, 9);
+    assert.deepEqual(files, [TEXT_ENGINE_FILE, ...Array.from({ length: 9 }, (_, i) => textFileName(i + 1, 9))]);
+    assert.equal(await fs.readFile(path.join(paths.textDir, TEXT_ENGINE_FILE), 'utf8'), `${TEXT_ENGINE}\n`);
     const first = await fs.readFile(path.join(paths.textDir, '001.txt'), 'utf8');
     assert.match(first, /^Lecture 5: CPU Scheduling/);
     const fourth = await fs.readFile(path.join(paths.textDir, '004.txt'), 'utf8');
@@ -316,6 +334,139 @@ describe('ingest of the sample deck', () => {
   });
 });
 
+describe('ingest progress (PDF worker → doc.json)', () => {
+  test('progressThrottle: the first report at once, then one per interval, and always the last page', () => {
+    let now = 1_000;
+    const shouldWrite = progressThrottle(400, () => now);
+    const written: number[] = [];
+    for (const [rendered, time] of [
+      [1, 1_000],
+      [2, 1_100],
+      [3, 1_399],
+      [4, 1_400],
+      [5, 1_500],
+      [6, 1_900],
+      [7, 1_901],
+      [8, 1_950],
+    ]) {
+      now = time;
+      if (shouldWrite(rendered, 8)) written.push(rendered);
+    }
+    assert.deepEqual(written, [1, 4, 6, 8]);
+  });
+
+  test('doc.json gets the page count before the slides, then their progress; nothing is looked up on PATH', async () => {
+    // 20 slides with some drawing each, so the rendering takes a while; nothing (no poppler) on PATH.
+    const draw = (n: number) =>
+      Array.from({ length: 60 }, (_, k) => `${(k % 7) / 7} ${(n % 5) / 5} 0.6 rg ${20 + ((k * 37) % 900)} ${20 + ((k * 53) % 380)} 40 30 re f`).join('\n');
+    const savedPath = process.env.PATH;
+    process.env.PATH = path.join(tmpRoot, 'empty-bin');
+    const states: string[] = [];
+    let docId = '';
+    try {
+      const initial = await importPdf(deckPdf(20, { draw }), 'Progress Deck.pdf');
+      docId = initial.id;
+      for (;;) {
+        const stored = await readStoredDoc(docId);
+        assert.ok(stored);
+        const state = `${stored.status} ${stored.pageCount} ${stored.progress}`;
+        if (states.at(-1) !== state) states.push(state);
+        if (stored.status !== 'processing') break;
+        await new Promise((resolve) => setTimeout(resolve, 2));
+      }
+      await waitForIngest(docId);
+    } finally {
+      process.env.PATH = savedPath;
+    }
+    assert.equal(states.at(-1), 'ready 20 20', states.join(' | '));
+    const processing = states.filter((state) => state.startsWith('processing ')).map((state) => state.split(' ').map(Number).slice(1));
+    // The page count is known while the slides are still being rendered.
+    assert.ok(processing.some(([pageCount, progress]) => pageCount === 20 && progress < 20), states.join(' | '));
+    // At least one intermediate count of rendered slides, never more than the page count, never going back.
+    assert.ok(processing.some(([, progress]) => progress > 0 && progress < 20), states.join(' | '));
+    for (const [pageCount, progress] of processing) assert.ok(progress <= Math.max(pageCount, 0), states.join(' | '));
+    const progresses = processing.map(([, progress]) => progress);
+    assert.deepEqual(progresses, [...progresses].sort((a, b) => a - b), states.join(' | '));
+    assert.equal(await fs.readFile(path.join(docPaths(docId).textDir, '020.txt'), 'utf8'), 'Slide 20');
+  });
+
+  test('createSlots: at most `limit` holders, first come first served; release is idempotent; waiters can be turned away', async () => {
+    const slots = createSlots(2);
+    const order: string[] = [];
+    const a = await slots.acquire();
+    const b = await slots.acquire();
+    assert.ok(a && b);
+    const c = slots.acquire().then((release) => (order.push('c'), release));
+    const d = slots.acquire().then((release) => (order.push('d'), release));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(slots.load(), { running: 2, waiting: 2 });
+    assert.deepEqual(order, []);
+    a();
+    a(); // a second release gives nothing back
+    const releaseC = await c;
+    assert.ok(releaseC);
+    assert.deepEqual(slots.load(), { running: 2, waiting: 1 });
+    assert.deepEqual(order, ['c']);
+    const e = slots.acquire();
+    slots.cancelWaiting();
+    assert.equal(await d, null);
+    assert.equal(await e, null);
+    assert.deepEqual(slots.load(), { running: 2, waiting: 0 });
+    b();
+    releaseC();
+    assert.deepEqual(slots.load(), { running: 0, waiting: 0 });
+    // Free slots are taken at once again.
+    const f = await slots.acquire();
+    assert.ok(f);
+    f();
+  });
+
+  test('a multi-file upload runs at most MAX_INGEST_WORKERS worker processes at a time; the others wait, then convert', async () => {
+    const draw = (n: number) => Array.from({ length: 30 }, (_, k) => `0.2 0.4 ${(n % 5) / 5} rg ${20 + k * 30} ${40 + ((k * n) % 300)} 20 60 re f`).join('\n');
+    await waitForBackfill(); // its one worker would count too
+    const docs: DocMeta[] = [];
+    for (let i = 0; i < MAX_INGEST_WORKERS + 2; i++) docs.push(await importPdf(deckPdf(8, { draw }), `Upload ${i}.pdf`));
+    const peak = { running: 0, waiting: 0, workers: 0 };
+    const sample = () => {
+      const load = ingestLoad();
+      for (const key of ['running', 'waiting', 'workers'] as const) peak[key] = Math.max(peak[key], load[key]);
+    };
+    sample();
+    const sampler = setInterval(sample, 2);
+    try {
+      await Promise.all(docs.map((doc) => waitForIngest(doc.id)));
+    } finally {
+      clearInterval(sampler);
+    }
+    assert.equal(peak.running, MAX_INGEST_WORKERS);
+    assert.ok(peak.waiting >= 2, `the last uploads waited for a slot (${JSON.stringify(peak)})`);
+    // Worker processes (PDF, then image with the derived files) of all ingests together, not per stage.
+    assert.ok(peak.workers <= MAX_INGEST_WORKERS, JSON.stringify(peak));
+    assert.deepEqual(ingestLoad(), { running: 0, waiting: 0, workers: 0 });
+    for (const doc of docs) {
+      assert.equal((await readStoredDoc(doc.id))?.status, 'ready');
+      assert.equal((await fs.readdir(docPaths(doc.id).thumbsDir)).length, 8, 'derived images written too');
+    }
+  });
+
+  test('at shutdown, ingests waiting for a slot never start: they stay processing and resume on the next start', async () => {
+    const docs: DocMeta[] = [];
+    for (let i = 0; i < MAX_INGEST_WORKERS + 2; i++) docs.push(await importPdf(deckPdf(3), `Queued ${i}.pdf`));
+    for (const deadline = Date.now() + 10_000; ingestLoad().waiting < 2; ) {
+      assert.ok(Date.now() < deadline, `two ingests wait for a slot: ${JSON.stringify(ingestLoad())}`);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    await stopImageWork();
+    await Promise.all(docs.map((doc) => waitForIngest(doc.id)));
+    const statuses = await Promise.all(docs.map(async (doc) => (await readStoredDoc(doc.id))?.status));
+    const waited = docs.filter((_, i) => statuses[i] === 'processing');
+    assert.equal(waited.length, 2, statuses.join(', '));
+    for (const doc of waited) assert.equal(await exists(docPaths(doc.id).slidesDir), false, 'never touched');
+    await resumePendingIngests();
+    for (const doc of docs) assert.equal((await readStoredDoc(doc.id))?.status, 'ready');
+  });
+});
+
 describe('import validation and failures', () => {
   test('rejects bodies without a %PDF header (400)', async () => {
     await assert.rejects(importPdf(Buffer.from('hello, not a pdf'), 'x.pdf'), (err: unknown) => {
@@ -335,17 +486,39 @@ describe('import validation and failures', () => {
     await assert.rejects(loadDocAssets(meta.id), (err: unknown) => err instanceof HttpError && err.status === 409);
   });
 
-  test('a missing poppler binary produces the install hint', async () => {
-    await assert.rejects(runPoppler('pdftoppm-definitely-not-installed', []), { message: POPPLER_MISSING_MESSAGE });
+  test('CJK text that could not be drawn for want of a fallback font is logged with the document (the ingest goes on)', async () => {
+    const saved = process.env.EASY_STUDY_PDF_FALLBACK_FONT;
+    process.env.EASY_STUDY_PDF_FALLBACK_FONT = path.join(tmpRoot, 'mistyped.ttf');
+    const warned: string[] = [];
+    const warn = console.warn;
+    console.warn = (...args: unknown[]) => void warned.push(args.join(' '));
+    let meta: DocMeta;
+    try {
+      meta = await importPdf(cjkPdf(2), 'Korean without fonts.pdf');
+      await waitForIngest(meta.id);
+    } finally {
+      console.warn = warn;
+      if (saved === undefined) delete process.env.EASY_STUDY_PDF_FALLBACK_FONT;
+      else process.env.EASY_STUDY_PDF_FALLBACK_FONT = saved;
+    }
+    assert.equal((await readStoredDoc(meta.id))?.status, 'ready');
+    const lines = warned.filter((line) => line.startsWith(`[library] ${meta.id}: `));
+    assert.equal(lines.length, 1, warned.join('\n'));
+    assert.match(lines[0], /CJK font it does not embed.*mistyped\.ttf.*EASY_STUDY_PDF_FALLBACK_FONT/);
   });
 
-  test('the poppler install hint fits the platform', () => {
-    assert.equal(POPPLER_MISSING_MESSAGE, popplerMissingMessage(process.platform));
-    assert.equal(popplerMissingMessage('darwin'), 'poppler is not installed (brew install poppler)');
-    assert.match(popplerMissingMessage('linux'), /sudo apt install poppler-utils.*sudo dnf install poppler-utils.*pacman -S poppler/);
-    assert.match(popplerMissingMessage('win32'), /winget install oschwartz10612\.Poppler.*scoop install poppler/);
-    assert.doesNotMatch(popplerMissingMessage('win32'), /brew|apt/);
-    assert.match(popplerMissingMessage('freebsd'), /^poppler is not installed/);
+  test('a damaged or password-protected PDF fails with a readable message (no external tool involved)', async () => {
+    for (const [bytes, error] of [
+      [GARBAGE_PDF, 'could not read the PDF: the file is damaged or is not a PDF'],
+      [encryptedPdf('secret'), 'the PDF is password protected'],
+    ] as const) {
+      const meta = await importPdf(bytes, 'unreadable.pdf');
+      await waitForIngest(meta.id);
+      const settled = await waitUntilSettled(meta.id);
+      assert.equal(settled.status, 'error');
+      assert.equal(settled.error, error);
+      assert.equal(settled.pageCount, 0);
+    }
   });
 
   test('loadDocAssets of an unknown doc is a 404', async () => {
@@ -549,7 +722,7 @@ describe('retrying a failed conversion and deleting documents', () => {
   }
 
   test('retryIngest converts a failed document again; only status error may be retried', async () => {
-    // The conversion fails (as without poppler); then the PDF becomes readable (poppler installed).
+    // The conversion fails (a damaged upload); then the PDF becomes readable (the file was replaced).
     const failed = await importPdf(Buffer.from('%PDF-1.4\nnot really a pdf\n%%EOF\n'), 'L8 Semantic Analysis.pdf');
     await waitForIngest(failed.id);
     const broken = await waitUntilSettled(failed.id);
@@ -740,6 +913,126 @@ describe('derived image routes and the backfill', () => {
     } finally {
       await second.close();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Text of documents converted by poppler, extracted again by the backfill (DESIGN §17)
+// ---------------------------------------------------------------------------
+
+describe('text backfill of documents converted before PDFium', () => {
+  /** mtimes of every file of a document except its text (slides, sheets, derived images, digest, doc.json). */
+  async function otherFiles(docId: string): Promise<Map<string, number>> {
+    const dir = docPaths(docId).dir;
+    const files = new Map<string, number>();
+    for (const entry of await fs.readdir(dir, { recursive: true, withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      const file = path.join(entry.parentPath, entry.name);
+      if (path.dirname(file) === docPaths(docId).textDir) continue;
+      files.set(path.relative(dir, file), (await fs.stat(file)).mtimeMs);
+    }
+    return files;
+  }
+
+  /** Turns a converted document into one poppler converted: pdftotext's text (PUA symbols), no text/.engine. */
+  async function asPopplerDoc(docId: string, pages: string[]): Promise<void> {
+    const paths = docPaths(docId);
+    await fs.rm(path.join(paths.textDir, TEXT_ENGINE_FILE));
+    for (const [i, text] of pages.entries()) await fs.writeFile(path.join(paths.textDir, textFileName(i + 1, pages.length)), text);
+  }
+
+  test('only the text is extracted again: slides, derived images and the digest stay as they are', async () => {
+    const symbols = await importPdf(symbolFontPdf(), 'Poppler Symbols.pdf');
+    const deck = await importPdf(await fs.readFile(SAMPLE_PDF), 'Poppler Deck.pdf');
+    await Promise.all([waitForIngest(symbols.id), waitForIngest(deck.id)]);
+    await waitForBackfill();
+    await asPopplerDoc(symbols.id, ['   Sets:  \uf061 \uf062 \uf0c8 \uf0ce \uf0c6 \uf0ae\n\n   \uf0a7 done']);
+    await asPopplerDoc(deck.id, Array.from({ length: 9 }, (_, i) => `pdftotext page ${i + 1}`));
+    // A digest made from the old text is kept (not made again).
+    const digest: DigestRecord = { version: 1, status: 'ready', slides: [{ slide: 1, title: 'Sets', markdown: 'α β' }], summary: 'old' };
+    await fs.mkdir(docPaths(symbols.id).digestDir, { recursive: true });
+    await fs.writeFile(docPaths(symbols.id).digestJson, JSON.stringify(digest));
+    const before = new Map([
+      [symbols.id, await otherFiles(symbols.id)],
+      [deck.id, await otherFiles(deck.id)],
+    ]);
+
+    await startBackfill();
+    await waitForBackfill();
+
+    const symbolText = await fs.readFile(path.join(docPaths(symbols.id).textDir, '001.txt'), 'utf8');
+    assert.equal(symbolText, 'Sets: α β ∪ ∈ ∅ →\n\uf0a7 done');
+    const deckTexts = await loadDocAssets(deck.id).then((assets) => assets.texts);
+    assert.match(deckTexts[0], /^Lecture 5: CPU Scheduling/);
+    assert.ok(deckTexts.every((text) => !text.startsWith('pdftotext page')), 'every page was extracted again');
+    for (const docId of [symbols.id, deck.id]) {
+      assert.equal(await fs.readFile(path.join(docPaths(docId).textDir, TEXT_ENGINE_FILE), 'utf8'), `${TEXT_ENGINE}\n`);
+      assert.deepEqual(await otherFiles(docId), before.get(docId), `${docId}: nothing but the text changed`);
+    }
+    assert.deepEqual(await readDigestRecord(symbols.id), digest);
+
+    // Once is enough: the marker keeps the next backfill away from the text.
+    const stamp = (await fs.stat(path.join(docPaths(deck.id).textDir, '001.txt'))).mtimeMs;
+    await startBackfill();
+    await waitForBackfill();
+    assert.equal((await fs.stat(path.join(docPaths(deck.id).textDir, '001.txt'))).mtimeMs, stamp);
+  });
+
+  test('text of an older PDFium extraction (text/.engine pdfium-1) is extracted again as well', async () => {
+    const doc = await importPdf(baselinePdf(), 'Baselines.pdf');
+    await waitForIngest(doc.id);
+    await waitForBackfill();
+    const textFile = path.join(docPaths(doc.id).textDir, textFileName(1, 1));
+    const current = await fs.readFile(textFile, 'utf8');
+    assert.match(current, /^Rank 1st and 2nd\nx2 \+ Ai done\nif E2 then\n/);
+    // What pdfium-1 wrote: a line break at every baseline shift.
+    await fs.writeFile(textFile, 'Rank 1st and 2nd\nx\n2\n+ Ai\ndone');
+    await fs.writeFile(path.join(docPaths(doc.id).textDir, TEXT_ENGINE_FILE), 'pdfium-1\n');
+    const before = await otherFiles(doc.id);
+    await startBackfill();
+    await waitForBackfill();
+    assert.equal(await fs.readFile(textFile, 'utf8'), current);
+    assert.equal(await fs.readFile(path.join(docPaths(doc.id).textDir, TEXT_ENGINE_FILE), 'utf8'), `${TEXT_ENGINE}\n`);
+    assert.deepEqual(await otherFiles(doc.id), before, 'nothing but the text changed');
+  });
+
+  test('documents without source.pdf or not ready keep their text; a deletion during the backfill wins', async () => {
+    // lec-1-aaa001 (above) has text files, no marker and no source.pdf.
+    const lecture = path.join(docPaths('lec-1-aaa001').textDir, textFileName(1, 3));
+    assert.equal(await fs.readFile(lecture, 'utf8'), 'Lec 1 slide 1');
+    // A document still being converted (by another process, say): its ingest writes the text itself.
+    const converting = docPaths('converting-abc123');
+    await fs.mkdir(converting.textDir, { recursive: true });
+    await fs.copyFile(SAMPLE_PDF, converting.sourcePdf);
+    await fs.writeFile(path.join(converting.textDir, '001.txt'), 'old');
+    const stored: StoredDocMeta = {
+      id: 'converting-abc123',
+      title: 'Converting',
+      fileName: 'Converting.pdf',
+      pageCount: 9,
+      aspectRatio: 16 / 9,
+      status: 'processing',
+      progress: 2,
+      createdAt: new Date().toISOString(),
+    };
+    await fs.writeFile(converting.docJson, JSON.stringify(stored));
+
+    const deleted = await importPdf(await fs.readFile(SAMPLE_PDF), 'Deleted While Backfilled.pdf');
+    await waitForIngest(deleted.id);
+    await waitForBackfill();
+    await asPopplerDoc(deleted.id, Array.from({ length: 9 }, () => 'old'));
+    const backfill = startBackfill();
+    // Whether the text run has started or not, the deletion wins: nothing is written into the folder later.
+    await deleteDoc(deleted.id);
+    await backfill;
+    await waitForBackfill();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await assert.rejects(fs.access(docPaths(deleted.id).dir));
+    assert.equal(await fs.readFile(lecture, 'utf8'), 'Lec 1 slide 1');
+    assert.ok(!(await exists(path.join(docPaths('lec-1-aaa001').textDir, TEXT_ENGINE_FILE))));
+    assert.equal(await fs.readFile(path.join(converting.textDir, '001.txt'), 'utf8'), 'old');
+    assert.deepEqual(await fs.readdir(converting.textDir), ['001.txt']);
+    await fs.rm(converting.dir, { recursive: true });
   });
 });
 
