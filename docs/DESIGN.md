@@ -797,3 +797,44 @@ added now and runs once a repository exists.)
   openssl; optdepends noto-fonts-cjk, xdg-utils). CI job `arch-x64` (container archlinux:latest) smoke-tests the x86_64 AppImage, builds
   the package from the fresh .deb, installs it, runs namcap and the smoke tests, removes it, and attaches the `.pkg.tar.zst` + PKGBUILD
   to releases. Arch Linux ARM (aarch64) is listed but untested.
+
+## 21. Attachments — select a slide region, paste / drop / pick images
+
+User request: drag on the PDF slide to select a region and attach it to the question; attach images instantly (paste, drop, pick).
+Contracts in shared/types.ts: RegionRect, Attachment, CreateRegionRequest, MAX_ATTACHMENTS (6), MAX_ATTACHMENT_BYTES (10 MB),
+ATTACHMENT_ID_RE, SendMessageRequest.attachments (ids), ChatMessage.attachments, ContextInfo.attachments; BuildTurnInput.attachments.
+
+Storage: `library/<docId>/attachments/<id>.jpg|png` (+ `<id>.json` metadata = Attachment). Ids: `att-` + 16 hex.
+- Regions are cropped by the image worker from the full-resolution `slides/NNN.png` (not the WebP view), padded by 2 % of the slide on
+  each side (clamped), minimum 16×16 px, encoded like inline JPEGs (≤ INLINE_MAX_EDGE, ≤ INLINE_MAX_BYTES; PNG when smaller for flat
+  graphics is fine). The text inside the rectangle comes from PDFium (FPDFText_GetBoundedText on the page, same Symbol remap) in the
+  same worker run; '' when the PDF has no text layer there.
+- Uploaded images: magic-byte check (PNG, JPEG, WebP, GIF first frame; HEIC only if sharp can decode it here — otherwise 415 with a clear
+  message), ≤ MAX_ATTACHMENT_BYTES (413), re-encoded by the worker (EXIF orientation applied, metadata stripped, ≤ INLINE limits).
+- Attachments not referenced by any message are deleted after 24 h (startup + hourly sweep); deleting a session deletes the attachments
+  only its messages reference; deleting a document deletes the folder.
+
+HTTP (remote-mode auth like every /api route; JSON errors):
+| POST `/api/docs/:docId/regions` | `CreateRegionRequest` | 201 `Attachment` (400 bad slide/rect, 409 doc not ready) |
+| POST `/api/docs/:docId/attachments` | raw image body, `Content-Type` image/*, header `X-Filename` (URI-encoded, optional) | 201 `Attachment` |
+| GET `/api/docs/:docId/attachments/:id` | – | the stored image (`Cache-Control: private, max-age=31536000, immutable`) |
+| DELETE `/api/docs/:docId/attachments/:id` | – | 204 only while unreferenced (409 once a message uses it) |
+`POST …/messages` accepts `attachments` (ids of this document; unknown → 400; > MAX_ATTACHMENTS → 400). The user message stores the
+resolved `Attachment[]`.
+
+Context (context.ts): after FOCUS and before the QUESTION: "The student attached N image(s) to this question:" then per attachment a label
+("[Attachment k: the region of slide 12 the student selected]" / "[Attachment k: an image from the student (name)]"), the image part
+(detail 'high'), and for regions "Text inside the selection:" + the text. Each attachment counts 1 toward the image budget (rollover) and the
+Anthropic preflight. Prime turns take no attachments. appendHistory keeps them for stateless providers. Notes (notes/<sid>.md and
+STUDY_NOTES.md) show the attachments under the question: `![p.12 영역](attachments/<id>.jpg)` / `![이미지](attachments/<id>.jpg)`.
+
+Web:
+- Slide viewer: drag on a slide draws a selection (mouse: press + move ≥ 6 px; a plain click still focuses the slide; touch: long-press
+  ~350 ms then drag, or the `✂ 영역` toolbar toggle; Esc cancels). On release a small floating menu: `📎 첨부` (POST regions → chip in
+  the composer), `💬 이 부분 설명해줘` (attach + send with that text), `✕`. Works at every zoom level; the rect is stored normalised.
+- Composer: chips row (thumbnail, "p.12 영역" / file name, ×, click → preview; region chip also scrolls the viewer to the slide and
+  flashes the rect). `📎` button → file picker (images, multiple). Paste (Cmd/Ctrl+V) of images into the composer and dropping image files
+  onto the chat panel upload them (progress, errors as toasts). Dropping a PDF anywhere keeps uploading it as a new document.
+  Max 6 per message (extra ones refused with a toast). Chips persist while switching slides; cleared after a successful send; kept
+  (not lost) if the send fails.
+- Message history and the notes tab show the attachments as thumbnails (click → preview; region → jump to slide + flash).

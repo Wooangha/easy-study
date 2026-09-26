@@ -167,6 +167,8 @@ export interface ContextInfo {
    * ('resume_invalid') or became too large ('context_overflow'); the turn was retried automatically.
    */
   recoveredFrom?: 'resume_invalid' | 'context_overflow';
+  /** Number of attachments (selected slide regions / images) sent with this question. */
+  attachments?: number;
 }
 
 export interface ChatMessage {
@@ -183,6 +185,8 @@ export interface ChatMessage {
   error?: string;
   /** Present on user messages. */
   context?: ContextInfo;
+  /** Present on user messages that carried attachments (selected slide regions or images). */
+  attachments?: Attachment[];
   /** Present on assistant messages. */
   provider?: ProviderId;
   model?: string;
@@ -222,6 +226,8 @@ export interface SendMessageRequest {
    * (ContextSettings.neighborWindow, default 1).
    */
   neighbors?: number;
+  /** Ids of attachments created beforehand (POST …/attachments or …/regions) of this document, max MAX_ATTACHMENTS. */
+  attachments?: string[];
 }
 
 export interface PrimeRequest {
@@ -321,3 +327,44 @@ export interface NotesResponse {
 export const DOC_ID_RE = /^[a-z0-9][a-z0-9-]{0,80}$/;
 export const COURSE_ID_RE = /^[a-z0-9][a-z0-9-]{0,80}$/;
 export const SESSION_ID_RE = /^[a-z0-9][a-z0-9-]{0,80}$/;
+
+// ---------------------------------------------------------------------------
+// Attachments (DESIGN §21): a region the student selected on a slide, or an image they pasted / dropped /
+// picked. Created first (so the composer can show a thumbnail), then referenced by id when the question is sent.
+// ---------------------------------------------------------------------------
+
+/** Rectangle on a slide, normalised to the slide image (0..1, origin top-left). */
+export interface RegionRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface Attachment {
+  /** ATTACHMENT_ID_RE */
+  id: string;
+  kind: 'region' | 'image';
+  /** kind 'region': the slide and the selected rectangle. */
+  slide?: number;
+  rect?: RegionRect;
+  /** kind 'image': the original file name, if any. */
+  name?: string;
+  /** Pixel size of the stored image. */
+  width: number;
+  height: number;
+  /** kind 'region': text of the PDF text layer inside the rectangle ('' when none). */
+  text?: string;
+  createdAt: string;
+}
+
+/** POST /api/docs/:docId/regions */
+export interface CreateRegionRequest {
+  slide: number;
+  rect: RegionRect;
+}
+
+export const MAX_ATTACHMENTS = 6;
+/** Maximum size of an uploaded image (bytes). */
+export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+export const ATTACHMENT_ID_RE = /^[a-z0-9][a-z0-9-]{0,80}$/;

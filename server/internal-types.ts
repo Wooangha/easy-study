@@ -120,6 +120,11 @@ export interface BuildTurnInput {
    * overflowed): behaves like a rollover (re-prime + recap), and ContextInfo.recoveredFrom is set.
    */
   forceNewConversation?: 'resume_invalid' | 'context_overflow';
+  /**
+   * Attachments of this question, in the order the student added them (resolved by chat.ts from the ids):
+   * the stored image path (inline-ready JPEG/PNG), a label, and for regions the text inside the selection.
+   */
+  attachments?: Array<{ kind: 'region' | 'image'; path: string; label: string; text?: string }>;
   settings: ContextSettings;
   /** Provider.maxImagesPerConversation of the session's provider. */
   maxImagesPerConversation: number;
