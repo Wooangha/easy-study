@@ -15,7 +15,7 @@
 
 pkgname=easy-study-bin
 _pkgname=easy-study
-pkgver=0.2.2
+pkgver=0.3.0
 pkgrel=1
 pkgdesc='Study lecture PDFs slide by slide with an LLM tutor (Claude Code, Codex, Claude API, OpenAI API): desktop app'
 arch=('x86_64' 'aarch64')
@@ -36,8 +36,8 @@ conflicts=("$_pkgname")
 options=('!strip' '!debug')
 source_x86_64=("${_pkgname}_${pkgver}_amd64.deb::$url/releases/download/v$pkgver/${_pkgname}_${pkgver}_amd64.deb")
 source_aarch64=("${_pkgname}_${pkgver}_arm64.deb::$url/releases/download/v$pkgver/${_pkgname}_${pkgver}_arm64.deb")
-sha256sums_x86_64=('c7981c289ea3efc401570719fd726cff03afb87448e1637901a4d628d890d12d')
-sha256sums_aarch64=('fdbacf8b0d1315b13aab24f2d536120fe86c9d961cdbe3e416d93edfb497b839')
+sha256sums_x86_64=('6763e633e07bcad24e5c805cafb4f893611120187f479a96d295d98c30da2fbf')
+sha256sums_aarch64=('12823465eb7b754f9433c0664fa3cc3b633fc6153d4117b45e6438e851493805')
 
 package() {
   # makepkg has already unpacked the .deb (debian-binary, control.tar.*, data.tar.*) into $srcdir.
