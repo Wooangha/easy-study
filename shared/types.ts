@@ -368,3 +368,117 @@ export const MAX_ATTACHMENTS = 6;
 /** Maximum size of an uploaded image (bytes). */
 export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 export const ATTACHMENT_ID_RE = /^[a-z0-9][a-z0-9-]{0,80}$/;
+
+// ---------------------------------------------------------------------------
+// Lecture recordings (DESIGN §22): recorded inside the app (live, transcribed a few seconds behind) or uploaded,
+// transcribed locally with whisper.cpp, aligned to slides, used as tutor context and replayed in sync with slides.
+// ---------------------------------------------------------------------------
+
+export type RecordingSource = 'live' | 'upload';
+export type RecordingStatus = 'recording' | 'paused' | 'converting' | 'ready' | 'error';
+export type TranscriptStatus = 'none' | 'queued' | 'running' | 'ready' | 'error';
+export type RecordingLanguage = 'ko' | 'en' | 'auto';
+/** How the current slide assignment was produced. */
+export type AlignmentKind = 'none' | 'timeline' | 'lexical' | 'llm';
+
+export interface RecordingInfo {
+  /** RECORDING_ID_RE */
+  id: string;
+  docId: string;
+  title: string;
+  source: RecordingSource;
+  status: RecordingStatus;
+  language: RecordingLanguage;
+  /** Whisper model id used (or to be used) for this recording. */
+  model: string;
+  /** Live recordings: transcribe while recording (false = only after stop). */
+  liveTranscribe: boolean;
+  createdAt: string;
+  /** Seconds of audio stored so far (live) or total (upload). */
+  durationSec: number;
+  transcriptStatus: TranscriptStatus;
+  /** Seconds of audio transcribed so far. */
+  transcribedSec: number;
+  alignment: AlignmentKind;
+  /** Segments with a manually set slide (markers) exist. */
+  hasManualMarkers: boolean;
+  error?: string;
+  /** Playback source (same-origin URL) once available. */
+  playback: { url: string; mime: string } | null;
+}
+
+export interface TranscriptSegment {
+  /** Stable, increasing within a recording. */
+  id: number;
+  /** Seconds from the start of the recording. */
+  start: number;
+  end: number;
+  text: string;
+  /** Slide this segment was said on (null = not about a slide, e.g. an announcement). */
+  slide: number | null;
+}
+
+export interface RecordingTranscript {
+  recordingId: string;
+  segments: TranscriptSegment[];
+}
+
+/** The student viewed `slide` from recording time `t` (seconds, recording clock) on. */
+export interface SlideViewEvent {
+  t: number;
+  slide: number;
+}
+
+/** Manual correction: from recording time `t` on, the lecture is on `slide` (null = off-slide). Hard constraint for alignment. */
+export interface AlignmentMarker {
+  t: number;
+  slide: number | null;
+}
+
+export interface CreateLiveRecordingRequest {
+  title?: string;
+  language?: RecordingLanguage;
+  /** Whisper model id; omitted = the recommended installed model. */
+  model?: string;
+  /** Default true. */
+  liveTranscribe?: boolean;
+}
+
+export interface AsrModelInfo {
+  id: string;
+  label: string;
+  sizeBytes: number;
+  installed: boolean;
+  /** Present while a download runs. */
+  downloading?: { receivedBytes: number; totalBytes: number };
+  /** Recommended default for this machine. */
+  recommended: boolean;
+}
+
+/** GET /api/asr */
+export interface AsrStatus {
+  /** whisper-cli found and runnable. */
+  engineAvailable: boolean;
+  engineVersion?: string;
+  /** Why the engine is unavailable (Korean, actionable). */
+  reason?: string;
+  /** 'metal' on Apple Silicon builds, otherwise 'cpu'. */
+  acceleration: 'metal' | 'cpu';
+  /** ffmpeg found (needed for uploads only). */
+  ffmpegAvailable: boolean;
+  models: AsrModelInfo[];
+}
+
+/** Events on GET …/recordings/:rid/events (SSE, `event: <type>`, JSON data; `id:` = segment id for 'segment'). */
+export type RecordingEvent =
+  | { type: 'status'; recording: RecordingInfo }
+  | { type: 'segment'; segment: TranscriptSegment }
+  /** Slides of existing segments changed (re-alignment). */
+  | { type: 'realigned'; segments: Array<{ id: number; slide: number | null }> }
+  | { type: 'ping' };
+
+export const RECORDING_ID_RE = /^[a-z0-9][a-z0-9-]{0,80}$/;
+/** Live audio format: PCM signed 16-bit little-endian, mono, 16 kHz. */
+export const LIVE_SAMPLE_RATE = 16000;
+/** Maximum size of an uploaded recording (bytes). */
+export const MAX_RECORDING_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024;

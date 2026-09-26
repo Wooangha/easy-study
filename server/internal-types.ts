@@ -125,6 +125,15 @@ export interface BuildTurnInput {
    * the stored image path (inline-ready JPEG/PNG), a label, and for regions the text inside the selection.
    */
   attachments?: Array<{ kind: 'region' | 'image'; path: string; label: string; text?: string }>;
+  /**
+   * Lecture speech from this document's recordings (DESIGN §22), resolved by chat.ts:
+   * per slide of the focus window what was said on it (already capped), and — while a live recording of this
+   * document is running — the last few minutes of speech.
+   */
+  lectureSpeech?: {
+    bySlide: Array<{ slide: number; text: string }>;
+    recent?: { text: string; minutes: number };
+  };
   settings: ContextSettings;
   /** Provider.maxImagesPerConversation of the session's provider. */
   maxImagesPerConversation: number;

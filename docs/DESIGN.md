@@ -861,3 +861,82 @@ Web:
 - The selection's floating menu goes below the selection when the visible part of the viewer has room (it may hang past the slide's
   edge, into the gap / next slide), else above it, and inside its bottom edge only when there is no room either way.
 - Message history and the notes tab show the attachments as thumbnails (click → preview; region → jump to slide + flash).
+
+## 22. Lecture recordings — record in the app (live) or upload, local transcription, slide alignment
+
+User request: record the lecture inside the app during class and process it right away (and also upload existing recordings); the tutor
+should know what the professor said; replay in sync with the slides. Spikes (session scratchpad `rec/spike-rec.json`,
+`rec-live/spike-live.json`, fixtures in `rec/fixtures`) are normative — reuse their verified code and numbers.
+Contracts: shared/types.ts (RecordingInfo, TranscriptSegment, RecordingTranscript, SlideViewEvent, AlignmentMarker,
+CreateLiveRecordingRequest, AsrModelInfo, AsrStatus, RecordingEvent, RECORDING_ID_RE, LIVE_SAMPLE_RATE, MAX_RECORDING_UPLOAD_BYTES),
+server/internal-types.ts BuildTurnInput.lectureSpeech.
+
+### Engines (all local, no API key)
+- ASR: whisper.cpp **v1.9.4** `whisper-cli` as a short-lived sidecar (like the image/PDF workers). Default model
+  `large-v3-turbo-q5_0` (574 MB, sha256 394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2) + Silero VAD v6.2.0; fast model
+  `small-q5_1` (190 MB) recommended on CPU-only machines. Flags: beam default (5), `-l ko|en` forced when known (auto otherwise), VAD on,
+  no prompt by default, output `-ojf`. Models are downloaded on first use into `<data>/models/` (desktop: app data dir; web: `<repo>/.cache/models`,
+  env EASY_STUDY_MODELS_DIR), resumable, sha256-verified, never bundled. Binary lookup: env EASY_STUDY_WHISPER, then a bundled sidecar (desktop),
+  then `<repo>/.cache/whisper/bin/whisper-cli` built by `npm run setup:whisper`, then PATH.
+- Audio decode (uploads only): minimal LGPL ffmpeg; env EASY_STUDY_FFMPEG, bundled sidecar (desktop), else `ffmpeg` on PATH. One pass →
+  `asr.wav` (16 kHz mono s16) + `playback.m4a` (AAC 64k mono, +faststart). Live recordings need no ffmpeg (PCM in, WAV playback).
+- Memory: at most one whisper process at a time (queue); live transcription processes ~20–30 s windows cut at silences as audio arrives.
+
+### Storage `library/<docId>/recordings/<rid>/`
+`meta.json` (RecordingInfo minus derived fields), `audio.pcm` (live, append-only, fsync before ack) or `source.<ext>` + `asr.wav` (upload),
+`playback.m4a` (upload) — live playback is served as WAV (44-byte header + audio.pcm, Range supported); `transcript.json` (segments with
+slide), `timeline.json` (SlideViewEvent[]), `markers.json` (AlignmentMarker[]). Recording ids: `rec-` + date + 4 hex.
+
+### HTTP (remote-mode auth on all; JSON errors)
+| GET `/api/asr` | – | `AsrStatus` |
+| POST `/api/asr/models/:modelId/download` | – | 202 (progress via GET /api/asr) |
+| DELETE `/api/asr/models/:modelId` | – | 204 |
+| GET `/api/docs/:docId/recordings` | – | `RecordingInfo[]` newest first |
+| POST `/api/docs/:docId/recordings` | `CreateLiveRecordingRequest` | 201 `RecordingInfo` (status 'recording'; one live recording per server at a time → 409) |
+| POST `/api/docs/:docId/recordings/upload` | raw audio/video body, `X-Filename` | 201 `RecordingInfo` (status 'converting' → transcription → alignment) |
+| POST `…/recordings/:rid/audio?offset=N` | PCM s16le 16 kHz mono bytes | 200 `{offset}` after fsync; overlap skipped, gap → 409 `{offset}` (tus-like, see the protocol spike) |
+| POST `…/recordings/:rid/slides` | `SlideViewEvent[]` | 204 |
+| POST `…/recordings/:rid/pause`, `…/resume`, `…/stop` | – | `RecordingInfo` |
+| GET `…/recordings/:rid/events` | – | SSE `RecordingEvent` (`event: ping` every 10 s; `?since=<segment id>` / Last-Event-ID replay) |
+| GET `…/recordings/:rid` / `…/transcript` | – | `RecordingInfo` / `RecordingTranscript` |
+| GET `…/recordings/:rid/audio` | – | playback (Range) |
+| PUT `…/recordings/:rid/markers` | `AlignmentMarker[]` | `RecordingTranscript` (re-aligned with markers as hard constraints) |
+| POST `…/recordings/:rid/align-ai` | `{ provider, model? }` | 202 (LLM alignment via the user's CLI, hybrid with the local DP; progress via events) |
+| PATCH `…/recordings/:rid` | `{ title }` | `RecordingInfo` |
+| DELETE `…/recordings/:rid` | – | 204 (stops a running recording/job first) |
+Crash safety: after a restart, live recordings left in 'recording'/'paused' stay resumable (the client resends from the acknowledged offset);
+queued/running transcriptions resume.
+
+### Alignment
+- Live: the slide-view timeline is the prior (segment → slide the student viewed at its midpoint), then the local DP may override only with
+  strong lexical evidence (e.g. a short look-ahead by the student), markers always win.
+- Upload: local lexical DP (TF-IDF char n-grams + Hangul-transliteration skeleton + monotonic Viterbi with skip/back/off-slide states; spike
+  code) on digest + slide text. Optional "AI 정밀 정렬": hybrid DP+LLM (haiku, rich deck, ≤150-segment chunks, independent not "refine").
+- Markers: "여기부터 p.N" from the UI are hard constraints; re-solving takes < 1 s for 60 minutes.
+
+### Tutor context (context.ts)
+For each slide of the focus window that has speech: "What the professor said on slide N (lecture recording, may contain transcription errors;
+English terms may be written in Hangul):" + text (cap 1500 chars/slide, total 4000). While a live recording of the document runs: "The last
+N minutes of the lecture:" + text (cap 3000 chars) before the question. Priming: one line saying recordings exist. System prompt: one bullet
+about using lecture speech.
+
+### Web
+- Record button (🎙) in the chat header / top bar: first use shows a one-time notice to check the professor's/school's recording rules; mic
+  permission; level meter, timer, pause/stop; live transcript strip; recording continues while switching slides/tabs; if the page reloads the
+  recorder offers to continue the same recording (resend from the acknowledged offset; IndexedDB keeps unacknowledged audio).
+  Capture: getUserMedia → AudioContext({sampleRate: 16000}) → AudioWorklet → s16le chunks (~1–5 s) → offset POSTs, one in flight.
+  Slide changes of the viewer post SlideViewEvents on the recording clock (captured frames / 16 000).
+  Not available on insecure origins (plain-HTTP LAN): explain HTTPS is needed.
+- Upload: "녹음 파일 올리기" per lecture (library row menu and the recording tab).
+- Right-pane tab **녹음**: recordings list (status/progress, model download prompt with size), transcript for the focused slide (or all, with
+  slide headers), click a segment → play from there; player (play/pause/seek/speed) with "슬라이드 따라가기" (the viewer follows the slide being
+  discussed); "여기부터 p.N" marker editing; "AI 정밀 정렬" button; settings: model (turbo / small), language, live transcription on/off.
+- Tutor: questions during a live recording automatically include the recent speech; a chip in the composer shows "🎙 최근 3분 포함".
+
+### Desktop shell + CI
+- macOS: Info.plist NSMicrophoneUsageDescription (Korean + English), entitlement com.apple.security.device.audio-input (hardened runtime);
+  Linux: enable media stream + permission-request handler allowing audio capture for the local server origin (and a remote origin the user
+  connected to over HTTPS); Windows: PermissionRequested → allow microphone for those origins.
+- CI builds whisper-cli v1.9.4 per target (Metal on macOS; CPU elsewhere) and the minimal LGPL ffmpeg, caches them, ships them like es-node
+  (resources on macOS/Windows, externalBin on Linux), and passes EASY_STUDY_WHISPER / EASY_STUDY_FFMPEG to the server. Licenses in
+  THIRD_PARTY_NOTICES.md (whisper.cpp MIT, ffmpeg LGPL build config + source offer, Silero VAD MIT, models MIT/OpenAI).
