@@ -13,6 +13,8 @@ interface SlideImageProps {
   draggable?: boolean;
   /** The PNG fallback failed too. */
   onFail?: () => void;
+  /** Loaded (WebP or PNG): its natural size tells the image's aspect ratio. */
+  onLoad?: (img: HTMLImageElement) => void;
 }
 
 /**
@@ -23,10 +25,16 @@ interface SlideImageProps {
  * whether the session is still valid (→ login screen), and images that failed are loaded again after the
  * next login.
  */
-export function SlideImage({ docId, slide, src, srcSet, sizes, alt, draggable, onFail }: SlideImageProps) {
+export function SlideImage({ docId, slide, src, srcSet, sizes, alt, draggable, onFail, onLoad }: SlideImageProps) {
   const epoch = useLoginEpoch();
   const [failure, setFailure] = useState<{ src: string; epoch: number } | null>(null);
-  const common = { alt, draggable, loading: 'lazy', decoding: 'async' } as const;
+  const common = {
+    alt,
+    draggable,
+    loading: 'lazy',
+    decoding: 'async',
+    onLoad: onLoad ? (e: { currentTarget: HTMLImageElement }) => onLoad(e.currentTarget) : undefined,
+  } as const;
   if (failure && failure.src === src && failure.epoch === epoch) {
     return (
       <img

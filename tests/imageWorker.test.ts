@@ -9,9 +9,33 @@ import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { pathToFileURL } from 'node:url';
 import sharp from 'sharp';
-import { INLINE_MAX_BYTES, INLINE_MAX_EDGE, THUMB_WIDTH, VIEW_WIDTHS, inlinePathFor, thumbPath, viewPath } from '../server/assets.ts';
+import {
+  INLINE_MAX_BYTES,
+  INLINE_MAX_EDGE,
+  REGION_MIN_PX,
+  THUMB_WIDTH,
+  VIEW_WIDTHS,
+  inlinePathFor,
+  isInlineReady,
+  regionCropBox,
+  thumbPath,
+  viewPath,
+} from '../server/assets.ts';
 import { repoRoot } from '../server/config.ts';
-import { imageWorkerPath, isImageWorkerStopped, runImageWorker, runPdfWorker, runTextWorker, slideLabel } from '../server/imageWorker.ts';
+import {
+  imageWorkerPath,
+  isImageWorkerStopped,
+  runAttachmentWorker,
+  runImageWorker,
+  runPdfWorker,
+  runTextWorker,
+  slideLabel,
+  UPLOAD_MAX_DECODE_BYTES,
+  UPLOAD_MAX_PIXELS,
+  uploadRefusal,
+} from '../server/imageWorker.ts';
+import type { AttachmentJob, AttachmentWorkerResult, UploadImageType } from '../server/imageWorker.ts';
+import { pngHeaderOnly, svgBehindAvifHeader } from './imageFixtures.ts';
 import { TEXT_ENGINE, TEXT_ENGINE_FILE } from '../server/pageNames.ts';
 import { fallbackFontFiles } from '../server/pdf.ts';
 import { GARBAGE_PDF, cjkPdf, deckPdf, encryptedPdf, symbolFontPdf } from './pdfFixtures.ts';
@@ -351,10 +375,288 @@ describe('PDF worker', () => {
   });
 });
 
+describe('attachment jobs (DESIGN §21)', () => {
+  const SAMPLE = path.join(repoRoot(), 'samples', 'sample-lecture.pdf');
+  let sampleDir = '';
+  let symbolDir = '';
+
+  /** A document directory with source.pdf rendered by the PDF worker (1600 px slides) and an attachments folder. */
+  async function renderedDocDir(name: string, source: Buffer): Promise<string> {
+    const docDir = path.join(tmpRoot, name);
+    await fs.mkdir(path.join(docDir, 'attachments'), { recursive: true });
+    await fs.writeFile(path.join(docDir, 'source.pdf'), source);
+    await runPdfWorker({ kind: 'pdf', docDir, longEdge: 1600 }).done;
+    return docDir;
+  }
+
+  before(async () => {
+    sampleDir = await renderedDocDir('attach-sample', await fs.readFile(SAMPLE));
+    symbolDir = await renderedDocDir('attach-symbol', symbolFontPdf());
+  });
+
+  let counter = 0;
+  const nextId = () => `att-${(++counter).toString(16).padStart(16, '0')}`;
+
+  async function region(docDir: string, slide: number, rect: { x: number; y: number; w: number; h: number }) {
+    const id = nextId();
+    const result = await runAttachmentWorker({ kind: 'region', docDir, id, slide, slideFile: `${String(slide).padStart(3, '0')}.png`, rect }).done;
+    assert.equal(result.ok, true, JSON.stringify(result));
+    const ok = result as Extract<AttachmentWorkerResult, { ok: true }>;
+    const file = path.join(docDir, 'attachments', ok.file);
+    return { id, result: ok, file, meta: await sharp(file).metadata() };
+  }
+
+  test('regionCropBox: padded by 2 % of the slide, clamped to it, at least 16 px a side', () => {
+    // 1600 x 900: 32 px of padding across, 18 px down.
+    assert.deepEqual(regionCropBox({ x: 0.25, y: 0.25, w: 0.5, h: 0.5 }, 1600, 900), { left: 368, top: 207, width: 864, height: 486 });
+    // At the corner the padding is cut off by the slide's edge.
+    assert.deepEqual(regionCropBox({ x: 0, y: 0, w: 0.1, h: 0.1 }, 1600, 900), { left: 0, top: 0, width: 192, height: 108 });
+    assert.deepEqual(regionCropBox({ x: 0.9, y: 0.9, w: 0.1, h: 0.1 }, 1600, 900), { left: 1408, top: 792, width: 192, height: 108 });
+    // Out of range values are clamped first.
+    assert.deepEqual(regionCropBox({ x: -1, y: -1, w: 3, h: 3 }, 1600, 900), { left: 0, top: 0, width: 1600, height: 900 });
+    // A tiny selection on a small image grows to 16 px around its centre, inside the image.
+    assert.deepEqual(regionCropBox({ x: 0.5, y: 0.5, w: 0.01, h: 0.01 }, 100, 100), { left: 43, top: 43, width: REGION_MIN_PX, height: REGION_MIN_PX });
+    assert.deepEqual(regionCropBox({ x: 0.99, y: 0, w: 0.01, h: 0.01 }, 100, 100), { left: 84, top: 0, width: 16, height: 16 });
+    // An image smaller than that is taken whole.
+    assert.deepEqual(regionCropBox({ x: 0.2, y: 0.2, w: 0.1, h: 0.1 }, 10, 8), { left: 0, top: 0, width: 10, height: 8 });
+  });
+
+  test('a region of the sample lecture: the padded crop of the full-resolution slide, and the text inside the selection', async () => {
+    const { id, result, file, meta } = await region(sampleDir, 5, { x: 0.25, y: 0.25, w: 0.5, h: 0.5 });
+    assert.equal(path.basename(file), result.file);
+    assert.match(result.file, new RegExp(`^${id}\\.(jpg|png)$`));
+    assert.deepEqual([result.width, result.height], [864, 486]);
+    assert.deepEqual([meta.width, meta.height], [864, 486]);
+    assert.equal(meta.format, result.file.endsWith('.png') ? 'png' : 'jpeg');
+    assert.ok((await fs.stat(file)).size <= INLINE_MAX_BYTES);
+    assert.equal(typeof result.text, 'string');
+
+    // The body of slide 5 (bullets), without its title or footer.
+    const body = await region(sampleDir, 5, { x: 0, y: 0.2, w: 1, h: 0.2 });
+    assert.match(body.result.text ?? '', /^• Bursts: P1 = 24, P2 = 3, P3 = 3\n• Average waiting time = \(0 \+ 24 \+ 27\) \/ 3 = 17\n• Convoy effect/);
+    assert.doesNotMatch(body.result.text ?? '', /First-Come|OS 101/);
+    // The whole slide width is scaled into INLINE_MAX_EDGE: 1600 x (180 + 2 x 18) → 1568 x 212/213.
+    assert.equal(body.result.width, INLINE_MAX_EDGE);
+    assert.ok(Math.abs(body.result.height - (216 * INLINE_MAX_EDGE) / 1600) <= 1, String(body.result.height));
+
+    // The title only.
+    assert.equal((await region(sampleDir, 5, { x: 0, y: 0, w: 1, h: 0.2 })).result.text, 'First-Come, First-Served (FCFS)');
+  });
+
+  test('clamping: a region at the corner keeps only the padding inside the slide; a tiny one still has its padding', async () => {
+    const corner = await region(sampleDir, 1, { x: 0, y: 0, w: 0.1, h: 0.1 });
+    assert.deepEqual([corner.result.width, corner.result.height], [192, 108]);
+    const tiny = await region(sampleDir, 1, { x: 0.5, y: 0.5, w: 0.0001, h: 0.0001 });
+    // 2 % on each side of a (nearly) empty selection: 64 x 36 px (+1 for the rounding outwards).
+    assert.ok(tiny.result.width >= 64 && tiny.result.width <= 66, String(tiny.result.width));
+    assert.ok(tiny.result.height >= 36 && tiny.result.height <= 38, String(tiny.result.height));
+  });
+
+  test('the crop is the slide’s own pixels (a flat area comes out white, as the smaller PNG)', async () => {
+    // Lower right of slide 4 of the sample: empty white.
+    const blank = await region(sampleDir, 4, { x: 0.7, y: 0.6, w: 0.1, h: 0.1 });
+    assert.equal(blank.result.text, '');
+    assert.equal(blank.result.file.endsWith('.png'), true, 'a flat area is smaller as a PNG');
+    const stats = await sharp(blank.file).stats();
+    for (const channel of stats.channels.slice(0, 3)) assert.ok(channel.min > 200, JSON.stringify(stats.channels));
+    // Compare with the slide itself at the same place.
+    const box = regionCropBox({ x: 0.7, y: 0.6, w: 0.1, h: 0.1 }, 1600, 900);
+    const expected = await sharp(path.join(sampleDir, 'slides', '004.png')).extract(box).removeAlpha().raw().toBuffer();
+    const actual = await sharp(blank.file).removeAlpha().raw().toBuffer();
+    assert.deepEqual(actual, expected, 'a PNG crop is lossless');
+  });
+
+  test('text inside the selection keeps its symbols (Symbol-font PUA remapped)', async () => {
+    const line1 = await region(symbolDir, 1, { x: 0, y: 0.1, w: 1, h: 0.15 });
+    assert.equal(line1.result.text, 'Sets: α β ∪ ∈ ∅ →');
+    const line2 = await region(symbolDir, 1, { x: 0, y: 0.3, w: 1, h: 0.15 });
+    assert.equal(line2.result.text, '\uf0a7 done');
+  });
+
+  test('without a readable source.pdf the crop is made all the same, with no text', async () => {
+    const docDir = path.join(tmpRoot, 'attach-no-pdf');
+    await fs.mkdir(path.join(docDir, 'attachments'), { recursive: true });
+    await fs.cp(path.join(sampleDir, 'slides'), path.join(docDir, 'slides'), { recursive: true });
+    const withoutPdf = await region(docDir, 5, { x: 0, y: 0.2, w: 1, h: 0.2 });
+    assert.equal(withoutPdf.result.text, '');
+    await fs.writeFile(path.join(docDir, 'source.pdf'), GARBAGE_PDF);
+    assert.equal((await region(docDir, 5, { x: 0, y: 0.2, w: 1, h: 0.2 })).result.text, '');
+  });
+
+  async function upload(input: Buffer, type: UploadImageType): Promise<{ result: AttachmentWorkerResult; file: string | null }> {
+    const docDir = sampleDir;
+    const id = nextId();
+    const inputFile = path.join(tmpRoot, `${id}.upload`);
+    await fs.writeFile(inputFile, input);
+    const result = await runAttachmentWorker({ kind: 'upload', docDir, id, input: inputFile, type }).done;
+    return { result, file: result.ok ? path.join(docDir, 'attachments', result.file) : null };
+  }
+
+  const refusalOf = (result: AttachmentWorkerResult) => (result.ok ? null : result.reason);
+
+  test('uploads: EXIF orientation applied, metadata dropped, scaled into the inline limits', async () => {
+    // 300 x 200 pixels whose EXIF says "rotate 90° clockwise" (a phone photo held upright): 200 x 300 upright.
+    const photo = await sharp({ create: { width: 300, height: 200, channels: 3, background: '#3366cc' } })
+      .composite([{ input: { create: { width: 60, height: 200, channels: 3, background: '#ff0000' } }, left: 0, top: 0 }])
+      .jpeg()
+      .withMetadata({ orientation: 6, density: 300 })
+      .toBuffer();
+    assert.equal((await sharp(photo).metadata()).orientation, 6);
+    const { result, file } = await upload(photo, 'jpeg');
+    assert.equal(result.ok, true);
+    const meta = await sharp(file!).metadata();
+    assert.deepEqual([meta.width, meta.height], [200, 300]);
+    assert.equal(meta.orientation, undefined, 'no orientation left');
+    assert.equal(meta.exif, undefined, 'no EXIF');
+    assert.equal(meta.icc, undefined);
+    // Rotated clockwise: the red band that was on the left is now at the top.
+    const top = await sharp(await sharp(file!).extract({ left: 90, top: 10, width: 10, height: 10 }).toBuffer()).stats();
+    assert.ok(top.channels[0].mean > 200 && top.channels[2].mean < 80, JSON.stringify(top.channels.map((c) => c.mean)));
+
+    // A large picture is scaled into INLINE_MAX_EDGE and INLINE_MAX_BYTES.
+    const large = await sharp({ create: { width: 4000, height: 3000, channels: 3, background: '#808080', noise: { type: 'gaussian', mean: 128, sigma: 50 } } }).png().toBuffer();
+    const big = await upload(large, 'png');
+    assert.equal(big.result.ok, true);
+    const bigMeta = await sharp(big.file!).metadata();
+    assert.ok(Math.max(bigMeta.width ?? 0, bigMeta.height ?? 0) <= INLINE_MAX_EDGE);
+    assert.ok((await fs.stat(big.file!)).size <= INLINE_MAX_BYTES);
+    assert.equal(bigMeta.format, 'jpeg', 'a noisy picture is smaller as a JPEG');
+  });
+
+  test('uploads: the first frame of an animated GIF, transparency on white, WebP', async () => {
+    const frame = (color: string) => sharp({ create: { width: 40, height: 30, channels: 3, background: color } }).png().toBuffer();
+    const gif = await sharp([await frame('#ff0000'), await frame('#0000ff')], { join: { animated: true } }).gif().toBuffer();
+    assert.equal((await sharp(gif).metadata()).pages, 2);
+    const first = await upload(gif, 'gif');
+    assert.equal(first.result.ok, true);
+    const firstMeta = await sharp(first.file!).metadata();
+    assert.deepEqual([firstMeta.width, firstMeta.height, firstMeta.pages ?? 1], [40, 30, 1]);
+    const firstColor = await sharp(first.file!).stats();
+    assert.ok(firstColor.channels[0].mean > 200 && firstColor.channels[2].mean < 60, 'the first (red) frame');
+
+    const transparent = await sharp({ create: { width: 20, height: 20, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } } }).png().toBuffer();
+    const flat = await upload(transparent, 'png');
+    assert.equal(flat.result.ok, true);
+    const flatStats = await sharp(flat.file!).stats();
+    assert.equal(flatStats.isOpaque, true);
+    for (const channel of flatStats.channels.slice(0, 3)) assert.ok(channel.min >= 250, 'on white');
+
+    const webp = await sharp({ create: { width: 50, height: 40, channels: 3, background: '#00aa00' } }).webp().toBuffer();
+    const fromWebp = await upload(webp, 'webp');
+    assert.equal(fromWebp.result.ok, true);
+    assert.deepEqual([(fromWebp.result as { width: number }).width, (fromWebp.result as { height: number }).height], [50, 40]);
+  });
+
+  test('an upload that cannot be decoded is a result, not a crash; invalid jobs are refused', async () => {
+    const broken = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('not really a png')]);
+    const { result } = await upload(broken, 'png');
+    assert.equal(result.ok, false);
+    assert.equal((result as { reason: string }).reason, 'undecodable');
+
+    const bad: unknown[] = [
+      { kind: 'region', docDir: sampleDir, id: '../escape', slide: 1, slideFile: '001.png', rect: { x: 0, y: 0, w: 1, h: 1 } },
+      { kind: 'region', docDir: sampleDir, id: nextId(), slide: 1, slideFile: '../001.png', rect: { x: 0, y: 0, w: 1, h: 1 } },
+      { kind: 'region', docDir: sampleDir, id: nextId(), slide: 0, slideFile: '001.png', rect: { x: 0, y: 0, w: 1, h: 1 } },
+      { kind: 'region', docDir: sampleDir, id: nextId(), slide: 1, slideFile: '001.png', rect: { x: 0, y: 0, w: Number.NaN, h: 1 } },
+      { kind: 'upload', docDir: 'relative/dir', id: nextId(), input: path.join(tmpRoot, 'x'), type: 'png' },
+      { kind: 'upload', docDir: sampleDir, id: nextId(), input: 'relative.upload', type: 'png' },
+      { kind: 'upload', docDir: sampleDir, id: nextId(), input: path.join(tmpRoot, 'x') },
+      { kind: 'upload', docDir: sampleDir, id: nextId(), input: path.join(tmpRoot, 'x'), type: 'svg' },
+    ];
+    for (const job of bad) {
+      await assert.rejects(runAttachmentWorker(job as AttachmentJob).done, /invalid worker job/, JSON.stringify(job));
+    }
+  });
+
+  test('uploads: only the loader the first bytes name reads the file — an SVG behind an AVIF header is never rendered', async () => {
+    const before = await fs.readdir(path.join(sampleDir, 'attachments'));
+    // It would pull in an attachment next to it if librsvg rendered it (and did, before the loaders were limited).
+    const polyglot = await upload(svgBehindAvifHeader(before.find((name) => /\.(jpg|png)$/.test(name)) ?? 'x.png'), 'heif');
+    assert.equal(refusalOf(polyglot.result), 'unsupported', JSON.stringify(polyglot.result));
+    assert.equal(polyglot.file, null);
+    // Claimed as another type than it is: refused as well (a PNG is only ever read as a PNG).
+    const png = await sharp({ create: { width: 20, height: 10, channels: 3, background: '#123456' } }).png().toBuffer();
+    assert.equal(refusalOf((await upload(png, 'jpeg')).result), 'unsupported');
+    assert.deepEqual(await fs.readdir(path.join(sampleDir, 'attachments')), before, 'nothing was written');
+
+    // The loaders that stay allowed read every depth and colour model of their format.
+    const deep = await sharp({ create: { width: 30, height: 20, channels: 4, background: { r: 10, g: 200, b: 30, alpha: 1 } } })
+      .toColourspace('rgb16')
+      .png()
+      .toBuffer();
+    assert.equal((await sharp(deep).metadata()).depth, 'ushort');
+    const deepUpload = await upload(deep, 'png');
+    assert.equal(deepUpload.result.ok, true, JSON.stringify(deepUpload.result));
+    const cmyk = await sharp({ create: { width: 30, height: 20, channels: 3, background: '#cc3300' } }).toColourspace('cmyk').jpeg().toBuffer();
+    assert.equal((await sharp(cmyk).metadata()).space, 'cmyk');
+    const cmykUpload = await upload(cmyk, 'jpeg');
+    assert.equal(cmykUpload.result.ok, true, JSON.stringify(cmykUpload.result));
+    const color = await sharp(cmykUpload.file!).stats();
+    assert.ok(color.channels[0].mean > 150 && color.channels[2].mean < 90, JSON.stringify(color.channels.map((c) => c.mean)));
+  });
+
+  test('uploads: images too large to decode are refused from their header, before any pixel is decoded', async () => {
+    // Over the pixel limit (a damaged file it is not).
+    assert.equal(refusalOf((await upload(pngHeaderOnly(12_000, 10_000, { colorType: 0 }), 'png')).result), 'too-large');
+    // Under it, but interlaced 16-bit RGBA must be decoded whole: 7000 x 7000 x 8 bytes = 392 MB.
+    assert.equal(refusalOf((await upload(pngHeaderOnly(7000, 7000, { bitDepth: 16, interlaced: true }), 'png')).result), 'too-large');
+    // The same picture not interlaced is read line by line: it gets as far as decoding (and this one's data is fake).
+    assert.equal(refusalOf((await upload(pngHeaderOnly(7000, 7000, { bitDepth: 16 }), 'png')).result), 'undecodable');
+  });
+
+  test('uploadRefusal: format, pixel limit, and the size of formats decoded whole', () => {
+    const at = (header: Parameters<typeof uploadRefusal>[0], type: UploadImageType) => uploadRefusal(header, type)?.reason ?? null;
+    const photo = { width: 8064, height: 6048, channels: 3, depth: 'uchar' }; // 48 MP
+    assert.equal(at({ ...photo, format: 'jpeg' }, 'jpeg'), null);
+    assert.equal(at({ ...photo, format: 'jpeg', isProgressive: true }, 'jpeg'), null, '146 MB decoded whole still fits');
+    assert.equal(at({ ...photo, format: 'svg' }, 'heif'), 'unsupported');
+    assert.equal(at({ ...photo, format: undefined }, 'png'), 'unsupported');
+    assert.equal(at({ ...photo, format: 'png', width: 0 }, 'png'), 'undecodable');
+    // Pixels: the first frame counts (pageHeight), up to UPLOAD_MAX_PIXELS.
+    assert.equal(at({ format: 'png', width: 10_000, height: 10_000, channels: 4 }, 'png'), null);
+    assert.equal(at({ format: 'png', width: 10_001, height: 10_000, channels: 4 }, 'png'), 'too-large');
+    assert.equal(at({ format: 'gif', width: 1000, height: 500_000, pageHeight: 1000, channels: 4 }, 'gif'), null);
+    // Formats decoded whole: interlaced PNG, progressive JPEG, GIF, HEIF.
+    assert.equal(at({ format: 'png', width: 10_000, height: 10_000, channels: 4, depth: 'ushort' }, 'png'), null, 'read line by line');
+    assert.equal(at({ format: 'png', width: 10_000, height: 10_000, channels: 4, isProgressive: true }, 'png'), 'too-large');
+    assert.equal(at({ format: 'jpeg', width: 10_000, height: 10_000, channels: 3, isProgressive: true }, 'jpeg'), 'too-large');
+    assert.equal(at({ format: 'gif', width: 7000, height: 7000, channels: 3 }, 'gif'), 'too-large', 'GIF frames are RGBA');
+    assert.equal(at({ format: 'gif', width: 5000, height: 5000, channels: 3 }, 'gif'), null);
+    assert.equal(at({ format: 'heif', width: 9000, height: 7000, channels: 3 }, 'heif'), 'too-large');
+    assert.equal(at({ format: 'webp', width: 10_000, height: 10_000, channels: 4 }, 'webp'), null, 'WebP shrinks while it loads');
+    const budget = Math.floor(UPLOAD_MAX_DECODE_BYTES / 4);
+    assert.equal(at({ format: 'png', width: budget, height: 1, channels: 4, isProgressive: true }, 'png'), null);
+    assert.equal(at({ format: 'png', width: budget + 1, height: 1, channels: 4, isProgressive: true }, 'png'), 'too-large');
+    assert.ok(UPLOAD_MAX_PIXELS >= 100_000_000);
+  });
+
+  test('the attachments folder is never made again (a deleted document stays deleted)', async () => {
+    const docDir = path.join(tmpRoot, 'attach-gone');
+    await fs.mkdir(docDir, { recursive: true });
+    await fs.cp(path.join(sampleDir, 'slides'), path.join(docDir, 'slides'), { recursive: true });
+    await assert.rejects(
+      runAttachmentWorker({ kind: 'region', docDir, id: nextId(), slide: 1, slideFile: '001.png', rect: { x: 0, y: 0, w: 0.5, h: 0.5 } }).done,
+      /ENOENT/,
+    );
+    assert.equal(await exists(path.join(docDir, 'attachments')), false);
+  });
+
+  test('attachments are their own inline image (providers send them as stored)', () => {
+    assert.equal(isInlineReady('/lib/doc-abc123/attachments/att-0123456789abcdef.jpg'), true);
+    assert.equal(isInlineReady('/lib/doc-abc123/attachments/att-0123456789abcdef.png'), true);
+    assert.equal(isInlineReady('/lib/doc-abc123/slides/001.png'), false);
+    assert.equal(isInlineReady('/lib/doc-abc123/attachments/other.png'), false);
+    assert.equal(inlinePathFor('/lib/doc-abc123/attachments/att-0123456789abcdef.png'), null);
+  });
+});
+
 describe('the server process never loads sharp or PDFium', () => {
-  test('import, ingest, derived images and every image route run without sharp or PDFium in the server', async () => {
+  test('import, ingest, derived images, attachments and every image route run without sharp or PDFium in the server', async () => {
     const library = await fs.mkdtemp(path.join(tmpRoot, 'library-'));
     const script = path.join(tmpRoot, 'no-sharp.mjs');
+    // An image to upload, made here (the child must not make it with sharp).
+    const photoFile = path.join(tmpRoot, 'upload-photo.jpg');
+    await sharp({ create: { width: 120, height: 80, channels: 3, background: '#cc3366' } }).jpeg().withMetadata({ orientation: 6 }).toFile(photoFile);
     await fs.writeFile(
       script,
       `import { registerHooks } from 'node:module';
@@ -379,8 +681,26 @@ for (const p of ['/slides/1.png', '/view/1.webp?w=1000', '/view/2.webp', '/thumb
   types.push(res.status + ' ' + res.headers.get('content-type'));
   await res.arrayBuffer();
 }
+// Attachments (DESIGN §21): a region, an upload, the stored image, and what a provider sends of it.
+const docUrl = server.url + '/api/docs/' + created.id;
+const regionRes = await fetch(docUrl + '/regions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ slide: 5, rect: { x: 0, y: 0.2, w: 1, h: 0.2 } }) });
+const region = await regionRes.json();
+const photo = await fs.readFile(${JSON.stringify(photoFile)});
+const uploadRes = await fetch(docUrl + '/attachments', { method: 'POST', headers: { 'Content-Type': 'image/jpeg' }, body: photo });
+const uploaded = await uploadRes.json();
+const attachmentTypes = [regionRes.status, uploadRes.status];
+for (const id of [region.id, uploaded.id]) {
+  const res = await fetch(docUrl + '/attachments/' + id);
+  attachmentTypes.push(res.status + ' ' + res.headers.get('content-type'));
+  await res.arrayBuffer();
+}
+const { loadInlineImage } = await import(${JSON.stringify(pathToFileURL(path.join(repoRoot(), 'server', 'providers', 'proc.ts')).href)});
+const dir = library.docPaths(created.id).dir + '/attachments/';
+const names = await fs.readdir(dir);
+const inline = [];
+for (const name of names.filter((n) => !n.endsWith('.json')).sort()) inline.push((await loadInlineImage(dir + name)).mediaType);
 await server.close();
-console.log(JSON.stringify({ status: meta.status, types, loaded }));
+console.log(JSON.stringify({ status: meta.status, types, attachmentTypes, regionText: region.text, uploaded: [uploaded.width, uploaded.height], inline, loaded }));
 `,
     );
     const child = spawn(process.execPath, [script], {
@@ -393,9 +713,24 @@ console.log(JSON.stringify({ status: meta.status, types, loaded }));
     child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
     const code = await new Promise<number | null>((resolve) => child.once('exit', resolve));
     assert.equal(code, 0, stderr);
-    const report = JSON.parse(stdout.trim().split('\n').at(-1) ?? '{}') as { status: string; types: string[]; loaded: string[] };
+    const report = JSON.parse(stdout.trim().split('\n').at(-1) ?? '{}') as {
+      status: string;
+      types: string[];
+      attachmentTypes: (string | number)[];
+      regionText: string;
+      uploaded: number[];
+      inline: string[];
+      loaded: string[];
+    };
     assert.equal(report.status, 'ready');
     assert.deepEqual(report.types, ['200 image/png', '200 image/webp', '200 image/webp', '200 image/webp']);
+    assert.equal(report.attachmentTypes[0], 201);
+    assert.equal(report.attachmentTypes[1], 201);
+    for (const type of report.attachmentTypes.slice(2)) assert.match(String(type), /^200 image\/(jpeg|png)$/);
+    assert.match(report.regionText, /^• Bursts: P1 = 24/);
+    assert.deepEqual(report.uploaded, [80, 120], 'EXIF orientation applied');
+    assert.equal(report.inline.length, 2);
+    for (const type of report.inline) assert.match(type, /^image\/(jpeg|png)$/);
     assert.deepEqual(report.loaded, [], 'sharp or PDFium was resolved in the server process');
   });
 });

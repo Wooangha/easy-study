@@ -270,14 +270,17 @@ export function webDistDir(): string {
 
 /**
  * Error carrying an HTTP status. Thrown by library/sessions/chat when a request is invalid;
- * server/index.ts turns it into `{ "error": message }` with that status.
+ * server/index.ts turns it into `{ "error": message }` with that status, plus `fields` when given
+ * (machine-readable details, e.g. `missingAttachments`).
  */
 export class HttpError extends Error {
   status: number;
+  fields: Readonly<Record<string, unknown>> | undefined;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, fields?: Readonly<Record<string, unknown>>) {
     super(message);
     this.name = 'HttpError';
     this.status = status;
+    this.fields = fields;
   }
 }

@@ -9,6 +9,9 @@
 // - Every turn feeds a focus window: the focused slide plus `neighbors` slides before and after it.
 //   Window slides whose image is among the slides sent recently (LRU window) are only pointed back
 //   to; the others are attached, so reading sequentially costs about one image per step.
+// - A question may carry attachments (DESIGN §21: selected slide regions, images of the student): they follow
+//   the focus window, each introduced by its label, and count toward the image budget like slide images.
+//   Priming turns take none.
 // - When the conversation would exceed the provider's image budget, or the orchestrator reports that
 //   the provider lost the conversation / found it too large (BuildTurnInput.forceNewConversation), a
 //   fresh conversation is started (rollover): the deck is primed again and a text recap of the
@@ -71,6 +74,7 @@ type ImagePart = Extract<Part, { type: 'image' }>;
 type Sheet = DocAssets['sheets'][number];
 type PrimeImagesMode = ContextSettings['primeWithImages'];
 type RecoveryKind = NonNullable<BuildTurnInput['forceNewConversation']>;
+type TurnAttachment = NonNullable<BuildTurnInput['attachments']>[number];
 
 /** Material of one slide: its digest entry when usable, otherwise its extracted text. */
 interface SlideMaterial {
@@ -164,12 +168,20 @@ export function buildTurn(input: BuildTurnInput): BuildTurnOutput {
   const earlier = course ? earlierLectureSections(course.lectures.slice(0, course.position), settings.maxCourseContextChars) : null;
   const agenticCli = isAgenticCli(session.provider);
   const forced = recoveryKind(input.forceNewConversation);
+  // Attachments of the question (never of a priming turn), each one image; they leave room for one slide at least.
+  const attachments = kind === 'question' ? normalizeAttachments(input.attachments, maxImages - 1) : [];
 
-  const windowSlides = focusWindow(slide, pageCount, resolveNeighbors(input.neighbors, settings.neighborWindow), maxImages);
+  const windowSlides = focusWindow(
+    slide,
+    pageCount,
+    resolveNeighbors(input.neighbors, settings.neighborWindow),
+    Math.max(1, maxImages - attachments.length),
+  );
 
   // A primed conversation without a resume handle cannot be continued, so treat it as unprimed.
   const needsPrime = !state.primed || state.resume === null;
-  const cost = needsPrime ? windowSlides.length : windowSlides.filter((s) => !state.recentSlides.includes(s)).length;
+  const cost =
+    (needsPrime ? windowSlides.length : windowSlides.filter((s) => !state.recentSlides.includes(s)).length) + attachments.length;
   const overBudget = !needsPrime && state.imagesSent + cost > maxImages;
   // The orchestrator forces a new conversation when the provider lost the old one or it grew too large.
   const rollover = overBudget || forced !== null;
@@ -196,6 +208,7 @@ export function buildTurn(input: BuildTurnInput): BuildTurnOutput {
       earlier,
       materialOf,
       windowSlides,
+      extraImages: attachments.length,
       maxImages,
     });
     // Recap the Q&A so far whenever a conversation starts in a session that already has some
@@ -205,7 +218,7 @@ export function buildTurn(input: BuildTurnInput): BuildTurnOutput {
     nextState = {
       resume: null, // filled in by the orchestrator from the provider result
       primed: true,
-      imagesSent: sheets.length + attached.length,
+      imagesSent: sheets.length + attached.length + attachments.length,
       recentSlides,
       generation: state.generation + 1,
       history: [],
@@ -214,13 +227,14 @@ export function buildTurn(input: BuildTurnInput): BuildTurnOutput {
     nextState = {
       ...state,
       resume: cloneResume(state.resume),
-      imagesSent: state.imagesSent + attached.length,
+      imagesSent: state.imagesSent + attached.length + attachments.length,
       recentSlides,
       history: [...state.history],
     };
   }
 
   appendFocus(out, doc, slide, pageCount, windowSlides, new Set(attached), materialOf, agenticCli);
+  appendAttachments(out, attachments, settings.maxSlideTextChars);
   if (kind === 'prime') {
     // Only ask how the lecture builds on earlier ones when their summaries are actually in context.
     out.text(prompts.primeInstruction((earlier?.included ?? 0) > 0));
@@ -236,6 +250,7 @@ export function buildTurn(input: BuildTurnInput): BuildTurnOutput {
     overviewImages: startsConversation ? sheets.length : 0,
   };
   if (forced !== null) context.recoveredFrom = forced;
+  if (attachments.length > 0) context.attachments = attachments.length;
 
   return {
     systemPrompt: prompts.tutorSystemPrompt(),
@@ -262,6 +277,8 @@ interface PrimingInput {
   materialOf: (slide: number) => SlideMaterial;
   /** Focus window of this turn (attached in full resolution right after the priming). */
   windowSlides: number[];
+  /** Other images of this turn after the priming (the question's attachments). */
+  extraImages: number;
   maxImages: number;
 }
 
@@ -270,14 +287,15 @@ interface PrimingInput {
  * material. Returns the overview sheets that were attached.
  */
 function appendPriming(out: PartsBuilder, input: PrimingInput): Sheet[] {
-  const { doc, pageCount, settings, agenticCli, course, earlier, materialOf, windowSlides, maxImages } = input;
+  const { doc, pageCount, settings, agenticCli, course, earlier, materialOf, windowSlides, extraImages, maxImages } = input;
+  const turnImages = windowSlides.length + extraImages;
   const digestSlides = countDigestSlides(materialOf, pageCount);
   const material: prompts.MaterialKind =
     digestSlides === 0 ? 'extracted' : digestSlides === pageCount ? 'digest' : 'mixed';
 
   // Overview sheets: 'always', or 'auto' without a complete digest (capped for huge decks).
   let sheets = useOverviewSheets(settings.primeWithImages, material === 'digest')
-    ? selectSheets(doc.sheets, maxImages, windowSlides.length)
+    ? selectSheets(doc.sheets, maxImages, turnImages)
     : [];
   // Slides whose image the model gets in this turn; a slide without text may only say "see the image" then.
   const shown = new Set<number>(windowSlides);
@@ -297,7 +315,7 @@ function appendPriming(out: PartsBuilder, input: PrimingInput): Sheet[] {
     sheets = selectSheets(
       doc.sheets.filter((sheet) => sheet.toSlide >= first),
       maxImages,
-      windowSlides.length,
+      turnImages,
     );
   }
 
@@ -450,7 +468,11 @@ function appendRecap(out: PartsBuilder, messages: ChatMessage[], recapTurns: num
   const pairs = completedPairs(messages).slice(-recapTurns);
   if (pairs.length === 0) return;
   const lines = pairs.map((p) =>
-    prompts.recapLine(p.slide, squeeze(p.question, RECAP_CHARS), squeeze(p.answer, RECAP_CHARS)),
+    prompts.recapLine(
+      p.slide,
+      squeeze(p.question, RECAP_CHARS) + (p.attachments > 0 ? prompts.recapAttachmentsNote(p.attachments) : ''),
+      squeeze(p.answer, RECAP_CHARS),
+    ),
   );
   out.text([prompts.RECAP_HEADING, ...lines, '', prompts.restartNote(reason)].join('\n'));
 }
@@ -483,6 +505,32 @@ function appendFocus(
     const m = materialOf(s);
     out.text(m.kind === 'digest' ? prompts.focusDigestBlock(s, m.title, m.body) : prompts.focusTextBlock(s, m.body));
   }
+}
+
+/**
+ * ATTACHMENTS (DESIGN §21), after the focus window: how many there are, then per attachment its label line, the
+ * image (detail 'high') and, for a selected region, the PDF text inside the selection (capped like slide text).
+ */
+function appendAttachments(out: PartsBuilder, attachments: TurnAttachment[], maxTextChars: number): void {
+  if (attachments.length === 0) return;
+  out.text(prompts.attachmentsIntro(attachments.length));
+  for (const attachment of attachments) {
+    out.text(prompts.attachmentLabelLine(attachment.label));
+    out.image({ type: 'image', path: attachment.path, detail: 'high', label: attachment.label });
+    if (attachment.kind === 'region') {
+      out.text(prompts.selectionTextBlock(truncateText(cleanExtractedText(attachment.text ?? ''), maxTextChars)));
+    }
+  }
+}
+
+/** BuildTurnInput.attachments, validated (entries without a path or label are dropped), at most `max`. */
+function normalizeAttachments(raw: BuildTurnInput['attachments'], max: number): TurnAttachment[] {
+  if (!Array.isArray(raw)) return [];
+  const valid = raw.filter(
+    (a): a is TurnAttachment =>
+      !!a && typeof a === 'object' && (a.kind === 'region' || a.kind === 'image') && typeof a.path === 'string' && !!a.path && typeof a.label === 'string',
+  );
+  return valid.slice(0, Math.max(0, max)).map((a) => ({ ...a, label: a.label.replace(/\s+/g, ' ').trim() || 'Attachment' }));
 }
 
 /**
@@ -752,14 +800,15 @@ function selectSheets(sheets: Sheet[], maxImages: number, focusImages: number): 
   return sheets.slice(0, budget);
 }
 
-function completedPairs(messages: ChatMessage[]): Array<{ slide: number; question: string; answer: string }> {
-  const pairs: Array<{ slide: number; question: string; answer: string }> = [];
+function completedPairs(messages: ChatMessage[]): Array<{ slide: number; question: string; answer: string; attachments: number }> {
+  const pairs: Array<{ slide: number; question: string; answer: string; attachments: number }> = [];
   for (let i = 0; i < messages.length; i++) {
     const q = messages[i];
     if (q.role !== 'user' || q.kind !== 'question') continue;
     const a = messages[i + 1];
     if (a && a.role === 'assistant' && a.status === 'complete' && a.text.trim()) {
-      pairs.push({ slide: q.slide, question: q.text, answer: a.text });
+      const attachments = Array.isArray(q.attachments) ? q.attachments.length : 0;
+      pairs.push({ slide: q.slide, question: q.text, answer: a.text, attachments });
     }
   }
   return pairs;

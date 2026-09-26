@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import type { WrappedPdfiumModule } from '@embedpdf/pdfium';
+import type { RegionRect } from '../shared/types.ts';
 
 const FPDF_ANNOT = 0x01;
 /** RGBx instead of BGRx: sharp takes the bitmap as raw 4-channel pixels. */
@@ -43,6 +44,11 @@ const FPDF_ANNOT_WIDGET = 20;
 const ANNOT_NOT_SHOWN = 0x01 | 0x02 | 0x20;
 /** FPDFAnnot_GetFormFieldType() values whose value is text: combo box, list box, text field. */
 const TEXT_VALUE_FIELDS: ReadonlySet<number> = new Set([4, 5, 6]);
+/**
+ * Long edge (device units) of the virtual device a selected region is mapped from (FPDF_DeviceToPage takes
+ * integer device coordinates): fine enough that rounding moves a corner by less than 0.01 pt on a slide.
+ */
+const REGION_DEVICE_EDGE = 100_000;
 
 export interface RenderedPage {
   /** RGBx pixels, row after row (stride = width * 4). */
@@ -64,6 +70,13 @@ export interface PdfPage {
    * draw on the page (pdftotext had it too): filled-in form fields and typed notes (FreeText).
    */
   text(): string;
+  /**
+   * The text of the page's text layer inside a region of the rendered page (normalised to the page as render()
+   * draws it: 0..1, origin top-left, /Rotate applied), as FPDFText_GetBoundedText gives it (a character counts when
+   * its box meets the region), Symbol-font PUA code points mapped back like text(), cleaned like the page text
+   * (cleanPageText). '' when the page has no text there (DESIGN §21).
+   */
+  textInRegion(rect: RegionRect): string;
   close(): void;
 }
 
@@ -395,6 +408,7 @@ export async function openPdf(file: string): Promise<PdfDocument> {
   const nameBuf = malloc(FONT_NAME_BUF);
   const flagsPtr = malloc(4);
   const rectPtr = malloc(16); // FS_RECTF { float left, top, right, bottom }
+  const doublesPtr = malloc(32); // up to four doubles (FPDF_DeviceToPage, FPDFText_GetCharBox)
 
   /** A UTF-16LE string of PDFium's "length in bytes, NUL included" getters (asked twice: size, then text). */
   const utf16 = (get: (buffer: number, length: number) => number): string => {
@@ -469,6 +483,50 @@ export async function openPdf(file: string): Promise<PdfDocument> {
     return lineBreakJoint(boxBefore, boxAfter, isBlank(codes[i - 1]) || isBlank(codes[i + 2]));
   };
 
+  /**
+   * The region (normalised to the rendered page) in page coordinates (points, y upwards): its corners mapped with
+   * FPDF_DeviceToPage, which applies /Rotate and the crop box origin the way rendering does.
+   */
+  const regionToPage = (page: number, width: number, height: number, rect: RegionRect) => {
+    const scale = REGION_DEVICE_EDGE / Math.max(width, height, 1e-6);
+    const deviceW = Math.max(1, Math.round(width * scale));
+    const deviceH = Math.max(1, Math.round(height * scale));
+    const clamp = (value: number) => Math.min(Math.max(Number.isFinite(value) ? value : 0, 0), 1);
+    const x0 = clamp(rect.x);
+    const y0 = clamp(rect.y);
+    const x1 = clamp(rect.x + rect.w);
+    const y1 = clamp(rect.y + rect.h);
+    const xs: number[] = [];
+    const ys: number[] = [];
+    for (const [dx, dy] of [
+      [x0, y0],
+      [x1, y0],
+      [x0, y1],
+      [x1, y1],
+    ]) {
+      m.FPDF_DeviceToPage(page, 0, 0, deviceW, deviceH, 0, Math.round(dx * deviceW), Math.round(dy * deviceH), doublesPtr, doublesPtr + 8);
+      xs.push(P.getValue(doublesPtr, 'double'));
+      ys.push(P.getValue(doublesPtr + 8, 'double'));
+    }
+    return { left: Math.min(...xs), right: Math.max(...xs), bottom: Math.min(...ys), top: Math.max(...ys) };
+  };
+
+  /** Symbol-font PUA code points of the characters whose box meets `area`, mapped to their real characters. */
+  const symbolRemapIn = (textPage: number, area: CharBox): Map<number, string> => {
+    const remap = new Map<number, string>();
+    const count = Math.max(0, m.FPDFText_CountChars(textPage));
+    for (let i = 0; i < count; i++) {
+      const codePoint = m.FPDFText_GetUnicode(textPage, i);
+      if (codePoint < SYMBOL_PUA_FIRST || codePoint > SYMBOL_PUA_LAST || remap.has(codePoint)) continue;
+      if (!m.FPDFText_GetCharBox(textPage, i, doublesPtr, doublesPtr + 8, doublesPtr + 16, doublesPtr + 24)) continue;
+      const [left, right, bottom, top] = [0, 8, 16, 24].map((offset) => P.getValue(doublesPtr + offset, 'double'));
+      if (left > area.right || right < area.left || bottom > area.top || top < area.bottom) continue;
+      const mapped = symbolPuaToUnicode(codePoint, fontName(textPage, i));
+      if (mapped !== null) remap.set(codePoint, mapped);
+    }
+    return remap;
+  };
+
   const loadPage = (n: number): PdfPage => {
     const page = m.FPDF_LoadPage(doc, n - 1);
     if (!page) throw new Error(`could not load page ${n} of the PDF`);
@@ -539,6 +597,35 @@ export async function openPdf(file: string): Promise<PdfDocument> {
           m.FPDFText_ClosePage(textPage);
         }
       },
+      textInRegion(rect) {
+        const area = regionToPage(page, width, height, rect);
+        if (!(area.right > area.left && area.top > area.bottom)) return '';
+        const textPage = m.FPDFText_LoadPage(page);
+        if (!textPage) return '';
+        try {
+          const length = m.FPDFText_GetBoundedText(textPage, area.left, area.top, area.right, area.bottom, 0, 0);
+          if (length <= 0) return '';
+          const buffer = malloc((length + 1) * 2);
+          let raw: string;
+          try {
+            const copied = m.FPDFText_GetBoundedText(textPage, area.left, area.top, area.right, area.bottom, buffer, length + 1);
+            const units = Math.min(length, Math.max(0, copied));
+            raw = Buffer.from(heap(m).subarray(buffer, buffer + units * 2)).toString('utf16le');
+          } finally {
+            free(buffer);
+          }
+          const remap = /[\uf020-\uf0ff]/.test(raw) ? symbolRemapIn(textPage, area) : new Map<number, string>();
+          let out = '';
+          for (const char of raw) {
+            const codePoint = char.codePointAt(0) ?? 0;
+            if (codePoint === 0) continue;
+            out += remap.get(codePoint) ?? char;
+          }
+          return cleanPageText(out);
+        } finally {
+          m.FPDFText_ClosePage(textPage);
+        }
+      },
       close() {
         if (closed) return;
         closed = true;
@@ -570,6 +657,7 @@ export async function openPdf(file: string): Promise<PdfDocument> {
       free(nameBuf);
       free(flagsPtr);
       free(rectPtr);
+      free(doublesPtr);
       fs.closeSync(fd);
     },
   };

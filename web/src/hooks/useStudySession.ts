@@ -5,8 +5,9 @@
 // are overlaid on top of the persisted messages at render time. This keeps streaming cheap (only the
 // live message re-renders) and survives switching away from / back to a session mid-turn.
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
-import type { ChatMessage, Session, SessionSummary, StreamEvent } from '../../../shared/types.ts';
+import type { Attachment, ChatMessage, Session, SessionSummary, StreamEvent } from '../../../shared/types.ts';
 import * as api from '../api.ts';
+import { missingAttachmentsMessage } from '../lib/attachments.ts';
 import { readStorage, storageKeys, writeStorage, isString } from '../lib/storage.ts';
 import { toast } from '../lib/toast.ts';
 import { useLatest } from './useLatest.ts';
@@ -17,6 +18,20 @@ export type TurnKind = 'question' | 'prime';
 /** How a turn ended. 'rejected' = refused before it started (validation, 409, network) — nothing saved. */
 export type TurnOutcome = 'complete' | 'error' | 'aborted' | 'rejected' | 'disconnected';
 
+interface TurnResult {
+  outcome: TurnOutcome;
+  /** 'rejected' because these attachments are gone from the server (swept after 24 h unused, deleted). */
+  missingAttachments: readonly string[];
+}
+
+/** What became of a question (ask). */
+export interface AskResult {
+  /** The server took it (a turn started); false: nothing was saved, the composer gets it back. */
+  accepted: boolean;
+  /** Not accepted because these attachments are gone: they must not come back to the composer. */
+  missingAttachments: readonly string[];
+}
+
 export interface LiveTurn {
   /** Unique per turn (increments). */
   seq: number;
@@ -26,6 +41,8 @@ export interface LiveTurn {
   kind: TurnKind;
   slide: number;
   question: string;
+  /** Attachments sent with the question (shown on the optimistic message until `start`). */
+  attachments: Attachment[];
   /** 'pending' until the server's `start` event arrives. */
   phase: 'pending' | 'streaming';
   userMessage: ChatMessage | null;
@@ -84,9 +101,10 @@ function overlayLiveTurn(base: ChatMessage[], turn: LiveTurn | null): ChatMessag
   if (turn.phase === 'pending' || !turn.userMessage || !turn.assistantMessage) {
     const now = new Date().toISOString();
     const common = { slide: turn.slide, kind: turn.kind, createdAt: now, status: 'streaming' as const };
+    const attachments = turn.attachments.length > 0 ? turn.attachments : undefined;
     return [
       ...base,
-      { ...common, id: PENDING_USER_ID, role: 'user', text: turn.question },
+      { ...common, id: PENDING_USER_ID, role: 'user', text: turn.question, attachments },
       { ...common, id: PENDING_ASSISTANT_ID, role: 'assistant', text: '' },
     ];
   }
@@ -244,11 +262,18 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
 
   /** Run one streaming turn. Registers the live turn synchronously (before the first await). */
   const runTurn = useCallback(
-    async (forDoc: string, sid: string, kind: TurnKind, question: string, slide: number): Promise<TurnOutcome> => {
+    async (
+      forDoc: string,
+      sid: string,
+      kind: TurnKind,
+      question: string,
+      slide: number,
+      attachments: Attachment[] = [],
+    ): Promise<TurnResult> => {
       const key = turnKey(forDoc, sid);
       if (turnsRef.current.has(key)) {
         toast('이미 답변을 생성하고 있어요. 끝난 뒤에 다시 시도해 주세요.', 'error');
-        return 'rejected';
+        return { outcome: 'rejected', missingAttachments: [] };
       }
       const turn: LiveTurn = {
         seq: ++turnSeq,
@@ -258,6 +283,7 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
         kind,
         slide,
         question,
+        attachments: kind === 'question' ? attachments : [],
         phase: 'pending',
         userMessage: null,
         assistantMessage: null,
@@ -271,6 +297,7 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
       rerender();
 
       let outcome: TurnOutcome = 'disconnected';
+      let missingAttachments: readonly string[] = [];
       let finished = false; // `done` or `error` received
       let gotDone = false;
       /** `done` came without the saved messages: reload them (the user message may have changed). */
@@ -328,10 +355,11 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
         if (kind === 'prime') {
           await api.primeSession(forDoc, sid, { slide, neighbors: neighborCount }, onEvent, turn.controller.signal);
         } else {
+          const ids = turn.attachments.map((a) => a.id);
           await api.sendMessage(
             forDoc,
             sid,
-            { text: question, slide, neighbors: neighborCount },
+            { text: question, slide, neighbors: neighborCount, ...(ids.length > 0 ? { attachments: ids } : {}) },
             onEvent,
             turn.controller.signal,
           );
@@ -342,7 +370,11 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
           if (!finished) outcome = 'aborted';
         } else if (!finished && !turn.userMessage) {
           outcome = 'rejected';
-          toast(api.errorMessage(e), 'error');
+          missingAttachments = api.missingAttachmentsOf(e);
+          toast(
+            missingAttachments.length > 0 ? missingAttachmentsMessage(turn.attachments, missingAttachments) : api.errorMessage(e),
+            'error',
+          );
         } else if (!finished) {
           toast(`연결이 끊겼어요: ${api.errorMessage(e)}`, 'error');
         }
@@ -356,7 +388,7 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
       else if (reloadAfterDone) void reloadSession(forDoc, sid);
       void refreshSessions(forDoc);
       onTurnFinishedRef.current?.(forDoc);
-      return outcome;
+      return { outcome, missingAttachments };
     },
     [scheduleRender, resync, reloadSession, refreshSessions, neighborsRef, onTurnFinishedRef],
   );
@@ -389,7 +421,7 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
         setSelection({ docId: forDoc, sessionId: created.id });
       }
       setFlow((f) => (f && f.docId === forDoc ? { ...f, creating: false } : f));
-      const outcome = await runTurn(forDoc, created.id, 'prime', '', slide);
+      const { outcome } = await runTurn(forDoc, created.id, 'prime', '', slide);
       return { sid: created.id, outcome };
     },
     [choiceRef, docIdRef, runTurn, onSessionCreatedRef],
@@ -414,28 +446,34 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
   );
 
   /**
-   * Ask a question about `slide`. Without a session, one is created and primed first.
-   * Resolves false when the question was not accepted (the composer then restores the text).
+   * Ask a question about `slide`, with `attachments` (selected regions / images of this document). Without a
+   * session, one is created and primed first. Resolves not accepted when the question never reached the server
+   * (the composer then restores the text and the attachments — except those the server no longer has).
    */
   const ask = useCallback(
-    async (text: string, slide: number): Promise<boolean> => {
-      if (!docId || flowActive) return false;
+    async (text: string, slide: number, attachments: Attachment[] = []): Promise<AskResult> => {
+      const notAccepted: AskResult = { accepted: false, missingAttachments: [] };
+      const asked = (result: TurnResult): AskResult => ({
+        accepted: result.outcome !== 'rejected',
+        missingAttachments: result.missingAttachments,
+      });
+      if (!docId || flowActive) return notAccepted;
       const forDoc = docId;
-      if (sessionId) return (await runTurn(forDoc, sessionId, 'question', text, slide)) !== 'rejected';
+      if (sessionId) return asked(await runTurn(forDoc, sessionId, 'question', text, slide, attachments));
 
       setFlow({ docId: forDoc, creating: true });
       try {
         const started = await createAndPrime(forDoc, slide);
-        if (!started) return false;
+        if (!started) return notAccepted;
         if (started.outcome !== 'complete') {
           if (started.outcome !== 'aborted') {
             toast('슬라이드를 LLM에게 전달하지 못해서 질문을 보내지 않았어요. 다시 시도해 주세요.', 'error');
           }
-          return false;
+          return notAccepted;
         }
-        const pending = runTurn(forDoc, started.sid, 'question', text, slide);
+        const pending = runTurn(forDoc, started.sid, 'question', text, slide, attachments);
         endFlow(forDoc); // the question's live turn now keeps the composer busy
-        return (await pending) !== 'rejected';
+        return asked(await pending);
       } finally {
         endFlow(forDoc);
       }

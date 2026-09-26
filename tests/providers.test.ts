@@ -53,6 +53,7 @@ import {
   buildAnthropicRequest,
   checkAnthropicRequest,
   classifyAnthropicError,
+  estimateAnthropicInputTokens,
 } from '../server/providers/anthropicApi.ts';
 import { buildOpenAIRequest, classifyOpenAIError, openaiApiProvider } from '../server/providers/openaiApi.ts';
 import { clearProviderInfoCache, getProvider, listProviders, providerInfos } from '../server/providers/index.ts';
@@ -1709,5 +1710,50 @@ describe('provider registry', () => {
     const fresh = await providerInfos();
     assert.equal(fresh.find((i) => i.id === 'openai-api')?.available, false);
     clearProviderInfoCache();
+  });
+});
+
+describe('attachments in provider requests (DESIGN §21)', () => {
+  let attachDir = '';
+  before(() => {
+    attachDir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'easy-study-attach-provider-')), 'doc-abc123', 'attachments');
+    fs.mkdirSync(attachDir, { recursive: true });
+  });
+  after(() => fs.rmSync(path.dirname(path.dirname(attachDir)), { recursive: true, force: true }));
+
+  test('loadInlineImage sends an attachment as stored, with its own media type (never re-encoded)', async () => {
+    clearInlineImageCache();
+    // Larger than the inline limits on purpose: re-encoding would have made a downscaled JPEG of it.
+    const wide = await sharp({ create: { width: 2000, height: 20, channels: 3, background: '#224466' } }).png().toBuffer();
+    const pngFile = path.join(attachDir, 'att-00000000000000a1.png');
+    const jpgFile = path.join(attachDir, 'att-00000000000000b2.jpg');
+    fs.writeFileSync(pngFile, wide);
+    fs.writeFileSync(jpgFile, 'stored jpeg bytes');
+    assert.deepEqual(await loadInlineImage(pngFile), { mediaType: 'image/png', data: wide.toString('base64') });
+    assert.deepEqual(await loadInlineImage(jpgFile), { mediaType: 'image/jpeg', data: Buffer.from('stored jpeg bytes').toString('base64') });
+    await assert.rejects(loadInlineImage(path.join(attachDir, 'att-00000000000000ff.png')), /읽을 수 없습니다/);
+  });
+
+  test('anthropic-api: attachments are image blocks, and the preflight counts each of them', async () => {
+    const pngFile = path.join(attachDir, 'att-00000000000000a1.png');
+    const jpgFile = path.join(attachDir, 'att-00000000000000b2.jpg');
+    const text: Part = { type: 'text', text: 'The student attached 2 images to this question:' };
+    const withAttachments = await buildAnthropicRequest({
+      systemPrompt: 's',
+      parts: [
+        text,
+        { type: 'image', path: pngFile, detail: 'high', label: 'Attachment 1: the region of slide 3 the student selected' },
+        { type: 'image', path: jpgFile, detail: 'high', label: 'Attachment 2: an image from the student' },
+      ],
+      history: [],
+      model: 'claude-haiku-4-5',
+    });
+    const blocks = withAttachments.messages[0].content as any[];
+    assert.deepEqual(
+      blocks.filter((b) => b.type === 'image').map((b) => b.source.media_type),
+      ['image/png', 'image/jpeg'],
+    );
+    const without = await buildAnthropicRequest({ systemPrompt: 's', parts: [text], history: [], model: 'claude-haiku-4-5' });
+    assert.equal(estimateAnthropicInputTokens(withAttachments) - estimateAnthropicInputTokens(without), 2 * 1_600);
   });
 });

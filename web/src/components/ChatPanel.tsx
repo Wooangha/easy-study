@@ -1,11 +1,13 @@
 import { useCallback, useState, type ReactNode } from 'react';
-import type { DigestInfo, DocMeta, ProviderInfo } from '../../../shared/types.ts';
+import type { Attachment, DigestInfo, DocMeta, ProviderInfo } from '../../../shared/types.ts';
 import { courseSummaryUrl } from '../api.ts';
+import type { AttachmentsApi } from '../hooks/useAttachments.ts';
 import type { CourseMembership } from '../hooks/useCourses.ts';
 import { useLatest } from '../hooks/useLatest.ts';
 import { NEIGHBOR_OPTIONS } from '../hooks/useNeighbors.ts';
 import type { ProviderChoice } from '../hooks/useProviderChoice.ts';
 import { PENDING_ASSISTANT_ID, type StudySession } from '../hooks/useStudySession.ts';
+import type { Chip } from '../lib/attachments.ts';
 import { canOpenFiles, courseBadgeTitle, courseContextSentence, type EarlierLectures } from '../lib/courseContext.ts';
 import { providerLabel, providerWithModel } from '../lib/format.ts';
 import { Composer } from './Composer.tsx';
@@ -42,6 +44,16 @@ interface ChatPanelProps {
   /** Neighbor slides (±N) fed with every question. */
   neighbors: number;
   onNeighborsChange: (n: number) => void;
+  /** Attachments waiting for the next question (composer chips). */
+  attachments: AttachmentsApi;
+  /** Attach images (picked / pasted in the composer). */
+  onAttachFiles: (files: File[], options?: { pasted?: boolean }) => void;
+  /** Send a question about `slide` with the composer's attachments (they come back if it is not accepted). */
+  onSendQuestion: (text: string, slide: number) => Promise<boolean>;
+  /** Preview an attachment (a region also shows where it is on its slide). */
+  onOpenAttachment: (attachment: Attachment) => void;
+  /** Shown over the whole panel (the attachment preview). */
+  overlay?: ReactNode;
 }
 
 function DigestTabBadge({ info }: { info: DigestInfo | null }) {
@@ -84,6 +96,11 @@ export function ChatPanel({
   onDigestLectures,
   neighbors,
   onNeighborsChange,
+  attachments,
+  onAttachFiles,
+  onSendQuestion,
+  onOpenAttachment,
+  overlay,
 }: ChatPanelProps) {
   const { session, messages, liveTurn, running, creating } = study;
   const targetSlide = pinnedSlide ?? focusedSlide;
@@ -98,8 +115,18 @@ export function ChatPanel({
 
   // `ask` / `primeCurrent` are stable while streaming, so memoized message items do not re-render on every delta.
   const { ask, primeCurrent } = study;
-  const onSend = useCallback((text: string) => ask(text, targetSlide), [ask, targetSlide]);
-  const onRetry = useCallback((text: string, slide: number) => void ask(text, slide), [ask]);
+  const onSend = useCallback((text: string) => onSendQuestion(text, targetSlide), [onSendQuestion, targetSlide]);
+  // A retry sends the failed question's attachments again (the server still has them: a message uses them).
+  const onRetry = useCallback(
+    (text: string, slide: number, attachments?: Attachment[]) => void ask(text, slide, attachments ?? []),
+    [ask],
+  );
+  const onOpenChip = useCallback(
+    (chip: Chip) => {
+      if (chip.attachment) onOpenAttachment(chip.attachment);
+    },
+    [onOpenAttachment],
+  );
   const retryPrime = useCallback(() => void primeCurrent(targetRef.current), [primeCurrent, targetRef]);
   // A priming turn that failed or was aborted leaves the session unprimed: offer to feed the deck again.
   const onRetryPrime = session && !session.primed && !running ? retryPrime : undefined;
@@ -301,6 +328,7 @@ export function ChatPanel({
         />
 
         <Composer
+          docId={doc.id}
           targetSlide={targetSlide}
           pageCount={doc.pageCount}
           neighbors={neighbors}
@@ -311,6 +339,9 @@ export function ChatPanel({
           onSend={onSend}
           onStop={study.stop}
           onGoToSlide={onGoToSlide}
+          attachments={attachments}
+          onAttachFiles={onAttachFiles}
+          onOpenChip={onOpenChip}
         />
       </div>
 
@@ -321,6 +352,8 @@ export function ChatPanel({
       <div className="notes-view" hidden={tab !== 'notes'}>
         {notesMounted && notes}
       </div>
+
+      {overlay}
     </section>
   );
 }

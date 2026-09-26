@@ -12,9 +12,20 @@ import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
-import { COURSE_ID_RE, DOC_ID_RE, SESSION_ID_RE } from '../shared/types.ts';
+import { ATTACHMENT_ID_RE, COURSE_ID_RE, DOC_ID_RE, MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, SESSION_ID_RE } from '../shared/types.ts';
 import { VIEW_WIDTHS, thumbPath, viewPath } from './assets.ts';
 import type { ViewWidth } from './assets.ts';
+import {
+  attachmentImagePath,
+  createImageAttachment,
+  createRegionAttachment,
+  deleteAttachment,
+  readAttachment,
+  startAttachmentSweeper,
+  stopAttachmentJobs,
+  tooLarge,
+} from './attachments.ts';
+import type { AttachmentSweeper } from './attachments.ts';
 import type {
   CreateSessionRequest,
   DocMeta,
@@ -119,6 +130,7 @@ import {
   getSession,
   listSessions,
   recoverInterruptedSessions,
+  referencedAttachmentIds,
   toSession,
   writeNotes,
 } from './sessions.ts';
@@ -205,6 +217,33 @@ function resolveProviderChoice(infos: ProviderInfo[], provider: unknown, model: 
   const resolved = (model ?? '').trim() || info.defaultModel;
   if (resolved && !MODEL_RE.test(resolved)) throw new HttpError(400, `모델 이름이 올바르지 않습니다: ${resolved}`);
   return { info, model: resolved };
+}
+
+/**
+ * SendMessageRequest.attachments: absent, or ids of attachments (ATTACHMENT_ID_RE), at most MAX_ATTACHMENTS once
+ * duplicates are dropped. Whether they exist in this document is checked by the turn (400 as well).
+ */
+function parseAttachmentIds(value: unknown): string[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value) || !value.every((id) => typeof id === 'string' && ATTACHMENT_ID_RE.test(id))) {
+    throw new HttpError(400, 'attachments는 첨부 id의 배열이어야 합니다');
+  }
+  const ids = [...new Set(value as string[])];
+  if (ids.length > MAX_ATTACHMENTS) throw new HttpError(400, `첨부는 질문 하나에 최대 ${MAX_ATTACHMENTS}개까지 보낼 수 있습니다`);
+  return ids;
+}
+
+/**
+ * The raw body of an image upload (≤ MAX_ATTACHMENT_BYTES, whatever its Content-Type). A larger one is read off
+ * (so the client gets the answer, not a reset connection) and answered 413 with a readable message.
+ */
+function rawImageBody(): express.RequestHandler {
+  const parse = express.raw({ type: () => true, limit: MAX_ATTACHMENT_BYTES });
+  return (req, res, next) => {
+    parse(req, res, (err?: unknown) => {
+      next((err as { type?: string } | undefined)?.type === 'entity.too.large' ? tooLarge() : err);
+    });
+  };
 }
 
 /** SendMessageRequest.neighbors / PrimeRequest.neighbors: absent, or an integer 0..3. */
@@ -443,6 +482,9 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
   api.param('groupId', (_req, _res, next, value: string) => {
     next(COURSE_ID_RE.test(value) ? undefined : new HttpError(404, '그룹을 찾을 수 없습니다'));
   });
+  api.param('attachmentId', (_req, _res, next, value: string) => {
+    next(ATTACHMENT_ID_RE.test(value) ? undefined : new HttpError(404, '첨부를 찾을 수 없습니다'));
+  });
   // Only parses application/json bodies; the raw PDF upload passes through untouched.
   api.use(express.json({ limit: '2mb' }));
 
@@ -492,6 +534,8 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
     await deleteDoc(docId, () => {
       if (isDigestRunning(docId)) return '정리본을 만드는 중에는 지울 수 없습니다. 정리본 만들기를 먼저 중단해 주세요';
       if (hasRunningTurns(docId)) return '답변을 생성하는 중에는 지울 수 없습니다. 답변이 끝난 뒤에 다시 시도해 주세요';
+      // From here on the document is gone for every request: attachment images still being made are not wanted.
+      stopAttachmentJobs(docId);
       return null;
     });
     try {
@@ -526,6 +570,48 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
   api.get('/docs/:docId/thumbs/:file', async (req, res) => {
     const { doc, slideFile } = await requireSlide(req.params.docId, req.params.file, 'webp');
     await sendDerivedFile(req, res, doc, slideFile, thumbPath(docPaths(doc.id).dir, slideFile));
+  });
+
+  // --- attachments: selected slide regions and images of the student (DESIGN §21) -------------------
+
+  /** CreateRegionRequest → 201 Attachment (400 bad slide / rect, 409 document not converted). */
+  api.post('/docs/:docId/regions', async (req, res) => {
+    res.status(201).json(await createRegionAttachment(req.params.docId, jsonBody(req)));
+  });
+
+  /**
+   * A raw image (Content-Type image/*, optional X-Filename URI-encoded) → 201 Attachment. 413 over
+   * MAX_ATTACHMENT_BYTES, 415 when it is not a supported image (by its bytes).
+   */
+  api.post('/docs/:docId/attachments', rawImageBody(), async (req, res) => {
+    const docId = String(req.params.docId);
+    await requireStoredDoc(docId);
+    const bytes: unknown = req.body;
+    if (!Buffer.isBuffer(bytes) || bytes.length === 0) throw new HttpError(400, '이미지 내용이 비어 있습니다');
+    if (!/^image\//i.test(req.get('Content-Type') ?? '')) {
+      throw new HttpError(415, '이미지 파일만 첨부할 수 있습니다 (Content-Type: image/*)');
+    }
+    const header = req.get('X-Filename');
+    res.status(201).json(await createImageAttachment(docId, bytes, header ? decodeFileName(header) : undefined));
+  });
+
+  /** The stored image of an attachment (never changes under its URL; private in both modes). */
+  api.get('/docs/:docId/attachments/:attachmentId', async (req, res) => {
+    const { docId, attachmentId } = req.params;
+    const file = (await readAttachment(docId, attachmentId)) ? await attachmentImagePath(docId, attachmentId) : null;
+    if (!file) throw new HttpError(404, '첨부를 찾을 수 없습니다');
+    try {
+      await sendFile(res, file, { cacheControl: false, headers: { 'Cache-Control': PRIVATE_IMMUTABLE } });
+    } catch (err) {
+      if (!res.headersSent) throw new HttpError(404, '첨부를 찾을 수 없습니다');
+      warnTransfer(req, err);
+    }
+  });
+
+  /** 204 while no message uses the attachment; 409 once one does. */
+  api.delete('/docs/:docId/attachments/:attachmentId', async (req, res) => {
+    await deleteAttachment(req.params.docId, req.params.attachmentId, referencedAttachmentIds);
+    res.status(204).end();
   });
 
   // --- sessions ----------------------------------------------------------------------------------
@@ -587,6 +673,8 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
     if (kind === 'question' && typeof body.text !== 'string') throw new HttpError(400, '질문을 입력해 주세요');
     const text = kind === 'question' ? String(body.text) : '';
     const neighbors = parseNeighbors(body.neighbors);
+    // Priming turns take no attachments (DESIGN §21).
+    const attachments = kind === 'question' ? parseAttachmentIds(body.attachments) : undefined;
 
     // Abort the turn when the client goes away mid-stream. This must watch the *response*:
     // req 'close' fires as soon as the request body has been consumed.
@@ -598,7 +686,7 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
     const sse = lazySse(res);
     try {
       await runTurn(
-        { docId, sessionId, kind, text, slide, neighbors, signal: disconnect.signal, onEvent: (event) => sse.send(event) },
+        { docId, sessionId, kind, text, slide, neighbors, attachments, signal: disconnect.signal, onEvent: (event) => sse.send(event) },
         chatDeps,
       );
     } catch (err) {
@@ -729,13 +817,15 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
   return api;
 }
 
-/** Every API error becomes `{ "error": string }` with a 4xx/5xx status. */
+/** Every API error becomes `{ "error": string }` (plus an HttpError's `fields`) with a 4xx/5xx status. */
 function apiErrorHandler(err: unknown, req: Request, res: Response, _next: NextFunction): void {
   const bodyParserError = err as { status?: number; statusCode?: number; type?: string };
   let status = 500;
   let message = errorMessage(err);
+  let fields: Readonly<Record<string, unknown>> | undefined;
   if (err instanceof HttpError) {
     status = err.status;
+    fields = err.fields;
   } else if (bodyParserError.type === 'entity.too.large') {
     status = 413;
     message = `파일이 너무 큽니다 (최대 ${MAX_UPLOAD.toUpperCase()})`;
@@ -751,7 +841,7 @@ function apiErrorHandler(err: unknown, req: Request, res: Response, _next: NextF
     res.end();
     return;
   }
-  res.status(status).json({ error: message });
+  res.status(status).json({ ...fields, error: message });
 }
 
 // ---------------------------------------------------------------------------
@@ -839,6 +929,10 @@ export interface ServerOptions extends AppOptions {
    * either way.
    */
   backfillImages?: boolean;
+  /**
+   * Delete attachments no message refers to after 24 h, at startup and hourly (DESIGN §21; default true).
+   */
+  sweepAttachments?: boolean;
   /** Print startup information (default true). */
   log?: boolean;
   /** Address to bind (default: EASY_STUDY_HOST or 127.0.0.1). Not loopback = remote mode (DESIGN §16). */
@@ -1024,14 +1118,17 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
   if (options.backfillImages ?? options.resumeIngests ?? true) {
     startBackfill().catch((err: unknown) => console.error('[library] backfill failed:', err));
   }
+  const sweeper: AttachmentSweeper | null =
+    (options.sweepAttachments ?? true) ? startAttachmentSweeper(referencedAttachmentIds, undefined, log) : null;
 
   let closing: Promise<void> | undefined;
   const close = () =>
     (closing ??= (async () => {
       abortAllTurns();
       abortAllDigests();
+      stopAttachmentJobs();
       // Let aborted turns and digest jobs persist their partial results; stop the image workers.
-      await Promise.all([waitForIdle(4_000), waitForDigestsIdle(4_000), stopImageWork()]);
+      await Promise.all([waitForIdle(4_000), waitForDigestsIdle(4_000), stopImageWork(), sweeper?.stop()]);
       await closeVite?.();
       await new Promise<void>((resolve) => {
         server.close(() => resolve());

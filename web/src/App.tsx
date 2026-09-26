@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { DocMeta } from '../../shared/types.ts';
+import type { Attachment, DocMeta, RegionRect } from '../../shared/types.ts';
 import { ApiError, errorMessage, startDigest } from './api.ts';
+import { AttachmentContext, AttachmentPreview, type AttachmentActions } from './components/Attachments.tsx';
 import { ChatPanel, type PanelTab } from './components/ChatPanel.tsx';
 import { ConfirmHost } from './components/ConfirmDialog.tsx';
 import { DigestPanel, type DigestMode } from './components/DigestPanel.tsx';
@@ -10,6 +11,7 @@ import { SlideViewer, type SlideViewerHandle } from './components/SlideViewer.ts
 import { SplitPane } from './components/SplitPane.tsx';
 import { Toaster } from './components/Toaster.tsx';
 import { TopBar } from './components/TopBar.tsx';
+import { useAttachments } from './hooks/useAttachments.ts';
 import { useCourses } from './hooks/useCourses.ts';
 import { useDigest } from './hooks/useDigest.ts';
 import { useDocs } from './hooks/useDocs.ts';
@@ -19,6 +21,15 @@ import { useNeighbors } from './hooks/useNeighbors.ts';
 import { useNotes } from './hooks/useNotes.ts';
 import { useProviderChoice } from './hooks/useProviderChoice.ts';
 import { useStudySession } from './hooks/useStudySession.ts';
+import {
+  classifyDragTypes,
+  dropOverlayCopy,
+  EXPLAIN_REGION_PROMPT,
+  planDrop,
+  readyAttachments,
+  withoutAttachments,
+  type DragKinds,
+} from './lib/attachments.ts';
 import { confirmDialog } from './lib/confirm.ts';
 import { earlierLectures } from './lib/courseContext.ts';
 import { withParticle } from './lib/korean.ts';
@@ -121,6 +132,66 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
 
   const viewerRef = useRef<SlideViewerHandle>(null);
   const goToSlide = useCallback((slide: number) => viewerRef.current?.scrollToSlide(slide), []);
+
+  // ---- Attachments of the next question (DESIGN §21) ---------------------------------------------
+  const attachments = useAttachments(readyDocId);
+  const {
+    addFiles,
+    addRegion,
+    take: takeAttachments,
+    restore: restoreAttachments,
+    settle: settleAttachments,
+    count: countAttachments,
+  } = attachments;
+  const attachFiles = useCallback(
+    (files: File[], options?: { pasted?: boolean }) => {
+      setTab('chat'); // the chips are shown in the composer
+      addFiles(files, options);
+    },
+    [addFiles],
+  );
+  const studyRef = useLatest(study);
+  /**
+   * Send a question with the composer's attachments; they come back when the question was not accepted — except
+   * those the server no longer has (swept after 24 h unused): back, they would make every later question fail.
+   */
+  const sendQuestion = useCallback(
+    async (text: string, slide: number): Promise<boolean> => {
+      const taken = takeAttachments();
+      const result = await studyRef.current.ask(text, slide, readyAttachments(taken.chips));
+      if (!result.accepted) {
+        restoreAttachments({ docId: taken.docId, chips: withoutAttachments(taken.chips, result.missingAttachments) });
+      }
+      return result.accepted;
+    },
+    [takeAttachments, restoreAttachments, studyRef],
+  );
+  const [preview, setPreview] = useState<{ docId: string; attachment: Attachment } | null>(null);
+  useEffect(() => setPreview(null), [readyDocId]);
+  const openAttachment = useCallback(
+    (attachment: Attachment) => {
+      if (!readyDocId) return;
+      setPreview({ docId: readyDocId, attachment });
+      if (attachment.kind === 'region' && attachment.slide && attachment.rect) {
+        viewerRef.current?.showRegion(attachment.slide, attachment.rect);
+      }
+    },
+    [readyDocId],
+  );
+  const showOnSlide = useCallback((attachment: Attachment) => {
+    if (attachment.slide && attachment.rect) viewerRef.current?.showRegion(attachment.slide, attachment.rect);
+  }, []);
+  const attachmentActions = useMemo<AttachmentActions | null>(
+    () => (readyDocId ? { docId: readyDocId, open: openAttachment } : null),
+    [readyDocId, openAttachment],
+  );
+  const attachRegion = useCallback(
+    (slide: number, rect: RegionRect) => {
+      setTab('chat');
+      void addRegion(slide, rect);
+    },
+    [addRegion],
+  );
   const openNotesFor = useCallback(
     (slide: number) => {
       setTab('notes');
@@ -162,6 +233,8 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
   /**
    * Upload PDFs (into `courseId` when given). With `open`, the last created doc is opened (its
    * progress is shown and it opens automatically when ready); course-card uploads stay in the library.
+   * Opening never throws away the open lecture's attachments waiting in the composer (e.g. images dropped
+   * together with the PDF): with any there, the new lecture is only added, and a toast says where it is.
    */
   const uploadFiles = useCallback(
     async (files: File[], courseId: string | null, open: boolean) => {
@@ -169,46 +242,77 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
       const onCreated = courseId ? (d: DocMeta) => addLectureLocally(courseId, d.id) : undefined;
       const created = await upload(files, courseId, onCreated);
       if (created.length === 0) return;
-      if (courseId) {
-        void refreshCourses(); // the server inserts new lectures in natural title order
-        const title = courses?.find((c) => c.id === courseId)?.title;
-        if (title) toast(`📁 ${title} 과목에 강의 ${created.length}개를 추가했어요`, 'success');
+      const last = created[created.length - 1];
+      const stay = open && countAttachments() > 0;
+      const courseTitle = courseId ? courses?.find((c) => c.id === courseId)?.title : undefined;
+      if (courseId) void refreshCourses(); // the server inserts new lectures in natural title order
+      if (stay) {
+        const what = created.length === 1 ? `‘${last.title}’ 강의` : `강의 ${created.length}개`;
+        toast(
+          `${what}를 ${courseTitle ? `📁 ${courseTitle} 과목에 ` : ''}추가했어요. 입력창의 첨부를 지키려고 지금 강의에 그대로 있어요 — 상단 문서 목록에서 열 수 있어요.`,
+          'success',
+        );
+      } else {
+        if (courseTitle) toast(`📁 ${courseTitle} 과목에 강의 ${created.length}개를 추가했어요`, 'success');
+        if (open) setDocId(last.id);
       }
-      if (open) setDocId(created[created.length - 1].id);
     },
-    [upload, addLectureLocally, refreshCourses, courses, setDocId],
+    [upload, addLectureLocally, refreshCourses, courses, setDocId, countAttachments],
   );
   const handleFiles = useCallback(
     (files: File[]) => uploadFiles(files, uploadTarget?.id ?? null, true),
     [uploadFiles, uploadTarget],
   );
-  const handleFilesRef = useLatest(handleFiles);
+  /**
+   * Dropped files, wherever they land (the window, the library's drop zone, a course card): PDFs become lectures
+   * (into `courseId`), images are attached to the next question while a lecture is open, the rest is explained.
+   */
+  const dropFiles = useCallback(
+    (files: File[], courseId: string | null, open: boolean) => {
+      const plan = planDrop(files, readyDocId !== null);
+      for (const notice of plan.notices) toast(notice.message, notice.kind);
+      // Attached first: the chips are in the composer before the PDFs are uploaded, so those are not opened.
+      if (plan.images.length > 0) attachFiles(plan.images);
+      if (plan.pdfs.length > 0) void uploadFiles(plan.pdfs, courseId, open);
+    },
+    [readyDocId, attachFiles, uploadFiles],
+  );
+  const dropFilesRef = useLatest(dropFiles);
+  const uploadTargetIdRef = useLatest(uploadTarget?.id ?? null);
 
-  const [dragOver, setDragOver] = useState(false);
+  // Dropped PDFs become lectures; dropped images are attached to the next question while a lecture is open
+  // (anywhere on the page, the chat panel included). One listener decides, so the two never compete.
+  const [dragOver, setDragOver] = useState<DragKinds | null>(null);
   const suspendedRef = useLatest(suspended);
   useEffect(() => {
     let depth = 0;
     const hasFiles = (e: DragEvent) => Array.from(e.dataTransfer?.types ?? []).includes('Files');
+    const dragKinds = (e: DragEvent) =>
+      classifyDragTypes(
+        Array.from(e.dataTransfer?.items ?? [])
+          .filter((item) => item.kind === 'file')
+          .map((item) => item.type),
+      );
     const onEnter = (e: DragEvent) => {
       if (!hasFiles(e) || suspendedRef.current) return;
       depth++;
-      setDragOver(true);
+      setDragOver(dragKinds(e));
     };
     const onLeave = (e: DragEvent) => {
       if (!hasFiles(e)) return;
       depth = Math.max(0, depth - 1);
-      if (depth === 0) setDragOver(false);
+      if (depth === 0) setDragOver(null);
     };
     const onOver = (e: DragEvent) => {
       if (hasFiles(e)) e.preventDefault(); // allow dropping anywhere
     };
     const onDrop = (e: DragEvent) => {
       depth = 0;
-      setDragOver(false);
+      setDragOver(null);
       if (!hasFiles(e) || e.defaultPrevented) return; // the library drop zone already handled it
       e.preventDefault();
       if (suspendedRef.current) return; // the login screen is up
-      void handleFilesRef.current(Array.from(e.dataTransfer?.files ?? []));
+      dropFilesRef.current(Array.from(e.dataTransfer?.files ?? []), uploadTargetIdRef.current, true);
     };
     window.addEventListener('dragenter', onEnter);
     window.addEventListener('dragleave', onLeave);
@@ -220,7 +324,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
       window.removeEventListener('dragover', onOver);
       window.removeEventListener('drop', onDrop);
     };
-  }, [handleFilesRef, suspendedRef]);
+  }, [dropFilesRef, uploadTargetIdRef, suspendedRef]);
 
   // Warn before closing the tab while an answer is streaming (closing aborts it) or an upload runs.
   const busy = study.anyRunning || uploads.length > 0;
@@ -321,75 +425,118 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
         ? '사용 가능한 LLM이 없어요 — 상단 ⓘ 에서 이유를 확인하세요'
         : null;
 
+  // "💬 이 부분 설명해줘" on a selected region: the same rule as the composer's send button.
+  const askDisabledReason = study.running
+    ? '답변이 끝난 뒤에 질문할 수 있어요 (📎 첨부는 지금도 돼요)'
+    : !study.session && !choice
+      ? (providerProblem ?? '사용 가능한 LLM이 없어요')
+      : null;
+  const askDisabledRef = useLatest(askDisabledReason);
+  const askRegion = useCallback(
+    async (slide: number, rect: RegionRect) => {
+      setTab('chat');
+      const created = await addRegion(slide, rect);
+      if (!created) return;
+      await settleAttachments(); // images still uploading go along
+      const blocked = askDisabledRef.current;
+      if (blocked) {
+        toast(`영역을 입력창에 첨부해 두었어요. ${blocked}`, 'info');
+        return;
+      }
+      await sendQuestion(EXPLAIN_REGION_PROMPT, slide);
+    },
+    [addRegion, settleAttachments, askDisabledRef, sendQuestion],
+  );
+  const onAskRegion = useCallback((slide: number, rect: RegionRect) => void askRegion(slide, rect), [askRegion]);
+
   const notesCount = (notesState.notes?.slides ?? []).reduce((n, s) => n + s.entries.length, 0);
 
   let main;
   if (doc && doc.status === 'ready') {
     main = (
-      <SplitPane
-        left={
-          <SlideViewer
-            key={doc.id}
-            ref={viewerRef}
-            doc={doc}
-            qaCounts={notesState.qaCounts}
-            pinnedSlide={pinnedSlide}
-            onFocusChange={setFocusedSlide}
-            onOpenNotes={openNotesFor}
-          />
-        }
-        right={
-          <ChatPanel
-            doc={doc}
-            providers={providers}
-            providerProblem={providerProblem}
-            choice={choice}
-            study={study}
-            focusedSlide={focusedSlide}
-            pinnedSlide={pinnedSlide}
-            onTogglePin={togglePin}
-            onGoToSlide={goToSlide}
-            tab={tab}
-            onTabChange={changeTab}
-            notesCount={notesCount}
-            digestInfo={digest.info}
-            course={docCourse}
-            earlier={earlier}
-            onDigestLectures={onDigestLectures}
-            neighbors={neighbors}
-            onNeighborsChange={setNeighbors}
-            digest={
-              <DigestPanel
-                key={doc.id}
-                doc={doc}
-                digest={digest}
-                providers={providers}
-                choice={choice}
-                providerProblem={providerProblem}
-                focusedSlide={focusedSlide}
-                active={tab === 'digest'}
-                mode={digestMode}
-                onModeChange={setDigestMode}
-                onGoToSlide={goToSlide}
-              />
-            }
-            notes={
-              <NotesPanel
-                docId={doc.id}
-                notes={notesState.notes}
-                loading={notesState.loading}
-                error={notesState.error}
-                providers={providers}
-                focusedSlide={focusedSlide}
-                filter={notesFilter}
-                onFilterChange={setNotesFilter}
-                onGoToSlide={goToSlide}
-                onRefresh={() => void refreshNotes()}
-              />
-            }
-          />
-        }
-      />
+      <AttachmentContext.Provider value={attachmentActions}>
+        <SplitPane
+          left={
+            <SlideViewer
+              key={doc.id}
+              ref={viewerRef}
+              doc={doc}
+              qaCounts={notesState.qaCounts}
+              pinnedSlide={pinnedSlide}
+              onFocusChange={setFocusedSlide}
+              onOpenNotes={openNotesFor}
+              onAttachRegion={attachRegion}
+              onAskRegion={onAskRegion}
+              askDisabledReason={askDisabledReason}
+            />
+          }
+          right={
+            <ChatPanel
+              doc={doc}
+              providers={providers}
+              providerProblem={providerProblem}
+              choice={choice}
+              study={study}
+              focusedSlide={focusedSlide}
+              pinnedSlide={pinnedSlide}
+              onTogglePin={togglePin}
+              onGoToSlide={goToSlide}
+              tab={tab}
+              onTabChange={changeTab}
+              notesCount={notesCount}
+              digestInfo={digest.info}
+              course={docCourse}
+              earlier={earlier}
+              onDigestLectures={onDigestLectures}
+              neighbors={neighbors}
+              onNeighborsChange={setNeighbors}
+              attachments={attachments}
+              onAttachFiles={attachFiles}
+              onSendQuestion={sendQuestion}
+              onOpenAttachment={openAttachment}
+              overlay={
+                preview && preview.docId === doc.id ? (
+                  <AttachmentPreview
+                    docId={preview.docId}
+                    attachment={preview.attachment}
+                    onClose={() => setPreview(null)}
+                    onShowOnSlide={showOnSlide}
+                  />
+                ) : null
+              }
+              digest={
+                <DigestPanel
+                  key={doc.id}
+                  doc={doc}
+                  digest={digest}
+                  providers={providers}
+                  choice={choice}
+                  providerProblem={providerProblem}
+                  focusedSlide={focusedSlide}
+                  active={tab === 'digest'}
+                  mode={digestMode}
+                  onModeChange={setDigestMode}
+                  onGoToSlide={goToSlide}
+                />
+              }
+              notes={
+                <NotesPanel
+                  docId={doc.id}
+                  notes={notesState.notes}
+                  loading={notesState.loading}
+                  error={notesState.error}
+                  providers={providers}
+                  focusedSlide={focusedSlide}
+                  filter={notesFilter}
+                  onFilterChange={setNotesFilter}
+                  onGoToSlide={goToSlide}
+                  onRefresh={() => void refreshNotes()}
+                />
+              }
+            />
+          }
+        />
+      </AttachmentContext.Provider>
     );
   } else if (doc) {
     main = (
@@ -412,8 +559,8 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
         onUploadCourseChange={setUploadCourseId}
         onOpen={setDocId}
         onPickFiles={pickFiles}
-        onDropFiles={(files) => void handleFiles(files)}
-        onUploadToCourse={(courseId, files) => void uploadFiles(files, courseId, false)}
+        onDropFiles={(files) => dropFiles(files, uploadTarget?.id ?? null, true)}
+        onUploadToCourse={(courseId, files) => dropFiles(files, courseId, false)}
         onRetryDoc={(id) => void retryDoc(id)}
         onDeleteDoc={(d) => void deleteDoc(d)}
         canDigest={choice !== null}
@@ -493,8 +640,20 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
       {dragOver && (
         <div className="drop-overlay" aria-hidden>
           <div className="drop-overlay-card">
-            {uploadTarget ? `📄 PDF를 놓으면 📁 ${uploadTarget.title}에 강의로 추가해요` : '📄 PDF를 놓으면 업로드해요'}
-            {!doc && (courses?.length ?? 0) > 0 && (
+            {(() => {
+              const copy = dropOverlayCopy(
+                dragOver,
+                uploadTarget ? `📄 PDF를 놓으면 📁 ${uploadTarget.title}에 강의로 추가해요` : '📄 PDF를 놓으면 업로드해요',
+                readyDocId !== null,
+              );
+              return (
+                <>
+                  {copy.title}
+                  {copy.sub && <div className="drop-overlay-sub">{copy.sub}</div>}
+                </>
+              );
+            })()}
+            {!doc && (courses?.length ?? 0) > 0 && (dragOver.pdf || dragOver.unknown) && (
               <div className="drop-overlay-sub">과목 카드 위에 놓으면 그 과목에 추가돼요</div>
             )}
           </div>

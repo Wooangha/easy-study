@@ -5,12 +5,12 @@
 //   AbortError creation,
 // - `<bin> --version` probing for detect(),
 // - loading slide images for providers that send them inline (the image worker's pre-encoded JPEGs, see
-//   server/assets.ts; sharp is only loaded for images that have none yet).
+//   server/assets.ts; sharp is only loaded for images that have none yet; attachments are sent as stored).
 import { execFile, spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
-import { INLINE_MAX_BYTES, INLINE_MAX_EDGE, inlinePathFor } from '../assets.ts';
+import { INLINE_MAX_BYTES, INLINE_MAX_EDGE, inlinePathFor, isInlineReady } from '../assets.ts';
 import { taskkillPath, trackChild } from '../children.ts';
 import { childProcessEnv } from '../config.ts';
 import type { ProviderAvailability } from './types.ts';
@@ -638,6 +638,16 @@ export async function loadInlineImage(file: string): Promise<InlineImage> {
     info = await stat(file);
   } catch (err) {
     throw unreadableImage(file, err);
+  }
+
+  // Attachments of questions (DESIGN §21) were encoded for this by the image worker: sent as they are (never
+  // re-encoded here, so sharp stays out of the server process).
+  if (isInlineReady(file)) {
+    try {
+      return { mediaType: imageMediaType(file), data: (await readFile(file)).toString('base64') };
+    } catch (err) {
+      throw unreadableImage(file, err);
+    }
   }
 
   const preEncoded = await readPreEncoded(file, info.mtimeMs);

@@ -717,6 +717,8 @@ describe('remote mode over HTTP', () => {
       ['GET', `${d}/slides/1.png`],
       ['GET', `${d}/view/1.webp?w=1000`],
       ['GET', `${d}/thumbs/1.webp`],
+      ['GET', `${d}/attachments/att-0123456789abcdef`],
+      ['GET', `${d}/attachments/BAD_ID`],
       ['GET', `${d}/sessions`],
       ['GET', s],
       ['GET', `${d}/notes`],
@@ -730,6 +732,8 @@ describe('remote mode over HTTP', () => {
       ['GET', '/api/nope'],
       ['POST', '/api/docs'],
       ['POST', `${d}/retry`],
+      ['POST', `${d}/regions`],
+      ['POST', `${d}/attachments`],
       ['POST', `${d}/sessions`],
       ['POST', `${s}/prime`],
       ['POST', `${s}/messages`],
@@ -743,15 +747,22 @@ describe('remote mode over HTTP', () => {
       ['PATCH', `/api/groups/${GROUP_ID}`],
       ['PATCH', '/api/groups/NOT_VALID'],
       ['DELETE', d],
+      ['DELETE', `${d}/attachments/att-0123456789abcdef`],
       ['DELETE', s],
       ['DELETE', `/api/courses/${COURSE_ID}`],
       ['DELETE', `/api/groups/${GROUP_ID}`],
     ];
     for (const [method, target] of routes) {
-      const body = method === 'POST' && target === '/api/docs' ? Buffer.from('%PDF-1.4 fake') : JSON.stringify({ slide: 1, text: 'hi', provider: 'claude-code' });
+      const image = target.endsWith('/attachments');
+      const body =
+        method === 'POST' && target === '/api/docs'
+          ? Buffer.from('%PDF-1.4 fake')
+          : image
+            ? PNG_1X1
+            : JSON.stringify({ slide: 1, text: 'hi', provider: 'claude-code', rect: { x: 0, y: 0, w: 1, h: 1 }, attachments: [] });
       const res = await request(base, target, {
         method,
-        headers: { 'Content-Type': target === '/api/docs' ? 'application/pdf' : 'application/json' },
+        headers: { 'Content-Type': target === '/api/docs' ? 'application/pdf' : image ? 'image/png' : 'application/json' },
         body: method === 'GET' || method === 'DELETE' ? undefined : body,
       });
       assert.equal(res.status, 401, `${method} ${target}`);
@@ -761,6 +772,41 @@ describe('remote mode over HTTP', () => {
     }
     // Nothing happened.
     assert.deepEqual((await fs.readdir(library)).sort(), [AUTH_FILE_NAME, SERVER_LOCK_FILE_NAME, DOC_ID].sort());
+    assert.deepEqual((await fs.readdir(path.join(library, DOC_ID))).sort(), ['doc.json', 'slides', 'text'], 'no attachment was made');
+  });
+
+  test('attachments (DESIGN §21) work with a session: region, upload, image, delete', async () => {
+    const cookie = cookieOf(await jsonLogin(base, code));
+    const d = `/api/docs/${DOC_ID}`;
+    const created = await request(base, `${d}/attachments`, {
+      method: 'POST',
+      headers: { Cookie: cookie, 'Content-Type': 'image/png', 'X-Filename': encodeURIComponent('점.png') },
+      body: PNG_1X1,
+    });
+    assert.equal(created.status, 201, created.body);
+    const attachment = JSON.parse(created.body) as { id: string; name: string };
+    assert.equal(attachment.name, '점.png');
+    const image = await request(base, `${d}/attachments/${attachment.id}`, { headers: { Cookie: cookie } });
+    assert.equal(image.status, 200);
+    assert.equal(image.headers['cache-control'], 'private, max-age=31536000, immutable');
+    assertSecurityHeaders(image, 'attachment image');
+    // Without the session the image is not served (a guessed id alone is not enough).
+    assert.equal((await request(base, `${d}/attachments/${attachment.id}`)).status, 401);
+    // A region of the (1 x 1 px) slide: at least 1 x 1, the whole slide.
+    const region = await request(base, `${d}/regions`, {
+      method: 'POST',
+      headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ slide: 1, rect: { x: 0, y: 0, w: 1, h: 1 } }),
+    });
+    assert.equal(region.status, 201, region.body);
+    // Another site's page cannot upload (CSRF), even with the cookie.
+    const forged = await request(base, `${d}/attachments`, {
+      method: 'POST',
+      headers: { Cookie: cookie, 'Content-Type': 'image/png', Origin: 'https://evil.example' },
+      body: PNG_1X1,
+    });
+    assert.equal(forged.status, 403);
+    assert.equal((await request(base, `${d}/attachments/${attachment.id}`, { method: 'DELETE', headers: { Cookie: cookie } })).status, 204);
   });
 
   test('the web client and the manifest stay public', async () => {

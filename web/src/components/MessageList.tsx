@@ -1,10 +1,11 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
-import type { ChatMessage, MessageStatus, ProviderInfo } from '../../../shared/types.ts';
+import type { Attachment, ChatMessage, MessageStatus, ProviderInfo } from '../../../shared/types.ts';
 import { PENDING_ASSISTANT_ID, PENDING_USER_ID } from '../hooks/useStudySession.ts';
 import { CHAT_WINDOW, chatWindowStart } from '../lib/chatWindow.ts';
 import { copyText } from '../lib/clipboard.ts';
 import { describeContext, formatDuration, formatTime, primeCardState, providerWithModel } from '../lib/format.ts';
 import { toast } from '../lib/toast.ts';
+import { AttachmentThumbs } from './Attachments.tsx';
 import { Markdown } from './Markdown.tsx';
 
 interface MessageListProps {
@@ -22,7 +23,8 @@ interface MessageListProps {
    */
   scrollKey: string;
   onGoToSlide: (slide: number) => void;
-  onRetry: (text: string, slide: number) => void;
+  /** Ask a failed question again (with the attachments it had). */
+  onRetry: (text: string, slide: number, attachments?: Attachment[]) => void;
   /**
    * Feed the deck again. Given when the session is not primed and nothing runs; offered on the last
    * priming turn if it failed or was aborted.
@@ -148,6 +150,7 @@ export function MessageList({
         pairStatus={pairStatus}
         retryText={canRetry && lastUser ? lastUser.text : null}
         retrySlide={canRetry && lastUser ? lastUser.slide : 0}
+        retryAttachments={canRetry && lastUser ? lastUser.attachments : undefined}
         onGoToSlide={onGoToSlide}
         onRetry={onRetry}
         onRetryPrime={canRetryPrime ? onRetryPrime : undefined}
@@ -194,8 +197,9 @@ interface MessageItemProps {
   pairStatus: MessageStatus | undefined;
   retryText: string | null;
   retrySlide: number;
+  retryAttachments: Attachment[] | undefined;
   onGoToSlide: (slide: number) => void;
-  onRetry: (text: string, slide: number) => void;
+  onRetry: (text: string, slide: number, attachments?: Attachment[]) => void;
   onRetryPrime?: () => void;
 }
 
@@ -231,6 +235,7 @@ function UserBubble({ message: m, onGoToSlide }: MessageItemProps) {
         </button>
         <span className="msg-time">{pending ? '보내는 중…' : formatTime(m.createdAt)}</span>
       </div>
+      <AttachmentThumbs attachments={m.attachments} className="in-chat" />
       <div className="bubble">{m.text}</div>
       <ContextLine message={m} />
     </div>
@@ -262,6 +267,7 @@ function AssistantMessage({
   stopping,
   retryText,
   retrySlide,
+  retryAttachments,
   onRetry,
   onRetryPrime,
 }: MessageItemProps) {
@@ -321,7 +327,12 @@ function AssistantMessage({
       )}
       {m.status === 'aborted' && <div className="msg-note">⏹ 중단된 답변이에요</div>}
       {retryText !== null && (
-        <button type="button" className="ghost-btn small" onClick={() => onRetry(retryText, retrySlide)}>
+        <button
+          type="button"
+          className="ghost-btn small"
+          onClick={() => onRetry(retryText, retrySlide, retryAttachments)}
+          title={retryAttachments?.length ? `첨부 ${retryAttachments.length}개와 함께 다시 보내요` : undefined}
+        >
           ↻ 다시 질문하기
         </button>
       )}

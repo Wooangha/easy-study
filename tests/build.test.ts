@@ -89,6 +89,27 @@ describe('compiled server (dist-server)', () => {
         await res.arrayBuffer();
       }
       assert.equal((await fs.readdir(path.join(docDir, 'view'))).length, 18);
+
+      // Attachments (DESIGN §21) are made by the compiled worker too: a region (crop + PDF text) and an upload.
+      const regionRes = await fetch(`${base}/api/docs/${created.id}/regions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slide: 5, rect: { x: 0, y: 0, w: 1, h: 0.2 } }),
+      });
+      const region = (await regionRes.json()) as { id: string; text: string; error?: string };
+      assert.equal(regionRes.status, 201, region.error ?? '');
+      assert.equal(region.text, 'First-Come, First-Served (FCFS)');
+      const slide = await fs.readFile(path.join(docDir, 'slides', '001.png'));
+      const uploadRes = await fetch(`${base}/api/docs/${created.id}/attachments`, { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: slide });
+      const uploaded = (await uploadRes.json()) as { id: string; width: number; error?: string };
+      assert.equal(uploadRes.status, 201, uploaded.error ?? '');
+      assert.equal(uploaded.width, 1568);
+      for (const id of [region.id, uploaded.id]) {
+        const res = await fetch(`${base}/api/docs/${created.id}/attachments/${id}`);
+        assert.equal(res.status, 200, id);
+        assert.match(res.headers.get('content-type') ?? '', /^image\/(jpeg|png)$/);
+        await res.arrayBuffer();
+      }
     } finally {
       child.kill('SIGTERM');
     }

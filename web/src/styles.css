@@ -3361,6 +3361,514 @@ kbd {
   text-align: center;
 }
 
+/* ---------------------------------------------------------------- attachments (DESIGN §21) */
+
+/* Region selection on the slides: a press + drag draws a rectangle, so nothing in a slide selects as text and
+   a long press on a phone does not open the image's menu. */
+.slide-box {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.viewer.is-region-mode .slide-box {
+  cursor: crosshair;
+  /* ✂ mode: a finger draws right away instead of scrolling. */
+  touch-action: none;
+}
+
+.viewer.is-selecting .slide-box,
+.viewer.is-selecting .viewer-scroll {
+  cursor: crosshair;
+}
+
+.region-toggle {
+  height: 28px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.region-toggle:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.region-toggle.is-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.region-layer {
+  position: absolute;
+  pointer-events: none;
+}
+
+.region-select {
+  position: absolute;
+  border: 2px solid var(--accent);
+  border-radius: 3px;
+  background: rgba(75, 107, 245, 0.1);
+  /* Dims the rest of the slide (clipped by the slide box). */
+  box-shadow: 0 0 0 9999px rgba(15, 18, 25, 0.22);
+}
+
+.region-select.is-drag {
+  border-style: dashed;
+}
+
+.region-flash {
+  position: absolute;
+  border: 3px solid var(--warn);
+  border-radius: 4px;
+  box-shadow: 0 0 0 9999px rgba(15, 18, 25, 0);
+  animation: region-flash 2.1s ease-out forwards;
+}
+
+@keyframes region-flash {
+  0% {
+    opacity: 0;
+    box-shadow: 0 0 0 9999px rgba(15, 18, 25, 0);
+  }
+  12% {
+    opacity: 1;
+    box-shadow: 0 0 0 9999px rgba(15, 18, 25, 0.28);
+  }
+  30% {
+    border-color: transparent;
+  }
+  45% {
+    border-color: var(--warn);
+  }
+  70% {
+    opacity: 1;
+    box-shadow: 0 0 0 9999px rgba(15, 18, 25, 0.28);
+  }
+  100% {
+    opacity: 0;
+    box-shadow: 0 0 0 9999px rgba(15, 18, 25, 0);
+  }
+}
+
+.region-menu {
+  position: absolute;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+  white-space: nowrap;
+  animation: toast-in 0.12s ease-out;
+}
+
+.region-menu.is-above,
+.region-menu.is-inside {
+  transform: translateY(-100%);
+  animation: none;
+}
+
+.region-menu-btn {
+  height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.region-menu-btn:hover:not(:disabled),
+.region-menu-btn:focus-visible {
+  background: var(--surface-2);
+}
+
+.region-menu-btn.is-primary {
+  color: var(--accent);
+}
+
+.region-menu-btn.is-primary:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+
+.region-menu-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.region-menu-btn.is-close {
+  width: 30px;
+  padding: 0;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+/* Composer: the 📎 button and the chips of the next question's attachments. */
+.attach-btn {
+  flex: none;
+  align-self: flex-end;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: none;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.attach-btn:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+
+.attach-btn:disabled {
+  opacity: 0.4;
+}
+
+.att-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 8px;
+  padding: 0;
+  list-style: none;
+}
+
+.att-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.att-chip.kind-region {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+.att-chip-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 3px 4px 3px 3px;
+  border: 0;
+  background: none;
+  color: var(--text);
+  text-align: left;
+}
+
+.att-chip-main:disabled {
+  cursor: progress;
+}
+
+.att-chip-main:hover:not(:disabled) .att-chip-label {
+  color: var(--accent);
+}
+
+.att-chip-thumb {
+  position: relative;
+  flex: none;
+  width: 36px;
+  height: 36px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--slide-bg);
+  display: grid;
+  place-items: center;
+}
+
+.att-chip-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.att-chip-icon {
+  font-size: 16px;
+  color: var(--muted);
+}
+
+/* Upload progress: a ring over the thumbnail (a region crop has no progress: it spins). */
+.att-chip-progress {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 18, 25, 0.35);
+}
+
+.att-chip-progress::after {
+  content: '';
+  position: absolute;
+  inset: 8px;
+  border-radius: 50%;
+  background: conic-gradient(#fff calc(var(--p, 0) * 360deg), rgba(255, 255, 255, 0.3) 0);
+  -webkit-mask: radial-gradient(circle, transparent 52%, #000 54%);
+  mask: radial-gradient(circle, transparent 52%, #000 54%);
+}
+
+.att-chip-progress[data-indeterminate]::after {
+  animation: spin 0.9s linear infinite;
+}
+
+.att-chip-label {
+  min-width: 0;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.att-chip.kind-region .att-chip-label {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.att-chip-remove {
+  flex: none;
+  align-self: stretch;
+  width: 26px;
+  border: 0;
+  border-left: 1px solid var(--border);
+  background: none;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+}
+
+.att-chip-remove:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+/* Thumbnails of a question's attachments (chat history, notes). */
+.att-thumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.att-thumbs.in-chat {
+  justify-content: flex-end;
+}
+
+.att-thumbs.in-notes {
+  margin: 2px 0 10px;
+}
+
+.att-thumb {
+  position: relative;
+  width: 96px;
+  height: 64px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--slide-bg);
+  overflow: hidden;
+}
+
+.att-thumb:hover,
+.att-thumb:focus-visible {
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+
+.att-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.att-thumb-label {
+  position: absolute;
+  left: 3px;
+  bottom: 3px;
+  max-width: calc(100% - 6px);
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--overlay);
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.6;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.att-img-missing {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  color: var(--muted);
+  background: var(--surface-2);
+}
+
+.note-att-count {
+  flex: none;
+  margin-left: 2px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.context-chip.chip-attachments {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* Preview over the right pane (the slides stay visible: an opened region flashes on its slide meanwhile). */
+.chat-panel {
+  position: relative;
+}
+
+.att-preview {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: var(--overlay);
+  animation: fade-in 0.12s ease-out;
+}
+
+.att-preview-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  max-width: 720px;
+  max-height: 100%;
+  min-height: 0;
+  padding: 10px 12px 12px;
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.att-preview-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.att-preview-title {
+  font-weight: 700;
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.att-preview-size {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.att-preview-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--slide-bg);
+  overflow: hidden;
+}
+
+.att-preview-body img {
+  display: block;
+  max-width: 100%;
+  max-height: min(62vh, 640px);
+  object-fit: contain;
+}
+
+.att-preview-body .att-img-missing {
+  min-height: 120px;
+}
+
+.att-preview-text summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.att-preview-text pre {
+  margin: 6px 0 0;
+  max-height: 140px;
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--code-bg);
+  font-family: var(--font);
+  font-size: 12.5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.att-preview-text p {
+  margin: 6px 0 0;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/*
+ * A short chat pane (stacked layout on a phone, or a low window): the chips stay one row that scrolls sideways,
+ * so six of them do not push the conversation out of view.
+ */
+@media (max-width: 800px), (max-height: 640px) {
+  .att-chips {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: thin;
+    margin-bottom: 6px;
+    padding-bottom: 2px;
+  }
+
+  .att-chip {
+    flex: none;
+    max-width: 70%;
+  }
+
+  .att-chip-label {
+    max-width: 96px;
+  }
+}
+
+@media (pointer: coarse) {
+  .att-chip-remove {
+    width: 34px;
+  }
+
+  .region-menu-btn {
+    height: 38px;
+  }
+}
+
 /* ---------------------------------------------------------------- responsive */
 
 @media (max-width: 800px) {

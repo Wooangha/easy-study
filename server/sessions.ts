@@ -1,9 +1,10 @@
 // Chat sessions persisted as library/<docId>/sessions/<sessionId>.json, and the review notes
-// generated from them (notes/<sessionId>.md + STUDY_NOTES.md, DESIGN §7).
+// generated from them (notes/<sessionId>.md + STUDY_NOTES.md, DESIGN §7). Questions with attachments (DESIGN
+// §21) show them under the question in both, linked relatively (attachments/<id>.jpg|png).
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { SESSION_ID_RE } from '../shared/types.ts';
+import { ATTACHMENT_ID_RE, SESSION_ID_RE } from '../shared/types.ts';
 import type {
   ChatMessage,
   NoteEntry,
@@ -13,6 +14,8 @@ import type {
   SessionSummary,
   SlideNotes,
 } from '../shared/types.ts';
+import { ATTACHMENTS_DIR } from './assets.ts';
+import { attachmentFileNames, removeUnreferencedAttachments } from './attachments.ts';
 import { HttpError } from './config.ts';
 import { initialProviderState } from './context.ts';
 import type { SessionRecord } from './internal-types.ts';
@@ -197,15 +200,42 @@ export async function listSessions(docId: string): Promise<SessionSummary[]> {
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || b.createdAt.localeCompare(a.createdAt));
 }
 
-/** Deletes the session file and its notes, then regenerates STUDY_NOTES.md. False when missing. */
+/**
+ * Deletes the session file and its notes, and the attachments only its messages referred to (DESIGN §21), then
+ * regenerates STUDY_NOTES.md. False when missing.
+ */
 export async function deleteSession(docId: string, sessionId: string): Promise<boolean> {
-  if ((await getSession(docId, sessionId)) === null) return false;
+  const record = await getSession(docId, sessionId);
+  if (record === null) return false;
   const file = sessionFile(docId, sessionId);
   // Queue behind pending writes so a late save cannot resurrect the file.
   await sessionQueue(`${docId}/${sessionId}`, () => rmWithRetry(file, { force: true }));
   await rmWithRetry(path.join(docPaths(docId).notesDir, `${sessionId}.md`), { force: true });
+  try {
+    await removeUnreferencedAttachments(docId, messageAttachmentIds(record.messages), referencedAttachmentIds);
+  } catch (err) {
+    // They are unreferenced now: the sweep removes them within a day.
+    console.warn(`[sessions] could not remove the attachments of ${sessionId}: ${(err as Error).message}`);
+  }
   await writeNotes(docId);
   return true;
+}
+
+/** Ids of the attachments messages refer to (ChatMessage.attachments), in order, without duplicates. */
+export function messageAttachmentIds(messages: ChatMessage[]): string[] {
+  const ids = new Set<string>();
+  for (const message of messages) {
+    if (!Array.isArray(message?.attachments)) continue;
+    for (const attachment of message.attachments) if (typeof attachment?.id === 'string') ids.add(attachment.id);
+  }
+  return [...ids];
+}
+
+/** Every attachment id a message of any session of the document refers to (DESIGN §21 cleanup). */
+export async function referencedAttachmentIds(docId: string): Promise<Set<string>> {
+  const ids = new Set<string>();
+  for (const record of await loadRecords(docId)) for (const id of messageAttachmentIds(record.messages)) ids.add(id);
+  return ids;
 }
 
 export function toSummary(record: SessionRecord): SessionSummary {
@@ -312,7 +342,23 @@ function answerMarkdown(answer: ChatMessage | null, headingLevels: number): stri
   }
 }
 
-function sessionNotesMarkdown(doc: StoredDocMeta, record: SessionRecord): string {
+/**
+ * The attachments of a question as Markdown images (DESIGN §21), one line: `![p.12 영역](<prefix><id>.png)` for a
+ * selected region, `![이미지](<prefix><id>.jpg)` for an image; '' without attachments. `files` maps ids to the
+ * stored file names.
+ */
+function attachmentsMarkdown(question: ChatMessage, files: ReadonlyMap<string, string>, prefix: string): string {
+  if (!Array.isArray(question.attachments)) return '';
+  return question.attachments
+    .filter((attachment) => typeof attachment?.id === 'string' && ATTACHMENT_ID_RE.test(attachment.id))
+    .map((attachment) => {
+      const alt = attachment.kind === 'region' ? `p.${attachment.slide ?? question.slide} 영역` : '이미지';
+      return `![${alt}](${prefix}${files.get(attachment.id) ?? `${attachment.id}.jpg`})`;
+    })
+    .join(' ');
+}
+
+function sessionNotesMarkdown(doc: StoredDocMeta, record: SessionRecord, files: ReadonlyMap<string, string>): string {
   const lines: string[] = [
     `# ${doc.title} — ${record.title}`,
     `- Provider: ${providerLabel(record.provider, record.model)} · Started: ${formatDateTime(record.createdAt)}`,
@@ -328,7 +374,10 @@ function sessionNotesMarkdown(doc: StoredDocMeta, record: SessionRecord): string
       shownSlides.add(slide);
       lines.push(`![slide ${slide}](../slides/${slideFileName(slide, doc.pageCount)})`);
     }
-    lines.push('', `**Q.** ${withHardBreaks(entry.question.text)}`, '', answerMarkdown(entry.answer, 2), '');
+    lines.push('', `**Q.** ${withHardBreaks(entry.question.text)}`, '');
+    const attached = attachmentsMarkdown(entry.question, files, `../${ATTACHMENTS_DIR}/`);
+    if (attached) lines.push(attached, '');
+    lines.push(answerMarkdown(entry.answer, 2), '');
   }
   return `${lines.join('\n').trimEnd()}\n`;
 }
@@ -349,7 +398,7 @@ function groupBySlide(records: SessionRecord[]): SlideNotes[] {
     }));
 }
 
-function studyNotesMarkdown(doc: StoredDocMeta, records: SessionRecord[], slides: SlideNotes[]): string {
+function studyNotesMarkdown(doc: StoredDocMeta, records: SessionRecord[], slides: SlideNotes[], files: ReadonlyMap<string, string>): string {
   const providerBySession = new Map(records.map((record) => [record.id, providerLabel(record.provider, record.model)]));
   const lines: string[] = [`# ${doc.title} — study notes`, ''];
   if (slides.length === 0) lines.push('_No questions yet._', '');
@@ -366,6 +415,8 @@ function studyNotesMarkdown(doc: StoredDocMeta, records: SessionRecord[], slides
       // The heading only holds the (possibly shortened) first line: add the full question whenever the
       // heading does not already show all of it, so the review file never loses question text.
       if (question.includes('\n') || firstLine(question) !== question) lines.push(withHardBreaks(question), '');
+      const attached = attachmentsMarkdown(entry.question, files, `${ATTACHMENTS_DIR}/`);
+      if (attached) lines.push(attached, '');
       lines.push(answerMarkdown(entry.answer, 3), '');
     }
   }
@@ -378,12 +429,13 @@ async function regenerateNotes(docId: string): Promise<void> {
   const paths = docPaths(docId);
   const records = (await loadRecords(docId)).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   await fs.mkdir(paths.notesDir, { recursive: true });
+  const files = await attachmentFileNames(docId, records.flatMap((record) => messageAttachmentIds(record.messages)));
 
   const current = new Set<string>();
   for (const record of records) {
     const name = `${record.id}.md`;
     current.add(name);
-    await writeFileAtomic(path.join(paths.notesDir, name), sessionNotesMarkdown(doc, record));
+    await writeFileAtomic(path.join(paths.notesDir, name), sessionNotesMarkdown(doc, record, files));
   }
   // Drop notes of sessions that no longer exist.
   for (const name of await fs.readdir(paths.notesDir)) {
@@ -391,7 +443,7 @@ async function regenerateNotes(docId: string): Promise<void> {
       await rmWithRetry(path.join(paths.notesDir, name), { force: true });
     }
   }
-  await writeFileAtomic(paths.studyNotes, studyNotesMarkdown(doc, records, groupBySlide(records)));
+  await writeFileAtomic(paths.studyNotes, studyNotesMarkdown(doc, records, groupBySlide(records), files));
 }
 
 /** Regenerates notes/<sid>.md for every session of the document and STUDY_NOTES.md. */

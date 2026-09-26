@@ -181,6 +181,74 @@ describe('opening PDFs', () => {
   });
 });
 
+describe('text inside a selected region (DESIGN §21)', () => {
+  test('only the lines whose characters meet the region; Symbol-font PUA characters come back, Wingdings stays', async () => {
+    const doc = await openPdf(await fixture('symbol-region.pdf', symbolFontPdf()));
+    try {
+      doc.withPage(1, (page) => {
+        // Line 1 (baseline y = 420 pt of 540: ~0.17–0.24 from the top), line 2 (y = 340: ~0.32–0.39).
+        assert.equal(page.textInRegion({ x: 0, y: 0.1, w: 1, h: 0.15 }), 'Sets: α β ∪ ∈ ∅ →');
+        assert.equal(page.textInRegion({ x: 0, y: 0.3, w: 1, h: 0.15 }), '\uf0a7 done');
+        assert.equal(page.textInRegion({ x: 0, y: 0, w: 1, h: 1 }), 'Sets: α β ∪ ∈ ∅ →\n\uf0a7 done');
+        // Part of a line: the characters whose boxes meet the region (the symbols on the right).
+        assert.equal(page.textInRegion({ x: 0.16, y: 0.1, w: 0.84, h: 0.15 }), 'α β ∪ ∈ ∅ →');
+        assert.equal(page.textInRegion({ x: 0.25, y: 0.1, w: 0.75, h: 0.15 }), '∈ ∅ →');
+        // Nothing there, or a region without area.
+        assert.equal(page.textInRegion({ x: 0.5, y: 0.6, w: 0.3, h: 0.3 }), '');
+        assert.equal(page.textInRegion({ x: 0.5, y: 0.5, w: 0, h: 0.2 }), '');
+      });
+    } finally {
+      doc.close();
+    }
+  });
+
+  test('the region is taken on the page as rendered: /Rotate is applied', async () => {
+    // "Slide 1" sits near the top left of the unrotated page (60, 440 pt); rotated by 90° it is near the top right.
+    const doc = await openPdf(await fixture('rotated-region.pdf', deckPdf(1, { rotate: 90 })));
+    try {
+      doc.withPage(1, (page) => {
+        assert.ok(page.height > page.width, 'portrait as rendered');
+        assert.equal(page.textInRegion({ x: 0.75, y: 0, w: 0.25, h: 0.3 }), 'Slide 1');
+        assert.equal(page.textInRegion({ x: 0, y: 0, w: 0.5, h: 1 }), '');
+        assert.equal(page.textInRegion({ x: 0, y: 0.5, w: 1, h: 0.5 }), '');
+      });
+    } finally {
+      doc.close();
+    }
+  });
+
+  test('on the sample lecture: the title region and the body region of slide 5', async () => {
+    const doc = await openPdf(SAMPLE);
+    try {
+      doc.withPage(5, (page) => {
+        assert.equal(page.textInRegion({ x: 0, y: 0, w: 1, h: 0.2 }), 'First-Come, First-Served (FCFS)');
+        const body = page.textInRegion({ x: 0, y: 0.2, w: 1, h: 0.2 });
+        assert.equal(body.split('\n').length, 3);
+        assert.match(body, /^• Bursts: P1 = 24, P2 = 3, P3 = 3\n• Average waiting time/);
+        assert.doesNotMatch(body, /FCFS\)|OS 101/);
+        // A region beyond the page is clamped to it.
+        assert.equal(page.textInRegion({ x: -0.5, y: -0.5, w: 2, h: 2 }), page.textInRegion({ x: 0, y: 0, w: 1, h: 1 }));
+      });
+    } finally {
+      doc.close();
+    }
+  });
+
+  test('gives back what it takes: the heap stays', async () => {
+    const file = await fixture('symbol-region-heap.pdf', symbolFontPdf());
+    const warm = await openPdf(file);
+    warm.withPage(1, (page) => page.textInRegion({ x: 0, y: 0, w: 1, h: 1 }));
+    warm.close();
+    const heapBefore = await engineHeapBytes();
+    for (let i = 0; i < 50; i++) {
+      const doc = await openPdf(file);
+      doc.withPage(1, (page) => [page.textInRegion({ x: 0, y: 0, w: 1, h: 1 }), page.textInRegion({ x: 0.16, y: 0.1, w: 0.84, h: 0.15 })]);
+      doc.close();
+    }
+    assert.equal(await engineHeapBytes(), heapBefore, 'the wasm heap did not grow');
+  });
+});
+
 describe('line breaks at shifted baselines (superscripts, subscripts)', () => {
   test('lineBreakJoint: one line when the boxes overlap and the next starts where the last ends', () => {
     // Loose boxes (ascent to descent) in points, y upwards: "1" at 18 pt, then "st" at 12 pt raised by 5.

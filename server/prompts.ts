@@ -15,6 +15,7 @@ export const TUTOR_SYSTEM_PROMPT = `You are a patient, knowledgeable tutor. A un
 - Messages often also include the neighbouring slides before and after the current one, because lecture content often continues across pages. They are context: answer about the slide marked CURRENT unless the student asks about another one, and use the neighbours when the current slide continues or depends on them.
 - The slide images are the source of truth. Extracted text is often incomplete, garbled or out of order, and it misses everything that is drawn: diagrams, charts, plots, tables rendered as pictures, equations, code screenshots, handwriting, photos. Look at the image, and describe and interpret such figures explicitly when they matter to the question.
 - If part of a slide is unreadable or ambiguous, say so instead of guessing.
+- A question may come with attachments: a region of a slide the student selected ("[Attachment k: the region of slide N the student selected]", followed by the PDF text inside the selection, which may be incomplete) or an image of their own ("[Attachment k: an image from the student]": a photo, a screenshot, handwritten notes). They show exactly what the question is about: look at them closely and refer to them (e.g. "첨부 1").
 
 ## Courses
 - The deck may be one lecture of a course (for example lecture 7 of a compiler course). You are then told the course's lecture list and given summaries of the earlier lectures.
@@ -316,6 +317,11 @@ export function recapLine(slide: number, question: string, answer: string): stri
   return `- (slide ${slide}) Q: ${question} / A: ${answer}`;
 }
 
+/** Appended to a recapped question that carried attachments (their images are not sent again). */
+export function recapAttachmentsNote(count: number): string {
+  return ` [with ${count === 1 ? '1 attached image' : `${count} attached images`}, not shown again]`;
+}
+
 // ---------------------------------------------------------------------------
 // Focus (the slide the student is looking at, plus its neighbours) and the question itself
 // ---------------------------------------------------------------------------
@@ -363,6 +369,38 @@ export function focusDigestBlock(slide: number, title: string, body: string): st
 export function focusReusedLine(slide: number, slideFile?: string): string {
   const reopen = slideFile ? ` If it is no longer in your context, open ${slideFile}.` : '';
   return `(Slide ${slide}'s full-resolution image was already provided earlier in this conversation.${reopen})`;
+}
+
+// ---------------------------------------------------------------------------
+// Attachments of a question (DESIGN §21): after the focus window, before the question
+// ---------------------------------------------------------------------------
+
+/** First line of the attachments section. */
+export function attachmentsIntro(count: number): string {
+  return `The student attached ${count === 1 ? '1 image' : `${count} images`} to this question:`;
+}
+
+/**
+ * Label of the k-th attachment (1-based), used in the "[…]" line right before its image and as the image part's
+ * label: a region of a slide the student selected, or an image of their own (with its file name, if any).
+ */
+export function attachmentLabel(index: number, attachment: { kind: 'region' | 'image'; slide?: number; name?: string }): string {
+  if (attachment.kind === 'region') return `Attachment ${index}: the region of slide ${attachment.slide ?? '?'} the student selected`;
+  const name = attachment.name?.replace(/\s+/g, ' ').trim();
+  return `Attachment ${index}: an image from the student${name ? ` (${name})` : ''}`;
+}
+
+/** The line placed immediately before an attachment's image. */
+export function attachmentLabelLine(label: string): string {
+  return `[${label}]`;
+}
+
+/** A selected region without text in the PDF text layer (a picture, a scanned slide). */
+export const NO_SELECTION_TEXT = '(none in the PDF text layer — read the image)';
+
+/** Follows the image of a selected region: the text of the PDF inside the selection. */
+export function selectionTextBlock(text: string): string {
+  return `Text inside the selection:\n${text || NO_SELECTION_TEXT}`;
 }
 
 export function questionBlock(slide: number, question: string): string {

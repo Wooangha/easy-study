@@ -1,0 +1,271 @@
+// Attachments waiting in the composer (DESIGN §21): regions selected on a slide and images pasted / dropped /
+// picked. Each one is created on the server right away (so the chip can show the server's copy), then its id is
+// sent with the next question. The chips belong to the open document; they survive slide changes, leave the
+// composer when a question is sent and come back when the question was not accepted.
+import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react';
+import { MAX_ATTACHMENT_BYTES, type Attachment, type RegionRect } from '../../../shared/types.ts';
+import * as api from '../api.ts';
+import {
+  attachErrorMessage,
+  attachmentLabel,
+  attachmentTitle,
+  chipsReducer,
+  classifyFiles,
+  formatMegabytes,
+  freeSlots,
+  isGenericPastedName,
+  isUploading,
+  limitMessage,
+  MAX_ATTACHMENT_MB,
+  SUPPORTED_IMAGE_FORMATS,
+  type Chip,
+  type ChipAction,
+  type ChipState,
+} from '../lib/attachments.ts';
+import { toast } from '../lib/toast.ts';
+import { useLatest } from './useLatest.ts';
+
+export interface AttachmentsApi {
+  docId: string | null;
+  /** Chips of the open document, in the order they were added. */
+  items: Chip[];
+  /** An image upload or a region crop is still running (sending waits for it). */
+  uploading: boolean;
+  /** Upload images (non-images and files that are too large are refused with a toast). */
+  addFiles: (files: readonly File[], options?: { pasted?: boolean }) => void;
+  /** Crop a region of a slide; resolves with the attachment, or null when it failed (a toast says why). */
+  addRegion: (slide: number, rect: RegionRect) => Promise<Attachment | null>;
+  /** Remove a chip (and the unused attachment on the server). */
+  remove: (key: string) => void;
+  /** Takes the ready chips out of the composer for sending (see restore). */
+  take: () => { docId: string | null; chips: Chip[] };
+  /** Puts back chips taken for a question that was not accepted. */
+  restore: (taken: { docId: string | null; chips: Chip[] }) => void;
+  /** Resolves when no upload / crop is running any more. */
+  settle: () => Promise<void>;
+  /** Chips of the open document right now (read at call time, not at the last render). */
+  count: () => number;
+}
+
+interface InFlight {
+  promise: Promise<unknown>;
+  controller?: AbortController;
+}
+
+/** Re-render at most this often for upload progress (the hook lives at the top of the app). */
+const PROGRESS_STEP = 0.05;
+
+let chipSeq = 0;
+const NO_CHIPS: Chip[] = [];
+
+export function useAttachments(docId: string | null): AttachmentsApi {
+  // The state lives in a ref and is updated synchronously: several files dropped at once, or a region added
+  // and sent in the same click, must see each other's chips before React re-renders.
+  const stateRef = useRef<ChipState>({ docId, items: [] });
+  const [, rerender] = useReducer((n: number) => n + 1, 0);
+  const dispatch = useCallback((action: ChipAction) => {
+    const next = chipsReducer(stateRef.current, action);
+    if (next !== stateRef.current) {
+      stateRef.current = next;
+      rerender();
+    }
+  }, []);
+  const inflight = useRef(new Map<string, InFlight>());
+  const docIdRef = useLatest(docId);
+
+  const revoke = (url: string | undefined) => {
+    if (url) URL.revokeObjectURL(url);
+  };
+
+  const abortAll = useCallback(() => {
+    for (const f of inflight.current.values()) f.controller?.abort();
+    inflight.current.clear();
+    for (const c of stateRef.current.items) revoke(c.localUrl);
+  }, []);
+
+  // Another document: its attachment ids mean nothing here. Unfinished uploads are cancelled (anything the
+  // server already made and no message uses is swept after 24 h).
+  useEffect(() => {
+    if (stateRef.current.docId !== docId) {
+      abortAll();
+      dispatch({ type: 'reset', docId });
+    }
+  }, [docId, abortAll, dispatch]);
+  useEffect(() => abortAll, [abortAll]);
+
+  /** The current document's chips (none for one render right after switching documents). */
+  const current = () => (stateRef.current.docId === docIdRef.current ? stateRef.current.items : []);
+
+  /** A chip that finished after it was removed (or its document was left): delete the unused attachment. */
+  const discardLate = (forDoc: string, key: string, attachment: Attachment) => {
+    if (stateRef.current.docId === forDoc && stateRef.current.items.some((c) => c.key === key)) return false;
+    api.deleteAttachment(forDoc, attachment.id).catch(() => {});
+    return true;
+  };
+
+  const addFiles = useCallback(
+    (files: readonly File[], options: { pasted?: boolean } = {}) => {
+      const forDoc = docIdRef.current;
+      if (!forDoc || files.length === 0) return;
+      const { images, pdfs, others } = classifyFiles(files);
+      const refused = [...pdfs, ...others];
+      if (refused.length > 0) {
+        toast(`${SUPPORTED_IMAGE_FORMATS} 이미지만 첨부할 수 있어요: ${refused.map((f) => f.name).join(', ')}`, 'error');
+      }
+      const tooBig = images.filter((f) => f.size > MAX_ATTACHMENT_BYTES);
+      for (const f of tooBig) {
+        toast(`이미지가 너무 커요 (최대 ${MAX_ATTACHMENT_MB} MB): ${f.name} (${formatMegabytes(f.size)})`, 'error');
+      }
+      const wanted = images.filter((f) => f.size <= MAX_ATTACHMENT_BYTES);
+      const free = freeSlots(current());
+      if (wanted.length > free) toast(limitMessage(wanted.length - free), 'error');
+
+      for (const file of wanted.slice(0, free)) {
+        const key = `img-${++chipSeq}`;
+        const name = options.pasted && isGenericPastedName(file.name) ? undefined : file.name || undefined;
+        let localUrl: string | undefined;
+        try {
+          localUrl = URL.createObjectURL(file);
+        } catch {
+          localUrl = undefined;
+        }
+        const label = name ?? (options.pasted ? '붙여넣은 이미지' : '이미지');
+        dispatch({
+          type: 'add',
+          item: {
+            key,
+            kind: 'image',
+            label,
+            title: attachmentTitle({ kind: 'image', name }),
+            status: 'uploading',
+            progress: 0,
+            localUrl,
+          },
+        });
+        const controller = new AbortController();
+        let shown = 0;
+        const promise = api
+          .uploadAttachment(forDoc, file, {
+            name,
+            signal: controller.signal,
+            onProgress: (fraction) => {
+              if (fraction < 1 && fraction - shown < PROGRESS_STEP) return;
+              shown = fraction;
+              dispatch({ type: 'progress', key, fraction });
+            },
+          })
+          .then((attachment) => {
+            if (!discardLate(forDoc, key, attachment)) dispatch({ type: 'ready', key, attachment });
+          })
+          .catch((e: unknown) => {
+            if (api.isAbortError(e)) return;
+            const status = e instanceof api.ApiError ? e.status : -1;
+            const message = status === -1 ? api.errorMessage(e) : attachErrorMessage(status, api.errorMessage(e));
+            if (stateRef.current.docId === forDoc) toast(`첨부하지 못했어요 (${label}): ${message}`, 'error');
+            dispatch({ type: 'remove', keys: [key] });
+          })
+          .finally(() => {
+            inflight.current.delete(key);
+            revoke(localUrl);
+          });
+        inflight.current.set(key, { promise, controller });
+      }
+    },
+    [docIdRef, dispatch],
+  );
+
+  const addRegion = useCallback(
+    async (slide: number, rect: RegionRect): Promise<Attachment | null> => {
+      const forDoc = docIdRef.current;
+      if (!forDoc) return null;
+      if (freeSlots(current()) === 0) {
+        toast(limitMessage(1), 'error');
+        return null;
+      }
+      const key = `region-${++chipSeq}`;
+      dispatch({
+        type: 'add',
+        item: {
+          key,
+          kind: 'region',
+          label: attachmentLabel({ kind: 'region', slide }),
+          title: attachmentTitle({ kind: 'region', slide }),
+          slide,
+          rect,
+          status: 'uploading',
+          progress: 0,
+        },
+      });
+      const promise = api
+        .createRegion(forDoc, { slide, rect })
+        .then((attachment) => {
+          if (discardLate(forDoc, key, attachment)) return null;
+          dispatch({ type: 'ready', key, attachment });
+          return attachment;
+        })
+        .catch((e: unknown) => {
+          const status = e instanceof api.ApiError ? e.status : -1;
+          const message = status === -1 ? api.errorMessage(e) : attachErrorMessage(status, api.errorMessage(e));
+          if (stateRef.current.docId === forDoc) toast(`영역을 첨부하지 못했어요: ${message}`, 'error');
+          dispatch({ type: 'remove', keys: [key] });
+          return null;
+        })
+        .finally(() => inflight.current.delete(key));
+      inflight.current.set(key, { promise });
+      return promise;
+    },
+    [docIdRef, dispatch],
+  );
+
+  const remove = useCallback(
+    (key: string) => {
+      const chip = stateRef.current.items.find((c) => c.key === key);
+      const forDoc = stateRef.current.docId;
+      if (!chip) return;
+      inflight.current.get(key)?.controller?.abort();
+      revoke(chip.localUrl);
+      dispatch({ type: 'remove', keys: [key] });
+      // Best effort: the server keeps an unused attachment for 24 h anyway.
+      if (forDoc && chip.attachment) api.deleteAttachment(forDoc, chip.attachment.id).catch(() => {});
+    },
+    [dispatch],
+  );
+
+  const take = useCallback(() => {
+    const forDoc = stateRef.current.docId;
+    if (forDoc !== docIdRef.current) return { docId: forDoc, chips: [] };
+    const chips = stateRef.current.items.filter((c) => c.status === 'ready' && c.attachment);
+    if (chips.length > 0) dispatch({ type: 'remove', keys: chips.map((c) => c.key) });
+    return { docId: forDoc, chips };
+  }, [docIdRef, dispatch]);
+
+  const restore = useCallback(
+    (taken: { docId: string | null; chips: Chip[] }) => {
+      if (taken.chips.length === 0) return;
+      const before = stateRef.current.items;
+      const back = taken.chips.filter((c) => !before.some((x) => x.key === c.key)).length;
+      dispatch({ type: 'restore', docId: taken.docId, items: taken.chips });
+      const lost = before.length + back - stateRef.current.items.length;
+      if (stateRef.current.docId === taken.docId && lost > 0) toast(limitMessage(lost), 'error');
+    },
+    [dispatch],
+  );
+
+  const settle = useCallback(async () => {
+    while (inflight.current.size > 0) {
+      await Promise.allSettled([...inflight.current.values()].map((f) => f.promise));
+    }
+  }, []);
+
+  const count = useCallback(
+    () => (stateRef.current.docId === docIdRef.current ? stateRef.current.items.length : 0),
+    [docIdRef],
+  );
+
+  const items = stateRef.current.docId === docId ? stateRef.current.items : NO_CHIPS;
+  const uploading = isUploading(items);
+  return useMemo(
+    () => ({ docId, items, uploading, addFiles, addRegion, remove, take, restore, settle, count }),
+    [docId, items, uploading, addFiles, addRegion, remove, take, restore, settle, count],
+  );
+}

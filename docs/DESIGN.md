@@ -83,7 +83,8 @@ On server start, any doc left in `processing` (crash mid-ingest) is re-processed
 
 ## 4. HTTP API (`server/index.ts`)
 
-All JSON. Errors: HTTP 4xx/5xx with `{ "error": string }`. Ids validated with `DOC_ID_RE` /
+All JSON. Errors: HTTP 4xx/5xx with `{ "error": string }` (plus machine-readable fields where noted, e.g.
+`missingAttachments`, §21). Ids validated with `DOC_ID_RE` /
 `SESSION_ID_RE` (404 when invalid or missing — never touch the filesystem with an unvalidated id).
 
 | Method & path | Body | Response |
@@ -808,9 +809,19 @@ Storage: `library/<docId>/attachments/<id>.jpg|png` (+ `<id>.json` metadata = At
 - Regions are cropped by the image worker from the full-resolution `slides/NNN.png` (not the WebP view), padded by 2 % of the slide on
   each side (clamped), minimum 16×16 px, encoded like inline JPEGs (≤ INLINE_MAX_EDGE, ≤ INLINE_MAX_BYTES; PNG when smaller for flat
   graphics is fine). The text inside the rectangle comes from PDFium (FPDFText_GetBoundedText on the page, same Symbol remap) in the
-  same worker run; '' when the PDF has no text layer there.
+  same worker run; '' when the PDF has no text layer there. The stored rect is the clamped request rounded to 6 decimals (no
+  floating-point dust such as 0.6200000000000001); narrower than that is 400.
 - Uploaded images: magic-byte check (PNG, JPEG, WebP, GIF first frame; HEIC only if sharp can decode it here — otherwise 415 with a clear
   message), ≤ MAX_ATTACHMENT_BYTES (413), re-encoded by the worker (EXIF orientation applied, metadata stripped, ≤ INLINE limits).
+  The worker job carries the sniffed type (`UploadJob.type`), and in that one-off process every libvips loader is blocked except
+  those of PNG/JPEG/WebP/GIF/HEIF (`sharp.block`/`unblock`): libvips would otherwise pick its own loader by content, so an SVG
+  behind a HEIF header (`<!--ftypavif--><svg …>`) was rendered by librsvg, pulling in other attachments next to it. sharp's
+  reported format must also equal the sniffed type (else 415). Before any pixel is decoded the header is checked
+  (`uploadRefusal`): more than UPLOAD_MAX_PIXELS (100 M) in the first frame, or — for formats decoded whole before they can be
+  scaled: interlaced PNG, progressive JPEG, GIF (RGBA), HEIF/AVIF — more than UPLOAD_MAX_DECODE_BYTES (150 MB) decoded
+  (width × height × channels × bytes per sample) → 413 "이미지 해상도가 너무 커서 처리할 수 없습니다…" (never "damaged"). Measured
+  peaks at 10000×10000: interlaced 16-bit PNG ~1 GB, GIF ~590 MB, progressive JPEG ~400 MB, plain PNG ~190 MB (read line by line).
+  Worker results: `{ ok: false, reason: 'unsupported' (415) | 'too-large' (413) | 'undecodable' (400; 415 for HEIF) }`.
 - Attachments not referenced by any message are deleted after 24 h (startup + hourly sweep); deleting a session deletes the attachments
   only its messages reference; deleting a document deletes the folder.
 
@@ -819,7 +830,8 @@ HTTP (remote-mode auth like every /api route; JSON errors):
 | POST `/api/docs/:docId/attachments` | raw image body, `Content-Type` image/*, header `X-Filename` (URI-encoded, optional) | 201 `Attachment` |
 | GET `/api/docs/:docId/attachments/:id` | – | the stored image (`Cache-Control: private, max-age=31536000, immutable`) |
 | DELETE `/api/docs/:docId/attachments/:id` | – | 204 only while unreferenced (409 once a message uses it) |
-`POST …/messages` accepts `attachments` (ids of this document; unknown → 400; > MAX_ATTACHMENTS → 400). The user message stores the
+`POST …/messages` accepts `attachments` (ids of this document; unknown → 400 with `missingAttachments: string[]` in the error body,
+every id that does not exist here — swept, deleted, another document's; > MAX_ATTACHMENTS → 400). The user message stores the
 resolved `Attachment[]`.
 
 Context (context.ts): after FOCUS and before the QUESTION: "The student attached N image(s) to this question:" then per attachment a label
@@ -836,5 +848,16 @@ Web:
   flashes the rect). `📎` button → file picker (images, multiple). Paste (Cmd/Ctrl+V) of images into the composer and dropping image files
   onto the chat panel upload them (progress, errors as toasts). Dropping a PDF anywhere keeps uploading it as a new document.
   Max 6 per message (extra ones refused with a toast). Chips persist while switching slides; cleared after a successful send; kept
-  (not lost) if the send fails.
+  (not lost) if the send fails — except those the server answered as `missingAttachments` (a toast names them; back in the
+  composer they would make every later question fail).
+  The client takes only what the server takes: PNG, JPEG, WebP, GIF, HEIC/HEIF/AVIF (by MIME type, or by extension when the type is
+  empty). BMP, TIFF, SVG, … are refused at once with the supported list, and a drag of them is not announced as attachable.
+  In a short chat pane (≤ 800 px wide — the stacked layout — or ≤ 640 px tall) the chips are one row that scrolls sideways. An empty
+  composer is as tall as its (wrapping) placeholder; with chips the placeholder is `첨부 N개 · 비워 두면 “…”`.
+- Drops (one plan, `planDrop`, for the window, the library's drop zone and course cards): PDFs → lectures; images → the open
+  lecture's question, or an info toast in the library ("이미지는 강의를 연 뒤 놓으면 질문에 첨부돼요", the overlay's words); other
+  files → an error naming them. Opening a newly uploaded PDF never discards chips: when the open lecture has attachments waiting (e.g.
+  images dropped together with the PDF), the lecture is only added and a toast says so (the top bar's document list opens it).
+- The selection's floating menu goes below the selection when the visible part of the viewer has room (it may hang past the slide's
+  edge, into the gap / next slide), else above it, and inside its bottom edge only when there is no room either way.
 - Message history and the notes tab show the attachments as thumbnails (click → preview; region → jump to slide + flash).

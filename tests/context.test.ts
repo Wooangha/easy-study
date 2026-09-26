@@ -37,6 +37,9 @@ import {
   SUMMARY_OMITTED_NOTE,
   TRUNCATED_MARK,
   TUTOR_SYSTEM_PROMPT,
+  NO_SELECTION_TEXT,
+  attachmentLabel,
+  attachmentsIntro,
   restartNote,
 } from '../server/prompts.ts';
 
@@ -1038,6 +1041,182 @@ describe('buildTurn: recent window (finding 5)', () => {
       state = succeed(out);
     }
     assert.equal(state.imagesSent, afterPrime + 5, 'only the second window was ever added');
+  });
+});
+
+describe('buildTurn: attachments (DESIGN §21)', () => {
+  const ATT = `${DIR}/attachments`;
+  type TurnAttachments = NonNullable<BuildTurnInput['attachments']>;
+  const regionOf = (k: number, slide: number, text = `text inside ${k}`): TurnAttachments[number] => ({
+    kind: 'region',
+    path: `${ATT}/att-000000000000000${k}.png`,
+    label: attachmentLabel(k, { kind: 'region', slide }),
+    text,
+  });
+  const imageOf = (k: number, name?: string): TurnAttachments[number] => ({
+    kind: 'image',
+    path: `${ATT}/att-000000000000000${k}.jpg`,
+    label: attachmentLabel(k, { kind: 'image', name }),
+  });
+  const primedState = (extra: Partial<ProviderState> = {}): ProviderState => ({
+    ...initialProviderState(),
+    primed: true,
+    resume: { cliSessionId: 'x' },
+    imagesSent: 5,
+    recentSlides: [3],
+    generation: 1,
+    ...extra,
+  });
+
+  test('labels: a selected region names its slide, an image its file name (if any)', () => {
+    assert.equal(attachmentLabel(1, { kind: 'region', slide: 12 }), 'Attachment 1: the region of slide 12 the student selected');
+    assert.equal(attachmentLabel(2, { kind: 'image', name: 'board photo.jpg' }), 'Attachment 2: an image from the student (board photo.jpg)');
+    assert.equal(attachmentLabel(3, { kind: 'image' }), 'Attachment 3: an image from the student');
+    assert.equal(attachmentsIntro(1), 'The student attached 1 image to this question:');
+    assert.equal(attachmentsIntro(2), 'The student attached 2 images to this question:');
+  });
+
+  test('after the focus window and before the question: intro, then per attachment its label, image and selection text', () => {
+    const out = turn({
+      session: makeSession(primedState()),
+      slide: 3,
+      question: '이 부분 설명해줘',
+      attachments: [regionOf(1, 3, 'x = a + b'), imageOf(2, 'note.jpg'), regionOf(3, 7, '')],
+    });
+    const parts = out.parts;
+    // [focus text][slide 3 is reused: no image] → intro … image 1 … image 2 … image 3 … question.
+    assert.deepEqual(
+      images(parts).map((p) => [p.path, p.detail, p.label]),
+      [
+        [`${ATT}/att-0000000000000001.png`, 'high', 'Attachment 1: the region of slide 3 the student selected'],
+        [`${ATT}/att-0000000000000002.jpg`, 'high', 'Attachment 2: an image from the student (note.jpg)'],
+        [`${ATT}/att-0000000000000003.png`, 'high', 'Attachment 3: the region of slide 7 the student selected'],
+      ],
+    );
+    const text = allText(parts);
+    const at = (needle: string) => {
+      const i = text.indexOf(needle);
+      assert.ok(i >= 0, `missing: ${needle}`);
+      return i;
+    };
+    const order = [
+      at("(Slide 3's full-resolution image was already provided earlier"),
+      at('The student attached 3 images to this question:'),
+      at('[Attachment 1: the region of slide 3 the student selected]'),
+      at('<image Attachment 1: the region of slide 3 the student selected>'),
+      at('Text inside the selection:\nx = a + b'),
+      at('[Attachment 2: an image from the student (note.jpg)]'),
+      at('<image Attachment 2'),
+      at('[Attachment 3: the region of slide 7 the student selected]'),
+      at('<image Attachment 3'),
+      at(`Text inside the selection:\n${NO_SELECTION_TEXT}`),
+      at("Student's question (about slide 3):\n이 부분 설명해줘"),
+    ];
+    assert.deepEqual(order, [...order].sort((a, b) => a - b), 'in this order');
+    // The label line is the text right before each image; an image attachment has no selection text.
+    parts.forEach((part, i) => {
+      if (part.type !== 'image') return;
+      const before = parts[i - 1];
+      assert.ok(before?.type === 'text' && before.text.endsWith(`[${part.label}]`), part.label);
+    });
+    assert.equal(text.match(/Text inside the selection:/g)?.length, 2);
+    assert.equal(parts.at(-1)?.type, 'text');
+    assert.equal(out.context.attachments, 3);
+    assert.deepEqual(out.context.attachedSlides, []);
+  });
+
+  test('every attachment costs one image: imagesSent and the rollover count them', () => {
+    // 5 sent + 2 attachments = 7 ≤ 7: continues.
+    const fits = turn({ session: makeSession(primedState()), slide: 3, attachments: [regionOf(1, 3), imageOf(2)], maxImagesPerConversation: 7 });
+    assert.equal(fits.context.primed, false);
+    assert.equal(fits.context.rollover, false);
+    assert.equal(fits.nextState.imagesSent, 7);
+    assert.equal(fits.resume?.cliSessionId, 'x');
+
+    // A new slide (1) + 2 attachments on top of 5 > 7: the conversation rolls over, and the new one counts them too.
+    const over = turn({ session: makeSession(primedState()), slide: 1, attachments: [regionOf(1, 1), imageOf(2)], maxImagesPerConversation: 7 });
+    assert.equal(over.context.rollover, true);
+    assert.equal(over.context.primed, true);
+    assert.equal(over.resume, null);
+    assert.equal(over.nextState.imagesSent, over.context.overviewImages + over.context.attachedSlides.length + 2);
+    assert.ok(over.nextState.imagesSent <= 7, String(over.nextState.imagesSent));
+    assert.equal(images(over.parts).filter((p) => p.label.startsWith('Attachment')).length, 2);
+
+    // Without attachments the same turn would have fitted.
+    assert.equal(turn({ session: makeSession(primedState()), slide: 1, maxImagesPerConversation: 7 }).context.rollover, false);
+  });
+
+  test('a first question primes and carries its attachments after the focus window', () => {
+    const out = turn({ session: makeSession(), slide: 2, neighbors: 1, attachments: [imageOf(1)] });
+    assert.equal(out.context.primed, true);
+    assert.equal(out.context.attachments, 1);
+    const labels = images(out.parts).map((p) => p.label);
+    assert.equal(labels.at(-1), 'Attachment 1: an image from the student');
+    assert.deepEqual(labels.slice(-4, -1), ['Slide 1', 'Slide 2', 'Slide 3']);
+    assert.equal(out.nextState.imagesSent, out.context.overviewImages + 3 + 1);
+  });
+
+  test('priming turns take no attachments; no attachments = no section and no count', () => {
+    const prime = turn({ session: makeSession(), kind: 'prime', question: '', attachments: [imageOf(1)] });
+    assert.equal(prime.context.attachments, undefined);
+    assert.ok(!images(prime.parts).some((p) => p.label.startsWith('Attachment')));
+    assert.doesNotMatch(allText(prime.parts), /The student attached/);
+
+    const plain = turn({ session: makeSession(primedState()), slide: 3 });
+    assert.equal('attachments' in plain.context, false);
+    assert.doesNotMatch(allText(plain.parts), /The student attached|Attachment 1/);
+    assert.equal(turn({ session: makeSession(primedState()), slide: 3, attachments: [] }).context.attachments, undefined);
+  });
+
+  test('the selection text is cleaned and capped like slide text; malformed entries are dropped', () => {
+    const long = 'word '.repeat(2000);
+    const out = turn({
+      session: makeSession(primedState()),
+      slide: 3,
+      settings: settings({ maxSlideTextChars: 100 }),
+      attachments: [
+        regionOf(1, 3, `line one   \r\n\r\n\r\n\u0007line two\n${long}`),
+        { kind: 'image', path: '', label: 'no path' },
+        { kind: 'bogus' as 'image', path: `${ATT}/x.png`, label: 'bad kind' },
+      ],
+    });
+    assert.equal(out.context.attachments, 1);
+    const text = allText(out.parts);
+    const block = text.slice(text.indexOf('Text inside the selection:'));
+    assert.match(block, /^Text inside the selection:\nline one\n\nline two\nword word/);
+    assert.ok(block.includes(TRUNCATED_MARK));
+    assert.ok(block.indexOf(TRUNCATED_MARK) < 'Text inside the selection:\n'.length + 100 + TRUNCATED_MARK.length + 1);
+  });
+
+  test('a rollover recap says which earlier questions carried attachments', () => {
+    const attachment = { id: 'att-00000000000000a1', kind: 'region' as const, slide: 3, width: 10, height: 10, createdAt: '2026-09-26T00:00:00.000Z' };
+    const messages = [
+      message('user', 'with a picture', 3, { attachments: [attachment, { ...attachment, id: 'att-00000000000000b2' }] }),
+      message('assistant', 'answer one', 3),
+      message('user', 'plain', 4),
+      message('assistant', 'answer two', 4),
+    ];
+    const out = turn({ session: makeSession(primedState({ imagesSent: 90 }), messages), slide: 1 });
+    assert.equal(out.context.rollover, true);
+    const text = allText(out.parts);
+    assert.ok(text.includes('- (slide 3) Q: with a picture [with 2 attached images, not shown again] / A: answer one'), text);
+    assert.ok(text.includes('- (slide 4) Q: plain / A: answer two'));
+  });
+
+  test('appendHistory keeps the attachments for stateless providers', () => {
+    const out = turn({ session: makeSession(primedState(), [], 'anthropic-api'), slide: 3, attachments: [regionOf(1, 3), imageOf(2)] });
+    const state = appendHistory(succeed(out), out.parts, 'answer');
+    const user = state.history.at(-2);
+    assert.equal(user?.role, 'user');
+    assert.deepEqual(
+      images(user?.parts ?? []).map((p) => p.label),
+      ['Attachment 1: the region of slide 3 the student selected', 'Attachment 2: an image from the student'],
+    );
+    // The next turn resends them as history (and they stay counted).
+    const next = turn({ session: makeSession(state, [], 'anthropic-api'), slide: 3 });
+    assert.equal(next.history.length, 2);
+    assert.equal(images(next.history[0].parts).length, 2);
+    assert.equal(next.nextState.imagesSent, 7);
   });
 });
 

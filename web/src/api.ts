@@ -1,10 +1,12 @@
 // Typed client for the easy-study HTTP API (DESIGN.md §4). Same-origin, everything under /api.
 import type {
+  Attachment,
   AuthStatusResponse,
   Course,
   CourseGroup,
   CreateCourseRequest,
   CreateGroupRequest,
+  CreateRegionRequest,
   CreateSessionRequest,
   DigestInfo,
   DocMeta,
@@ -21,6 +23,7 @@ import type {
   UpdateCourseRequest,
   UpdateGroupRequest,
 } from '../../shared/types.ts';
+import { ATTACHMENT_ID_RE } from '../../shared/types.ts';
 import {
   getAuthSnapshot,
   loginPending,
@@ -29,17 +32,29 @@ import {
   parseRetryAfter,
   waitForLogin,
 } from './lib/auth.ts';
+import { imageContentType } from './lib/attachments.ts';
 
 export class ApiError extends Error {
   readonly status: number;
   /** Seconds to wait before trying again (429 with Retry-After), else null. */
   readonly retryAfter: number | null;
-  constructor(message: string, status: number, retryAfter: number | null = null) {
+  /**
+   * A question refused because some of its attachments are gone (swept after 24 h unused, deleted): their ids, from
+   * the error body's `missingAttachments` (DESIGN §21). Empty otherwise.
+   */
+  readonly missingAttachments: readonly string[];
+  constructor(message: string, status: number, retryAfter: number | null = null, missingAttachments: readonly string[] = []) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.retryAfter = retryAfter;
+    this.missingAttachments = missingAttachments;
   }
+}
+
+/** The attachment ids a request was refused for (ApiError.missingAttachments), or none. */
+export function missingAttachmentsOf(e: unknown): readonly string[] {
+  return e instanceof ApiError ? e.missingAttachments : [];
 }
 
 export function isAbortError(e: unknown): boolean {
@@ -52,11 +67,15 @@ export function isAbortError(e: unknown): boolean {
 /** Best-effort extraction of the server's `{ error }` message from a failed response. */
 async function toApiError(res: Response): Promise<ApiError> {
   let message = '';
+  let missing: string[] = [];
   try {
     const text = await res.text();
     try {
-      const body = JSON.parse(text) as { error?: unknown };
+      const body = JSON.parse(text) as { error?: unknown; missingAttachments?: unknown };
       if (typeof body.error === 'string') message = body.error;
+      if (Array.isArray(body.missingAttachments)) {
+        missing = body.missingAttachments.filter((id): id is string => typeof id === 'string' && ATTACHMENT_ID_RE.test(id));
+      }
     } catch {
       message = text.trim().slice(0, 300);
     }
@@ -65,7 +84,7 @@ async function toApiError(res: Response): Promise<ApiError> {
   }
   if (!message) message = res.ok ? '예상하지 못한 응답 형식이에요' : `HTTP ${res.status} ${res.statusText}`.trim();
   const retryAfter = res.status === 429 ? parseRetryAfter(res.headers.get('retry-after')) : null;
-  return new ApiError(message, res.ok ? 500 : res.status, retryAfter);
+  return new ApiError(message, res.ok ? 500 : res.status, retryAfter, missing);
 }
 
 // ---------------------------------------------------------------------------
@@ -347,8 +366,26 @@ export async function uploadPdf(
   onProgress?: (fraction: number) => void,
   courseId?: string | null,
 ): Promise<DocMeta> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/pdf', 'X-Filename': enc(file.name) };
+  if (courseId) headers['X-Course-Id'] = courseId;
+  const body = await uploadWithLogin('/api/docs', headers, file, '업로드 실패', onProgress);
+  return normalizeDoc(body as DocMeta);
+}
+
+/**
+ * Sends a file with XMLHttpRequest (upload progress), waiting for a login first when one is needed and again
+ * after a 401 (the file is sent again then). Resolves with the JSON body of a 2xx answer.
+ */
+async function uploadWithLogin(
+  path: string,
+  headers: Record<string, string>,
+  file: Blob,
+  failure: string,
+  onProgress?: (fraction: number) => void,
+  signal?: AbortSignal,
+): Promise<unknown> {
   for (;;) {
-    await whenLoggedIn();
+    await whenLoggedIn(signal);
     // A login is required: do not send a large file just to have it refused.
     if (getAuthSnapshot().authRequired) {
       const status = await getAuthStatus().catch(() => null);
@@ -359,27 +396,40 @@ export async function uploadPdf(
     }
     const epoch = getAuthSnapshot().epoch;
     try {
-      return await uploadOnce(file, onProgress, courseId);
+      return await uploadOnce(path, headers, file, failure, onProgress, signal);
     } catch (e) {
       if (!(e instanceof ApiError) || e.status !== 401) throw e;
       if (getAuthSnapshot().epoch === epoch) markUnauthorized();
       onProgress?.(0);
-      await waitForLogin(epoch);
+      await waitForLogin(epoch, signal);
     }
   }
 }
 
-function uploadOnce(file: File, onProgress?: (fraction: number) => void, courseId?: string | null): Promise<DocMeta> {
+function uploadOnce(
+  path: string,
+  headers: Record<string, string>,
+  file: Blob,
+  failure: string,
+  onProgress?: (fraction: number) => void,
+  signal?: AbortSignal,
+): Promise<unknown> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('Upload aborted', 'AbortError'));
+      return;
+    }
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/docs');
-    xhr.setRequestHeader('Content-Type', 'application/pdf');
-    xhr.setRequestHeader('X-Filename', enc(file.name));
-    if (courseId) xhr.setRequestHeader('X-Course-Id', courseId);
+    xhr.open('POST', path);
+    for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, value);
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
     };
+    const onAbort = () => xhr.abort();
+    signal?.addEventListener('abort', onAbort, { once: true });
+    const done = () => signal?.removeEventListener('abort', onAbort);
     xhr.onload = () => {
+      done();
       let body: unknown = null;
       try {
         body = JSON.parse(xhr.responseText);
@@ -387,17 +437,63 @@ function uploadOnce(file: File, onProgress?: (fraction: number) => void, courseI
         /* not JSON */
       }
       if (xhr.status >= 200 && xhr.status < 300 && body && typeof body === 'object') {
-        resolve(normalizeDoc(body as DocMeta));
+        resolve(body);
         return;
       }
       const error = (body as { error?: unknown } | null)?.error;
-      reject(new ApiError(typeof error === 'string' ? error : `업로드 실패 (HTTP ${xhr.status})`, xhr.status));
+      reject(new ApiError(typeof error === 'string' ? error : `${failure} (HTTP ${xhr.status})`, xhr.status));
     };
-    xhr.onerror = () => reject(new ApiError('업로드 중 네트워크 오류가 발생했어요', 0));
-    xhr.onabort = () => reject(new DOMException('Upload aborted', 'AbortError'));
+    xhr.onerror = () => {
+      done();
+      reject(new ApiError('업로드 중 네트워크 오류가 발생했어요', 0));
+    };
+    xhr.onabort = () => {
+      done();
+      reject(new DOMException('Upload aborted', 'AbortError'));
+    };
     xhr.send(file);
   });
 }
+
+// ---------------------------------------------------------------------------
+// Attachments of a question (DESIGN §21): selected slide regions and images
+// ---------------------------------------------------------------------------
+
+/** The stored image of an attachment (thumbnails and previews). */
+export const attachmentUrl = (docId: string, id: string) => `${docPath(docId)}/attachments/${enc(id)}`;
+
+/** Crop a region of a slide (the server also reads the text inside it). 400 bad slide/rect, 409 doc not ready. */
+export const createRegion = (docId: string, body: CreateRegionRequest) =>
+  postJSON<Attachment>(`${docPath(docId)}/regions`, body);
+
+/**
+ * Upload an image (pasted, dropped or picked) as an attachment of `docId`, with progress. The server checks and
+ * re-encodes it: 413 too large, 415 not an image it can read. `name` is sent as X-Filename (omitted for a
+ * pasted screenshot).
+ */
+export async function uploadAttachment(
+  docId: string,
+  file: Blob & { name?: string; type: string },
+  options: { name?: string; onProgress?: (fraction: number) => void; signal?: AbortSignal } = {},
+): Promise<Attachment> {
+  const headers: Record<string, string> = {
+    'Content-Type': imageContentType({ name: file.name ?? options.name ?? '', type: file.type }),
+  };
+  if (options.name) headers['X-Filename'] = enc(options.name);
+  const body = await uploadWithLogin(
+    `${docPath(docId)}/attachments`,
+    headers,
+    file,
+    '첨부 실패',
+    options.onProgress,
+    options.signal,
+  );
+  return body as Attachment;
+}
+
+/** Delete an attachment no message uses (a chip removed from the composer). 409 once a message references it. */
+export const deleteAttachment = (docId: string, id: string) =>
+  request<void>(attachmentUrl(docId, id), { method: 'DELETE' });
 
 // ---------------------------------------------------------------------------
 // Server-Sent Events over fetch (POST streams)

@@ -8,17 +8,24 @@
 // error instead of opening the SSE stream). After `start`, provider failures never throw: they end
 // the turn with an assistant message in status 'error' / 'aborted'.
 //
+// Attachments (DESIGN §21): a question may refer to attachments created beforehand (selected slide regions,
+// images of the student). They are resolved and pinned (so no cleanup takes them away) for the whole turn, fed
+// after the focus window, and stored as Attachment[] on the user message.
+//
 // Recovery (DESIGN §14): when the provider lost the conversation ('resume_invalid': expired CLI
 // session, unknown thread or previous_response_id) or it became too large ('context_overflow'), the
 // turn is rebuilt as a new conversation (re-prime + recap) and retried once within the same request.
 import { randomUUID } from 'node:crypto';
 import type { ChatMessage, ProviderId, Session, StreamEvent } from '../shared/types.ts';
+import { holdAttachments } from './attachments.ts';
+import type { HeldAttachments } from './attachments.ts';
 import { acquireCliSlot } from './cliBudget.ts';
 import type { AcquireCliSlot } from './cliBudget.ts';
 import { HttpError } from './config.ts';
 import { appendHistory, buildTurn, defaultContextSettings } from './context.ts';
-import type { BuildTurnInput, BuildTurnOutput, ContextSettings, ProviderState, SessionRecord } from './internal-types.ts';
+import type { BuildTurnInput, BuildTurnOutput, ContextSettings, DocAssets, ProviderState, SessionRecord } from './internal-types.ts';
 import { loadDocAssets } from './library.ts';
+import { attachmentLabel } from './prompts.ts';
 import { getProvider, providerInfos } from './providers/index.ts';
 import { providerErrorKind } from './providers/types.ts';
 import type { Part, Provider, ProviderRunResult } from './providers/types.ts';
@@ -98,6 +105,11 @@ export interface TurnRequest {
    * Omitted = ContextSettings.neighborWindow.
    */
   neighbors?: number;
+  /**
+   * Ids of attachments of this document (SendMessageRequest.attachments; at most MAX_ATTACHMENTS, duplicates
+   * dropped). Ignored for kind === 'prime'. Unknown ids → HttpError 400.
+   */
+  attachments?: string[];
   /** Receives start / delta / status / done. Exceptions thrown by the listener are ignored. */
   onEvent: (event: StreamEvent) => void;
   /** External cancellation, e.g. the HTTP client disconnected. */
@@ -248,6 +260,34 @@ async function executeTurn(request: TurnRequest, deps: ChatDeps, signal: AbortSi
   if (question.length > MAX_QUESTION_CHARS) {
     throw new HttpError(400, `질문이 너무 깁니다 (최대 ${MAX_QUESTION_CHARS.toLocaleString('en-US')}자)`);
   }
+  // Resolved and pinned until the turn has ended (HttpError 400 for unknown ids or more than MAX_ATTACHMENTS:
+  // nothing was persisted). Priming turns take none.
+  const attachmentIds = kind === 'question' && Array.isArray(request.attachments) ? request.attachments : [];
+  const held = await holdAttachments(docId, attachmentIds);
+  try {
+    return await startTurn({ request, deps, signal, session, doc, provider, slide, question, held, emit });
+  } finally {
+    held.release();
+  }
+}
+
+interface ValidatedTurn {
+  request: TurnRequest;
+  deps: ChatDeps;
+  signal: AbortSignal;
+  session: SessionRecord;
+  doc: DocAssets;
+  provider: Provider;
+  slide: number;
+  question: string;
+  held: HeldAttachments;
+  emit: (event: StreamEvent) => void;
+}
+
+/** Steps 2-5 of a validated turn. */
+async function startTurn(validated: ValidatedTurn): Promise<TurnResult> {
+  const { request, deps, signal, session, doc, provider, slide, question, held, emit } = validated;
+  const { docId, sessionId, kind } = request;
   if (signal.aborted) throw new HttpError(400, abortReason(signal));
 
   // 2. Build the turn and persist the new messages ------------------------------------------
@@ -264,6 +304,14 @@ async function executeTurn(request: TurnRequest, deps: ChatDeps, signal: AbortSi
     settings,
     maxImagesPerConversation: provider.maxImagesPerConversation,
   };
+  if (held.items.length > 0) {
+    turnInput.attachments = held.items.map(({ attachment, path }, i) => ({
+      kind: attachment.kind,
+      path,
+      label: attachmentLabel(i + 1, attachment),
+      ...(attachment.kind === 'region' ? { text: attachment.text ?? '' } : {}),
+    }));
+  }
   let built = deps.buildTurn(turnInput);
   // BuildTurnInput.session is the session *before* this turn (a retry must not recap the new question).
   const messagesBefore = session.messages.slice();
@@ -279,6 +327,7 @@ async function executeTurn(request: TurnRequest, deps: ChatDeps, signal: AbortSi
     status: 'complete',
     context: built.context,
   };
+  if (held.items.length > 0) userMessage.attachments = held.items.map(({ attachment }) => structuredClone(attachment));
   const assistantMessage: ChatMessage = {
     id: randomUUID(),
     role: 'assistant',

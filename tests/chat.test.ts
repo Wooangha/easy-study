@@ -6,7 +6,8 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
-import type { ChatMessage, DocMeta, NotesResponse, ProviderId, ProviderInfo, Session, StreamEvent } from '../shared/types.ts';
+import type { Attachment, ChatMessage, DocMeta, NotesResponse, ProviderId, ProviderInfo, Session, StreamEvent } from '../shared/types.ts';
+import { isAttachmentPinned } from '../server/attachments.ts';
 import { abortTurn, defaultChatDeps, isTurnRunning, resolveNeighbors, runTurn } from '../server/chat.ts';
 import type { ChatDeps, TurnRequest } from '../server/chat.ts';
 import { createCliBudget } from '../server/cliBudget.ts';
@@ -599,6 +600,121 @@ describe('runTurn', () => {
 // ---------------------------------------------------------------------------
 // Recovery: a lost or overflowing provider conversation (DESIGN §14)
 // ---------------------------------------------------------------------------
+
+describe('runTurn with attachments (DESIGN §21)', () => {
+  const DOC = 'attach-deck-fff666';
+  const OTHER = 'attach-other-ggg777';
+  before(async () => {
+    await makeReadyDoc(DOC);
+    await makeReadyDoc(OTHER);
+  });
+
+  /** Stores an attachment as the routes do (metadata + image file), without the image worker. */
+  async function storeAttachment(docId: string, attachment: Attachment, ext: 'jpg' | 'png' = 'png'): Promise<string> {
+    const dir = path.join(docPaths(docId).dir, 'attachments');
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, `${attachment.id}.${ext}`), 'image bytes');
+    await fs.writeFile(path.join(dir, `${attachment.id}.json`), JSON.stringify(attachment));
+    return path.join(dir, `${attachment.id}.${ext}`);
+  }
+  const REGION: Attachment = {
+    id: 'att-00000000000000a1',
+    kind: 'region',
+    slide: 4,
+    rect: { x: 0.1, y: 0.2, w: 0.3, h: 0.4 },
+    width: 500,
+    height: 300,
+    text: 'x = y + 1',
+    createdAt: '2026-09-26T00:00:00.000Z',
+  };
+  const IMAGE: Attachment = { id: 'att-00000000000000b2', kind: 'image', name: 'note.jpg', width: 80, height: 60, createdAt: '2026-09-26T00:00:00.000Z' };
+
+  test('resolved in order into BuildTurnInput.attachments; the user message stores the Attachment[]', async () => {
+    const regionPath = await storeAttachment(DOC, REGION);
+    const imagePath = await storeAttachment(DOC, IMAGE, 'jpg');
+    const provider = fakeProvider('claude-code', streamingAnswer(() => 'ok'));
+    const seen: BuildTurnInput[] = [];
+    const base = defaultChatDeps();
+    const deps = depsFor(provider, { buildTurn: (input) => (seen.push(input), base.buildTurn(input)) });
+    const session = await createSession(DOC, { provider: 'claude-code', model: '' });
+    const { events } = await turn(deps, {
+      docId: DOC,
+      sessionId: session.id,
+      kind: 'question',
+      text: '이거 뭐야',
+      slide: 4,
+      attachments: [IMAGE.id, REGION.id, IMAGE.id],
+    });
+    assert.deepEqual(seen[0].attachments, [
+      { kind: 'image', path: imagePath, label: 'Attachment 1: an image from the student (note.jpg)' },
+      { kind: 'region', path: regionPath, label: 'Attachment 2: the region of slide 4 the student selected', text: 'x = y + 1' },
+    ]);
+    const start = events[0] as Extract<StreamEvent, { type: 'start' }>;
+    assert.deepEqual(start.userMessage.attachments, [IMAGE, REGION]);
+    assert.equal(start.userMessage.context?.attachments, 2);
+    const parts = provider.calls[0].parts;
+    assert.deepEqual(
+      parts.filter((p): p is Extract<Part, { type: 'image' }> => p.type === 'image' && p.label.startsWith('Attachment')).map((p) => p.path),
+      [imagePath, regionPath],
+    );
+    const stored = await getSession(DOC, session.id);
+    assert.deepEqual(stored?.messages[0].attachments, [IMAGE, REGION]);
+    assert.equal(stored?.messages[1].status, 'complete');
+    assert.equal(stored?.providerState.imagesSent, (start.userMessage.context?.overviewImages ?? 0) + (start.userMessage.context?.attachedSlides.length ?? 0) + 2);
+  });
+
+  test('a retried turn (lost conversation) keeps its attachments; a failed one still stores them', async () => {
+    const provider = fakeProvider('claude-code', async (input, call) => {
+      if (input.resume !== null) throw new ProviderError('No conversation found with session ID x', 'resume_invalid');
+      if (textOf(input.parts).includes('FAIL')) throw new Error('model exploded');
+      return streamingAnswer(() => `answer ${call}`)(input, call);
+    });
+    const seen: BuildTurnInput[] = [];
+    const base = defaultChatDeps();
+    const deps = depsFor(provider, { buildTurn: (input) => (seen.push(input), base.buildTurn(input)) });
+    const session = await createSession(DOC, { provider: 'claude-code', model: '' });
+    await turn(deps, { docId: DOC, sessionId: session.id, kind: 'prime', slide: 1 });
+    const { events } = await turn(deps, { docId: DOC, sessionId: session.id, kind: 'question', text: '다시', slide: 4, attachments: [REGION.id] });
+    assert.equal(seen.length, 3, 'prime, first attempt, retry');
+    assert.equal(seen[2].forceNewConversation, 'resume_invalid');
+    assert.deepEqual(seen[2].attachments, seen[1].attachments);
+    const retryParts = provider.calls.at(-1)!.parts;
+    assert.ok(retryParts.some((p) => p.type === 'image' && p.label === 'Attachment 1: the region of slide 4 the student selected'));
+    const done = events.at(-1) as Extract<StreamEvent, { type: 'done' }>;
+    assert.equal(done.assistantMessage.status, 'complete');
+    const user = (await getSession(DOC, session.id))!.messages.at(-2)!;
+    assert.deepEqual(user.attachments, [REGION]);
+    assert.equal(user.context?.recoveredFrom, 'resume_invalid');
+    assert.equal(user.context?.attachments, 1);
+
+    const failing = await createSession(DOC, { provider: 'claude-code', model: '' });
+    const failed = await turn(deps, { docId: DOC, sessionId: failing.id, kind: 'question', text: 'FAIL', slide: 4, attachments: [IMAGE.id] });
+    assert.equal(failed.assistant.status, 'error');
+    assert.deepEqual((await getSession(DOC, failing.id))!.messages[0].attachments, [IMAGE]);
+  });
+
+  test('unknown, foreign or too many ids: HttpError 400 before anything is persisted, nothing stays pinned', async () => {
+    const foreign: Attachment = { ...IMAGE, id: 'att-00000000000000c3' };
+    await storeAttachment(OTHER, foreign);
+    const provider = fakeProvider('claude-code', streamingAnswer(() => 'ok'));
+    const deps = depsFor(provider);
+    const session = await createSession(DOC, { provider: 'claude-code', model: '' });
+    const many = Array.from({ length: 7 }, (_, i) => `att-${String(i).padStart(16, '0')}`);
+    for (const attachments of [['att-ffffffffffffffff'], [foreign.id], [REGION.id, 'att-ffffffffffffffff'], many]) {
+      await assert.rejects(
+        runTurn({ docId: DOC, sessionId: session.id, kind: 'question', text: 'q', slide: 1, attachments, onEvent: () => {} }, deps),
+        (err: unknown) => err instanceof HttpError && err.status === 400,
+      );
+    }
+    assert.equal(provider.calls.length, 0);
+    assert.deepEqual((await getSession(DOC, session.id))?.messages, []);
+    // REGION was looked up by the third request and released again.
+    assert.equal(isAttachmentPinned(DOC, REGION.id), false);
+    // Priming turns ignore attachments altogether (even unknown ids).
+    const primed = await turn(deps, { docId: DOC, sessionId: session.id, kind: 'prime', slide: 1, attachments: ['att-ffffffffffffffff'] });
+    assert.equal(primed.assistant.status, 'complete');
+  });
+});
 
 describe('runTurn recovery', () => {
   const DOC = 'recovery-deck-eee555';

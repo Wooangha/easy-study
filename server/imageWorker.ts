@@ -11,7 +11,10 @@
 //   - ImageJob (runImageWorker):
 //       1. optionally (ingest) the overview contact sheets: sheets/sheet-NN.png + sheets/sheets.json (§3 step 4),
 //       2. optionally the derived files of server/assets.ts that are still missing: view renditions (lossy
-//          WebP), thumbnails (WebP) and inline JPEGs for every slide, and inline JPEGs for every contact sheet.
+//          WebP), thumbnails (WebP) and inline JPEGs for every slide, and inline JPEGs for every contact sheet;
+//   - AttachmentJob (runAttachmentWorker, DESIGN §21): one attachment image in attachments/<id>.jpg|png, either a
+//     region of a slide (cropped from slides/NNN.png, with the text of the PDF inside the region) or an image the
+//     student uploaded (EXIF orientation applied, metadata dropped), encoded like the inline JPEGs.
 //
 // Parent side: run*Worker() forks this very file with process.execPath (server/imageWorker.ts in development
 // and tests, dist-server/server/imageWorker.js in the production build) and talks to it over the IPC channel.
@@ -25,7 +28,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type sharpModule from 'sharp';
 import type { OutputInfo, OverlayOptions, Sharp as SharpPipeline } from 'sharp';
+import type { RegionRect } from '../shared/types.ts';
 import {
+  ATTACHMENTS_DIR,
+  ATTACHMENT_FILE_ID_RE,
   INLINE_MAX_BYTES,
   INLINE_MAX_EDGE,
   THUMB_WEBP_QUALITY,
@@ -33,6 +39,7 @@ import {
   VIEW_WEBP_QUALITY,
   VIEW_WIDTHS,
   inlinePathFor,
+  regionCropBox,
   thumbPath,
   viewPath,
 } from './assets.ts';
@@ -95,6 +102,78 @@ export interface TextJob {
   pageCount: number;
 }
 
+/**
+ * Job of runAttachmentWorker(): a region of a slide the student selected (DESIGN §21) → attachments/<id>.jpg|png,
+ * cropped from the full-resolution slides/<slideFile> (padded, clamped, at least 16 px a side: regionCropBox), plus
+ * the text of source.pdf's page `slide` inside the region ('' when there is none or the PDF cannot be read).
+ */
+export interface RegionJob {
+  kind: 'region';
+  /** Absolute path of library/<docId>. */
+  docDir: string;
+  /** Attachment id (`att-` + 16 hex): the file name of the output. */
+  id: string;
+  /** 1-based page of source.pdf. */
+  slide: number;
+  /** File name of the rendered slide under slides/ (e.g. `007.png`). */
+  slideFile: string;
+  /** Normalised to the slide image (0..1, origin top-left). */
+  rect: RegionRect;
+}
+
+/**
+ * Image types an upload may have, by its first bytes (server/attachments.ts sniffImageType; the Content-Type
+ * header is not trusted). 'heif' covers HEIC and AVIF (decoded only if sharp can here). Each is also the format
+ * sharp must report for the file: only that format's loader may read it.
+ */
+export type UploadImageType = 'png' | 'jpeg' | 'gif' | 'webp' | 'heif';
+
+export const UPLOAD_IMAGE_TYPES: readonly UploadImageType[] = ['png', 'jpeg', 'gif', 'webp', 'heif'];
+
+/**
+ * Job of runAttachmentWorker(): an image the student pasted, dropped or picked → attachments/<id>.jpg|png (first
+ * frame, EXIF orientation applied, metadata dropped, transparency on white).
+ */
+export interface UploadJob {
+  kind: 'upload';
+  /** Absolute path of library/<docId>. */
+  docDir: string;
+  /** Attachment id (`att-` + 16 hex). */
+  id: string;
+  /** Absolute path of the uploaded bytes (the caller removes the file afterwards). */
+  input: string;
+  /** What the first bytes say the upload is: anything else (e.g. an SVG behind a HEIF header) is refused. */
+  type: UploadImageType;
+}
+
+export type AttachmentJob = RegionJob | UploadJob;
+
+/**
+ * Why an upload was not made into an attachment: 'unsupported' — not the image its first bytes claim, or no
+ * decoder for it here; 'too-large' — over UPLOAD_MAX_PIXELS, or would need more than UPLOAD_MAX_DECODE_BYTES
+ * decoded at once; 'undecodable' — the decoder failed (a damaged file).
+ */
+export type UploadRefusal = 'unsupported' | 'too-large' | 'undecodable';
+
+/** What an attachment job made: the stored image, or why the upload could not be read as an image. */
+export type AttachmentWorkerResult =
+  | {
+      ok: true;
+      /** File name under attachments/: `<id>.jpg` or `<id>.png`. */
+      file: string;
+      width: number;
+      height: number;
+      /** Region jobs: the text inside the region ('' when none). */
+      text?: string;
+    }
+  | { ok: false; reason: UploadRefusal; message: string };
+
+export interface AttachmentWorkerRun {
+  /** Resolves with the result (an undecodable upload is a result, not a rejection); rejects on failures and kill(). */
+  readonly done: Promise<AttachmentWorkerResult>;
+  kill(): void;
+}
+
 export interface PdfInfo {
   pageCount: number;
   /** Width / height of page 1 in points, /Rotate applied. */
@@ -127,6 +206,7 @@ type ChildMessage =
   | { type: 'progress'; rendered: number }
   | { type: 'warning'; message: string }
   | { type: 'sheets'; entries: SheetEntry[] }
+  | { type: 'attachment'; result: AttachmentWorkerResult }
   | { type: 'done'; written: number; failed: ImageFailure[] }
   | { type: 'error'; message: string };
 
@@ -191,7 +271,7 @@ interface WorkerProcess {
  * Forks a worker for `job`. Messages other than the final one go to `onMessage` as they arrive; `label`
  * names the worker in error messages ("image worker", "PDF worker").
  */
-function forkWorker(job: ImageJob | PdfJob | TextJob, label: string, options: ImageWorkerOptions, onMessage: (message: ChildMessage) => void): WorkerProcess {
+function forkWorker(job: ImageJob | PdfJob | TextJob | AttachmentJob, label: string, options: ImageWorkerOptions, onMessage: (message: ChildMessage) => void): WorkerProcess {
   // Registered until it exits: no way out of the server leaves a worker running (server/children.ts).
   const child = trackChild(
     fork(imageWorkerPath(), [], {
@@ -320,6 +400,19 @@ export function runPdfWorker(job: PdfJob, handlers: PdfWorkerHandlers = {}, opti
 export function runTextWorker(job: TextJob, options: ImageWorkerOptions = {}): TextWorkerRun {
   const worker = forkWorker(job, 'PDF worker', options, () => {});
   return { done: worker.done.then((outcome) => ({ written: outcome.written })), kill: worker.kill };
+}
+
+/** Makes one attachment image in a new worker process (DESIGN §21). */
+export function runAttachmentWorker(job: AttachmentJob, options: ImageWorkerOptions = {}): AttachmentWorkerRun {
+  let result: AttachmentWorkerResult | null = null;
+  const worker = forkWorker(job, 'image worker', options, (message) => {
+    if (message.type === 'attachment') result = message.result;
+  });
+  const done = worker.done.then((): AttachmentWorkerResult => {
+    if (!result) throw new Error('image worker finished without the attachment');
+    return result;
+  });
+  return { done, kill: worker.kill };
 }
 
 // ---------------------------------------------------------------------------
@@ -691,6 +784,176 @@ async function runTextJob(job: TextJob, send: (message: ChildMessage) => Promise
   }
 }
 
+/**
+ * An attachment image (DESIGN §21), from decoded pixels: the inline JPEG (encodeInlineJpeg), or a PNG of the same
+ * size when that is smaller and within INLINE_MAX_BYTES (flat graphics: slide text, diagrams).
+ */
+async function encodeAttachment(sharp: Sharp, input: () => SharpPipeline): Promise<{ data: Buffer; ext: 'jpg' | 'png'; width: number; height: number }> {
+  const jpeg = await encodeInlineJpeg(input);
+  const png = await input()
+    .resize({ width: INLINE_MAX_EDGE, height: INLINE_MAX_EDGE, fit: 'inside', withoutEnlargement: true })
+    .png({ compressionLevel: 9 })
+    .toBuffer();
+  const usePng = png.length <= INLINE_MAX_BYTES && png.length <= jpeg.length;
+  const data = usePng ? png : jpeg;
+  const { width = 0, height = 0 } = await sharp(data).metadata();
+  return { data, ext: usePng ? 'png' : 'jpg', width, height };
+}
+
+/** Writes attachments/<id>.<ext> (the directory must exist: a deleted document's folder is never made again). */
+async function writeAttachment(job: AttachmentJob, image: { data: Buffer; ext: 'jpg' | 'png' }): Promise<string> {
+  const file = `${job.id}.${image.ext}`;
+  await writeAtomic(path.join(job.docDir, ATTACHMENTS_DIR, file), image.data);
+  return file;
+}
+
+/** Decoded pixels of a pipeline (flattened onto white), and an input factory over them (decoded once). */
+async function decodeOnce(sharp: Sharp, pipeline: SharpPipeline): Promise<() => SharpPipeline> {
+  const { data, info } = await pipeline.flatten({ background: '#ffffff' }).raw().toBuffer({ resolveWithObject: true });
+  return () => sharp(data, { raw: { width: info.width, height: info.height, channels: info.channels } });
+}
+
+/** A selected region of a slide → attachments/<id>.jpg|png + the text of the PDF inside it (DESIGN §21). */
+async function runRegionJob(job: RegionJob, send: (message: ChildMessage) => Promise<void>): Promise<void> {
+  const sharp = (await import('sharp')).default;
+  sharp.cache(false);
+  const source = path.join(job.docDir, 'slides', job.slideFile);
+  const { width = 0, height = 0 } = await sharp(source).metadata();
+  if (width < 1 || height < 1) throw new Error(`the slide image ${job.slideFile} has no size`);
+  const box = regionCropBox(job.rect, width, height);
+  const input = await decodeOnce(sharp, sharp(source).extract(box));
+  const image = await encodeAttachment(sharp, input);
+
+  // The text layer inside the selection itself (not the padding). The image is what matters: no text on failure.
+  let text = '';
+  try {
+    const { openPdf } = await import('./pdf.ts');
+    const doc = await openPdf(path.join(job.docDir, 'source.pdf'));
+    try {
+      if (job.slide <= doc.pageCount) text = doc.withPage(job.slide, (page) => page.textInRegion(job.rect));
+    } finally {
+      doc.close();
+    }
+  } catch {
+    text = '';
+  }
+
+  const file = await writeAttachment(job, image);
+  await send({ type: 'attachment', result: { ok: true, file, width: image.width, height: image.height, text } });
+  await send({ type: 'done', written: 1, failed: [] });
+}
+
+/**
+ * An uploaded image → attachments/<id>.jpg|png: the first frame (GIF, animated WebP), turned upright by its EXIF
+ * orientation, scaled into INLINE_MAX_EDGE while decoding, on white, without any metadata (sharp writes none unless
+ * asked). Only the loader of the type the first bytes claim may read it (libvips otherwise picks its own: an SVG
+ * behind a HEIF header would be rendered by librsvg, fetching files next to it), and its header is checked before
+ * anything is decoded (uploadRefusal). An image refused or that sharp cannot decode (a damaged file, HEIC without
+ * a decoder here) is reported, not thrown.
+ */
+async function runUploadJob(job: UploadJob, send: (message: ChildMessage) => Promise<void>): Promise<void> {
+  const sharp = (await import('sharp')).default;
+  sharp.cache(false);
+  // This process exists for this one upload: no other loader (SVG, PDF, TIFF, raw, ...) may run in it.
+  sharp.block({ operation: ['VipsForeignLoad'] });
+  sharp.unblock({ operation: UPLOAD_LOADERS });
+  const refuse = async (reason: UploadRefusal, message: string) => {
+    await send({ type: 'attachment', result: { ok: false, reason, message } });
+    await send({ type: 'done', written: 0, failed: [] });
+  };
+  let input: () => SharpPipeline;
+  try {
+    const refusal = uploadRefusal(await sharp(job.input).metadata(), job.type);
+    if (refusal) return await refuse(refusal.reason, refusal.message);
+    const pipeline = sharp(job.input, { limitInputPixels: UPLOAD_MAX_PIXELS })
+      .rotate()
+      .resize({ width: INLINE_MAX_EDGE, height: INLINE_MAX_EDGE, fit: 'inside', withoutEnlargement: true });
+    input = await decodeOnce(sharp, pipeline);
+  } catch (err) {
+    const message = errorText(err);
+    return await refuse(/unsupported image format/i.test(message) ? 'unsupported' : /pixel limit/i.test(message) ? 'too-large' : 'undecodable', message);
+  }
+  const image = await encodeAttachment(sharp, input);
+  const file = await writeAttachment(job, image);
+  await send({ type: 'attachment', result: { ok: true, file, width: image.width, height: image.height } });
+  await send({ type: 'done', written: 1, failed: [] });
+}
+
+/** The libvips loaders of UploadImageType (the file loaders are their subclasses); every other loader is blocked. */
+const UPLOAD_LOADERS = ['VipsForeignLoadPng', 'VipsForeignLoadJpeg', 'VipsForeignLoadWebp', 'VipsForeignLoadNsgif', 'VipsForeignLoadHeif'];
+
+/** Largest uploaded image decoded (pixels): a small file can hold a huge picture ("decompression bomb"). */
+export const UPLOAD_MAX_PIXELS = 100_000_000;
+
+/**
+ * Largest image (bytes, decoded) of a format that is decoded whole before it can be scaled down: interlaced PNG,
+ * progressive JPEG, GIF, HEIF/AVIF. Other images are shrunk while they load (JPEG, WebP) or read line by line
+ * (PNG), so they never need their full size in memory. Measured peaks of the worker (10000 x 10000): interlaced
+ * 16-bit RGBA PNG ~1 GB, GIF ~590 MB, progressive JPEG ~400 MB, against ~190 MB for a plain PNG; this cap keeps
+ * such uploads at ~300 MB (a 48 MP progressive JPEG still fits).
+ */
+export const UPLOAD_MAX_DECODE_BYTES = 150 * 1024 * 1024;
+
+/** The header of an upload, as sharp's metadata() reports it. */
+export interface UploadHeader {
+  format?: string;
+  width?: number;
+  height?: number;
+  pageHeight?: number;
+  channels?: number;
+  depth?: string;
+  isProgressive?: boolean;
+}
+
+/**
+ * Why an upload is refused from its header alone (before any pixel is decoded), or null: another format than
+ * `type` (the loader libvips chose is not the one the first bytes name), more than UPLOAD_MAX_PIXELS in the first
+ * frame, or a format decoded whole that would need more than UPLOAD_MAX_DECODE_BYTES.
+ */
+export function uploadRefusal(header: UploadHeader, type: UploadImageType): { reason: UploadRefusal; message: string } | null {
+  if (header.format !== type) {
+    return { reason: 'unsupported', message: `the upload starts like ${type} but is ${header.format ?? 'unknown'}` };
+  }
+  const width = header.width ?? 0;
+  const height = header.pageHeight ?? header.height ?? 0;
+  if (!(width > 0 && height > 0)) return { reason: 'undecodable', message: 'the image has no size' };
+  const pixels = width * height;
+  if (pixels > UPLOAD_MAX_PIXELS) {
+    return { reason: 'too-large', message: `${width} x ${height} is over ${UPLOAD_MAX_PIXELS} pixels` };
+  }
+  const decodedWhole = type === 'gif' || type === 'heif' || ((type === 'png' || type === 'jpeg') && header.isProgressive === true);
+  const sample = header.depth === undefined || header.depth === 'uchar' || header.depth === 'char' ? 1 : header.depth === 'ushort' || header.depth === 'short' ? 2 : 4;
+  // GIF frames are always decoded to RGBA.
+  const bytes = pixels * (type === 'gif' ? 4 : Math.max(1, header.channels ?? 4)) * sample;
+  if (decodedWhole && bytes > UPLOAD_MAX_DECODE_BYTES) {
+    return { reason: 'too-large', message: `${width} x ${height} ${type} would be decoded whole (${Math.round(bytes / 1024 / 1024)} MB)` };
+  }
+  return null;
+}
+
+function isValidAttachmentJob(value: unknown): value is AttachmentJob {
+  const job = value as { [K in keyof RegionJob | keyof UploadJob]?: unknown } | null;
+  if (typeof job !== 'object' || job === null) return false;
+  if (typeof job.docDir !== 'string' || !path.isAbsolute(job.docDir)) return false;
+  if (typeof job.id !== 'string' || !ATTACHMENT_FILE_ID_RE.test(job.id)) return false;
+  if (job.kind === 'upload') {
+    return typeof job.input === 'string' && path.isAbsolute(job.input) && UPLOAD_IMAGE_TYPES.includes(job.type as UploadImageType);
+  }
+  if (job.kind !== 'region') return false;
+  const rect = job.rect as Partial<RegionRect> | undefined;
+  return (
+    typeof job.slide === 'number' &&
+    Number.isInteger(job.slide) &&
+    job.slide >= 1 &&
+    typeof job.slideFile === 'string' &&
+    job.slideFile === path.basename(job.slideFile) &&
+    job.slideFile.endsWith('.png') &&
+    typeof rect === 'object' &&
+    rect !== null &&
+    [rect.x, rect.y, rect.w, rect.h].every((n) => typeof n === 'number' && Number.isFinite(n))
+  );
+}
+
 function isValidPdfJob(value: unknown): value is PdfJob {
   const job = value as Partial<PdfJob> | null;
   return (
@@ -742,9 +1005,11 @@ function childMain(): void {
       ? () => runPdfJob(value, send)
       : isValidTextJob(value)
         ? () => runTextJob(value, send)
-        : isValidJob(value)
-          ? () => runJob(value, send)
-          : null;
+        : isValidAttachmentJob(value)
+          ? () => (value.kind === 'region' ? runRegionJob(value, send) : runUploadJob(value, send))
+          : isValidJob(value)
+            ? () => runJob(value, send)
+            : null;
     if (!run) {
       void send({ type: 'error', message: 'invalid worker job' }).finally(() => process.exit(1));
       return;

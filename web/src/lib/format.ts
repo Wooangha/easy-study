@@ -54,7 +54,14 @@ export function pageList(slides: number[]): string {
   return slides.length === 0 ? '' : `p.${slides.join('·')}`;
 }
 
-export type ContextChipKind = 'recovered' | 'rollover' | 'primed' | 'overview' | 'attached' | 'reused';
+export type ContextChipKind =
+  | 'recovered'
+  | 'rollover'
+  | 'primed'
+  | 'overview'
+  | 'attached'
+  | 'reused'
+  | 'attachments';
 
 export interface ContextChip {
   kind: ContextChipKind;
@@ -89,6 +96,14 @@ export function describeContext(ctx: ContextInfo | undefined): ContextChip[] {
   const reused = [...(ctx.reusedSlides ?? [])].sort((a, b) => a - b);
   if (attached.length > 0) out.push({ kind: 'attached', text: `🖼 ${pageList(attached)} 첨부` });
   if (reused.length > 0) out.push({ kind: 'reused', text: `↺ ${pageList(reused)} 이미 전달됨` });
+  const extra = ctx.attachments ?? 0;
+  if (extra > 0) {
+    out.push({
+      kind: 'attachments',
+      text: `📎 첨부 ${extra}개`,
+      title: '질문과 함께 보낸 선택 영역·이미지 (선택 영역은 그 안의 텍스트도 함께 전달돼요)',
+    });
+  }
   return out;
 }
 

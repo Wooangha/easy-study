@@ -5,6 +5,7 @@ import { useAuth } from '../hooks/useAuth.ts';
 import { copyText } from '../lib/clipboard.ts';
 import { firstLine, formatTime, providerLabel } from '../lib/format.ts';
 import { toast } from '../lib/toast.ts';
+import { AttachmentThumbs } from './Attachments.tsx';
 import { Markdown } from './Markdown.tsx';
 import { SlideImage } from './SlideImage.tsx';
 
@@ -172,10 +173,18 @@ function NoteCard({
   const [open, setOpen] = useState(defaultOpen);
   const { question, answer } = entry;
   const multiLine = question.text.trim().includes('\n');
+  const attachmentCount = question.attachments?.length ?? 0;
   return (
     <details className="note-card" open={open} onToggle={(e) => setOpen(e.currentTarget.open)}>
       <summary>
-        <span className="note-q">Q. {firstLine(question.text)}</span>
+        <span className="note-q">
+          Q. {firstLine(question.text)}
+          {attachmentCount > 0 && (
+            <span className="note-att-count" title={`첨부 ${attachmentCount}개 (선택 영역·이미지)`}>
+              📎{attachmentCount}
+            </span>
+          )}
+        </span>
         <span className="note-meta">
           {entry.sessionTitle} · {providerLabel(providers, entry.provider)} · {formatTime(question.createdAt)}
         </span>
@@ -184,6 +193,7 @@ function NoteCard({
       {open && (
         <div className="note-body">
           {multiLine && <div className="note-question">{question.text}</div>}
+          <AttachmentThumbs attachments={question.attachments} className="in-notes" />
           {!answer ? (
             <div className="msg-note">(답변 없음)</div>
           ) : answer.status === 'complete' ? (
