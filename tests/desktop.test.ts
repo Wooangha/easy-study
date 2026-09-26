@@ -372,7 +372,10 @@ describe('desktop mode (EASY_STUDY_DESKTOP=1)', () => {
     assert.equal(await exists(path.join(library, SERVER_LOCK_FILE_NAME)), false, 'the lock is released');
     assert.match(server.stdout(), /stdin EOF: 종료하는 중/);
     assert.equal(server.stdout().split(READY_PREFIX).length - 1, 1, 'one ready line');
-    assert.equal(server.stderr(), '');
+    // Nothing unexpected on stderr. The "[web] … dist is missing" hint is allowed: the tests may run
+    // before `npm run build` (as in CI), and the packaged desktop app always ships web/dist.
+    const unexpected = server.stderr().split(/\r?\n/).filter((l) => l !== '' && !l.startsWith('[web] '));
+    assert.deepEqual(unexpected, []);
   });
 
   test('stdin EOF during a chat turn: exit 0, the CLI, its own child and every other process of the group are gone', POSIX_ONLY, async () => {

@@ -762,12 +762,18 @@ function apiErrorHandler(err: unknown, req: Request, res: Response, _next: NextF
  * Serves the production build of the web client (`dist`, default web/dist) with the SPA fallback, and ends
  * with the error handler of everything outside /api (plain text, never a stack trace or a path).
  */
+/** A path relative to the working directory when it is inside it, otherwise the absolute path. */
+function displayPath(p: string): string {
+  const rel = path.relative(process.cwd(), p);
+  return rel && !rel.startsWith('..') && !path.isAbsolute(rel) ? rel : p;
+}
+
 export function mountProductionClient(app: express.Express, log: boolean, dist = webDistDir()): void {
   const indexHtml = path.join(dist, 'index.html');
   if (!existsSync(indexHtml)) {
     if (log) {
       console.warn(
-        `[web] ${path.relative(process.cwd(), dist) || dist} 이(가) 없습니다. ` +
+        `[web] ${displayPath(dist)} 이(가) 없습니다. ` +
           '`npm start`(빌드 후 실행) 또는 `npm run dev`(개발 모드)로 실행하세요.',
       );
     }
