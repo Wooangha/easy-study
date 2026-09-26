@@ -126,7 +126,7 @@ GitHub Releases(또는 Actions의 빌드 결과)에서 OS에 맞는 파일을 �
 
 `easy-study-bin` 패키지는 릴리스의 .deb(CI가 빌드하고 시험한 바로 그 파일)를 풀어서 만들어요(`packaging/arch/PKGBUILD`). 파일 위치는 deb와 같고(`/usr/bin/easy-study`, `/usr/lib/easy-study/`), WebKitGTK 같은 라이브러리는 Arch 패키지를 써서 보안 업데이트도 그대로 받아요. 릴리스가 비공개라 `gh`로 받아요 (`sudo pacman -S --needed github-cli`, `gh auth login`).
 
-0.2.1 뒤의 릴리스에는 CI가 만든 x86_64 패키지와 그 PKGBUILD가 들어 있어요. 받아서 바로 설치하세요.
+0.2.2부터 릴리스에는 CI가 만들고 시험한 x86_64 패키지와 그 PKGBUILD가 들어 있어요. 받아서 바로 설치하세요 (예: `<버전>` = `0.2.2`).
 
 ```bash
 gh release download v<버전> --repo Wooangha/easy-study -p 'easy-study-bin-*-x86_64.pkg.tar.zst'
@@ -134,7 +134,7 @@ sudo pacman -U ./easy-study-bin-<버전>-1-x86_64.pkg.tar.zst   # webkit2gtk-4.1
 sudo pacman -S --needed noto-fonts-cjk   # 한글 글꼴: 화면이 한국어라 필요해요 (다른 한글 글꼴이 있으면 생략)
 ```
 
-직접 만들 때(0.2.1, aarch64): .deb를 PKGBUILD 옆에 받아 두면 makepkg가 그 파일을 쓰고 SHA-256은 그대로 확인해요. 저장소의 PKGBUILD는 `pkgver`의 릴리스용이고, 그 뒤 릴리스라면 릴리스에 있는 PKGBUILD를 쓰세요 (`-p PKGBUILD`로 같이 받아요).
+직접 만들 때(aarch64이거나 패키지를 직접 만들고 싶을 때): .deb를 PKGBUILD 옆에 받아 두면 makepkg가 그 파일을 쓰고 SHA-256은 그대로 확인해요. 저장소의 PKGBUILD는 `pkgver`의 릴리스용이고, 그 뒤 릴리스라면 릴리스에 있는 PKGBUILD를 쓰세요 (`-p PKGBUILD`로 같이 받아요).
 
 ```bash
 sudo pacman -S --needed base-devel
