@@ -56,7 +56,7 @@ npm run dev
 ### 다른 OS
 
 - **macOS**: 개발하고 실제로 쓰면서 확인한 환경이에요.
-- **Linux**: Docker(Node 22.18, 26, poppler 없음)에서 설치, 테스트, 빌드, 서버 실행, PDF 변환까지 확인했어요. 슬라이드 이미지와 텍스트는 macOS에서 만든 것과 바이트 단위로 같았어요. 글꼴이 하나도 없는 시스템(슬림 Docker 이미지 등)에서도 변환과 목차 이미지는 그대로 돼요. 다만 글꼴을 내장하지 않은 한글·일본어·중국어 PDF를 위해 `fonts-noto-cjk`(또는 `fonts-nanum`)을 설치해 두세요. Codex의 읽기 제한은 macOS에서만 실제로 확인했어요. Linux에서 Codex가 시작하지 못하면 아래 `EASY_STUDY_CODEX_CONFINE=0`을 참고하세요.
+- **Linux**: Docker(Node 22.18, 26, poppler 없음)에서 설치, 테스트, 빌드, 서버 실행, PDF 변환까지 확인했어요. 슬라이드 이미지와 텍스트는 macOS에서 만든 것과 바이트 단위로 같았어요. 글꼴이 하나도 없는 시스템(슬림 Docker 이미지 등)에서도 변환과 목차 이미지는 그대로 돼요. 다만 글꼴을 내장하지 않은 한글·일본어·중국어 PDF를 위해 `fonts-noto-cjk`(또는 `fonts-nanum`, Arch는 `noto-fonts-cjk`)을 설치해 두세요. Codex의 읽기 제한은 macOS에서만 실제로 확인했어요. Linux에서 Codex가 시작하지 못하면 아래 `EASY_STUDY_CODEX_CONFINE=0`을 참고하세요.
 - **Windows**: 실제 Windows에서는 테스트하지 못했어요. 가장 확실한 방법은 **WSL2(Ubuntu)** 안에서 Linux 방법대로 설치하는 거예요. Windows에서 바로 실행한다면:
   - `claude`·`codex`는 공식 설치 프로그램(`.exe`)을 권장해요. npm으로 설치한 `.cmd`도 실제 실행 파일을 찾아 쓰도록 해 뒀지만 검증하지는 못했어요.
   - Windows에서는 Codex의 읽기 제한이 꺼져 있어서 Codex가 사용자 파일 전체를 읽을 수 있어요. 민감한 파일이 있는 계정이라면 Claude Code를 쓰세요.
@@ -117,8 +117,35 @@ GitHub Releases(또는 Actions의 빌드 결과)에서 OS에 맞는 파일을 �
 - **Linux** (x86_64, arm64):
   - Ubuntu 22.04 이상·Debian 12 이상: `sudo apt install ./easy-study_<버전>_amd64.deb` (WebKitGTK, `libatomic1` 등 필요한 패키지가 같이 설치되고, 한글 글꼴 `fonts-noto-cjk`도 권장 패키지로 설치돼요).
   - Fedora: `sudo dnf install ./easy-study-<버전>-1.x86_64.rpm`.
-  - AppImage: `chmod +x easy-study_<버전>_amd64.AppImage` 후 실행 (FUSE가 필요해요. 없으면 `--appimage-extract-and-run`을 붙이세요). deb/rpm은 배포판의 WebKitGTK 보안 업데이트를 그대로 받으니 되도록 deb/rpm을 쓰세요.
+  - Arch Linux: pacman 패키지로 설치해요 ([아래](#arch-linux)).
+  - AppImage: `chmod +x easy-study_<버전>_amd64.AppImage` 후 실행 (FUSE가 필요해요: `fusermount3`나 `fusermount` 중 하나면 돼요. 없으면 `--appimage-extract-and-run`을 붙이세요). deb/rpm은 배포판의 WebKitGTK 보안 업데이트를 그대로 받으니 되도록 deb/rpm을 쓰세요.
+  - 0.2.1까지의 AppImage는 Arch Linux(Mesa 26)에서 창이 빈 채로 떠요(`Could not create default EGL display: EGL_BAD_PARAMETER`). 안에 든 Ubuntu 22.04의 `libwayland-client`가 시스템 것을 가려서 새 Mesa를 읽지 못해요. Mesa가 새로운 다른 배포판도 그럴 수 있어요. 0.2.1 뒤의 릴리스부터는 이 라이브러리를 빼고 시스템 것을 써요. 0.2.1은 시스템 것을 먼저 읽게 해서 켜세요: `LD_PRELOAD=/usr/lib/libwayland-client.so.0 ./easy-study_0.2.1_amd64.AppImage` (Debian·Ubuntu 계열의 경로는 `/usr/lib/x86_64-linux-gnu/libwayland-client.so.0`).
   - 창이 하얗게만 보이면(일부 NVIDIA 드라이버) `WEBKIT_DISABLE_DMABUF_RENDERER=1 easy-study`로 켜 보세요.
+
+### Arch Linux
+
+`easy-study-bin` 패키지는 릴리스의 .deb(CI가 빌드하고 시험한 바로 그 파일)를 풀어서 만들어요(`packaging/arch/PKGBUILD`). 파일 위치는 deb와 같고(`/usr/bin/easy-study`, `/usr/lib/easy-study/`), WebKitGTK 같은 라이브러리는 Arch 패키지를 써서 보안 업데이트도 그대로 받아요. 릴리스가 비공개라 `gh`로 받아요 (`sudo pacman -S --needed github-cli`, `gh auth login`).
+
+0.2.1 뒤의 릴리스에는 CI가 만든 x86_64 패키지와 그 PKGBUILD가 들어 있어요. 받아서 바로 설치하세요.
+
+```bash
+gh release download v<버전> --repo Wooangha/easy-study -p 'easy-study-bin-*-x86_64.pkg.tar.zst'
+sudo pacman -U ./easy-study-bin-<버전>-1-x86_64.pkg.tar.zst   # webkit2gtk-4.1, gtk3 등 필요한 패키지도 같이 설치돼요
+sudo pacman -S --needed noto-fonts-cjk   # 한글 글꼴: 화면이 한국어라 필요해요 (다른 한글 글꼴이 있으면 생략)
+```
+
+직접 만들 때(0.2.1, aarch64): .deb를 PKGBUILD 옆에 받아 두면 makepkg가 그 파일을 쓰고 SHA-256은 그대로 확인해요. 저장소의 PKGBUILD는 `pkgver`의 릴리스용이고, 그 뒤 릴리스라면 릴리스에 있는 PKGBUILD를 쓰세요 (`-p PKGBUILD`로 같이 받아요).
+
+```bash
+sudo pacman -S --needed base-devel
+cd packaging/arch
+gh release download v<버전> --repo Wooangha/easy-study -p 'easy-study_*_amd64.deb'   # aarch64: -p 'easy-study_*_arm64.deb'
+makepkg -si
+```
+
+지울 때는 `sudo pacman -R easy-study-bin` (라이브러리와 설정 폴더는 남아요). CI는 빌드할 때마다 최신 Arch Linux 컨테이너에서 x86_64 AppImage와 이 PKGBUILD로 만든 패키지를 켜 보고(`EASY_STUDY_DESKTOP_SMOKE`), 패키지 설치와 삭제까지 시험해요. aarch64(Arch Linux ARM)는 아직 시험하지 않았어요. 릴리스가 나오면 그 PKGBUILD를 `packaging/arch/`에 복사하고 `makepkg --printsrcinfo > .SRCINFO`를 실행하세요.
+
+AppImage도 Arch에서 돼요 (0.2.1은 위의 `LD_PRELOAD`가 필요해요). 더블클릭으로 켜려면 `fuse3`(또는 `fuse2`)가 있어야 하고, 없으면 `--appimage-extract-and-run`을 붙이세요. 한글 글꼴(`noto-fonts-cjk` 등)은 똑같이 필요해요. 글꼴이 없으면 창에 글자가 하나도 안 보여요.
 
 ### 데이터 위치
 
@@ -134,7 +161,7 @@ GitHub Releases(또는 Actions의 빌드 결과)에서 OS에 맞는 파일을 �
 
 ### 직접 빌드하기
 
-필요한 것: Node.js 26, Rust (stable, `rustup`), 그리고 OS별 도구 — macOS는 Xcode Command Line Tools, Windows는 Visual Studio C++ Build Tools, Linux는 [Tauri의 패키지 목록](https://v2.tauri.app/start/prerequisites/)(`libwebkit2gtk-4.1-dev` 등)과 AppImage용 `xdg-utils`.
+필요한 것: Node.js 26, Rust (stable, `rustup`), 그리고 OS별 도구 — macOS는 Xcode Command Line Tools, Windows는 Visual Studio C++ Build Tools, Linux는 [Tauri의 패키지 목록](https://v2.tauri.app/start/prerequisites/)(`libwebkit2gtk-4.1-dev` 등)과 AppImage용 `xdg-utils`, `squashfs-tools`.
 
 ```bash
 npm ci
@@ -144,7 +171,7 @@ npm run desktop:dev          # 개발용으로 바로 실행 (tauri dev)
 npm run desktop:test         # 앱 설정 검사 (IPC는 시작 화면에만, 대상별 번들 설정); 셸 자체는 desktop/src-tauri에서 cargo test
 ```
 
-`desktop:build`는 저장소를 빌드하고(`npm run build`), 앱에 넣을 공식 Node.js(nodejs.org, SHA-256 확인, 버전은 `desktop/package.json`의 `easyStudy.nodeVersion`)와 그 대상 OS용 `node_modules`를 담은 서버를 `desktop/resources/`에 준비한 뒤 Tauri로 묶어요. 결과는 `desktop/src-tauri/target/<대상>/release/bundle/`에 나와요. Windows 설치 파일은 Windows에서, Linux 패키지는 Linux에서 빌드하세요. GitHub Actions(`.github/workflows/desktop.yml`)는 테스트를 먼저 돌린 뒤 macOS(arm64·x64)·Windows·Linux(x64·arm64)용을 모두 빌드하고, `v*` 태그를 올리면 초안(draft) 릴리스를 만들어요. `APPLE_*` 시크릿을 넣으면 macOS 앱을 서명·공증해요.
+`desktop:build`는 저장소를 빌드하고(`npm run build`), 앱에 넣을 공식 Node.js(nodejs.org, SHA-256 확인, 버전은 `desktop/package.json`의 `easyStudy.nodeVersion`)와 그 대상 OS용 `node_modules`를 담은 서버를 `desktop/resources/`에 준비한 뒤 Tauri로 묶어요. 결과는 `desktop/src-tauri/target/<대상>/release/bundle/`에 나와요. Linux에서는 마지막에 AppImage에서 사용자 시스템의 것을 써야 하는 라이브러리(`libwayland-client`: Mesa가 자기 버전을 필요로 해요)를 빼요 (`desktop/scripts/appimage.mjs`, `squashfs-tools` 필요). Windows 설치 파일은 Windows에서, Linux 패키지는 Linux에서 빌드하세요. GitHub Actions(`.github/workflows/desktop.yml`)는 테스트를 먼저 돌린 뒤 macOS(arm64·x64)·Windows·Linux(x64·arm64)용을 모두 빌드하고, x86_64 Linux용은 최신 Arch Linux에서도 시험하고, `v*` 태그를 올리면 초안(draft) 릴리스를 만들어요. `APPLE_*` 시크릿을 넣으면 macOS 앱을 서명·공증해요.
 
 시험용 환경 변수: `EASY_STUDY_DESKTOP_LIBRARY`(라이브러리 폴더 지정), `EASY_STUDY_DESKTOP_HOME`(설정·로그·기본 라이브러리를 다른 폴더에), `EASY_STUDY_DESKTOP_SMOKE`(확인한 뒤 앱이 스스로 종료해요. 결과는 `EASY_STUDY_DESKTOP_SMOKE`로 시작하는 줄과 종료 코드: 0 성공, 2 서버·연결 실패, 3 시간 초과(`EASY_STUDY_DESKTOP_SMOKE_TIMEOUT`, 기본 120초), 4 확인 실패, 5 실패 뒤에도 시작 화면이 ‘진행 중’에 멈춤).
 
@@ -152,7 +179,7 @@ npm run desktop:test         # 앱 설정 검사 (IPC는 시작 화면에만, �
 - `=chooser`: 시작 화면만 확인해요 (IPC로 받은 라이브러리 경로, 스타일).
 - `=chooser-local`, `=chooser-remote`: 시작 화면의 양식을 채우고 ‘연결’을 눌러요. 버튼을 누를 때와 같은 길(IPC `connect_local`/`connect_remote`)로 연결한 뒤 `=1`과 같은 확인을 해요. `=chooser-remote`는 `EASY_STUDY_DESKTOP_SMOKE_URL`/`_CODE`를 써요. 실패는 시작 화면에 보이는 오류로 판단해요.
 
-앱을 시험할 때 알아 둘 것: 스모크 실행은 이미 켜진 easy-study에 넘기지 않고 따로 실행돼요. 하지만 보통 실행은 컴퓨터 전체에서 하나만 돼요(두 번째 실행은 켜진 창을 앞으로 가져오고 끝나요). WebView의 쿠키·저장소는 `EASY_STUDY_DESKTOP_HOME`과 상관없이 OS의 앱 폴더를 같이 써요. 그러니 앱 시험은 한 번에 하나씩 하세요. macOS에서 `CFFIXED_USER_HOME`으로 WebView 데이터를 옮기면 쿠키가 저장되지 않으니 로그인 유지 시험에는 쓰지 마세요. Linux에서 WebDriver(tauri-driver)로 시험하면 `target=_blank` 링크의 새 창이 열리지 않고, 시작 화면 스크린숏이 스크립트 실행 전 모습으로 찍혀요. 새 창과 화면 모습은 앱을 직접 실행해서 xdotool과 X 스크린숏으로 확인하세요. Docker 같은 곳에서 Linux 패키지를 빌드할 때는 `xdg-utils`도 설치하세요 (AppImage에 `xdg-open`이 들어가요). 구조와 계약은 [docs/DESIGN.md](docs/DESIGN.md) §19에 있어요.
+앱을 시험할 때 알아 둘 것: 스모크 실행은 이미 켜진 easy-study에 넘기지 않고 따로 실행돼요. 하지만 보통 실행은 컴퓨터 전체에서 하나만 돼요(두 번째 실행은 켜진 창을 앞으로 가져오고 끝나요). WebView의 쿠키·저장소는 `EASY_STUDY_DESKTOP_HOME`과 상관없이 OS의 앱 폴더를 같이 써요. 그러니 앱 시험은 한 번에 하나씩 하세요. macOS에서 `CFFIXED_USER_HOME`으로 WebView 데이터를 옮기면 쿠키가 저장되지 않으니 로그인 유지 시험에는 쓰지 마세요. Linux에서 WebDriver(tauri-driver)로 시험하면 `target=_blank` 링크의 새 창이 열리지 않고, 시작 화면 스크린숏이 스크립트 실행 전 모습으로 찍혀요. 새 창과 화면 모습은 앱을 직접 실행해서 xdotool과 X 스크린숏으로 확인하세요. Docker 같은 곳에서 Linux 패키지를 빌드할 때는 `xdg-utils`(AppImage에 `xdg-open`이 들어가요)와 `squashfs-tools`도 설치하세요. 구조와 계약은 [docs/DESIGN.md](docs/DESIGN.md) §19에 있어요.
 
 ## 동작 방식
 
@@ -273,7 +300,7 @@ library/
 - **Codex가 `Failed to initialize session` / `fs sandbox helper` 오류로 바로 멈출 때**: 설치된 Codex CLI가 읽기 제한(권한 프로필)을 지원하지 않는 경우예요. Codex CLI를 업데이트하고(0.154에서 확인), 그래도 안 되면 `EASY_STUDY_CODEX_CONFINE=0`으로 서버를 다시 시작하세요 (위 표의 경고 참고).
 - **`the PDF is password protected`**: 암호가 걸린 PDF예요. 암호를 푼 PDF로 다시 저장해서(예: 미리보기에서 열고 암호 없이 내보내기) 올리세요.
 - **`could not read the PDF: the file is damaged or is not a PDF`**: 파일이 깨졌거나 PDF가 아니에요. 원본에서 PDF로 다시 내보내 올리세요.
-- **한글·일본어·중국어가 슬라이드 이미지에서 안 보일 때**: 글꼴을 내장하지 않은 PDF예요. 이때 서버 로그에 `[library] <문서>: the PDF uses a CJK font it does not embed, and no fallback font could be read (…)`가 한 번 찍혀요. 위 `EASY_STUDY_PDF_FALLBACK_FONT` 설명의 글꼴(Linux는 `fonts-noto-cjk`)을 설치하거나 지정한 뒤, 문서를 지우고 다시 올리세요. 텍스트는 글꼴이 없어도 제대로 뽑혀요. `EASY_STUDY_PDF_FALLBACK_FONT`에 읽을 수 없는 경로를 지정하면 서버를 켤 때 경고가 나와요.
+- **한글·일본어·중국어가 슬라이드 이미지에서 안 보일 때**: 글꼴을 내장하지 않은 PDF예요. 이때 서버 로그에 `[library] <문서>: the PDF uses a CJK font it does not embed, and no fallback font could be read (…)`가 한 번 찍혀요. 위 `EASY_STUDY_PDF_FALLBACK_FONT` 설명의 글꼴(Debian·Ubuntu는 `fonts-noto-cjk`, Arch는 `noto-fonts-cjk`)을 설치하거나 지정한 뒤, 문서를 지우고 다시 올리세요. 텍스트는 글꼴이 없어도 제대로 뽑혀요. `EASY_STUDY_PDF_FALLBACK_FONT`에 읽을 수 없는 경로를 지정하면 서버를 켤 때 경고가 나와요.
 - 답변이 이상하거나 멈췄을 때: ■ 중지를 누른 뒤 다시 질문하세요. 실패한 턴은 LLM 대화 상태를 바꾸지 않아요.
 
 ## 메모리 사용

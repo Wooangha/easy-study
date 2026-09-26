@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import fs from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -54,10 +55,19 @@ async function waitFor(what: string, predicate: () => boolean | Promise<boolean>
 function isAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
-    return true;
   } catch (err) {
     return (err as NodeJS.ErrnoException).code === 'EPERM';
   }
+  // kill(pid, 0) also succeeds for zombies, which nobody reaps in a container without an init process.
+  if (process.platform === 'linux') {
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+      if (stat.slice(stat.lastIndexOf(')') + 2).startsWith('Z')) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
 }
 
 const exists = (file: string) =>

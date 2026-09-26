@@ -1,6 +1,7 @@
 # Desktop app (DESIGN §19): Tauri 2 shell + official Node runtime + the packed server, for macOS (arm64, x64),
-# Windows (x64) and Linux (x64, arm64). The repo's tests run first. Bundles are uploaded as workflow artifacts; a
-# `v*` tag also creates a DRAFT GitHub release with them. Unsigned by default (macOS ad-hoc signature, no
+# Windows (x64) and Linux (x64, arm64). The repo's tests run first. Bundles are uploaded as workflow artifacts; the
+# x86_64 Linux bundles are also tested on current Arch Linux, which builds the Arch package. A `v*` tag also creates
+# a DRAFT GitHub release with all of them. Unsigned by default (macOS ad-hoc signature, no
 # notarization; unsigned Windows installer): macOS signing and notarization turn on when the APPLE_* secrets exist.
 # (A secret that is not configured arrives as an empty variable; desktop/scripts/build.mjs drops empty APPLE_*
 # variables, which the Tauri CLI would otherwise take as the signing identity "" and as notarization credentials.)
@@ -13,6 +14,7 @@ on:
   pull_request:
     paths:
       - 'desktop/**'
+      - 'packaging/**'
       - '.github/workflows/desktop.yml'
 
 permissions:
@@ -95,12 +97,12 @@ jobs:
           workspaces: desktop/src-tauri -> target
           key: ${{ matrix.target }}
 
-      - name: Linux build dependencies (v2.tauri.app/start/prerequisites; xdg-utils for the AppImage) + Xvfb
+      - name: Linux build dependencies (v2.tauri.app/start/prerequisites; xdg-utils for the AppImage, squashfs-tools for appimage.mjs) + Xvfb
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev \
-            libayatana-appindicator3-dev librsvg2-dev xdg-utils xvfb
+            libayatana-appindicator3-dev librsvg2-dev xdg-utils squashfs-tools xvfb
 
       - run: npm ci
       - run: npm ci
@@ -144,6 +146,12 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: node desktop/scripts/build.mjs --target ${{ matrix.target }} --skip-prepare
+
+      # build.mjs has taken the libraries out of the AppImage that must come from the user's system
+      # (desktop/scripts/appimage.mjs: libwayland-client, which the user's Mesa needs in its own version).
+      - name: AppImage without host libraries (Linux)
+        if: runner.os == 'Linux'
+        run: node desktop/scripts/appimage.mjs --check "$BUNDLE"/appimage/*.AppImage
 
       - uses: actions/upload-artifact@v4
         with:
@@ -210,9 +218,86 @@ jobs:
         if: matrix.name == 'linux-x64'
         run: cargo test --manifest-path desktop/src-tauri/Cargo.toml
 
+  # The Linux bundles are built on Ubuntu 22.04, where the libraries inside the AppImage are the system's own. On a
+  # rolling distribution they meet a newer Mesa, Wayland… (v0.2.1's AppImage opened a blank window on Arch:
+  # appimage.mjs). So this build's x86_64 AppImage runs here on current Arch Linux (--appimage-extract-and-run: no
+  # FUSE in a container), and packaging/arch/PKGBUILD is built from this build's .deb files, installed, smoke-tested
+  # and removed. The package and the PKGBUILD with this build's checksums go into the release (the repository's
+  # PKGBUILD keeps the last release's). As a normal user: root is not how the app runs, and makepkg refuses it.
+  arch:
+    name: arch-x64
+    needs: build
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    defaults:
+      run:
+        shell: bash # -eo pipefail
+    steps:
+      - name: Packages
+        run: |
+          # pacman's syscall sandbox fails under x86_64 emulation (Rosetta, where this job was tried out); harmless here.
+          sed -i '0,/^\[options\]/s//&\nDisableSandboxSyscalls/' /etc/pacman.conf
+          pacman -Syu --noconfirm --needed base-devel namcap pacman-contrib xorg-server-xvfb fontconfig fribidi harfbuzz
+          useradd -m tester
+
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: easy-study-linux-*
+          path: dist
+          merge-multiple: true
+
+      - name: Smoke test (AppImage)
+        run: |
+          # Artifacts do not keep the executable bit.
+          install -m 755 -o tester -g tester "$(find dist -name '*_amd64.AppImage' | head -n 1)" /home/tester/easy-study.AppImage
+          for mode in chooser-local 1; do
+            runuser -u tester -- env EASY_STUDY_DESKTOP_HOME=/tmp/es-home-appimage EASY_STUDY_DESKTOP_LIBRARY=/tmp/.es-appimage/library \
+              EASY_STUDY_DESKTOP_SMOKE=$mode EASY_STUDY_DESKTOP_SMOKE_TIMEOUT=180 \
+              xvfb-run -a /home/tester/easy-study.AppImage --appimage-extract-and-run
+          done
+          sleep 1
+          if pgrep -af 'dist-server/server/index.js'; then exit 1; fi
+
+      - name: Arch package (packaging/arch/PKGBUILD)
+        run: |
+          version=$(sed -n 's/^  "version": "\([^"]*\)",$/\1/p' package.json)
+          [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "no version in package.json: '$version'"; exit 1; }
+          work=/home/tester/pkg
+          install -d -o tester -g tester "$work"
+          install -m 644 -o tester -g tester packaging/arch/PKGBUILD dist/deb/*.deb "$work"/
+          cd "$work"
+          sed -i "s/^pkgver=.*/pkgver=$version/; s/^pkgrel=.*/pkgrel=1/" PKGBUILD
+          runuser -u tester -- updpkgsums
+          # -d: package() only unpacks the .deb; pacman -U installs the dependencies, as for a user.
+          runuser -u tester -- makepkg -f -d
+          pacman -U --noconfirm ./*.pkg.tar.zst
+          # After the install: namcap finds the packages of the linked libraries only among installed ones.
+          namcap PKGBUILD ./*.pkg.tar.zst | tee namcap.txt
+          if grep -F ' E: ' namcap.txt; then exit 1; fi
+
+      - name: Smoke test (Arch package)
+        run: |
+          for mode in chooser-local 1; do
+            runuser -u tester -- env EASY_STUDY_DESKTOP_HOME=/tmp/es-home-pkg EASY_STUDY_DESKTOP_LIBRARY=/tmp/.es-pkg/library \
+              EASY_STUDY_DESKTOP_SMOKE=$mode EASY_STUDY_DESKTOP_SMOKE_TIMEOUT=180 xvfb-run -a easy-study
+          done
+          sleep 1
+          if pgrep -af 'dist-server/server/index.js'; then exit 1; fi
+          pacman -R --noconfirm easy-study-bin
+          test ! -e /usr/bin/easy-study && test ! -e /usr/bin/es-node && test ! -e /usr/lib/easy-study
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: easy-study-arch-x64
+          path: |
+            /home/tester/pkg/*.pkg.tar.zst
+            /home/tester/pkg/PKGBUILD
+          if-no-files-found: error
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, arch]
     runs-on: ubuntu-latest
     permissions:
       contents: write

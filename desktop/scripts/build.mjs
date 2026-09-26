@@ -3,11 +3,13 @@
 //   node desktop/scripts/build.mjs [--target <rust triple>] [--bundles app,dmg] [--skip-prepare] [--skip-build] [--debug]
 //   node desktop/scripts/build.mjs --dev
 // (npm run desktop:build / npm run desktop:dev in the repo.) Steps: npm ci in desktop/ when the Tauri CLI is
-// missing → prepare.mjs (repo build + resources for the target) → `tauri build --target <t> --bundles <b>`.
+// missing → prepare.mjs (repo build + resources for the target) → `tauri build --target <t> --bundles <b>` →
+// Linux: appimage.mjs removes the libraries the AppImage must take from the user's system (needs squashfs-tools).
 // Output: desktop/src-tauri/target/<triple>/release/bundle/<kind>/…
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { stripAppImage } from './appimage.mjs';
 import { prepare } from './prepare.mjs';
 import { DESKTOP_DIR, RESOURCES_DIR, arg, hostTarget, runNpm, targetInfo, tauriEnv } from './targets.mjs';
 
@@ -37,5 +39,12 @@ if (ignored.length > 0) console.log(`   (ignored because empty: ${ignored.join('
 execFileSync(process.execPath, [cli, ...tauriArgs], { cwd: DESKTOP_DIR, stdio: 'inherit', env });
 if (!dev) {
   const out = path.join(DESKTOP_DIR, 'src-tauri', 'target', target, arg('debug') === true ? 'debug' : 'release', 'bundle');
+  if (info.os === 'linux' && bundles.split(',').includes('appimage')) {
+    console.log('== AppImage: libraries from the system (appimage.mjs)');
+    const dir = path.join(out, 'appimage');
+    const images = fs.readdirSync(dir).filter((f) => f.endsWith('.AppImage'));
+    if (images.length === 0) throw new Error(`no AppImage in ${dir}`);
+    for (const f of images) stripAppImage(path.join(dir, f));
+  }
   console.log(`\nbundles: ${out}`);
 }

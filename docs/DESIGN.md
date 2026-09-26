@@ -785,3 +785,15 @@ AppImage (secondary). Node ships as a resource (macOS/Windows) or externalBin `e
 CI (`.github/workflows/desktop.yml`): build on macos-latest (arm64 + x64), windows-latest, ubuntu-22.04 and ubuntu-22.04-arm; run the
 repo tests first; upload artifacts; on a `v*` tag create a draft GitHub release. (There is no GitHub remote yet: the workflow file is
 added now and runs once a repository exists.)
+
+## 20. Arch Linux
+
+- The web/server mode runs unchanged on Arch (`nodejs` 26 and `nodejs-lts-jod` 22 tested; `nodejs-lts-iron` = Node 20 is too old).
+- AppImage fix (found on Arch, applies to any distro with a newer Mesa): the linuxdeploy that Tauri CLI 2.11 pins bundles the build
+  host's `libwayland-client.so.0` (Ubuntu 22.04, 1.20). Mesa 26's `libEGL_mesa` needs newer symbols, EGL fails, WebKit aborts, the window
+  stays blank. `desktop/scripts/appimage.mjs` (run by build.mjs on Linux) unpacks the AppImage's squashfs, removes that library and
+  repacks it after the original runtime; CI checks the result with `--check`.
+- `packaging/arch/PKGBUILD` (`easy-study-bin`) repackages the release .deb with Arch dependencies (webkit2gtk-4.1, gtk3, gcc-libs,
+  openssl; optdepends noto-fonts-cjk, xdg-utils). CI job `arch-x64` (container archlinux:latest) smoke-tests the x86_64 AppImage, builds
+  the package from the fresh .deb, installs it, runs namcap and the smoke tests, removes it, and attaches the `.pkg.tar.zst` + PKGBUILD
+  to releases. Arch Linux ARM (aarch64) is listed but untested.

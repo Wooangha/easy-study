@@ -212,7 +212,7 @@ export function fallbackFontFiles(platform: NodeJS.Platform = process.platform, 
         '/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc',
         '/usr/share/fonts/google-noto-sans-cjk-fonts/NotoSansCJK-Regular.ttc',
         '/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc',
-        // Nanum Gothic: Debian/Ubuntu (fonts-nanum), Fedora/Arch.
+        // Nanum Gothic: Debian/Ubuntu (fonts-nanum), Fedora (naver-nanum-*), Arch only via the AUR.
         '/usr/share/fonts/truetype/nanum/NanumGothic.ttf',
         '/usr/share/fonts/nanum/NanumGothic.ttf',
         '/usr/share/fonts/naver-nanum/NanumGothic.ttf',
