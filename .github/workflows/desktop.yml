@@ -193,7 +193,6 @@ jobs:
           ! pgrep -f 'dist-server/server/index.js'
       - name: Smoke test (Windows)
         if: matrix.smoke && runner.os == 'Windows'
-        continue-on-error: true # not run on a real Windows machine yet
         shell: pwsh
         run: |
           $exe = "desktop/src-tauri/target/${{ matrix.target }}/release/easy-study.exe"
