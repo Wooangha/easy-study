@@ -80,7 +80,8 @@ echo "== libopus (static) for $TARGET"
 cmake -S "$OPUSSRC" -B "$WORK/opus" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DOPUS_BUILD_PROGRAMS=OFF \
   -DOPUS_BUILD_TESTING=OFF -DCMAKE_INSTALL_PREFIX="$WORK/prefix" -DCMAKE_INSTALL_LIBDIR=lib $OPUS_CMAKE > "$WORK/opus.log" 2>&1 ||
   { tail -30 "$WORK/opus.log"; exit 1; }
-if ! { cmake --build "$WORK/opus" --parallel "$JOBS" && cmake --install "$WORK/opus"; } >> "$WORK/opus.log" 2>&1; then
+# --config Release: multi-config generators (Visual Studio on Windows) ignore CMAKE_BUILD_TYPE and default to Debug.
+if ! { cmake --build "$WORK/opus" --config Release --parallel "$JOBS" && cmake --install "$WORK/opus" --config Release; } >> "$WORK/opus.log" 2>&1; then
   tail -30 "$WORK/opus.log"
   exit 1
 fi

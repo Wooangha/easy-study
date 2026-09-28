@@ -21,7 +21,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { checkBinary } from './binaries.mjs';
-import { arg, download, ensureCacheDir, exeName, hasCommand, hostTarget, run, sha256, targetInfo, untar } from './targets.mjs';
+import { arg, download, ensureCacheDir, exeName, hasCommand, hostTarget, run, targetInfo, textSha256, untar } from './targets.mjs';
 
 export const WHISPER = {
   version: '1.9.4',
@@ -82,7 +82,7 @@ export function whisperDir(target, cacheDir = ensureCacheDir()) {
 }
 
 function stampOf(target) {
-  return { version: WHISPER.version, commit: WHISPER.commit, flags: whisperFlags(target), script: sha256(fileURLToPath(import.meta.url)) };
+  return { version: WHISPER.version, commit: WHISPER.commit, flags: whisperFlags(target), script: textSha256(fileURLToPath(import.meta.url)) };
 }
 
 /** The files to ship (absolute paths), or null when the cache has no build of these sources and flags. */

@@ -1,0 +1,6 @@
+# Check out text files with LF on every OS: shell scripts must stay LF on Windows, and build stamps hash script
+# contents (desktop/scripts/*.mjs) that must match across OSes.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

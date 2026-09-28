@@ -15,7 +15,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { checkBinary } from './binaries.mjs';
-import { DESKTOP_DIR, REPO_DIR, arg, download, ensureCacheDir, exeName, hasCommand, hostTarget, run, sha256, targetInfo, untar } from './targets.mjs';
+import { DESKTOP_DIR, REPO_DIR, arg, download, ensureCacheDir, exeName, hasCommand, hostTarget, run, targetInfo, textSha256, untar } from './targets.mjs';
 
 export const FFMPEG = {
   version: '8.1',
@@ -31,7 +31,7 @@ const SCRIPT = path.join(DESKTOP_DIR, 'scripts', 'build-ffmpeg.sh');
 const FLAGS = path.join(DESKTOP_DIR, 'scripts', 'ffmpeg-min.flags');
 /** What a build is made of: a cached build with another stamp is rebuilt. */
 function stamp() {
-  return { ffmpeg: FFMPEG, opus: OPUS, flags: sha256(FLAGS), script: sha256(SCRIPT), driver: sha256(fileURLToPath(import.meta.url)) };
+  return { ffmpeg: FFMPEG, opus: OPUS, flags: textSha256(FLAGS), script: textSha256(SCRIPT), driver: textSha256(fileURLToPath(import.meta.url)) };
 }
 
 export function ffmpegDir(target, cacheDir = ensureCacheDir()) {

@@ -86,6 +86,14 @@ export function sha256(data) {
   return createHash('sha256').update(typeof data === 'string' ? fs.readFileSync(data) : data).digest('hex');
 }
 
+/**
+ * SHA-256 of a text file with line endings normalised to LF, for build stamps: a Windows checkout may have CRLF, and a
+ * stamp must match the one computed on another OS (e.g. a build artifact made on Linux and reused on Windows).
+ */
+export function textSha256(file) {
+  return createHash('sha256').update(fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n')).digest('hex');
+}
+
 /** Downloads `url` to `file` (through a temporary file) and checks its SHA-256. Reuses a file that matches. */
 export async function download(url, file, want) {
   if (fs.existsSync(file) && sha256(file) === want) return file;

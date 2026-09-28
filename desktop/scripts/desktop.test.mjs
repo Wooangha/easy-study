@@ -10,7 +10,7 @@ import { SMOKE_MODELS, asrSmoke, mp4Boxes, readWav, toneWav } from './asr-smoke.
 import { checkBinary, elfInfo, machoInfo, peInfo } from './binaries.mjs';
 import { FFMPEG, OPUS, ffmpegBuildPlan } from './ffmpeg.mjs';
 import { RECORDING_TOOLS, placeTool } from './prepare.mjs';
-import { DESKTOP_DIR, REPO_DIR, TARGETS, externalBinOverride, hostTarget, shippedNodeVersion, targetInfo, tauriEnv } from './targets.mjs';
+import { DESKTOP_DIR, REPO_DIR, TARGETS, externalBinOverride, hostTarget, shippedNodeVersion, targetInfo, tauriEnv, textSha256 } from './targets.mjs';
 import { WHISPER, whisperFlags } from './whisper.mjs';
 
 const tauriDir = path.join(DESKTOP_DIR, 'src-tauri');
@@ -631,4 +631,30 @@ test('CI builds the recording tools for every target, ships them and checks them
   const arch = /\n {2}arch:\n([\s\S]*?)\n {2}release:/.exec(wf)?.[1];
   assert.match(arch, /node desktop\/scripts\/asr-smoke\.mjs --whisper \/usr\/bin\/es-whisper --ffmpeg \/usr\/bin\/es-ffmpeg/);
   assert.match(arch, /test ! -e \/usr\/bin\/es-whisper && test ! -e \/usr\/bin\/es-ffmpeg/);
+});
+
+test('build stamps hash script text with LF line endings (a CRLF Windows checkout reuses a Linux-built artifact)', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'es-stamp-'));
+  try {
+    const lf = path.join(dir, 'lf.sh');
+    const crlf = path.join(dir, 'crlf.sh');
+    fs.writeFileSync(lf, '#!/bin/sh\necho one\necho two\n');
+    fs.writeFileSync(crlf, '#!/bin/sh\r\necho one\r\necho two\r\n');
+    assert.equal(textSha256(crlf), textSha256(lf));
+    fs.writeFileSync(crlf, '#!/bin/sh\r\necho one\r\necho three\r\n');
+    assert.notEqual(textSha256(crlf), textSha256(lf));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('libopus is built and installed as Release (multi-config generators such as Visual Studio default to Debug)', () => {
+  const script = fs.readFileSync(path.join(DESKTOP_DIR, 'scripts', 'build-ffmpeg.sh'), 'utf8');
+  assert.match(script, /cmake --build "\$WORK\/opus" --config Release/);
+  assert.match(script, /cmake --install "\$WORK\/opus" --config Release/);
+});
+
+test('.gitattributes checks text files out with LF on every OS', () => {
+  const attrs = fs.readFileSync(path.join(REPO_DIR, '.gitattributes'), 'utf8');
+  assert.match(attrs, /^\* text=auto eol=lf$/m);
 });
