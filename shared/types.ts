@@ -227,6 +227,11 @@ export interface ChatMessage {
   /** Reasoning effort of the assistant message (absent = the CLI's default). */
   effort?: string;
   durationMs?: number;
+  /**
+   * Present on assistant messages whose provider reported token usage (DESIGN §23): every model call of the turn,
+   * an automatic retry in a new conversation included. Absent in messages saved before usage was recorded.
+   */
+  usage?: TokenUsage;
 }
 
 export interface SessionSummary {
@@ -242,6 +247,10 @@ export interface SessionSummary {
   messageCount: number;
   /** Whether the provider conversation has been fed the deck. */
   primed: boolean;
+  /** Tokens of the session's turns so far (DESIGN §23); absent until a turn reported usage. */
+  usage?: SessionUsage;
+  /** The subscription's usage limits as the provider last reported them in this session (subscription CLIs only). */
+  limits?: UsageLimits;
 }
 
 export interface Session extends SessionSummary {
@@ -275,6 +284,60 @@ export interface PrimeRequest {
   slide: number;
   /** Same meaning as SendMessageRequest.neighbors. */
   neighbors?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Token usage and subscription limits (DESIGN §23): what turns and digest runs cost, as the providers report it,
+// and — for the subscription CLIs — how much of the plan's usage limits is used.
+// ---------------------------------------------------------------------------
+
+/**
+ * Tokens of one or more model calls. `input` and `output` are totals; the other counts are parts of them, omitted
+ * when zero or not reported.
+ */
+export interface TokenUsage {
+  /** Every input token, the cached ones included. */
+  input: number;
+  /** Part of `input` read from the prompt cache. */
+  cachedInput?: number;
+  /** Part of `input` written to the prompt cache (Claude). */
+  cacheWrite?: number;
+  /** Every output token, reasoning included. */
+  output: number;
+  /** Part of `output` spent on reasoning (thinking). */
+  reasoning?: number;
+}
+
+/** Running totals of a session (SessionSummary.usage). */
+export interface SessionUsage {
+  /** Every turn so far: priming, questions, failed and aborted ones, automatic retries. */
+  total: TokenUsage;
+  /** The priming turns alone (feeding the deck). */
+  priming?: TokenUsage;
+}
+
+/** One usage-limit window of a subscription (e.g. Claude's 5-hour and weekly limits, Codex's weekly limit). */
+export interface LimitWindow {
+  /** Length of the window in minutes: 300 = 5 hours, 10080 = a week. */
+  minutes: number;
+  /** How much of the window's allowance is used, in percent (can exceed 100). */
+  usedPercent: number;
+  /** When the window starts over (ISO), when reported. */
+  resetsAt?: string;
+  /** Set for a limit of one model family (e.g. 'Opus'), not the plan's general one. */
+  label?: string;
+  /** The window the report's 'warning' / 'reached' status is about, when the provider names it (Claude). */
+  binding?: true;
+}
+
+/** The subscription's usage limits as the provider reported them. */
+export interface UsageLimits {
+  /** When they were reported (ISO). */
+  at: string;
+  /** 'warning' = close to a limit; 'reached' = a limit is reached (requests are refused until it resets). */
+  status: 'ok' | 'warning' | 'reached';
+  /** Shortest window first. */
+  windows: LimitWindow[];
 }
 
 // ---------------------------------------------------------------------------
@@ -314,6 +377,8 @@ export interface DigestInfo {
   summary: string | null;
   /** Absolute path of DIGEST.md. */
   markdownPath: string;
+  /** Tokens of the latest run (every call, failed ones included), when the provider reported them (DESIGN §23). */
+  usage?: TokenUsage;
 }
 
 export interface StartDigestRequest {
@@ -338,6 +403,11 @@ export type StreamEvent =
   | { type: 'delta'; text: string }
   /** Transient progress line (e.g. "슬라이드 12 이미지를 읽는 중"). */
   | { type: 'status'; text: string }
+  /**
+   * Tokens the turn has used so far (a running total over all its model calls) and the subscription's usage limits,
+   * as far as the provider reported them (DESIGN §23). Sent again whenever either changes.
+   */
+  | { type: 'usage'; usage?: TokenUsage; limits?: UsageLimits }
   /** Final assistant message (status 'complete' | 'error' | 'aborted'). Always the last event. */
   | { type: 'done'; assistantMessage: ChatMessage; session: SessionSummary }
   /** Fatal error before a turn could start (e.g. validation). Always the last event. */

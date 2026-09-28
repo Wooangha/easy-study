@@ -52,9 +52,16 @@
 // Failures are classified (ProviderError). Resuming a thread whose rollout is gone either fails
 // ("thread not found", "no rollout found", …) or silently starts a new thread (thread.started with
 // another id, and no deck in it): both are 'resume_invalid'.
+//
+// Token usage (DESIGN §23): turn.completed carries it, but `codex exec --json` has no usage limits, and for a
+// resumed thread its usage may be the thread's running total. So once a non-ephemeral run has ended (stopped ones
+// too: the model calls that finished are recorded), what it appended to the thread's rollout is read (codexRollout.ts,
+// bounded by ROLLOUT_READ_TIMEOUT_MS) for the turn's own usage and the limits; a new thread's turn.completed usage is
+// reported right away, a resumed one's only from the rollout.
 import { constants as fsConstants } from 'node:fs';
 import { access, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
+import type { TokenUsage, UsageLimits } from '../../shared/types.ts';
 import type {
   Part,
   Provider,
@@ -65,8 +72,11 @@ import type {
 } from './types.ts';
 import { ProviderError } from './types.ts';
 import { describeExit, probeVersion, resolveBin, runJsonlProcess, stderrSuffix } from './proc.ts';
-import type { CliBinSpec, JsonObject } from './proc.ts';
+import type { CliBinSpec, JsonlProcessResult, JsonObject } from './proc.ts';
 import { CODEX_DEFAULT_MODEL_LABEL, codexCatalog, codexConfigModel, codexModelChoices, readCodexConfig } from './codexCatalog.ts';
+import { codexRolloutSize, readCodexRolloutTurn } from './codexRollout.ts';
+import type { CodexRolloutTurn } from './codexRollout.ts';
+import { openaiUsage } from './usage.ts';
 
 /** Features that reach outside the sandbox; always disabled. */
 export const CODEX_DISABLED_INTEGRATIONS = ['plugins', 'apps', 'browser_use', 'computer_use', 'in_app_browser'];
@@ -324,9 +334,15 @@ export class CodexStreamState {
   completed = false;
   failure: string | null = null;
   lastError: string | null = null;
+  /**
+   * turn.completed's usage: the turn's tokens on a new thread (reported through onUsage at once); on a resumed
+   * thread possibly the whole thread's, so it is not reported (see the top of the file).
+   */
+  usage: TokenUsage | undefined;
 
   private readonly onDelta: (text: string) => void;
   private readonly onStatus: (text: string) => void;
+  private readonly onUsage: ((usage: TokenUsage) => void) | undefined;
   /** Thread being resumed (undefined for a new conversation). */
   private readonly resumedThread: string | undefined;
   /** Latest agent message, not emitted as answer text yet. */
@@ -334,10 +350,16 @@ export class CodexStreamState {
   /** `pending` has already been shown as a status line. */
   private pendingShown = false;
 
-  constructor(onDelta: (text: string) => void, onStatus: (text: string) => void, resumedThread?: string) {
+  constructor(
+    onDelta: (text: string) => void,
+    onStatus: (text: string) => void,
+    resumedThread?: string,
+    onUsage?: (usage: TokenUsage) => void,
+  ) {
     this.onDelta = onDelta;
     this.onStatus = onStatus;
     this.resumedThread = resumedThread;
+    this.onUsage = onUsage;
   }
 
   /** Throws a ProviderError('resume_invalid') when a resumed run reports another thread (see top of file). */
@@ -363,6 +385,8 @@ export class CodexStreamState {
       case 'turn.completed':
         this.completed = true;
         this.flushAnswer();
+        this.usage = openaiUsage(event.usage);
+        if (this.usage && !this.resumedThread) this.onUsage?.(this.usage);
         break;
       case 'turn.failed':
         this.failure = messageOf(asObject(event.error)) || 'turn failed';
@@ -514,6 +538,43 @@ function codexFailure(base: string, evidence: string, resumed: boolean, stderrTa
   return new ProviderError(`${base}${hint}${stderrSuffix(stderrTail)}`, kind);
 }
 
+/**
+ * How long a run waits for its thread's rollout (codexRollout.ts): its size before a resumed run starts, what the run
+ * appended once it has ended. After that the usage of a resumed thread and the limits are left out rather than
+ * holding back the turn.
+ */
+export const ROLLOUT_READ_TIMEOUT_MS = 1_500;
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(fallback), timeoutMs);
+    timer.unref?.();
+    void promise.then((value) => {
+      clearTimeout(timer);
+      resolve(value);
+    });
+  });
+}
+
+/**
+ * The run's token usage and the subscription's usage limits (see the top of the file): from what the run appended to
+ * the thread's rollout (after its first `rolloutStart` bytes; null = not read: an ephemeral run keeps no rollout, and
+ * a resumed thread's could not be found before the run) when it has them, else a new thread's turn.completed usage.
+ */
+async function codexRunUsage(
+  state: CodexStreamState,
+  threadId: string | undefined,
+  resumed: boolean,
+  rolloutStart: number | null,
+): Promise<{ usage?: TokenUsage; limits?: UsageLimits }> {
+  let rollout: CodexRolloutTurn = {};
+  if (threadId && rolloutStart !== null) {
+    rollout = await withTimeout(readCodexRolloutTurn(threadId, rolloutStart), ROLLOUT_READ_TIMEOUT_MS, {});
+  }
+  const usage = rollout.usage ?? (resumed ? undefined : state.usage);
+  return { ...(usage ? { usage } : {}), ...(rollout.limits ? { limits: rollout.limits } : {}) };
+}
+
 let warnedUnconfined = false;
 
 async function runCodex(input: ProviderRunInput): Promise<ProviderRunResult> {
@@ -539,16 +600,37 @@ async function runCodex(input: ProviderRunInput): Promise<ProviderRunResult> {
     confine,
   });
 
-  const state = new CodexStreamState(input.onDelta, input.onStatus, threadId);
-  const proc = await runJsonlProcess({
-    // The real path, not a symlink on PATH: see the top of the file.
-    bin: await codexExecutable(await resolveBin(CODEX_BIN_SPEC)),
-    args,
-    cwd: input.cwd,
-    stdin: prompt,
-    signal: input.signal,
-    onEvent: (event) => state.handle(event),
-  });
+  const state = new CodexStreamState(input.onDelta, input.onStatus, threadId, input.onUsage);
+  // Where this run's rollout entries will start: a new thread's file is its own, a resumed one's is appended to.
+  let rolloutStart: number | null = null;
+  if (!ephemeral) rolloutStart = threadId ? await withTimeout(codexRolloutSize(threadId), ROLLOUT_READ_TIMEOUT_MS, null) : 0;
+  /** Reports the run's usage and limits (see codexRunUsage), a failed or stopped run's too: it may have used tokens. */
+  const reportUsage = async () => {
+    const found = await codexRunUsage(state, state.threadId ?? threadId, resumed, rolloutStart);
+    // A new thread's turn.completed usage was reported already (the rollout normally says the same).
+    const reported = resumed ? undefined : state.usage;
+    if (found.usage && JSON.stringify(found.usage) !== JSON.stringify(reported)) input.onUsage?.(found.usage);
+    if (found.limits) input.onLimits?.(found.limits);
+    return found;
+  };
+  let proc: JsonlProcessResult;
+  try {
+    proc = await runJsonlProcess({
+      // The real path, not a symlink on PATH: see the top of the file.
+      bin: await codexExecutable(await resolveBin(CODEX_BIN_SPEC)),
+      args,
+      cwd: input.cwd,
+      stdin: prompt,
+      signal: input.signal,
+      onEvent: (event) => state.handle(event),
+    });
+  } catch (err) {
+    // Stopped: the CLI has exited, and the model calls it finished are in the rollout.
+    if (input.signal.aborted) await reportUsage();
+    throw err;
+  }
+
+  const { usage, limits } = await reportUsage();
 
   const tail = stderrSuffix(proc.stderrTail);
   if (state.failure) {
@@ -570,10 +652,12 @@ async function runCodex(input: ProviderRunInput): Promise<ProviderRunResult> {
   if (!state.completed && !state.text) throw new Error(`Codex가 응답 없이 종료되었습니다.${tail}`);
 
   const id = state.threadId ?? threadId;
-  if (ephemeral) return { text: state.text, resume: id ? { cliSessionId: id } : {} };
   // Without a thread id the next turn could not continue this conversation (and would lack the deck).
-  if (!id) throw new Error(`Codex가 thread id를 알려주지 않았습니다.${tail}`);
-  return { text: state.text, resume: { cliSessionId: id } };
+  if (!ephemeral && !id) throw new Error(`Codex가 thread id를 알려주지 않았습니다.${tail}`);
+  const out: ProviderRunResult = { text: state.text, resume: id ? { cliSessionId: id } : {} };
+  if (usage) out.usage = usage;
+  if (limits) out.limits = limits;
+  return out;
 }
 
 export const codexProvider: Provider = {

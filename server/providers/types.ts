@@ -1,6 +1,6 @@
 // Internal contract between the chat orchestrator (server/chat.ts) and LLM providers.
 import { EFFORT_LABELS } from '../../shared/types.ts';
-import type { EffortOption, ModelOption, ProviderId } from '../../shared/types.ts';
+import type { EffortOption, ModelOption, ProviderId, TokenUsage, UsageLimits } from '../../shared/types.ts';
 
 /** One piece of a user turn. Images are referenced by absolute path and loaded by the provider. */
 export type Part =
@@ -76,6 +76,14 @@ export interface ProviderRunInput {
   onDelta: (text: string) => void;
   /** Transient progress information (tool use, reasoning, ...). */
   onStatus: (text: string) => void;
+  /**
+   * Tokens this call has used so far, as the provider reports them (DESIGN §23): a running total, each report
+   * replaces the previous one. Reported as soon as known (live while streaming where the provider allows) and also
+   * when the call fails afterwards. Not every provider reports usage in every case.
+   */
+  onUsage?: (usage: TokenUsage) => void;
+  /** The subscription's usage limits, when the provider reports them (subscription CLIs only; DESIGN §23). */
+  onLimits?: (limits: UsageLimits) => void;
 }
 
 export interface ProviderRunResult {
@@ -83,6 +91,10 @@ export interface ProviderRunResult {
   text: string;
   /** Handle to continue this conversation next turn. */
   resume: ResumeHandle;
+  /** The last usage reported through onUsage, if any. */
+  usage?: TokenUsage;
+  /** The last limits reported through onLimits, if any. */
+  limits?: UsageLimits;
 }
 
 export interface ProviderAvailability {

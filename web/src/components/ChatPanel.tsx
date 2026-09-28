@@ -10,9 +10,11 @@ import { PENDING_ASSISTANT_ID, type StudySession } from '../hooks/useStudySessio
 import type { Chip } from '../lib/attachments.ts';
 import { canOpenFiles, courseBadgeTitle, courseContextSentence, type EarlierLectures } from '../lib/courseContext.ts';
 import { effortName, providerLabel, providerWithModel } from '../lib/format.ts';
+import { unrecordedAnswers } from '../lib/usage.ts';
 import { Composer } from './Composer.tsx';
 import { MessageList } from './MessageList.tsx';
 import { RecordingTabBadge } from './recording/LectureSpeech.tsx';
+import { UsageBar } from './UsageBar.tsx';
 
 export type PanelTab = 'chat' | 'digest' | 'notes' | 'recordings';
 
@@ -370,6 +372,19 @@ export function ChatPanel({
           attachments={attachments}
           onAttachFiles={onAttachFiles}
           onOpenChip={onOpenChip}
+          footer={
+            session && (
+              <UsageBar
+                provider={session.provider}
+                providers={providers}
+                usage={session.usage}
+                unrecorded={unrecordedAnswers(session.messages)}
+                live={study.liveUsage}
+                livePriming={liveTurn?.kind === 'prime'}
+                limits={study.usageLimits}
+              />
+            )
+          }
         />
       </div>
 

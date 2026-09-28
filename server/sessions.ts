@@ -5,6 +5,7 @@ import { randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { ATTACHMENT_ID_RE, EFFORT_ID_RE, SESSION_ID_RE } from '../shared/types.ts';
+import { readSessionUsage, readUsageLimits } from '../shared/usage.ts';
 import type {
   ChatMessage,
   NoteEntry,
@@ -160,6 +161,13 @@ async function readRecord(docId: string, sessionId: string): Promise<SessionReco
   const record: SessionRecord = { ...value, id: sessionId, docId };
   // The effort reaches a CLI's arguments: anything but a valid level means the default.
   if (record.effort !== undefined && (typeof record.effort !== 'string' || !EFFORT_ID_RE.test(record.effort))) delete record.effort;
+  // Totals are added to: only well-formed ones are kept (absent in sessions made before usage was recorded).
+  const usage = readSessionUsage(record.usage);
+  if (usage) record.usage = usage;
+  else delete record.usage;
+  const limits = readUsageLimits(record.limits);
+  if (limits) record.limits = limits;
+  else delete record.limits;
   return record;
 }
 
@@ -257,6 +265,8 @@ export function toSummary(record: SessionRecord): SessionSummary {
     primed: record.providerState.primed,
   };
   if (record.effort) summary.effort = record.effort;
+  if (record.usage) summary.usage = record.usage;
+  if (record.limits) summary.limits = record.limits;
   return summary;
 }
 

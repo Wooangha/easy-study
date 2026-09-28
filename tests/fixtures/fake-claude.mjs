@@ -10,6 +10,12 @@
 //     | model-unavailable | model-needs-update
 // Like the real CLI, a run without --session-id / --resume (e.g. --no-session-persistence) still
 // reports a session id of its own (except in mode no-session-id).
+//
+// Token usage and limits come in the shapes of claude 2.1.280 (DESIGN §23): every model call's message_start carries
+// its usage and a message_delta its final counts; success makes two calls (their total: USAGE_TOTAL below), then one
+// rate_limit_event and a result with the run's total. $FAKE_CLAUDE_RATE_LIMIT: unset = a subscription's limits
+// (5 hours 12 %, a week 9 %), 'none' = no rate_limit_event (as with an API key), else JSON used as rate_limit_info.
+// $FAKE_CLI_DELAY_MS slows a successful run down between its steps (to watch it stream in the UI).
 import fs from 'node:fs';
 
 const argv = process.argv.slice(2);
@@ -27,7 +33,42 @@ const valueAfter = (flag) => {
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const pause = () => sleep(Number(process.env.FAKE_CLI_DELAY_MS) || 0);
 const emit = (obj) => process.stdout.write(`${JSON.stringify(obj)}\n`);
+
+// The two model calls of a successful run (usage as message_start / message_delta report it) and their total.
+const CALL_1_START = { input_tokens: 3, cache_creation_input_tokens: 1200, cache_read_input_tokens: 45000, output_tokens: 1 };
+const CALL_1_END = { ...CALL_1_START, output_tokens: 120, output_tokens_details: { thinking_tokens: 30 } };
+const CALL_2_START = { input_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 46300, output_tokens: 1 };
+const CALL_2_END = { input_tokens: null, cache_creation_input_tokens: null, cache_read_input_tokens: null, output_tokens: 60 };
+const USAGE_TOTAL = {
+  input_tokens: 8,
+  cache_creation_input_tokens: 1200,
+  cache_read_input_tokens: 91300,
+  output_tokens: 180,
+  output_tokens_details: { thinking_tokens: 30 },
+  server_tool_use: { web_search_requests: 0, web_fetch_requests: 0 },
+  service_tier: 'standard',
+};
+
+function rateLimitInfo() {
+  const raw = process.env.FAKE_CLAUDE_RATE_LIMIT;
+  if (raw === 'none') return null;
+  if (raw) return JSON.parse(raw);
+  const now = Math.floor(Date.now() / 1000);
+  return {
+    status: 'allowed',
+    resetsAt: now + 2 * 3600,
+    rateLimitType: 'five_hour',
+    overageStatus: 'rejected',
+    overageDisabledReason: 'org_level_disabled',
+    isUsingOverage: false,
+    unifiedWindows: {
+      five_hour: { utilization: 0.12, resetsAt: now + 2 * 3600 },
+      seven_day: { utilization: 0.09, resetsAt: now + 4 * 86400 },
+    },
+  };
+}
 
 let stdin = '';
 process.stdin.setEncoding('utf8');
@@ -113,11 +154,12 @@ async function main() {
   }
 
   if (mode === 'no-deltas') {
-    emit({ type: 'result', subtype: 'success', is_error: false, result: '최종 답변', session_id: reportedId });
+    const usage = { input_tokens: 100, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 20 };
+    emit({ type: 'result', subtype: 'success', is_error: false, result: '최종 답변', session_id: reportedId, usage });
     return;
   }
 
-  emit({ type: 'stream_event', event: { type: 'message_start', message: {} } });
+  emit({ type: 'stream_event', event: { type: 'message_start', message: { usage: CALL_1_START } } });
 
   if (mode === 'hang' || mode === 'hang-ignore-term') {
     emit({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } });
@@ -127,6 +169,7 @@ async function main() {
   }
 
   // --- success ---
+  await pause();
   emit({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } } });
   emit({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'SECRET THOUGHTS' } } });
   emit({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } });
@@ -145,12 +188,31 @@ async function main() {
   emit({ type: 'assistant', message: { content: [{ type: 'text', text: '안녕 세계' }] } });
 
   const toolUse = { type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: `${cwd}/slides/012.png` } };
-  emit({ type: 'assistant', message: { content: [toolUse] } });
-  emit({ type: 'assistant', message: { content: [toolUse] } }); // duplicate snapshot: one status only
+  // Snapshots repeat the call's (not final) usage once per content block: it must not be counted again.
+  emit({ type: 'assistant', message: { content: [toolUse], usage: CALL_1_START } });
+  emit({ type: 'assistant', message: { content: [toolUse], usage: CALL_1_START } }); // duplicate snapshot: one status only
+  await pause();
+  emit({ type: 'stream_event', event: { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: CALL_1_END } });
+  emit({ type: 'stream_event', event: { type: 'message_stop' } });
   emit({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'ok' }] } });
 
-  emit({ type: 'stream_event', event: { type: 'message_start', message: {} } });
+  await pause();
+  emit({ type: 'stream_event', event: { type: 'message_start', message: { usage: CALL_2_START } } });
   emit({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } });
   emit({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '두 번째 블록' } } });
-  emit({ type: 'result', subtype: 'success', is_error: false, result: '두 번째 블록', session_id: reportedId });
+  await pause();
+  emit({ type: 'stream_event', event: { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: CALL_2_END } });
+  emit({ type: 'stream_event', event: { type: 'message_stop' } });
+  await pause();
+  const limits = rateLimitInfo();
+  if (limits) emit({ type: 'rate_limit_event', rate_limit_info: limits, uuid: 'fake-uuid', session_id: reportedId });
+  emit({
+    type: 'result',
+    subtype: 'success',
+    is_error: false,
+    result: '두 번째 블록',
+    session_id: reportedId,
+    total_cost_usd: 0.061,
+    usage: USAGE_TOTAL,
+  });
 }

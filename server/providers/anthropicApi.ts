@@ -14,6 +14,8 @@
 // orchestrator continues in a new conversation (re-prime + recap). API errors are classified the same
 // way (413, "prompt is too long", …).
 //
+// Token usage (DESIGN §23) streams with message_start / message_delta; the final message's usage is the total.
+//
 // The SDK is imported on the first call (measured: importing it and the openai SDK at startup costs the
 // server ~12 MB of idle footprint, and most users never use an API provider).
 import type Anthropic from '@anthropic-ai/sdk';
@@ -23,7 +25,7 @@ import type {
   BetaMessageStreamParams,
   BetaRawMessageStreamEvent,
 } from '@anthropic-ai/sdk/resources/beta/messages/messages';
-import type { ModelOption } from '../../shared/types.ts';
+import type { ModelOption, TokenUsage } from '../../shared/types.ts';
 import type {
   HistoryTurn,
   Part,
@@ -35,6 +37,7 @@ import type {
 } from './types.ts';
 import { ProviderError } from './types.ts';
 import { abortError, errorMessage, loadInlineImage } from './proc.ts';
+import { AnthropicUsageTracker, anthropicUsage } from './usage.ts';
 
 export const ANTHROPIC_DEFAULT_MODEL = 'claude-opus-5';
 
@@ -213,23 +216,43 @@ export async function buildAnthropicRequest(input: AnthropicRequestInput): Promi
 // Streaming
 // ---------------------------------------------------------------------------
 
-/** Turns stream events into onDelta/onStatus calls and assembles the final text. */
+/** Turns stream events into onDelta/onStatus/onUsage calls and assembles the final text. */
 export class AnthropicStreamState {
   /**
    * The answer text, equal to the concatenation of the onDelta chunks. Across a server-side fallback it
    * holds the declined model's partial text followed by the fallback model's continuation.
    */
   text = '';
+  /** Tokens used so far (undefined until the stream reported any). */
+  usage: TokenUsage | undefined;
   private lastIndex: number | null = null;
   private readonly onDelta: (text: string) => void;
   private readonly onStatus: (text: string) => void;
+  private readonly onUsage: ((usage: TokenUsage) => void) | undefined;
+  private readonly calls = new AnthropicUsageTracker();
 
-  constructor(onDelta: (text: string) => void, onStatus: (text: string) => void) {
+  constructor(onDelta: (text: string) => void, onStatus: (text: string) => void, onUsage?: (usage: TokenUsage) => void) {
     this.onDelta = onDelta;
     this.onStatus = onStatus;
+    this.onUsage = onUsage;
+  }
+
+  /** Reports usage (the stream's running total, or the final message's). */
+  reportUsage(usage: TokenUsage | undefined): void {
+    if (!usage) return;
+    this.usage = usage;
+    this.onUsage?.(usage);
   }
 
   handle(event: BetaRawMessageStreamEvent): void {
+    if (event.type === 'message_start') {
+      this.reportUsage(this.calls.start(event.message.usage));
+      return;
+    }
+    if (event.type === 'message_delta') {
+      this.reportUsage(this.calls.update(event.usage));
+      return;
+    }
     if (event.type === 'content_block_start') {
       const type = event.content_block.type;
       if (type === 'thinking' || type === 'redacted_thinking') {
@@ -327,13 +350,15 @@ async function runAnthropic(input: ProviderRunInput): Promise<ProviderRunResult>
   const Anthropic = await loadAnthropicSdk();
   if (input.signal.aborted) throw abortError();
   const client = new Anthropic({ maxRetries: 2 });
-  const state = new AnthropicStreamState(input.onDelta, input.onStatus);
+  const state = new AnthropicStreamState(input.onDelta, input.onStatus, input.onUsage);
 
   try {
     const stream = client.beta.messages.stream(params, { signal: input.signal });
     for await (const event of stream) state.handle(event);
     if (input.signal.aborted) throw abortError();
     const final = await stream.finalMessage();
+    // The SDK folds every message_delta into the final message: its usage is the call's total.
+    state.reportUsage(anthropicUsage(final.usage));
     if (final.stop_reason === 'refusal') {
       const category = final.stop_details?.category;
       throw new Error(`모델이 이 요청에 대한 답변을 거절했습니다${category ? ` (${category})` : ''}. 질문을 바꿔 다시 시도해 보세요.`);
@@ -349,7 +374,9 @@ async function runAnthropic(input: ProviderRunInput): Promise<ProviderRunResult>
     if (input.signal.aborted || err instanceof Anthropic.APIUserAbortError) throw abortError();
     throw toProviderError(Anthropic, err);
   }
-  return { text: state.text, resume: {} };
+  const out: ProviderRunResult = { text: state.text, resume: {} };
+  if (state.usage) out.usage = state.usage;
+  return out;
 }
 
 export const anthropicApiProvider: Provider = {

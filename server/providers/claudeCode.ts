@@ -14,9 +14,13 @@
 // Failures are classified (ProviderError): a --resume whose CLI session no longer exists is
 // 'resume_invalid', "Prompt is too long" / "Request too large" is 'context_overflow', login problems
 // are 'auth', an unknown model or a CLI too old for it is 'model_unavailable'.
+//
+// Token usage (DESIGN §23) is reported live from each model call's message_start / message_delta and replaced by the
+// run's total from `result`; a subscription's usage limits come with rate_limit_event (after the last call).
 import { randomUUID } from 'node:crypto';
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
+import type { TokenUsage, UsageLimits } from '../../shared/types.ts';
 import type {
   Part,
   Provider,
@@ -36,6 +40,7 @@ import {
   stderrSuffix,
 } from './proc.ts';
 import type { CliBinSpec, JsonObject } from './proc.ts';
+import { AnthropicUsageTracker, anthropicUsage, claudeRateLimits } from './usage.ts';
 
 /** Read-only tools the CLI may use (to open slide PNGs it has not been shown). */
 export const CLAUDE_TOOLS = 'Read,Glob,Grep';
@@ -135,26 +140,41 @@ export interface ClaudeResultEvent {
   sessionId?: string;
 }
 
+/** Where ClaudeStreamState reports token usage and usage limits (ProviderRunInput.onUsage / onLimits). */
+export interface UsageReporters {
+  onUsage?: (usage: TokenUsage) => void;
+  onLimits?: (limits: UsageLimits) => void;
+}
+
 /**
  * Stateful interpreter of the CLI's stream-json events. Text deltas are forwarded as they arrive
- * (thinking is not); separate text blocks are joined with a blank line.
+ * (thinking is not); separate text blocks are joined with a blank line. Token usage is summed over the
+ * run's model calls as they stream (the `assistant` snapshots repeat it per content block and are not
+ * counted), then replaced by the total of `result`; the last rate_limit_event gives the limits.
  */
 export class ClaudeStreamState {
   text = '';
   sawDelta = false;
   result: ClaudeResultEvent | null = null;
+  /** Tokens of the run so far (undefined until the CLI reported any). */
+  usage: TokenUsage | undefined;
+  /** The subscription's usage limits of the last rate_limit_event, if any. */
+  limits: UsageLimits | undefined;
 
   private readonly cwd: string;
   private readonly onDelta: (text: string) => void;
   private readonly onStatus: (text: string) => void;
+  private readonly reporters: UsageReporters;
+  private readonly calls = new AnthropicUsageTracker();
   private messageSeq = 0;
   private lastTextBlock: string | null = null;
   private readonly seenTools = new Set<string>();
 
-  constructor(cwd: string, onDelta: (text: string) => void, onStatus: (text: string) => void) {
+  constructor(cwd: string, onDelta: (text: string) => void, onStatus: (text: string) => void, reporters: UsageReporters = {}) {
     this.cwd = cwd;
     this.onDelta = onDelta;
     this.onStatus = onStatus;
+    this.reporters = reporters;
   }
 
   handle(event: JsonObject): void {
@@ -165,6 +185,14 @@ export class ClaudeStreamState {
       case 'assistant':
         this.handleAssistant(asObject(event.message));
         break;
+      case 'rate_limit_event': {
+        const limits = claudeRateLimits(event.rate_limit_info, new Date().toISOString());
+        if (limits) {
+          this.limits = limits;
+          this.reporters.onLimits?.(limits);
+        }
+        break;
+      }
       case 'result':
         this.result = {
           isError: event.is_error === true,
@@ -172,15 +200,28 @@ export class ClaudeStreamState {
           text: typeof event.result === 'string' ? event.result : '',
           sessionId: typeof event.session_id === 'string' && event.session_id ? event.session_id : undefined,
         };
+        // The total of every model call of the run (authoritative; the streamed counts may miss a retried call).
+        this.reportUsage(anthropicUsage(event.usage));
         break;
       default:
         break;
     }
   }
 
+  private reportUsage(usage: TokenUsage | undefined): void {
+    if (!usage) return;
+    this.usage = usage;
+    this.reporters.onUsage?.(usage);
+  }
+
   private handleStreamEvent(e: JsonObject): void {
     if (e.type === 'message_start') {
       this.messageSeq += 1;
+      this.reportUsage(this.calls.start(asObject(e.message).usage));
+      return;
+    }
+    if (e.type === 'message_delta') {
+      if (e.usage !== undefined && e.usage !== null) this.reportUsage(this.calls.update(e.usage));
       return;
     }
     if (e.type === 'content_block_start') {
@@ -372,7 +413,7 @@ async function runClaude(input: ProviderRunInput): Promise<ProviderRunResult> {
   });
   const stdin = `${await claudeUserMessage(input.parts)}\n`;
 
-  const state = new ClaudeStreamState(input.cwd, input.onDelta, input.onStatus);
+  const state = new ClaudeStreamState(input.cwd, input.onDelta, input.onStatus, { onUsage: input.onUsage, onLimits: input.onLimits });
   const proc = await runJsonlProcess({
     bin: await resolveBin(CLAUDE_BIN_SPEC),
     args,
@@ -408,7 +449,10 @@ async function runClaude(input: ProviderRunInput): Promise<ProviderRunResult> {
   }
   // An ephemeral run has no session of ours; still hand back what the CLI reported, if anything.
   const cliSessionId = result.sessionId ?? resumeId ?? sessionId;
-  return { text, resume: cliSessionId ? { cliSessionId } : {} };
+  const out: ProviderRunResult = { text, resume: cliSessionId ? { cliSessionId } : {} };
+  if (state.usage) out.usage = state.usage;
+  if (state.limits) out.limits = state.limits;
+  return out;
 }
 
 export const claudeCodeProvider: Provider = {

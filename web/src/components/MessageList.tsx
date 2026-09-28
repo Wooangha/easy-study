@@ -5,6 +5,7 @@ import { CHAT_WINDOW, chatWindowStart } from '../lib/chatWindow.ts';
 import { copyText } from '../lib/clipboard.ts';
 import { describeContext, formatDuration, formatTime, primeCardState, providerWithModel } from '../lib/format.ts';
 import { toast } from '../lib/toast.ts';
+import { usageLine, usageTitle } from '../lib/usage.ts';
 import { AttachmentThumbs } from './Attachments.tsx';
 import { Markdown } from './Markdown.tsx';
 
@@ -326,6 +327,11 @@ function AssistantMessage({
         <div className="msg-error">⚠️ 답변 실패{m.error ? `: ${m.error}` : ''}</div>
       )}
       {m.status === 'aborted' && <div className="msg-note">⏹ 중단된 답변이에요</div>}
+      {m.usage && (
+        <div className="msg-usage" title={usageTitle(m.usage)}>
+          {usageLine(m.usage)}
+        </div>
+      )}
       {retryText !== null && (
         <button
           type="button"

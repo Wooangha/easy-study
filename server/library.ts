@@ -28,6 +28,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { COURSE_ID_RE, DOC_ID_RE, EFFORT_ID_RE } from '../shared/types.ts';
 import type { DigestSlide, DigestStatus, DocMeta } from '../shared/types.ts';
+import { readTokenUsage } from '../shared/usage.ts';
 import { VIEW_WIDTHS, inlinePathFor, thumbPath, viewPath } from './assets.ts';
 import { HttpError, libraryDir } from './config.ts';
 import { isImageWorkerStopped, runImageWorker, runPdfWorker, runTextWorker } from './imageWorker.ts';
@@ -479,6 +480,8 @@ function normalizeDigestRecord(value: unknown): DigestRecord | null {
   if (typeof raw.updatedAt === 'string') record.updatedAt = raw.updatedAt;
   if (typeof raw.error === 'string' && raw.error) record.error = raw.error;
   if (raw.summaryStale === true) record.summaryStale = true;
+  const usage = readTokenUsage(raw.usage);
+  if (usage) record.usage = usage;
   return record;
 }
 

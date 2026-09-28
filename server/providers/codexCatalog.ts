@@ -141,11 +141,15 @@ export function codexConfigModel(configToml: string): string | null {
   return model;
 }
 
+/** Codex's home directory: $CODEX_HOME, default ~/.codex (the CLI children inherit the same environment). */
+export function codexHome(): string {
+  return process.env.CODEX_HOME?.trim() || path.join(os.homedir(), '.codex');
+}
+
 /** $CODEX_HOME/config.toml (default ~/.codex/config.toml); '' when it cannot be read. */
 export async function readCodexConfig(): Promise<string> {
-  const home = process.env.CODEX_HOME?.trim() || path.join(os.homedir(), '.codex');
   try {
-    return await readFile(path.join(home, 'config.toml'), 'utf8');
+    return await readFile(path.join(codexHome(), 'config.toml'), 'utf8');
   } catch {
     return '';
   }

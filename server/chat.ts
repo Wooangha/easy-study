@@ -15,8 +15,13 @@
 // Recovery (DESIGN §14): when the provider lost the conversation ('resume_invalid': expired CLI
 // session, unknown thread or previous_response_id) or it became too large ('context_overflow'), the
 // turn is rebuilt as a new conversation (re-prime + recap) and retried once within the same request.
+//
+// Token usage (DESIGN §23): what the provider reports (ProviderRunInput.onUsage / onLimits) is streamed as `usage`
+// events — the turn's running total over all its attempts — stored on the assistant message and added to the
+// session's totals (a priming turn to its priming cost too), whether the turn succeeds, fails or is aborted.
 import { randomUUID } from 'node:crypto';
-import type { ChatMessage, ProviderId, Session, StreamEvent } from '../shared/types.ts';
+import type { ChatMessage, ProviderId, Session, StreamEvent, TokenUsage, UsageLimits } from '../shared/types.ts';
+import { addSessionUsage, addUsage, totalTokens } from '../shared/usage.ts';
 import { holdAttachments } from './attachments.ts';
 import type { HeldAttachments } from './attachments.ts';
 import { acquireCliSlot } from './cliBudget.ts';
@@ -369,11 +374,25 @@ async function startTurn(validated: ValidatedTurn): Promise<TurnResult> {
   await saveSession(session);
   emit({ type: 'start', userMessage: structuredClone(userMessage), assistantMessage: structuredClone(assistantMessage) });
 
+  // Tokens of the finished attempts, of the running one (its latest report) and the latest limits.
+  let attemptsUsage: TokenUsage | undefined;
+  let attemptUsage: TokenUsage | undefined;
+  let limits: UsageLimits | undefined;
+  const turnUsage = () => {
+    const usage = addUsage(attemptsUsage, attemptUsage);
+    return usage && totalTokens(usage) > 0 ? usage : undefined;
+  };
+  const emitUsage = () => {
+    const usage = turnUsage();
+    emit({ type: 'usage', ...(usage ? { usage } : {}), ...(limits ? { limits } : {}) });
+  };
+
   // 3. Run the provider (retried once in a new conversation when the old one is lost / too large) --
   const runAttempt = async (turn: BuildTurnOutput): Promise<Attempt> => {
     let streamed = '';
     let settled = false; // ignore callbacks that arrive after run() settled
     let releaseSlot: (() => void) | null = null;
+    attemptUsage = undefined;
     try {
       if (provider.kind === 'cli' && deps.cliSlot) {
         let waited = false;
@@ -402,6 +421,16 @@ async function startTurn(validated: ValidatedTurn): Promise<TurnResult> {
         onStatus: (text) => {
           if (!settled && text) emit({ type: 'status', text });
         },
+        onUsage: (usage) => {
+          if (settled) return;
+          attemptUsage = usage;
+          emitUsage();
+        },
+        onLimits: (reported) => {
+          if (settled) return;
+          limits = reported;
+          emitUsage();
+        },
       });
       settled = true;
       return { ok: true, result, streamed };
@@ -410,6 +439,8 @@ async function startTurn(validated: ValidatedTurn): Promise<TurnResult> {
       return { ok: false, error, streamed };
     } finally {
       releaseSlot?.();
+      attemptsUsage = addUsage(attemptsUsage, attemptUsage);
+      attemptUsage = undefined;
     }
   };
 
@@ -457,6 +488,10 @@ async function startTurn(validated: ValidatedTurn): Promise<TurnResult> {
     }
   }
   assistantMessage.durationMs = Date.now() - startedAt;
+  const usage = turnUsage();
+  if (usage) assistantMessage.usage = usage;
+  session.usage = addSessionUsage(session.usage, usage, kind === 'prime');
+  if (limits) session.limits = limits;
 
   // 5. Persist, regenerate notes, finish --------------------------------------------------------
   // `done` carries the whole session (a Session is a SessionSummary plus its messages) so the client

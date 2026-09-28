@@ -8,13 +8,17 @@
 // ("다시 만들기") keeps every old entry (and the old summary) until a new one replaces it, so an aborted
 // or failed redo never loses the digest the student already had.
 //
+// Every call's token usage (DESIGN §23), failed calls included, is added to the record's `usage`, which
+// describes the latest run like its provider / model / startedAt do.
+//
 // One job per document at a time. Provider calls are one-shot (resume: null, ephemeral, no tools) and
 // never touch the study sessions. All jobs together run at most EASY_STUDY_DIGEST_CONCURRENCY calls at
 // a time (a process-wide limit), so opening several lectures does not multiply the load; with a CLI
 // provider each call also needs a slot of the CLI process budget (server/cliBudget.ts), where chat turns
 // go first.
 import fs from 'node:fs/promises';
-import type { DigestInfo, DigestSlide, ProviderId } from '../shared/types.ts';
+import type { DigestInfo, DigestSlide, ProviderId, TokenUsage } from '../shared/types.ts';
+import { addUsage, totalTokens } from '../shared/usage.ts';
 import { defaultChatDeps } from './chat.ts';
 import type { ProviderCheck } from './chat.ts';
 import { acquireCliSlot } from './cliBudget.ts';
@@ -212,6 +216,7 @@ function toInfo(docId: string, pageCount: number, record: DigestRecord | null, j
   if (record.error) info.error = record.error;
   if (record.startedAt) info.startedAt = record.startedAt;
   if (record.updatedAt) info.updatedAt = record.updatedAt;
+  if (record.usage) info.usage = { ...record.usage };
   return info;
 }
 
@@ -481,6 +486,7 @@ async function runJob(docId: string, job: DigestJob, record: DigestRecord, ctx: 
   const call = async (systemPrompt: string, parts: Part[]): Promise<string> => {
     const release = await acquireCallSlot(deps.concurrency(), signal);
     let releaseCli: (() => void) | null = null;
+    let usage: TokenUsage | undefined;
     try {
       if (provider.kind === 'cli' && deps.cliSlot) releaseCli = await deps.cliSlot('digest', signal);
       let streamed = '';
@@ -500,11 +506,16 @@ async function runJob(docId: string, job: DigestJob, record: DigestRecord, ctx: 
           streamed += text;
         },
         onStatus: () => {},
+        onUsage: (reported) => {
+          usage = reported;
+        },
       });
       return result.text.trim() ? result.text : streamed;
     } finally {
       releaseCli?.();
       release();
+      // Persisted with the batch (or at the end of the run).
+      if (usage && totalTokens(usage) > 0) record.usage = addUsage(record.usage, usage);
     }
   };
 

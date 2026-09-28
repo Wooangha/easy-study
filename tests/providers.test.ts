@@ -13,6 +13,7 @@ import { after, afterEach, before, beforeEach, describe, mock, test } from 'node
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import sharp from 'sharp';
+import type { TokenUsage, UsageLimits } from '../shared/types.ts';
 import { inlinePathFor } from '../server/assets.ts';
 import type { Part, Provider, ProviderRunInput, ProviderRunResult } from '../server/providers/types.ts';
 import { ProviderError, providerErrorKind } from '../server/providers/types.ts';
@@ -28,6 +29,7 @@ import {
   classifyClaudeFailure,
   toolStatus,
 } from '../server/providers/claudeCode.ts';
+import { findCodexRollout, uuidV7Time } from '../server/providers/codexRollout.ts';
 import {
   CODEX_BIN_SPEC,
   CODEX_DISABLED_INTEGRATIONS,
@@ -139,6 +141,9 @@ const ENV_KEYS = [
   'FAKE_CLI_RECORD',
   'FAKE_CODEX_CATALOG',
   'FAKE_CODEX_CATALOG_LOG',
+  'FAKE_CODEX_ROLLOUT',
+  'FAKE_CODEX_RATE_LIMITS',
+  'FAKE_CLAUDE_RATE_LIMIT',
   'CLAUDECODE',
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_AUTH_TOKEN',
@@ -824,6 +829,68 @@ describe('claude-code provider', () => {
     );
     assert.equal(toolStatus('Read', { file_path: '/etc/hosts' }, cwd), '파일 읽는 중: /etc/hosts');
   });
+
+  test('token usage: live per model call (snapshots not counted twice), then the run total; limits of rate_limit_event', FAKE_CLI, async () => {
+    const usages: TokenUsage[] = [];
+    const limits: UsageLimits[] = [];
+    const out = await run(claudeCodeProvider, { onUsage: (u) => usages.push(u), onLimits: (l) => limits.push(l) });
+    assert.ifError(out.error);
+    // Input = input_tokens + cache writes + cache reads (Claude counts the cache apart); output includes thinking.
+    const firstCall = { input: 46_203, cachedInput: 45_000, cacheWrite: 1_200 };
+    const total = { input: 92_508, output: 180, cachedInput: 91_300, cacheWrite: 1_200, reasoning: 30 };
+    assert.deepEqual(usages, [
+      { ...firstCall, output: 1 }, // message_start
+      { ...firstCall, output: 120, reasoning: 30 }, // message_delta
+      { input: 92_508, output: 121, cachedInput: 91_300, cacheWrite: 1_200, reasoning: 30 }, // second call starts
+      total, // its message_delta (null counts keep message_start's)
+      total, // result: the run's total
+    ]);
+    assert.deepEqual(out.result?.usage, total);
+
+    assert.equal(limits.length, 1);
+    assert.equal(limits[0].status, 'ok');
+    assert.deepEqual(
+      limits[0].windows.map((w) => [w.minutes, w.usedPercent, w.label]),
+      [
+        [300, 12, undefined],
+        [10_080, 9, undefined],
+      ],
+    );
+    assert.ok(limits[0].windows.every((w) => w.resetsAt && Date.parse(w.resetsAt) > Date.now()));
+    assert.deepEqual(out.result?.limits, limits[0]);
+  });
+
+  test('usage limits: none without rate_limit_event (an API key); a warning on a model-family window', FAKE_CLI, async () => {
+    process.env.FAKE_CLAUDE_RATE_LIMIT = 'none';
+    const plain = await run(claudeCodeProvider, { onLimits: () => assert.fail('no limits') });
+    assert.ifError(plain.error);
+    assert.equal(plain.result?.limits, undefined);
+    assert.ok(plain.result?.usage, 'usage is still reported');
+
+    process.env.FAKE_CLAUDE_RATE_LIMIT = JSON.stringify({
+      status: 'allowed_warning',
+      rateLimitType: 'seven_day_opus',
+      utilization: 0.91,
+      resetsAt: 1790982000,
+      unifiedWindows: { five_hour: { utilization: 0.4, resetsAt: 1790634600 } },
+    });
+    const warned = await run(claudeCodeProvider);
+    assert.ifError(warned.error);
+    assert.equal(warned.result?.limits?.status, 'warning');
+    assert.deepEqual(warned.result?.limits?.windows, [
+      { minutes: 300, usedPercent: 40, resetsAt: '2026-09-28T22:30:00.000Z' },
+      // The window the warning is about.
+      { minutes: 10_080, usedPercent: 91, resetsAt: '2026-10-02T23:00:00.000Z', label: 'Opus', binding: true },
+    ]);
+  });
+
+  test('an aborted run has reported the usage streamed so far', FAKE_CLI, async () => {
+    process.env.FAKE_CLI_MODE = 'hang';
+    const usages: TokenUsage[] = [];
+    const out = await run(claudeCodeProvider, { onUsage: (u) => usages.push(u) }, (_t, controller) => controller.abort());
+    assert.equal(out.error?.name, 'AbortError');
+    assert.deepEqual(usages, [{ input: 46_203, output: 1, cachedInput: 45_000, cacheWrite: 1_200 }]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1306,6 +1373,111 @@ describe('codex provider', () => {
     assert.equal(classifyCodexFailure('This model requires a newer version of Codex.', false), 'model_unavailable');
     assert.equal(classifyCodexFailure('stream disconnected before completion', true), 'other');
   });
+
+  /** Usage of the fake's successful turn (tests/fixtures/fake-codex.mjs TURN_USAGE). */
+  const CODEX_TURN: TokenUsage = { input: 8_595, cachedInput: 3_072, output: 520, reasoning: 128 };
+
+  test("token usage: a new thread's comes with turn.completed; a resumed thread's (maybe the thread's total) only from its rollout", FAKE_CLI, async () => {
+    const usages: TokenUsage[] = [];
+    const out = await run(codexProvider, { onUsage: (u) => usages.push(u), onLimits: () => assert.fail('no limits without a rollout') });
+    assert.ifError(out.error);
+    assert.deepEqual(usages, [CODEX_TURN]);
+    assert.deepEqual(out.result?.usage, CODEX_TURN);
+    assert.equal(out.result?.limits, undefined);
+
+    usages.length = 0;
+    const resumed = await run(codexProvider, { resume: { cliSessionId: 'thread-123' }, onUsage: (u) => usages.push(u) });
+    assert.ifError(resumed.error);
+    assert.deepEqual(usages, [], 'turn.completed of a resumed thread is not reported');
+    assert.equal(resumed.result?.usage, undefined);
+  });
+
+  test("with the thread's rollout: the turn's own usage and the plan's limits (not a model bucket's), resumed turns too", FAKE_CLI, async () => {
+    process.env.FAKE_CODEX_ROLLOUT = '1';
+    const usages: TokenUsage[] = [];
+    const limits: UsageLimits[] = [];
+    const collect = { onUsage: (u: TokenUsage) => usages.push(u), onLimits: (l: UsageLimits) => limits.push(l) };
+    const first = await run(codexProvider, collect);
+    assert.ifError(first.error);
+    const threadId = first.result?.resume.cliSessionId ?? '';
+    assert.ok(uuidV7Time(threadId), 'a UUIDv7 thread id');
+    const file = await findCodexRollout(threadId, process.env.CODEX_HOME);
+    assert.ok(file && file.startsWith(path.join(process.env.CODEX_HOME ?? '', 'sessions')));
+    assert.deepEqual(usages, [CODEX_TURN], 'the rollout says the same as turn.completed: reported once');
+    assert.equal(limits.length, 1);
+    assert.deepEqual(
+      limits[0].windows.map((w) => [w.minutes, w.usedPercent, w.label]),
+      [
+        [300, 12, undefined],
+        [10_080, 9, undefined],
+      ],
+    );
+
+    usages.length = 0;
+    limits.length = 0;
+    const second = await run(codexProvider, { resume: { cliSessionId: threadId }, ...collect });
+    assert.ifError(second.error);
+    assert.deepEqual(usages, [CODEX_TURN], "the turn's usage, not the thread's running total");
+    assert.deepEqual(second.result?.usage, CODEX_TURN);
+    assert.equal(limits.length, 1);
+    assert.equal(second.result?.limits?.status, 'ok');
+
+    process.env.FAKE_CODEX_RATE_LIMITS = JSON.stringify({
+      limit_id: 'codex',
+      primary: { used_percent: 100, window_minutes: 10080, resets_at: 1791049157 },
+      secondary: null,
+      rate_limit_reached_type: 'rate_limit_reached',
+    });
+    const reached = await run(codexProvider, { resume: { cliSessionId: threadId } });
+    assert.deepEqual(reached.result?.limits?.windows, [{ minutes: 10_080, usedPercent: 100, resetsAt: '2026-10-03T17:39:17.000Z' }]);
+    assert.equal(reached.result?.limits?.status, 'reached');
+  });
+
+  test("a resumed run that recorded nothing never reports the previous turn's usage, however soon it starts", FAKE_CLI, async () => {
+    process.env.FAKE_CODEX_ROLLOUT = '1';
+    const first = await run(codexProvider);
+    assert.ifError(first.error);
+    // Right after the priming turn (milliseconds after its records), the question fails before any model response.
+    process.env.FAKE_CLI_MODE = 'turn-failed';
+    const usages: TokenUsage[] = [];
+    const limits: UsageLimits[] = [];
+    const failed = await run(codexProvider, {
+      resume: first.result?.resume ?? null,
+      onUsage: (u) => usages.push(u),
+      onLimits: (l) => limits.push(l),
+    });
+    assert.match(failed.error?.message ?? '', /stream disconnected/);
+    assert.deepEqual(usages, []);
+    assert.deepEqual(limits, []);
+  });
+
+  test('a stopped run reports the usage of the model calls it finished (from the rollout)', FAKE_CLI, async () => {
+    process.env.FAKE_CODEX_ROLLOUT = '1';
+    const first = await run(codexProvider);
+    assert.ifError(first.error);
+    const threadId = first.result?.resume.cliSessionId ?? '';
+    const file = (await findCodexRollout(threadId, process.env.CODEX_HOME)) ?? '';
+    process.env.FAKE_CLI_MODE = 'hang';
+    const usages: TokenUsage[] = [];
+    const call = { input_tokens: 40_000, cached_input_tokens: 30_000, output_tokens: 300, reasoning_output_tokens: 0 };
+    const stopped = await run(codexProvider, { resume: { cliSessionId: threadId }, onUsage: (u) => usages.push(u) }, undefined, (_t, controller) => {
+      // The running turn's first model call has finished: Codex records it.
+      const entry = { timestamp: new Date().toISOString(), type: 'token_usage_record', payload: { thread_id: threadId, turn_token_usage: call } };
+      fs.appendFileSync(file, `${JSON.stringify(entry)}\n`);
+      controller.abort();
+    });
+    assert.equal(stopped.error?.name, 'AbortError');
+    assert.deepEqual(usages, [{ input: 40_000, cachedInput: 30_000, output: 300 }]);
+  });
+
+  test('ephemeral runs report the usage of turn.completed and neither write nor read a rollout', FAKE_CLI, async () => {
+    process.env.FAKE_CODEX_ROLLOUT = '1';
+    const out = await run(codexProvider, { ephemeral: true });
+    assert.ifError(out.error);
+    assert.deepEqual(out.result?.usage, CODEX_TURN);
+    assert.equal(out.result?.limits, undefined);
+    assert.equal(fs.existsSync(path.join(process.env.CODEX_HOME ?? '', 'sessions')), false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1384,7 +1556,7 @@ function anthropicEvents(stopReason = 'end_turn', text = ['안녕', '하세요']
           content: [],
           stop_reason: null,
           stop_sequence: null,
-          usage: { input_tokens: 10, output_tokens: 1 },
+          usage: { input_tokens: 10, cache_creation_input_tokens: 2000, cache_read_input_tokens: 30000, output_tokens: 1 },
         },
       },
     ],
@@ -1401,7 +1573,7 @@ function anthropicEvents(stopReason = 'end_turn', text = ['안녕', '하세요']
       {
         type: 'message_delta',
         delta: { stop_reason: stopReason, stop_sequence: null, stop_details: stopReason === 'refusal' ? { type: 'refusal', category: 'cyber', explanation: null } : null },
-        usage: { output_tokens: 5 },
+        usage: { output_tokens: 5, output_tokens_details: { thinking_tokens: 3 } },
       },
     ],
     ['message_stop', { type: 'message_stop' }],
@@ -1467,6 +1639,18 @@ describe('anthropic-api provider', () => {
     assert.equal(out.result?.text, '안녕하세요');
     assert.deepEqual(out.result?.resume, {});
     assert.deepEqual(out.statuses, ['생각하는 중…']);
+  });
+
+  test('token usage: live from message_start / message_delta, then the final message (cache counted in the input)', async () => {
+    handler = (_req, res) => sse(res, anthropicEvents());
+    const usages: TokenUsage[] = [];
+    const out = await run(anthropicApiProvider, { onUsage: (u) => usages.push(u) });
+    assert.ifError(out.error);
+    const input = { input: 32_010, cachedInput: 30_000, cacheWrite: 2_000 };
+    const total = { ...input, output: 5, reasoning: 3 };
+    assert.deepEqual(usages, [{ ...input, output: 1 }, total, total]);
+    assert.deepEqual(out.result?.usage, total);
+    assert.equal(out.result?.limits, undefined, 'API keys have no subscription limits');
   });
 
   test('first turn has a single breakpoint; non-Opus models get no fallbacks', async () => {
@@ -1637,7 +1821,24 @@ function openaiEvents(id = 'resp_2'): Array<[string, unknown]> {
       'response.output_text.delta',
       { type: 'response.output_text.delta', sequence_number: 3, item_id: 'msg_1', output_index: 1, content_index: 0, delta: 'lo', logprobs: [] },
     ],
-    ['response.completed', { type: 'response.completed', sequence_number: 4, response: { ...response, status: 'completed' } }],
+    [
+      'response.completed',
+      {
+        type: 'response.completed',
+        sequence_number: 4,
+        response: {
+          ...response,
+          status: 'completed',
+          usage: {
+            input_tokens: 1200,
+            input_tokens_details: { cached_tokens: 1024 },
+            output_tokens: 300,
+            output_tokens_details: { reasoning_tokens: 200 },
+            total_tokens: 1500,
+          },
+        },
+      },
+    ],
   ];
 }
 
@@ -1677,6 +1878,8 @@ describe('openai-api provider', () => {
     assert.equal(out.result?.text, 'Hello');
     assert.deepEqual(out.result?.resume, { previousResponseId: 'resp_2' });
     assert.deepEqual(out.statuses, ['생각하는 중…']);
+    // Cached and reasoning tokens are parts of the input and output counts.
+    assert.deepEqual(out.result?.usage, { input: 1200, cachedInput: 1024, output: 300, reasoning: 200 });
   });
 
   test('a new conversation has no previous_response_id; OPENAI_MODEL sets the default model', async () => {

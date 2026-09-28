@@ -6,7 +6,19 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
-import type { Attachment, ChatMessage, DocMeta, NotesResponse, ProviderId, ProviderInfo, Session, StreamEvent } from '../shared/types.ts';
+import type {
+  Attachment,
+  ChatMessage,
+  DocMeta,
+  NotesResponse,
+  ProviderId,
+  ProviderInfo,
+  Session,
+  SessionSummary,
+  StreamEvent,
+  TokenUsage,
+  UsageLimits,
+} from '../shared/types.ts';
 import { isAttachmentPinned } from '../server/attachments.ts';
 import { abortTurn, defaultChatDeps, isTurnRunning, resolveNeighbors, runTurn } from '../server/chat.ts';
 import type { ChatDeps, TurnRequest } from '../server/chat.ts';
@@ -21,7 +33,7 @@ import { docPaths, slideFileName, textFileName } from '../server/library.ts';
 import type { StoredDocMeta } from '../server/library.ts';
 import { ProviderError } from '../server/providers/types.ts';
 import type { Part, Provider, ProviderRunInput, ProviderRunResult } from '../server/providers/types.ts';
-import { createSession, getSession, saveSession } from '../server/sessions.ts';
+import { createSession, getSession, saveSession, toSummary } from '../server/sessions.ts';
 
 let tmpRoot = '';
 
@@ -959,6 +971,160 @@ describe('runTurn recovery', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Token usage (DESIGN §23)
+// ---------------------------------------------------------------------------
+
+const LIMITS: UsageLimits = {
+  at: '2026-09-29T00:00:00.000Z',
+  status: 'ok',
+  windows: [
+    { minutes: 300, usedPercent: 12, resetsAt: '2026-09-29T02:00:00.000Z' },
+    { minutes: 10_080, usedPercent: 9, resetsAt: '2026-10-02T00:00:00.000Z' },
+  ],
+};
+
+/** Reports usage while streaming (like Claude Code: a first count, then the call's final one) and the limits. */
+const usageAnswer =
+  (final: TokenUsage, limits: UsageLimits | null = LIMITS): Script =>
+  async (input, call) => {
+    input.onUsage?.({ ...final, output: 1 });
+    input.onDelta(`answer ${call}`);
+    input.onUsage?.(final);
+    if (limits) input.onLimits?.(limits);
+    return { text: `answer ${call}`, resume: { cliSessionId: `cli-${call}` } };
+  };
+
+function usageEvents(events: StreamEvent[]): Array<Extract<StreamEvent, { type: 'usage' }>> {
+  return events.filter((e): e is Extract<StreamEvent, { type: 'usage' }> => e.type === 'usage');
+}
+
+describe('runTurn token usage (DESIGN §23)', () => {
+  const DOC = 'usage-deck-fff666';
+  before(() => makeReadyDoc(DOC));
+
+  const PRIME: TokenUsage = { input: 41_000, cacheWrite: 39_000, output: 900 };
+  const QUESTION: TokenUsage = { input: 47_213, cachedInput: 41_000, output: 820, reasoning: 120 };
+
+  test('`usage` events carry the running total and the limits; the answer and the session keep them, priming apart', async () => {
+    const provider = fakeProvider('claude-code', usageAnswer(PRIME));
+    const deps = depsFor(provider);
+    const session = await createSession(DOC, { provider: 'claude-code', model: '' });
+
+    const prime = await turn(deps, { docId: DOC, sessionId: session.id, kind: 'prime', slide: 1 });
+    assert.deepEqual(
+      prime.events.map((e) => e.type),
+      ['start', 'usage', 'delta', 'usage', 'usage', 'done'],
+    );
+    assert.deepEqual(usageEvents(prime.events), [
+      { type: 'usage', usage: { ...PRIME, output: 1 } },
+      { type: 'usage', usage: PRIME },
+      { type: 'usage', usage: PRIME, limits: LIMITS },
+    ]);
+    assert.deepEqual(prime.assistant.usage, PRIME);
+    const primeDone = prime.events.at(-1) as Extract<StreamEvent, { type: 'done' }>;
+    assert.deepEqual(primeDone.assistantMessage.usage, PRIME);
+    assert.deepEqual(primeDone.session.usage, { total: PRIME, priming: PRIME });
+    assert.deepEqual(primeDone.session.limits, LIMITS);
+
+    provider.script = usageAnswer(QUESTION, { ...LIMITS, at: '2026-09-29T01:00:00.000Z' });
+    const ask = await turn(deps, { docId: DOC, sessionId: session.id, kind: 'question', text: '토큰?', slide: 2 });
+    assert.deepEqual(ask.assistant.usage, QUESTION);
+
+    const stored = await getSession(DOC, session.id);
+    assert.deepEqual(stored?.messages[1].usage, PRIME);
+    assert.deepEqual(stored?.messages[3].usage, QUESTION);
+    assert.equal(stored?.messages[2].usage, undefined, 'user messages carry none');
+    assert.deepEqual(stored?.usage, {
+      total: { input: 88_213, cachedInput: 41_000, cacheWrite: 39_000, output: 1_720, reasoning: 120 },
+      priming: PRIME,
+    });
+    assert.equal(stored?.limits?.at, '2026-09-29T01:00:00.000Z', 'the latest limits');
+
+    // A provider that reports nothing (or only zeros) leaves the answer without usage and the totals as they were.
+    provider.script = async (input, call) => {
+      input.onUsage?.({ input: 0, output: 0 });
+      return streamingAnswer((n) => `plain ${n}`)(input, call);
+    };
+    const plain = await turn(deps, { docId: DOC, sessionId: session.id, kind: 'question', text: 'no usage', slide: 2 });
+    assert.equal(plain.assistant.usage, undefined);
+    assert.ok(usageEvents(plain.events).every((e) => e.usage === undefined));
+    assert.deepEqual((await getSession(DOC, session.id))?.usage, stored?.usage);
+  });
+
+  test('failed, aborted and retried turns count every attempt', async () => {
+    let script: Script = usageAnswer(PRIME, null);
+    const provider = fakeProvider('claude-code', (input, call) => script(input, call));
+    const deps = depsFor(provider);
+    const session = await createSession(DOC, { provider: 'claude-code', model: '' });
+    await turn(deps, { docId: DOC, sessionId: session.id, kind: 'prime', slide: 1 });
+
+    // An error after the model has read the question: the tokens were still used.
+    script = async (input) => {
+      input.onUsage?.({ input: 30_000, cachedInput: 29_000, output: 0 });
+      throw new Error('stream disconnected');
+    };
+    const failed = await turn(deps, { docId: DOC, sessionId: session.id, kind: 'question', text: 'fails', slide: 1 });
+    assert.equal(failed.assistant.status, 'error');
+    assert.deepEqual(failed.assistant.usage, { input: 30_000, cachedInput: 29_000, output: 0 });
+
+    // Aborted mid-answer.
+    script = async (input, call) => {
+      input.onUsage?.({ input: 31_000, output: 40 });
+      return hangUntilAborted(input, call);
+    };
+    const events: StreamEvent[] = [];
+    const running = runTurn({ docId: DOC, sessionId: session.id, kind: 'question', text: 'stop me', slide: 1, onEvent: (e) => events.push(e) }, deps);
+    await waitFor(() => events.some((e) => e.type === 'usage'));
+    abortTurn(DOC, session.id);
+    const aborted = (await running).assistantMessage;
+    assert.equal(aborted.status, 'aborted');
+    assert.deepEqual(aborted.usage, { input: 31_000, output: 40 });
+
+    // A lost conversation: the failed attempt and the retry in a new conversation add up.
+    script = async (input, call) => {
+      if (input.resume !== null) {
+        input.onUsage?.({ input: 120, output: 0 });
+        throw new ProviderError('No conversation found', 'resume_invalid');
+      }
+      return usageAnswer(PRIME, null)(input, call);
+    };
+    const retried = await turn(deps, { docId: DOC, sessionId: session.id, kind: 'question', text: 'retry', slide: 1 });
+    assert.equal(retried.assistant.status, 'complete');
+    assert.deepEqual(retried.assistant.usage, { input: 41_120, cacheWrite: 39_000, output: 900 });
+    assert.deepEqual(
+      usageEvents(retried.events).map((e) => e.usage?.input),
+      [120, 41_120, 41_120],
+      'the retry continues the running total',
+    );
+
+    const stored = await getSession(DOC, session.id);
+    assert.deepEqual(stored?.usage, {
+      total: { input: 41_000 + 30_000 + 31_000 + 41_120, cachedInput: 29_000, cacheWrite: 78_000, output: 900 + 40 + 900 },
+      priming: PRIME,
+    });
+    assert.equal(stored?.limits, undefined, 'no limits were reported');
+  });
+
+  test('sessions saved before usage existed load without it; malformed totals are dropped', async () => {
+    const session = await createSession(DOC, { provider: 'codex', model: '' });
+    assert.equal('usage' in session, false);
+    assert.equal('usage' in toSummary(session), false);
+    const file = path.join(docPaths(DOC).sessionsDir, `${session.id}.json`);
+    const raw = JSON.parse(await fs.readFile(file, 'utf8'));
+    await fs.writeFile(file, JSON.stringify({ ...raw, usage: { total: { input: 'many' } }, limits: { at: 'soon', windows: 1 } }));
+    const loaded = await getSession(DOC, session.id);
+    assert.ok(loaded);
+    assert.equal(loaded.usage, undefined);
+    assert.equal(loaded.limits, undefined);
+
+    // Its next turn starts the totals.
+    const provider = fakeProvider('codex', usageAnswer(PRIME));
+    await turn(depsFor(provider), { docId: DOC, sessionId: session.id, kind: 'prime', slide: 1 });
+    assert.deepEqual((await getSession(DOC, session.id))?.usage, { total: PRIME, priming: PRIME });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // HTTP smoke test
 // ---------------------------------------------------------------------------
 
@@ -1207,6 +1373,39 @@ describe('HTTP server', () => {
     const session = (await (await api(`/docs/${docId}/sessions/${sessionId}`)).json()) as Session;
     assert.equal(session.messages.at(-1)?.text, 'partial ');
     assert.equal(session.messages.at(-1)?.error, '클라이언트 연결이 끊어져 중단되었습니다');
+  });
+
+  test('token usage: SSE `usage` frames, then saved with the answer and the session (DESIGN §23)', async () => {
+    const saved = provider.script;
+    const final: TokenUsage = { input: 47_213, cachedInput: 41_000, output: 820, reasoning: 120 };
+    provider.script = usageAnswer(final);
+    try {
+      const created = (await (await postJson(`/docs/${docId}/sessions`, { provider: 'claude-code', title: '토큰' })).json()) as Session;
+      const prime = parseSse(await (await postJson(`/docs/${docId}/sessions/${created.id}/prime`, { slide: 1 })).text());
+      assert.deepEqual(
+        prime.map((f) => f.event),
+        ['start', 'usage', 'delta', 'usage', 'usage', 'done'],
+      );
+      assert.deepEqual(prime.at(-2)?.data, { type: 'usage', usage: final, limits: LIMITS });
+      const ask = parseSse(await (await postJson(`/docs/${docId}/sessions/${created.id}/messages`, { text: '토큰은?', slide: 2 })).text());
+      const done = ask.at(-1)?.data as Extract<StreamEvent, { type: 'done' }>;
+      assert.deepEqual(done.assistantMessage.usage, final);
+
+      // A reload shows the same: per answer, the session's totals, the latest limits.
+      const session = (await (await api(`/docs/${docId}/sessions/${created.id}`)).json()) as Session;
+      assert.deepEqual(
+        session.messages.filter((m) => m.role === 'assistant').map((m) => m.usage),
+        [final, final],
+      );
+      const total = { input: 94_426, cachedInput: 82_000, output: 1_640, reasoning: 240 };
+      assert.deepEqual(session.usage, { total, priming: final });
+      assert.deepEqual(session.limits, LIMITS);
+      const list = (await (await api(`/docs/${docId}/sessions`)).json()) as SessionSummary[];
+      assert.deepEqual(list.find((s) => s.id === created.id)?.usage?.total, total);
+      await api(`/docs/${docId}/sessions/${created.id}`, { method: 'DELETE' });
+    } finally {
+      provider.script = saved;
+    }
   });
 
   test('notes endpoints', async () => {

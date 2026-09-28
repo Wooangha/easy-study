@@ -351,6 +351,34 @@ describe('digest job', () => {
     assert.ok(redo.calls.every((c) => c.effort === ''));
   });
 
+  test("every call's token usage (failed ones and the summary too) is kept for the latest run (DESIGN §23)", async () => {
+    const docId = 'usage-000001';
+    await makeDoc(docId, 5);
+    let failSlide5 = true;
+    const provider = fakeProvider(async (info) => {
+      info.input.onUsage?.({ input: 10_000, cachedInput: 2_000, output: 1 });
+      info.input.onUsage?.({ input: 10_000, cachedInput: 2_000, output: 700, reasoning: 100 });
+      if (!info.summary && info.slides[0] === 5 && failSlide5) {
+        failSlide5 = false;
+        throw new Error('stream disconnected');
+      }
+      return wellBehaved(info);
+    });
+    await startDigest(docId, { provider: 'claude-code' }, depsFor(provider));
+    const info = await finish(docId);
+    assert.equal(info.status, 'ready', info.error ?? '');
+    assert.equal(provider.calls.length, 4, 'slides 1–4, slide 5 (failed), slide 5 again, the summary');
+    const total = { input: 40_000, cachedInput: 8_000, output: 2_800, reasoning: 400 };
+    assert.deepEqual(info.usage, total);
+    assert.deepEqual((await readRecord(docId)).usage, total);
+
+    // A new run starts over (a provider that reports nothing leaves none).
+    const quiet = fakeProvider(wellBehaved);
+    const redo = await startDigest(docId, { provider: 'claude-code', force: true }, depsFor(quiet));
+    assert.equal(redo.usage, undefined);
+    assert.equal((await finish(docId)).usage, undefined);
+  });
+
   test('persists after every batch (digest.json and DIGEST.md)', async () => {
     const docId = 'persist-000001';
     await makeDoc(docId, 9, 'Persisted');

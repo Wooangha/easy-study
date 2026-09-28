@@ -186,11 +186,12 @@ Settings defaults (overridable with env): `recentWindow=4` (`EASY_STUDY_RECENT_W
    no running turn → else 409).
 2. `buildTurn(...)`. Create the user message (with `context`) and an assistant placeholder
    (`status: 'streaming'`), append both to the session, persist, emit `start`.
-3. `provider.run(...)` streaming `delta` / `status` events.
+3. `provider.run(...)` streaming `delta` / `status` events (and `usage`, §23).
 4. On success: assistant `status: 'complete'`, `text` = result text, `durationMs`; providerState =
    `nextState` with `resume` from the result (and `appendHistory` for stateless providers).
    On failure: `status: 'error'` + `error`; on abort: `status: 'aborted'`. In both cases the
-   providerState is **not** advanced (so the next turn re-primes if priming failed).
+   providerState is **not** advanced (so the next turn re-primes if priming failed). In every case the
+   turn's token usage goes to the assistant message and the session's totals (§23).
 5. Persist session, regenerate `notes/<sid>.md` and `STUDY_NOTES.md`, emit `done`.
 
 ## 6. Providers (`server/providers/*`)
@@ -271,6 +272,9 @@ Default model from `OPENAI_MODEL` or `gpt-5`. maxImagesPerConversation: 150.
 
 `GET /api/health` reports availability: CLI providers run `<cli> --version` (cached 60 s; Codex also its model
 catalog, above); API providers check the env key.
+
+Every provider reports the tokens of a call (`onUsage`) and, the subscription CLIs, their usage limits (`onLimits`):
+where each one finds them is in §23.
 
 ### Model and reasoning effort choice
 ProviderInfo: `models` (ModelOption `{id, label, description?, efforts?}`; `efforts` omitted = every level of the
@@ -1009,3 +1013,72 @@ about using lecture speech.
   since ggml's own busy-waiting thread pool hangs there when threads outnumber free CPUs) and the minimal LGPL ffmpeg, caches them, ships them like es-node
   (resources on macOS/Windows, externalBin on Linux), and passes EASY_STUDY_WHISPER / EASY_STUDY_FFMPEG to the server. Licenses in
   THIRD_PARTY_NOTICES.md (whisper.cpp MIT, ffmpeg LGPL build config + source offer, Silero VAD MIT, models MIT/OpenAI).
+
+## 23. Token usage and subscription limits
+
+Students on a Claude or ChatGPT subscription watch their plan's usage limits. A question sends about 40–55k input
+tokens (mostly read from the prompt cache after the first turn) and gets a few hundred to ~1k output tokens back; the
+app shows what each answer and each session used, live, and the plan's limits when the CLI reports them.
+
+### Contract (shared/types.ts, arithmetic in shared/usage.ts)
+- `TokenUsage {input, cachedInput?, cacheWrite?, output, reasoning?}`: `input` / `output` are totals (the cache and
+  reasoning included); the parts are omitted when zero or not reported.
+- `UsageLimits {at, status: 'ok'|'warning'|'reached', windows: [{minutes, usedPercent, resetsAt?, label?, binding?}]}`:
+  windows by length (300 = 5 hours, 10080 = a week), shortest first, `usedPercent` 0–100 (can exceed 100), `label` for a
+  model family's own limit, `binding` on the window a warning / reached status is about when the provider names it.
+- `ProviderRunInput.onUsage` (the call's running total; each report replaces the previous one, also before a failure)
+  and `onLimits`; `ProviderRunResult.usage` / `limits` are the last values.
+- SSE `{type:'usage', usage?, limits?}`: the turn's running total over all its attempts (a failed attempt retried in a
+  new conversation counts) and the latest limits, sent whenever either changes. `ChatMessage.usage` (assistant; complete,
+  error and aborted alike; zero totals dropped); `SessionSummary.usage {total, priming?}` (priming = the `prime` turns)
+  and `limits` (the latest of that session), kept in the session file. Files without them load unchanged; malformed ones
+  are dropped on read. Limits are the account's, not the session's: the web shows the newest report of the provider.
+- Digest: every call (failed ones and the lecture summary too) adds to digest.json `usage` = `DigestInfo.usage` of the
+  latest run; a new run starts over.
+
+### Where the providers find them
+- **claude-code** (verified with claude 2.1.280): `stream_event` message_start (`event.message.usage`) opens a model
+  call, message_delta (`event.usage`, cumulative for that call; null = unchanged) updates it; calls are summed live (the
+  `assistant` snapshots repeat a call's unfinished usage per content block and are not counted), and `result.usage`
+  (every call of the run) replaces the sum. Input = `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`
+  (Claude counts the cache apart); `output_tokens` include thinking (`output_tokens_details.thinking_tokens`).
+  `total_cost_usd` is a list-price estimate, not what a subscription costs: not shown. Limits: the run's (last)
+  `rate_limit_event.rate_limit_info` (claude.ai subscriptions only, after the last call): `unifiedWindows.five_hour` /
+  `seven_day` (utilization as a fraction, resetsAt in Unix seconds), plus the top-level `rateLimitType` / `utilization`
+  (the binding window, marked `binding` unless the status is ok; `seven_day_opus` / `seven_day_sonnet` labelled) when not
+  among them; status `allowed` / `allowed_warning` / `rejected` → ok / warning / reached. An API-key session (no windows)
+  gives no limits.
+- **codex** (verified with codex-cli 0.154): `turn.completed.usage` `{input_tokens, cached_input_tokens,
+  cache_write_input_tokens, output_tokens, reasoning_output_tokens}` (cached and reasoning are parts). `codex exec --json`
+  reports no limits, and a resumed thread's turn.completed may be the thread's running total. So once a non-ephemeral run
+  has ended (a stopped one too: Codex records every finished model call), its thread's rollout is read
+  (server/providers/codexRollout.ts, at most 1.5 s):
+  `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<local creation time>-<thread id>.jsonl`, the date taken from the UUIDv7 thread
+  id (±1 day), resumed turns appended to it. Only what the run appended counts (from the file's size before a resumed
+  run; not by timestamps: a question sent right after priming starts milliseconds after the priming's records), at most
+  its last 256 KB: the last `token_usage_record.turn_token_usage` (cumulative within the turn) is the turn's usage, the
+  last `event_msg` `token_count.rate_limits` the
+  limits (`limit_id` "codex" or none preferred over a model bucket, which is labelled with its `limit_name`; windows by
+  `window_minutes`, never by primary / secondary; `rate_limit_reached_type` → reached). A new thread's turn.completed usage
+  is reported at once; a resumed thread's only from the rollout (left out without it). Ephemeral runs (digests): usage
+  from turn.completed, no limits. Anything unexpected in the rollout gives nothing.
+- **anthropic-api**: the same message_start / message_delta tracking; `finalMessage().usage` is the total.
+  **openai-api**: `response.usage` of response.completed / incomplete / failed (`input_tokens_details.cached_tokens`,
+  `output_tokens_details.reasoning_tokens`). Their rate-limit headers are per-minute organisation limits, not
+  subscription windows: not read.
+
+### Web
+- Under each answer a muted line "입력 4.7만 (캐시 4.1만) · 출력 820", growing while it streams; tooltip: the exact numbers
+  (cache read / written, reasoning, total).
+- Under the composer: "이 세션 12.3만 토큰" (saved totals + the streaming turn; tooltip: exact numbers, the priming part,
+  and how many answers were saved without usage, e.g. before §23) and the limits "5시간 한도 12% · 주간 9%" (tooltip:
+  provider, report time, each window's reset time). The limits are the newest report of the session's provider from any
+  session seen (useStudySession; cached per device in localStorage), not the session's own; a report an hour old or
+  older adds "14:30 기준". From 80 % a window is shown in the warning color, from 100 % (or reached) in the danger color,
+  and says when it resets ("5시간 한도 100% (14:30 초기화)"). A provider warning / reached marks the window it is about
+  (`binding`, else the fullest) only while that window lasts; without windows it stands alone for a day. Windows whose
+  reset time has passed are hidden (they started over), and the line re-renders by itself at the next reset. The items
+  wrap as text (a separator ends the item before it); the tooltips are also the items' aria-labels.
+- Korean counts (web/src/lib/usage.ts): below 1만 with separators ("9,876"), then 만 with one decimal below 100만
+  ("4.7만", "123만"), then 억.
+- The 정리본 status line shows "토큰 12.3만" for the latest run (tooltip: exact numbers).

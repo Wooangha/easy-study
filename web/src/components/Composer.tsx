@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type KeyboardEvent } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type KeyboardEvent, type ReactNode } from 'react';
 import { MAX_ATTACHMENTS } from '../../../shared/types.ts';
 import type { AttachmentsApi } from '../hooks/useAttachments.ts';
 import { useLatest } from '../hooks/useLatest.ts';
@@ -34,6 +34,8 @@ interface ComposerProps {
   onAttachFiles: (files: File[], options?: { pasted?: boolean }) => void;
   /** A ready chip was clicked: preview it (a region also shows where it is on its slide). */
   onOpenChip: (chip: Chip) => void;
+  /** Shown under the input (the session's token usage and limits). */
+  footer?: ReactNode;
 }
 
 const MAX_TEXTAREA_PX = 220;
@@ -82,6 +84,7 @@ export function Composer({
   attachments,
   onAttachFiles,
   onOpenChip,
+  footer,
 }: ComposerProps) {
   const [text, setText] = useState('');
   // A touch screen has no Enter / Shift+Enter to explain, and its narrow composer wraps every extra word.
@@ -261,6 +264,7 @@ export function Composer({
           </button>
         )}
       </div>
+      {footer}
       <input
         ref={fileInputRef}
         type="file"

@@ -1152,6 +1152,16 @@ kbd {
   margin-top: 6px;
 }
 
+/* Token usage of an answer (DESIGN §23): quiet; the exact numbers are in the tooltip. */
+.msg-usage {
+  width: fit-content;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  cursor: help;
+}
+
 /* ---------------------------------------------------------------- empty states */
 
 .chat-empty {
@@ -1345,6 +1355,45 @@ kbd {
 .send-btn.stop {
   background: var(--danger);
   color: #fff;
+}
+
+/*
+ * The session's token total and the subscription's usage limits, under the composer (DESIGN §23). Inline text that
+ * wraps between items; each separator ends the item before it, so a wrapped line never starts with one.
+ */
+.usage-bar {
+  margin-top: 6px;
+  padding: 0 2px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-total,
+.usage-limits {
+  cursor: help;
+}
+
+.usage-item {
+  white-space: nowrap;
+}
+
+.usage-bar .usage-item:not(:last-child)::after {
+  content: '·';
+  margin: 0 2px 0 6px;
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.usage-limit.is-warn {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.usage-limit.is-danger {
+  color: var(--danger);
+  font-weight: 700;
 }
 
 /* ---------------------------------------------------------------- markdown */
@@ -2066,6 +2115,11 @@ kbd {
   align-items: center;
   flex-wrap: wrap;
   gap: 4px 8px;
+}
+
+.digest-usage {
+  font-variant-numeric: tabular-nums;
+  cursor: help;
 }
 
 .digest-status-label {

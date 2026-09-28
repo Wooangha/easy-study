@@ -16,7 +16,17 @@
 //       reports it when an AGENTS.md on the way to the project root is unreadable)
 // Like the real CLI, success sends a preamble agent message before running a command, then more
 // agent messages; only the last one is the answer.
+//
+// Token usage (DESIGN §23): turn.completed carries it in the shape of codex-cli 0.154 — the turn's usage on a new
+// thread, the thread's running total on a resumed one (as `codex exec` may report it). With $FAKE_CODEX_ROLLOUT=1 and
+// $CODEX_HOME set (never the real ~/.codex), a non-ephemeral run gets a UUIDv7 thread id and writes the thread's
+// rollout like the real CLI: $CODEX_HOME/sessions/YYYY/MM/DD/rollout-<local time>-<id>.jsonl, a resumed turn
+// appended, each turn ending with token_usage_record (turn and thread usage), token_count with the plan's
+// rate_limits (5 hours 12 %, a week 9 %; $FAKE_CODEX_RATE_LIMITS = JSON replaces them) followed by one of a model
+// bucket, and task_complete.
+import crypto from 'node:crypto';
 import fs from 'node:fs';
+import path from 'node:path';
 
 const argv = process.argv.slice(2);
 if (argv[0] === '--version') {
@@ -72,6 +82,82 @@ function debugModels(bundled) {
 const mode = process.env.FAKE_CLI_MODE || 'success';
 const emit = (obj) => process.stdout.write(`${JSON.stringify(obj)}\n`);
 
+/** Usage of one successful turn (codex-cli 0.154 field names). */
+const TURN_USAGE = { input_tokens: 8595, cached_input_tokens: 3072, cache_write_input_tokens: 0, output_tokens: 520, reasoning_output_tokens: 128 };
+const USAGE_KEYS = Object.keys(TURN_USAGE);
+
+const pad2 = (n) => String(n).padStart(2, '0');
+
+function uuidV7(ms) {
+  const time = ms.toString(16).padStart(12, '0');
+  const rand = crypto.randomBytes(10).toString('hex');
+  return `${time.slice(0, 8)}-${time.slice(8)}-7${rand.slice(0, 3)}-${'89ab'[Number.parseInt(rand[3], 16) & 3]}${rand.slice(4, 7)}-${rand.slice(7, 19)}`;
+}
+
+/** Where the real CLI keeps a thread's rollout (named after its creation in local time), or null for other ids. */
+function rolloutPath(threadId) {
+  const m = /^([0-9a-f]{8})-([0-9a-f]{4})-7/.exec(threadId);
+  if (!m) return null;
+  const d = new Date(Number.parseInt(m[1] + m[2], 16));
+  const day = [d.getFullYear(), pad2(d.getMonth() + 1), pad2(d.getDate())];
+  const time = `${day.join('-')}T${pad2(d.getHours())}-${pad2(d.getMinutes())}-${pad2(d.getSeconds())}`;
+  return path.join(process.env.CODEX_HOME, 'sessions', ...day.map(String), `rollout-${time}-${threadId}.jsonl`);
+}
+
+/** The thread's usage so far (its last token_usage_record), zeros when there is none. */
+function threadUsage(file) {
+  let last = null;
+  if (file && fs.existsSync(file)) {
+    for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+      if (line.includes('"token_usage_record"')) last = JSON.parse(line).payload.thread_token_usage;
+    }
+  }
+  return last ?? Object.fromEntries([...USAGE_KEYS, 'total_tokens'].map((key) => [key, 0]));
+}
+
+function addUsage(a, b) {
+  const sum = Object.fromEntries(USAGE_KEYS.map((key) => [key, (a[key] ?? 0) + (b[key] ?? 0)]));
+  return { ...sum, total_tokens: sum.input_tokens + sum.output_tokens };
+}
+
+/** Appends one turn's closing entries to the thread's rollout (see the top of the file). */
+function writeRolloutTurn(file, threadId, answer, fresh) {
+  const now = Math.floor(Date.now() / 1000);
+  const line = (type, payload) => `${JSON.stringify({ timestamp: new Date().toISOString(), type, payload })}\n`;
+  const turn = { ...TURN_USAGE, total_tokens: TURN_USAGE.input_tokens + TURN_USAGE.output_tokens };
+  const thread = addUsage(threadUsage(file), TURN_USAGE);
+  const rateLimits = process.env.FAKE_CODEX_RATE_LIMITS
+    ? JSON.parse(process.env.FAKE_CODEX_RATE_LIMITS)
+    : {
+        limit_id: 'codex',
+        limit_name: null,
+        primary: { used_percent: 12, window_minutes: 300, resets_at: now + 2 * 3600 },
+        secondary: { used_percent: 9, window_minutes: 10080, resets_at: now + 4 * 86400 },
+        credits: null,
+        plan_type: 'plus',
+        rate_limit_reached_type: null,
+      };
+  const bucket = {
+    limit_id: 'codex_bengalfox',
+    limit_name: 'GPT-5.3-Codex-Spark',
+    primary: { used_percent: 1, window_minutes: 300, resets_at: now + 3600 },
+    secondary: null,
+    plan_type: 'plus',
+    rate_limit_reached_type: null,
+  };
+  const info = { total_token_usage: thread, last_token_usage: turn, model_context_window: 258400 };
+  let text = '';
+  if (fresh) text += line('session_meta', { id: threadId, cwd: process.cwd(), originator: 'codex_exec' });
+  text += line('event_msg', { type: 'task_started', turn_id: 'turn-fake' });
+  text += line('token_usage_record', { thread_id: threadId, turn_id: 'turn-fake', usage: turn, turn_token_usage: turn, thread_token_usage: thread });
+  text += line('event_msg', { type: 'token_count', info, rate_limits: rateLimits });
+  text += line('event_msg', { type: 'token_count', info, rate_limits: bucket });
+  text += line('event_msg', { type: 'task_complete', turn_id: 'turn-fake', last_agent_message: answer });
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.appendFileSync(file, text);
+  return thread;
+}
+
 let stdin = '';
 if (argv[0] === 'debug' && argv[1] === 'models') {
   debugModels(argv.includes('--bundled'));
@@ -102,7 +188,8 @@ function main() {
   }
 
   const resuming = argv[0] === 'exec' && argv[1] === 'resume';
-  const threadId = resuming && mode !== 'resume-new-thread' ? argv[2] : 'thread-new-1';
+  const rollouts = process.env.FAKE_CODEX_ROLLOUT === '1' && !!process.env.CODEX_HOME && !argv.includes('--ephemeral');
+  const threadId = resuming && mode !== 'resume-new-thread' ? argv[2] : rollouts ? uuidV7(Date.now()) : 'thread-new-1';
 
   if (mode === 'resume-missing') {
     process.stderr.write(`Error: thread not found: ${argv[2]}\n`);
@@ -189,5 +276,9 @@ function main() {
   emit({ type: 'item.completed', item: { id: 'item_4', type: 'agent_message', text: '최종 답변입니다.' } });
   // A trailing non-message item must not demote the final answer.
   emit({ type: 'item.completed', item: { id: 'item_5', type: 'todo_list', items: [] } });
-  emit({ type: 'turn.completed', usage: { input_tokens: 10, cached_input_tokens: 0, output_tokens: 5 } });
+  const file = rollouts ? rolloutPath(threadId) : null;
+  const thread = file ? writeRolloutTurn(file, threadId, '최종 답변입니다.', !resuming) : null;
+  // A resumed thread reports the thread's running total (without a rollout: a made-up large one).
+  const usage = !resuming ? TURN_USAGE : (thread ?? { ...TURN_USAGE, input_tokens: 999_999, output_tokens: 9_999 });
+  emit({ type: 'turn.completed', usage: Object.fromEntries(USAGE_KEYS.map((key) => [key, usage[key]])) });
 }

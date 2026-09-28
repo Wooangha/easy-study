@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, type MouseEvent } from 'react';
 import type { DigestSlide, DocMeta, ProviderInfo } from '../../../shared/types.ts';
+import { totalTokens } from '../../../shared/usage.ts';
 import { digestMarkdownUrl } from '../api.ts';
 import { useAuth } from '../hooks/useAuth.ts';
 import type { DigestState } from '../hooks/useDigest.ts';
@@ -9,6 +10,7 @@ import { confirmDialog } from '../lib/confirm.ts';
 import { digestContinueLabel, digestNote, digestStatusLabel, digestView } from '../lib/digestState.ts';
 import { formatTime, providerWithModel } from '../lib/format.ts';
 import { toast } from '../lib/toast.ts';
+import { formatTokens, usageTitle } from '../lib/usage.ts';
 import { Markdown } from './Markdown.tsx';
 
 /** 'current' = the focused slide's entry (follows scrolling), 'all' = summary + every entry. */
@@ -289,6 +291,11 @@ export function DigestPanel({
               <span className="muted small">
                 {providerWithModel(providers, info.provider, info.model, info.effort)}
                 {info.updatedAt && ` · ${formatTime(info.updatedAt)}`}
+              </span>
+            )}
+            {info.usage && (
+              <span className="muted small digest-usage" title={usageTitle(info.usage, '이번 정리본 만들기에 쓴 토큰 (실패한 호출 포함)')}>
+                토큰 {formatTokens(totalTokens(info.usage))}
               </span>
             )}
             <span className="spacer" />

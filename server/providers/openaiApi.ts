@@ -11,6 +11,8 @@
 // responses are kept for a limited time) is 'resume_invalid'; context_length_exceeded / HTTP 413 is
 // 'context_overflow' — both make the orchestrator continue in a new conversation (re-prime + recap).
 //
+// Token usage (DESIGN §23) comes with response.completed / response.incomplete / response.failed.
+//
 // The SDK is imported on the first call (measured: importing it and the Anthropic SDK at startup costs the
 // server ~12 MB of idle footprint, and most users never use an API provider).
 import type OpenAI from 'openai';
@@ -19,7 +21,7 @@ import type {
   ResponseInputContent,
   ResponseStreamEvent,
 } from 'openai/resources/responses/responses';
-import type { ModelOption } from '../../shared/types.ts';
+import type { ModelOption, TokenUsage } from '../../shared/types.ts';
 import type {
   Part,
   Provider,
@@ -31,6 +33,7 @@ import type {
 } from './types.ts';
 import { ProviderError } from './types.ts';
 import { abortError, errorMessage, loadInlineImage } from './proc.ts';
+import { openaiUsage } from './usage.ts';
 
 export const OPENAI_FALLBACK_MODEL = 'gpt-5';
 
@@ -92,18 +95,29 @@ export async function buildOpenAIRequest(input: OpenAIRequestInput): Promise<Res
 // Streaming
 // ---------------------------------------------------------------------------
 
-/** Turns Responses stream events into onDelta/onStatus calls; throws on failure events. */
+/** Turns Responses stream events into onDelta/onStatus/onUsage calls; throws on failure events. */
 export class OpenAIStreamState {
   text = '';
   responseId: string | undefined;
   completed = false;
+  /** Tokens of the response (undefined until reported). */
+  usage: TokenUsage | undefined;
   private lastPart: string | null = null;
   private readonly onDelta: (text: string) => void;
   private readonly onStatus: (text: string) => void;
+  private readonly onUsage: ((usage: TokenUsage) => void) | undefined;
 
-  constructor(onDelta: (text: string) => void, onStatus: (text: string) => void) {
+  constructor(onDelta: (text: string) => void, onStatus: (text: string) => void, onUsage?: (usage: TokenUsage) => void) {
     this.onDelta = onDelta;
     this.onStatus = onStatus;
+    this.onUsage = onUsage;
+  }
+
+  private reportUsage(value: unknown): void {
+    const usage = openaiUsage(value);
+    if (!usage) return;
+    this.usage = usage;
+    this.onUsage?.(usage);
   }
 
   handle(event: ResponseStreamEvent): void {
@@ -121,16 +135,19 @@ export class OpenAIStreamState {
       case 'response.completed':
         this.responseId = event.response.id;
         this.completed = true;
+        this.reportUsage(event.response.usage);
         break;
       case 'response.incomplete': {
         // Usually max_output_tokens: keep the (truncated) answer.
         this.responseId = event.response.id;
         this.completed = true;
+        this.reportUsage(event.response.usage);
         const reason = event.response.incomplete_details?.reason;
         if (reason) this.onStatus(`응답이 중간에 끝났습니다 (${reason})`);
         break;
       }
       case 'response.failed': {
+        this.reportUsage(event.response.usage);
         const error = event.response.error;
         const message = error?.message ?? '응답 생성에 실패했습니다.';
         throw openaiFailure({ code: error?.code ?? null, message }, false);
@@ -262,7 +279,7 @@ async function runOpenAI(input: ProviderRunInput): Promise<ProviderRunResult> {
   const OpenAI = await loadOpenAISdk();
   if (input.signal.aborted) throw abortError();
   const client = new OpenAI({ maxRetries: 2 });
-  const state = new OpenAIStreamState(input.onDelta, input.onStatus);
+  const state = new OpenAIStreamState(input.onDelta, input.onStatus, input.onUsage);
 
   try {
     const stream = await client.responses.create(params, { signal: input.signal });
@@ -275,7 +292,9 @@ async function runOpenAI(input: ProviderRunInput): Promise<ProviderRunResult> {
   if (input.signal.aborted) throw abortError();
   if (!state.completed) throw new Error('OpenAI API 응답이 완료되지 않았습니다.');
   if (!state.responseId) throw new Error('OpenAI API가 response id를 알려주지 않았습니다.');
-  return { text: state.text, resume: { previousResponseId: state.responseId } };
+  const out: ProviderRunResult = { text: state.text, resume: { previousResponseId: state.responseId } };
+  if (state.usage) out.usage = state.usage;
+  return out;
 }
 
 export const openaiApiProvider: Provider = {

@@ -1,5 +1,17 @@
 // Server-internal contracts shared by sessions.ts, context.ts and chat.ts.
-import type { ChatMessage, ContextInfo, CourseGroup, DigestSlide, DigestStatus, DocMeta, LayoutItem, ProviderId } from '../shared/types.ts';
+import type {
+  ChatMessage,
+  ContextInfo,
+  CourseGroup,
+  DigestSlide,
+  DigestStatus,
+  DocMeta,
+  LayoutItem,
+  ProviderId,
+  SessionUsage,
+  TokenUsage,
+  UsageLimits,
+} from '../shared/types.ts';
 import type { HistoryTurn, Part, ResumeHandle } from './providers/types.ts';
 
 /** State of the conversation held *inside the provider* (CLI session / API thread). */
@@ -35,6 +47,10 @@ export interface SessionRecord {
   updatedAt: string;
   providerState: ProviderState;
   messages: ChatMessage[];
+  /** Running token totals (DESIGN §23); absent in sessions without reported usage (and those made before it). */
+  usage?: SessionUsage;
+  /** The subscription's usage limits as last reported in this session. */
+  limits?: UsageLimits;
 }
 
 export interface ContextSettings {
@@ -175,6 +191,8 @@ export interface DigestRecord {
   summary: string | null;
   /** True when slide entries changed after the summary was written (the summary must be regenerated). */
   summaryStale?: boolean;
+  /** Tokens of the latest run (DigestInfo.usage). */
+  usage?: TokenUsage;
 }
 
 /** Persisted as library/courses/<courseId>/course.json (the Course type from shared/types.ts plus a version). */

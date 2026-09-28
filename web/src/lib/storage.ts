@@ -25,6 +25,8 @@ export const storageKeys = {
   transcriptMode: 'transcriptMode',
   /** Collapsed live transcript strip under the top bar. */
   liveStripCollapsed: 'liveStripCollapsed',
+  /** The newest subscription usage limits of each provider (DESIGN §23; the account's, cached per device). */
+  usageLimits: 'usageLimits',
   /** "여기부터 p.N" markers sent for a recording (the API has no GET for them). */
   recordingMarkers: (recordingId: string) => `recordingMarkers:${recordingId}`,
   slide: (docId: string) => `slide:${docId}`,

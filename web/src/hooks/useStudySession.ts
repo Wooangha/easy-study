@@ -5,10 +5,12 @@
 // are overlaid on top of the persisted messages at render time. This keeps streaming cheap (only the
 // live message re-renders) and survives switching away from / back to a session mid-turn.
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
-import type { Attachment, ChatMessage, Session, SessionSummary, StreamEvent } from '../../../shared/types.ts';
+import type { Attachment, ChatMessage, Session, SessionSummary, StreamEvent, TokenUsage, UsageLimits } from '../../../shared/types.ts';
 import * as api from '../api.ts';
 import { missingAttachmentsMessage } from '../lib/attachments.ts';
 import { readStorage, storageKeys, writeStorage, isString } from '../lib/storage.ts';
+import { newerLimits, readLatestLimits, withLatestLimits } from '../lib/usage.ts';
+import type { LatestLimits } from '../lib/usage.ts';
 import { toast } from '../lib/toast.ts';
 import { useLatest } from './useLatest.ts';
 import type { ProviderChoice } from './useProviderChoice.ts';
@@ -51,6 +53,13 @@ export interface LiveTurn {
   text: string;
   /** Latest transient status line. */
   status: string | null;
+  /**
+   * Tokens the turn used so far (`usage` events, DESIGN §23); cleared by `done`, whose saved answer and session
+   * totals include them.
+   */
+  usage: TokenUsage | null;
+  /** The subscription's usage limits the turn reported, if any. */
+  limits: UsageLimits | null;
   stopRequested: boolean;
   controller: AbortController;
 }
@@ -110,7 +119,7 @@ function overlayLiveTurn(base: ChatMessage[], turn: LiveTurn | null): ChatMessag
   }
   return mergeMessages(base, [
     turn.userMessage,
-    { ...turn.assistantMessage, text: turn.text, status: 'streaming' },
+    { ...turn.assistantMessage, text: turn.text, status: 'streaming', ...(turn.usage ? { usage: turn.usage } : {}) },
   ]);
 }
 
@@ -134,6 +143,12 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
   const [rawSession, setRawSession] = useState<Session | null>(null);
   /** A multi-step flow (create session → prime → ask) is in progress for this doc. */
   const [flow, setFlow] = useState<{ docId: string; creating: boolean } | null>(null);
+
+  /**
+   * The newest usage limits of each provider in any session seen (DESIGN §23): they are the account's, so another
+   * session's older report must not be shown. Kept per device for the next visit.
+   */
+  const [latestLimits, setLatestLimits] = useState<LatestLimits>(() => readLatestLimits(readStorage<unknown>(storageKeys.usageLimits, null)));
 
   const turnsRef = useRef(new Map<string, LiveTurn>());
   /** Seq of the most recently started turn per session; kept after the turn ends (see scrollKey). */
@@ -236,6 +251,16 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
     };
   }, [docId, sessionId, refreshSessions]);
 
+  // Every session summary (the list, the open session, `done`) may carry a newer report.
+  useEffect(() => {
+    setLatestLimits((prev) => {
+      let next = prev;
+      for (const s of [...(sessions ?? []), ...(session ? [session] : [])]) next = withLatestLimits(next, s.provider, s.limits);
+      return next;
+    });
+  }, [sessions, session]);
+  useEffect(() => writeStorage(storageKeys.usageLimits, latestLimits), [latestLimits]);
+
   /** Reload a finished session from the server (the saved messages are authoritative). */
   const reloadSession = useCallback(async (forDoc: string, sid: string) => {
     try {
@@ -289,6 +314,8 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
         assistantMessage: null,
         text: '',
         status: null,
+        usage: null,
+        limits: null,
         stopRequested: false,
         controller: new AbortController(),
       };
@@ -320,10 +347,18 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
             turn.status = ev.text;
             scheduleRender();
             break;
+          case 'usage':
+            turn.usage = ev.usage ?? turn.usage;
+            turn.limits = ev.limits ?? turn.limits;
+            scheduleRender();
+            break;
           case 'done': {
             finished = true;
             gotDone = true;
             const final = ev.assistantMessage;
+            // The session's totals now include this turn: it must not be added on top of them again.
+            turn.usage = null;
+            turn.assistantMessage = final;
             outcome = final.status === 'complete' ? 'complete' : final.status === 'aborted' ? 'aborted' : 'error';
             const summary = toSummary(ev.session);
             const saved = messagesOf(ev.session);
@@ -574,6 +609,10 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
     liveTurn,
     /** Status line of the live turn. */
     liveStatus: liveTurn?.status ?? null,
+    /** Tokens of the live turn so far, not yet in the session's totals (DESIGN §23). */
+    liveUsage: liveTurn?.usage ?? null,
+    /** The newest usage limits of the open session's provider (the live turn's, another session's, …). */
+    usageLimits: session ? newerLimits(latestLimits[session.provider], liveTurn?.limits) : null,
     /** Changes when the message list should jump to the bottom (session switch, turn started). */
     scrollKey,
     /** A turn (or the create → prime → ask flow) is running for the current session. */
