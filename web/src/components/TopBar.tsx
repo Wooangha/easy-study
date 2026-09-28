@@ -2,10 +2,11 @@ import { useState, type ReactNode } from 'react';
 import type { Course, DocMeta, LibraryLayout, ProviderId, ProviderInfo, SessionSummary } from '../../../shared/types.ts';
 import { notesMarkdownUrl } from '../api.ts';
 import { indexCourses } from '../hooks/useCourses.ts';
-import type { ProviderChoice } from '../hooks/useProviderChoice.ts';
+import type { ProviderChoice, ProviderChoiceUpdate } from '../hooks/useProviderChoice.ts';
 import { confirmDialog } from '../lib/confirm.ts';
 import { formatTime, providerWithModel } from '../lib/format.ts';
 import { courseLabel, layoutEntries } from '../lib/libraryLayout.ts';
+import { effortOptions, withModel } from '../lib/providerChoice.ts';
 
 const UPLOAD = '__upload__';
 const NEW_SESSION = '__new__';
@@ -34,7 +35,7 @@ interface TopBarProps {
   providers: ProviderInfo[] | undefined;
   providersLoading: boolean;
   choice: ProviderChoice | null;
-  onChoiceChange: (choice: ProviderChoice) => void;
+  onChoiceChange: (choice: ProviderChoiceUpdate) => void;
   hasNotes: boolean;
   /** Remote mode (the server asks for an access code): "로그아웃" button. */
   onLogout?: () => void;
@@ -150,7 +151,7 @@ export function TopBar(props: TopBarProps) {
             {!sessionId && <option value="">{sessions === null ? '세션 불러오는 중…' : '💬 세션 없음'}</option>}
             {(sessions ?? []).map((s) => (
               <option key={s.id} value={s.id}>
-                {s.title} · {providerWithModel(providers, s.provider, s.model)} · 메시지 {s.messageCount}개 ·{' '}
+                {s.title} · {providerWithModel(providers, s.provider, s.model, s.effort)} · 메시지 {s.messageCount}개 ·{' '}
                 {formatTime(s.updatedAt)}
               </option>
             ))}
@@ -226,12 +227,14 @@ function ProviderPicker({
   providers: ProviderInfo[] | undefined;
   loading: boolean;
   choice: ProviderChoice | null;
-  onChange: (choice: ProviderChoice) => void;
+  onChange: (choice: ProviderChoiceUpdate) => void;
 }) {
   const current = providers?.find((p) => p.id === choice?.provider);
-  const knownModel = !!current && current.models.some((m) => m.id === (choice?.model ?? ''));
+  const currentModel = current?.models.find((m) => m.id === (choice?.model ?? ''));
   const [customMode, setCustomMode] = useState(false);
-  const showCustom = !!choice && (customMode || !knownModel);
+  const showCustom = !!choice && (customMode || !currentModel);
+  const efforts = effortOptions(current, choice?.model ?? '');
+  const effort = efforts.find((e) => e.id === choice?.effort);
   const unavailable = (providers ?? []).filter((p) => !p.available);
   const unavailableTitle = unavailable.map((p) => `${p.label}: ${p.reason ?? '사용 불가'}`).join('\n');
 
@@ -250,7 +253,7 @@ function ProviderPicker({
           const p = providers.find((x) => x.id === (e.target.value as ProviderId));
           if (!p) return;
           setCustomMode(false);
-          onChange({ provider: p.id, model: p.defaultModel });
+          onChange({ provider: p.id, model: p.defaultModel, effort: '' });
         }}
       >
         {!choice && <option value="">사용 가능한 LLM 없음</option>}
@@ -266,23 +269,24 @@ function ProviderPicker({
           </option>
         ))}
       </select>
-      {current && (
+      {current && choice && (
         <>
           <select
             className="picker model-picker"
             aria-label="모델 선택"
-            value={showCustom ? CUSTOM_MODEL : (choice?.model ?? '')}
+            title={showCustom ? undefined : currentModel?.description}
+            value={showCustom ? CUSTOM_MODEL : choice.model}
             onChange={(e) => {
               if (e.target.value === CUSTOM_MODEL) {
                 setCustomMode(true);
                 return;
               }
               setCustomMode(false);
-              onChange({ provider: current.id, model: e.target.value });
+              onChange(withModel(current, choice, e.target.value));
             }}
           >
             {current.models.map((m) => (
-              <option key={m.id || '__default'} value={m.id}>
+              <option key={m.id || '__default'} value={m.id} title={m.description}>
                 {m.label}
               </option>
             ))}
@@ -295,7 +299,7 @@ function ProviderPicker({
                 list={`models-${current.id}`}
                 placeholder="모델 이름"
                 aria-label="모델 이름 직접 입력"
-                value={choice?.model ?? ''}
+                value={choice.model}
                 onChange={(e) => onChange({ provider: current.id, model: e.target.value.trim() })}
               />
               <datalist id={`models-${current.id}`}>
@@ -308,6 +312,28 @@ function ProviderPicker({
                   ))}
               </datalist>
             </>
+          )}
+          {/* Reasoning effort (CLI providers): "기본값" passes nothing, so the CLI's own setting applies. */}
+          {current.efforts && current.efforts.length > 0 && (
+            <select
+              className="picker effort-picker"
+              aria-label="추론 수준"
+              title={
+                efforts.length === 0
+                  ? '이 모델은 추론 수준을 고를 수 없어요'
+                  : (effort?.description ?? '추론 수준: 기본값은 CLI 설정(또는 모델 기본값)을 따라요')
+              }
+              value={effort ? effort.id : ''}
+              disabled={efforts.length === 0}
+              onChange={(e) => onChange({ ...choice, effort: e.target.value })}
+            >
+              <option value="">추론 기본값</option>
+              {efforts.map((e) => (
+                <option key={e.id} value={e.id} title={e.description}>
+                  추론 {e.label}
+                </option>
+              ))}
+            </select>
           )}
         </>
       )}

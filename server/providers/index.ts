@@ -1,5 +1,5 @@
 // Provider registry + availability report for GET /api/health.
-import type { ProviderId, ProviderInfo } from '../../shared/types.ts';
+import type { ModelOption, ProviderId, ProviderInfo } from '../../shared/types.ts';
 import type { Provider, ProviderAvailability } from './types.ts';
 import { anthropicApiProvider } from './anthropicApi.ts';
 import { claudeCodeProvider } from './claudeCode.ts';
@@ -29,8 +29,9 @@ export function clearProviderInfoCache(): void {
 }
 
 /**
- * Info about every provider, including availability. detect() runs in parallel for all providers,
- * results are cached for AVAILABILITY_TTL_MS, and failures become `available: false` (never throws).
+ * Info about every provider, including availability and the models / effort levels detect() found (else the
+ * provider's static ones). detect() runs in parallel for all providers, results are cached for AVAILABILITY_TTL_MS,
+ * and failures become `available: false` (never throws).
  */
 export async function providerInfos(): Promise<ProviderInfo[]> {
   const availability = await cachedAvailability();
@@ -41,13 +42,19 @@ export async function providerInfos(): Promise<ProviderInfo[]> {
       label: p.label,
       kind: p.kind,
       available: a.available,
-      models: p.models.map((m) => ({ ...m })),
+      models: (a.models ?? p.models).map(copyModel),
       defaultModel: p.defaultModel,
     };
+    const efforts = a.efforts ?? p.efforts;
+    if (efforts && efforts.length > 0) info.efforts = efforts.map((e) => ({ ...e }));
     if (a.reason) info.reason = a.reason;
     if (a.version) info.version = a.version;
     return info;
   });
+}
+
+function copyModel(model: ModelOption): ModelOption {
+  return model.efforts ? { ...model, efforts: [...model.efforts] } : { ...model };
 }
 
 async function cachedAvailability(): Promise<Map<ProviderId, ProviderAvailability>> {

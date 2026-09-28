@@ -426,7 +426,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
         toast('사용할 수 있는 LLM이 없어요. 상단의 모델 선택을 확인해 주세요.', 'error');
         return;
       }
-      const who = providerWithModel(providers, choice.provider, choice.model);
+      const who = providerWithModel(providers, choice.provider, choice.model, choice.effort);
       const ok = await confirmDialog({
         title: `강의 ${targets.length}개의 정리본을 ${who}(으)로 만들까요?`,
         message:
@@ -439,7 +439,11 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
       const failed: string[] = [];
       for (const d of targets) {
         try {
-          await startDigest(d.id, { provider: choice.provider, model: choice.model || undefined });
+          await startDigest(d.id, {
+            provider: choice.provider,
+            model: choice.model || undefined,
+            effort: choice.effort || undefined,
+          });
           started++;
           patchDoc(d.id, { digestStatus: 'running' });
         } catch (e) {

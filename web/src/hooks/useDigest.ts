@@ -99,6 +99,7 @@ export function useDigest(docId: string | null) {
         const next = await api.startDigest(target, {
           provider: choice.provider,
           model: choice.model || undefined,
+          effort: choice.effort || undefined,
           force: force || undefined,
         });
         accept(target, next);

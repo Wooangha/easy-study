@@ -330,6 +330,27 @@ describe('digest job', () => {
     assert.ok(provider.calls.every((c) => c.model === 'default-model'));
   });
 
+  test('the reasoning effort reaches every call (slides and summary) and is kept in digest.json', async () => {
+    const docId = 'effort-000001';
+    await makeDoc(docId, 5);
+    const provider = fakeProvider(wellBehaved);
+    const started = await startDigest(docId, { provider: 'claude-code', model: 'opus', effort: 'high' }, depsFor(provider));
+    assert.equal(started.effort, 'high');
+    const info = await finish(docId);
+    assert.equal(info.effort, 'high');
+    assert.ok(provider.calls.length >= 3);
+    assert.ok(provider.calls.every((c) => c.effort === 'high' && c.model === 'opus'));
+    const stored = JSON.parse(await fs.readFile(path.join(docPaths(docId).digestDir, 'digest.json'), 'utf8')) as DigestRecord;
+    assert.equal(stored.effort, 'high');
+
+    // A redo without one uses the CLI default (and no longer reports the old one).
+    const redo = fakeProvider(wellBehaved);
+    await startDigest(docId, { provider: 'claude-code', force: true }, depsFor(redo));
+    const again = await finish(docId);
+    assert.equal(again.effort, undefined);
+    assert.ok(redo.calls.every((c) => c.effort === ''));
+  });
+
   test('persists after every batch (digest.json and DIGEST.md)', async () => {
     const docId = 'persist-000001';
     await makeDoc(docId, 9, 'Persisted');
@@ -967,7 +988,18 @@ describe('HTTP routes', () => {
     return summary ? 'http summary' : digestOutput(slides);
   });
   const infos: ProviderInfo[] = [
-    { id: 'claude-code', label: 'Claude Code', kind: 'cli', available: true, models: [], defaultModel: '' },
+    {
+      id: 'claude-code',
+      label: 'Claude Code',
+      kind: 'cli',
+      available: true,
+      models: [],
+      defaultModel: '',
+      efforts: [
+        { id: 'low', label: '낮음' },
+        { id: 'max', label: '최대' },
+      ],
+    },
     { id: 'codex', label: 'Codex', kind: 'cli', available: false, reason: 'codex CLI not found', models: [], defaultModel: '' },
   ];
 
@@ -1017,6 +1049,7 @@ describe('HTTP routes', () => {
     await expectError(await postJson(`/docs/${docId}/digest`, { provider: 'codex' }), 400);
     await expectError(await postJson(`/docs/${docId}/digest`, { provider: 'claude-code', model: '--evil' }), 400);
     await expectError(await postJson(`/docs/${docId}/digest`, { provider: 'claude-code', force: 'yes' }), 400);
+    await expectError(await postJson(`/docs/${docId}/digest`, { provider: 'claude-code', effort: 'ultra' }), 400);
     await expectError(await postJson('/docs/missing-000000/digest', { provider: 'claude-code' }), 404);
 
     const started = await postJson(`/docs/${docId}/digest`, { provider: 'claude-code', model: 'opus' });
@@ -1065,6 +1098,18 @@ describe('HTTP routes', () => {
     await postJson(`/docs/${docId}/sessions`, { provider: 'claude-code' });
     await finish(docId);
     assert.equal(provider.calls.length - before, used);
+
+    // The digest is made with the effort of the session that started it.
+    const withEffort = 'http-effort-000001';
+    await makeDoc(withEffort, 3, 'Effort');
+    const effortBefore = provider.calls.length;
+    const created = (await (await postJson(`/docs/${withEffort}/sessions`, { provider: 'claude-code', effort: 'max' })).json()) as Session;
+    assert.equal(created.effort, 'max');
+    assert.equal((await finish(withEffort)).effort, 'max');
+    assert.ok(provider.calls.slice(effortBefore).every((c) => c.effort === 'max'));
+    const manual = await postJson(`/docs/${withEffort}/digest`, { provider: 'claude-code', effort: 'low', force: true });
+    assert.equal(((await manual.json()) as DigestInfo).effort, 'low');
+    await finish(withEffort);
 
     process.env.EASY_STUDY_AUTO_DIGEST = '0';
     try {

@@ -12,6 +12,23 @@ import { promisify } from 'node:util';
 import { repoRoot } from '../server/config.ts';
 
 const run = promisify(execFile);
+const FIXTURES = path.join(repoRoot(), 'tests', 'fixtures');
+
+/**
+ * The compiled server's environment: health detects the LLM CLIs, so they are the fixtures' fakes (no real CLI is
+ * started, e.g. `codex debug models` reading the account's catalog) and no real Codex configuration is read.
+ */
+function serverEnv(env: Record<string, string>): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    CLAUDE_BIN: path.join(FIXTURES, 'fake-claude.mjs'),
+    CODEX_BIN: path.join(FIXTURES, 'fake-codex.mjs'),
+    CODEX_HOME: path.join(os.tmpdir(), 'easy-study-build-test-no-codex-home'),
+    PORT: '0',
+    EASY_STUDY_AUTO_DIGEST: '0',
+    ...env,
+  };
+}
 
 describe('compiled server (dist-server)', () => {
   // Inside the repository like dist-server/ (the compiled server finds package.json upwards) but ignored by git.
@@ -52,7 +69,7 @@ describe('compiled server (dist-server)', () => {
 
     const child = spawn(process.execPath, ['--max-semi-space-size=2', entry], {
       cwd: os.tmpdir(), // nothing may depend on the working directory
-      env: { ...process.env, EASY_STUDY_LIBRARY: library, PORT: '0', EASY_STUDY_AUTO_DIGEST: '0' },
+      env: serverEnv({ EASY_STUDY_LIBRARY: library }),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '';
@@ -132,7 +149,7 @@ describe('compiled server (dist-server)', () => {
     // The desktop app runs this compiled server in desktop mode (DESIGN §19): one ready line, stop on stdin EOF.
     const desktop = spawn(process.execPath, ['--max-semi-space-size=2', entry], {
       cwd: os.tmpdir(),
-      env: { ...process.env, EASY_STUDY_DESKTOP: '1', EASY_STUDY_LIBRARY: library, PORT: '0', EASY_STUDY_AUTO_DIGEST: '0' },
+      env: serverEnv({ EASY_STUDY_DESKTOP: '1', EASY_STUDY_LIBRARY: library }),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let desktopOut = '';

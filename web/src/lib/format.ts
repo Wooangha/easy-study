@@ -1,3 +1,4 @@
+import { EFFORT_LABELS } from '../../../shared/types.ts';
 import type { ContextInfo, MessageStatus, ProviderId, ProviderInfo } from '../../../shared/types.ts';
 
 const FALLBACK_PROVIDER_LABELS: Record<ProviderId, string> = {
@@ -11,10 +12,17 @@ export function providerLabel(providers: ProviderInfo[] | undefined, id: Provide
   return providers?.find((p) => p.id === id)?.label ?? FALLBACK_PROVIDER_LABELS[id] ?? id;
 }
 
-/** "Claude Code · sonnet" (model omitted when it is the provider default ''). */
-export function providerWithModel(providers: ProviderInfo[] | undefined, id: ProviderId, model?: string): string {
-  const label = providerLabel(providers, id);
-  return model ? `${label} · ${model}` : label;
+/** Korean name of a reasoning-effort level ("높음"), as the provider lists it; the id when unknown. */
+export function effortName(providers: ProviderInfo[] | undefined, id: ProviderId, effort: string): string {
+  return providers?.find((p) => p.id === id)?.efforts?.find((e) => e.id === effort)?.label ?? EFFORT_LABELS[effort] ?? effort;
+}
+
+/** "Claude Code · sonnet · 추론 높음" (model and effort omitted when they are the defaults ''). */
+export function providerWithModel(providers: ProviderInfo[] | undefined, id: ProviderId, model?: string, effort?: string): string {
+  const parts = [providerLabel(providers, id)];
+  if (model) parts.push(model);
+  if (effort) parts.push(`추론 ${effortName(providers, id, effort)}`);
+  return parts.join(' · ');
 }
 
 function sameDay(a: Date, b: Date): boolean {

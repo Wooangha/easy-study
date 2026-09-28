@@ -403,7 +403,11 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
       }
       let created: Session;
       try {
-        created = await api.createSession(forDoc, { provider: c.provider, model: c.model || undefined });
+        created = await api.createSession(forDoc, {
+          provider: c.provider,
+          model: c.model || undefined,
+          effort: c.effort || undefined,
+        });
       } catch (e) {
         toast(`세션을 만들지 못했어요: ${api.errorMessage(e)}`, 'error');
         return null;

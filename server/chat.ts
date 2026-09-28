@@ -364,6 +364,7 @@ async function startTurn(validated: ValidatedTurn): Promise<TurnResult> {
     provider: session.provider,
     model: session.model,
   };
+  if (session.effort) assistantMessage.effort = session.effort;
   session.messages.push(userMessage, assistantMessage);
   await saveSession(session);
   emit({ type: 'start', userMessage: structuredClone(userMessage), assistantMessage: structuredClone(assistantMessage) });
@@ -389,6 +390,7 @@ async function startTurn(validated: ValidatedTurn): Promise<TurnResult> {
         resume: turn.resume,
         history: turn.history,
         model: session.model,
+        effort: session.effort ?? '',
         // Other lectures of the course, so agentic CLIs can open their DIGEST.md / slides.
         extraReadDirs: turn.readDirs,
         signal,

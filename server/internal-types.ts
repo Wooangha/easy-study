@@ -29,6 +29,8 @@ export interface SessionRecord {
   title: string;
   provider: ProviderId;
   model: string;
+  /** Reasoning effort; absent = the CLI's default (always absent in sessions made before efforts existed). */
+  effort?: string;
   createdAt: string;
   updatedAt: string;
   providerState: ProviderState;
@@ -163,6 +165,8 @@ export interface DigestRecord {
   status: DigestStatus;
   provider?: ProviderId;
   model?: string;
+  /** Reasoning effort (absent = the CLI's default). */
+  effort?: string;
   startedAt?: string;
   updatedAt?: string;
   error?: string;

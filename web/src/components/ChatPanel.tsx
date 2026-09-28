@@ -1,5 +1,5 @@
 import { useCallback, useState, type ReactNode } from 'react';
-import type { Attachment, DigestInfo, DocMeta, ProviderInfo } from '../../../shared/types.ts';
+import type { Attachment, DigestInfo, DocMeta, ProviderInfo, SessionSummary } from '../../../shared/types.ts';
 import { courseSummaryUrl } from '../api.ts';
 import type { AttachmentsApi } from '../hooks/useAttachments.ts';
 import type { CourseMembership } from '../hooks/useCourses.ts';
@@ -9,7 +9,7 @@ import type { ProviderChoice } from '../hooks/useProviderChoice.ts';
 import { PENDING_ASSISTANT_ID, type StudySession } from '../hooks/useStudySession.ts';
 import type { Chip } from '../lib/attachments.ts';
 import { canOpenFiles, courseBadgeTitle, courseContextSentence, type EarlierLectures } from '../lib/courseContext.ts';
-import { providerLabel, providerWithModel } from '../lib/format.ts';
+import { effortName, providerLabel, providerWithModel } from '../lib/format.ts';
 import { Composer } from './Composer.tsx';
 import { MessageList } from './MessageList.tsx';
 import { RecordingTabBadge } from './recording/LectureSpeech.tsx';
@@ -59,6 +59,13 @@ interface ChatPanelProps {
   recordings: ReactNode;
   /** Recordings of this lecture (tab badge), null while unknown. */
   recordingCount: number | null;
+}
+
+/** "Codex (gpt-5.5, 추론 높음)" for the session badge's tooltip. */
+function sessionLlmDetails(providers: ProviderInfo[] | undefined, session: SessionSummary): string {
+  const details = [session.model, session.effort ? `추론 ${effortName(providers, session.provider, session.effort)}` : ''];
+  const shown = details.filter(Boolean);
+  return `${providerLabel(providers, session.provider)}${shown.length > 0 ? ` (${shown.join(', ')})` : ''}`;
 }
 
 function DigestTabBadge({ info }: { info: DigestInfo | null }) {
@@ -162,7 +169,7 @@ export function ChatPanel({
       </div>
       <h3>무엇이든 물어보세요</h3>
       <p>
-        질문을 보내면 {choice ? <b>{providerWithModel(providers, choice.provider, choice.model)}</b> : 'LLM'}(으)로 새
+        질문을 보내면 {choice ? <b>{providerWithModel(providers, choice.provider, choice.model, choice.effort)}</b> : 'LLM'}(으)로 새
         세션을 만들고, <b>전체 슬라이드 {doc.pageCount}장</b>
         {digestReady ? '(정리본 텍스트)' : ''}을 먼저 전달한 뒤 지금 보고 있는 슬라이드
         {neighbors > 0 ? `(앞뒤 ${neighbors}장 포함)` : ''}를 기준으로 설명해요.
@@ -326,9 +333,9 @@ export function ChatPanel({
           {session && (
             <span
               className="provider-badge"
-              title={`이 세션의 LLM: ${providerLabel(providers, session.provider)}${session.model ? ` (${session.model})` : ''}`}
+              title={`이 세션의 LLM: ${sessionLlmDetails(providers, session)}`}
             >
-              {providerWithModel(providers, session.provider, session.model)}
+              {providerWithModel(providers, session.provider, session.model, session.effort)}
             </span>
           )}
         </div>

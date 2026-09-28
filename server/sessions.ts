@@ -4,7 +4,7 @@
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { ATTACHMENT_ID_RE, SESSION_ID_RE } from '../shared/types.ts';
+import { ATTACHMENT_ID_RE, EFFORT_ID_RE, SESSION_ID_RE } from '../shared/types.ts';
 import type {
   ChatMessage,
   NoteEntry,
@@ -96,6 +96,8 @@ export interface CreateSessionInput {
   provider: ProviderId;
   /** Resolved model ('' = provider default). */
   model: string;
+  /** Reasoning effort ('' / omitted = the CLI's default). */
+  effort?: string;
   title?: string;
 }
 
@@ -123,6 +125,7 @@ export async function createSession(docId: string, input: CreateSessionInput): P
     providerState: initialProviderState(),
     messages: [],
   };
+  if (input.effort) record.effort = input.effort;
   await writeRecord(record);
   return record;
 }
@@ -154,7 +157,10 @@ async function readRecord(docId: string, sessionId: string): Promise<SessionReco
   const value = await readJsonFile<unknown>(sessionFile(docId, sessionId));
   if (!isSessionRecord(value)) return null;
   // The file location is authoritative for the ids.
-  return { ...value, id: sessionId, docId };
+  const record: SessionRecord = { ...value, id: sessionId, docId };
+  // The effort reaches a CLI's arguments: anything but a valid level means the default.
+  if (record.effort !== undefined && (typeof record.effort !== 'string' || !EFFORT_ID_RE.test(record.effort))) delete record.effort;
+  return record;
 }
 
 /** The session, or null when an id is invalid or the session does not exist. */
@@ -239,7 +245,7 @@ export async function referencedAttachmentIds(docId: string): Promise<Set<string
 }
 
 export function toSummary(record: SessionRecord): SessionSummary {
-  return {
+  const summary: SessionSummary = {
     id: record.id,
     docId: record.docId,
     title: record.title,
@@ -250,6 +256,8 @@ export function toSummary(record: SessionRecord): SessionSummary {
     messageCount: record.messages.length,
     primed: record.providerState.primed,
   };
+  if (record.effort) summary.effort = record.effort;
+  return summary;
 }
 
 export function toSession(record: SessionRecord): Session {
@@ -293,9 +301,11 @@ export async function recoverInterruptedSessions(): Promise<number> {
 // Notes
 // ---------------------------------------------------------------------------
 
-function providerLabel(provider: ProviderId, model: string): string {
+/** "Codex (gpt-5.5, effort high)"; the model and effort are left out when they are the defaults. */
+function providerLabel(provider: ProviderId, model: string, effort?: string): string {
   const label = PROVIDER_LABELS[provider] ?? provider;
-  return model ? `${label} (${model})` : label;
+  const details = [model, effort ? `effort ${effort}` : ''].filter(Boolean);
+  return details.length > 0 ? `${label} (${details.join(', ')})` : label;
 }
 
 /** Question/answer pairs of one session in chronological order (prime turns excluded). */
@@ -361,7 +371,7 @@ function attachmentsMarkdown(question: ChatMessage, files: ReadonlyMap<string, s
 function sessionNotesMarkdown(doc: StoredDocMeta, record: SessionRecord, files: ReadonlyMap<string, string>): string {
   const lines: string[] = [
     `# ${doc.title} — ${record.title}`,
-    `- Provider: ${providerLabel(record.provider, record.model)} · Started: ${formatDateTime(record.createdAt)}`,
+    `- Provider: ${providerLabel(record.provider, record.model, record.effort)} · Started: ${formatDateTime(record.createdAt)}`,
     '',
     '---',
     '',
@@ -399,7 +409,9 @@ function groupBySlide(records: SessionRecord[]): SlideNotes[] {
 }
 
 function studyNotesMarkdown(doc: StoredDocMeta, records: SessionRecord[], slides: SlideNotes[], files: ReadonlyMap<string, string>): string {
-  const providerBySession = new Map(records.map((record) => [record.id, providerLabel(record.provider, record.model)]));
+  const providerBySession = new Map(
+    records.map((record) => [record.id, providerLabel(record.provider, record.model, record.effort)]),
+  );
   const lines: string[] = [`# ${doc.title} — study notes`, ''];
   if (slides.length === 0) lines.push('_No questions yet._', '');
   for (const { slide, entries } of slides) {

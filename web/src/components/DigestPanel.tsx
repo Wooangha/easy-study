@@ -73,7 +73,7 @@ export function DigestPanel({
       .catch(() => toast('복사하지 못했어요', 'error'));
   };
 
-  const chosen = choice ? providerWithModel(providers, choice.provider, choice.model) : null;
+  const chosen = choice ? providerWithModel(providers, choice.provider, choice.model, choice.effort) : null;
   const startDisabled = !choice || pending !== null;
   const startTitle = chosen
     ? `${chosen}(으)로 만들어요 — 상단 ‘새 세션’에서 LLM을 바꿀 수 있어요`
@@ -287,7 +287,7 @@ export function DigestPanel({
             <span className="digest-status-label">{digestStatusLabel(info, s)}</span>
             {info.provider && (
               <span className="muted small">
-                {providerWithModel(providers, info.provider, info.model)}
+                {providerWithModel(providers, info.provider, info.model, info.effort)}
                 {info.updatedAt && ` · ${formatTime(info.updatedAt)}`}
               </span>
             )}

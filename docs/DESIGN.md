@@ -95,7 +95,7 @@ All JSON. Errors: HTTP 4xx/5xx with `{ "error": string }` (plus machine-readable
 | GET `/api/docs/:docId` | – | `DocMeta` |
 | GET `/api/docs/:docId/slides/:n.png` | – | PNG (`Cache-Control: public, max-age=31536000, immutable`) |
 | GET `/api/docs/:docId/sessions` | – | `SessionSummary[]` newest first |
-| POST `/api/docs/:docId/sessions` | `CreateSessionRequest` | `Session` (201). 400 if provider unknown/unavailable. |
+| POST `/api/docs/:docId/sessions` | `CreateSessionRequest` | `Session` (201). 400 if provider unknown/unavailable, or the effort is not one the model supports (§6). |
 | GET `/api/docs/:docId/sessions/:sid` | – | `Session` |
 | DELETE `/api/docs/:docId/sessions/:sid` | – | 204 (also removes its notes file and regenerates STUDY_NOTES.md) |
 | POST `/api/docs/:docId/sessions/:sid/prime` | `PrimeRequest` | SSE stream (see below) |
@@ -204,7 +204,7 @@ error messages). Abort → SIGTERM, then SIGKILL after 3 s. Remove `CLAUDECODE` 
 ```
 claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages
        --system-prompt <systemPrompt> --tools Read,Glob,Grep --strict-mcp-config
-       [--model <model>]  ( --session-id <new uuid> | --resume <cliSessionId> )
+       [--model <model>] [--effort <level>]  ( --session-id <new uuid> | --resume <cliSessionId> )
 stdin: one line {"type":"user","message":{"role":"user","content":[
          {"type":"text","text":"..."},
          {"type":"image","source":{"type":"base64","media_type":"image/png","data":"..."}} ]}}
@@ -214,15 +214,16 @@ stdout events: `{"type":"stream_event","event":{"type":"content_block_delta","de
 → onDelta (insert `\n\n` between separate text blocks); `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{…}}]}}`
 → onStatus; final `{"type":"result","subtype":"success","is_error":false,"result":"…","session_id":"…"}`.
 `is_error: true` or non-zero exit → error. Models: `''` (CLI default), `sonnet`, `opus`, `haiku`, `fable`.
-maxImagesPerConversation: 48 (round 4; was 90).
+Reasoning effort (`--effort`, on every call incl. resumes): `low` · `medium` · `high` · `xhigh` · `max` (as
+`claude --help` lists them); Haiku gets none (`efforts: []`). maxImagesPerConversation: 48 (round 4; was 90).
 
 ### codex (ChatGPT subscription via Codex CLI) — verified with codex-cli 0.154
 
 ```
-new:    codex exec --json --skip-git-repo-check [--ephemeral] -C <cwd> <policy> <hardening> [-m <model>] [-i <img> ...]
-        (prompt on stdin, no positional prompt)
+new:    codex exec --json --skip-git-repo-check [--ephemeral] -C <cwd> <policy> <hardening> [-m <model>]
+        [-c model_reasoning_effort="<level>"] [-i <img> ...]          (prompt on stdin, no positional prompt)
 resume: codex exec resume <threadId> - --json --skip-git-repo-check <policy> <hardening>
-        [-m <model>] [-i <img> ...]          (the positional "-" = read prompt from stdin)
+        [-m <model>] [-c model_reasoning_effort="<level>"] [-i <img> ...]   (the positional "-" = read prompt from stdin)
 policy: -c sandbox_mode="read-only"          (fallback for CLIs without permission profiles)
         -c default_permissions="easy_study_readonly"
         -c permissions.easy_study_readonly.filesystem={":minimal"="read","<cwd>"="read","<extraReadDir>"="read",…}
@@ -245,7 +246,17 @@ On a new conversation the system prompt is prepended to the text (`<instructions
 stdout events: `{"type":"thread.started","thread_id":"…"}`; `{"type":"item.completed","item":{"type":"agent_message","text":"…"}}`
 (→ onDelta, whole message at once; join multiple with `\n\n`); `item.started` of `command_execution` /
 `reasoning` → onStatus; `{"type":"turn.completed","usage":{…}}`; `turn.failed` / `error` → error.
-Models: `''` (Codex config default) plus free text. maxImagesPerConversation: 90.
+Models (`server/providers/codexCatalog.ts`): detect() reads the CLI's model catalog with `codex debug models` (refreshed
+from the account's catalog; no inference), falling back to `codex debug models --bundled` (offline) when that fails or
+takes over 4 s. Options: `''` = "Codex 설정 기본값" (named after config.toml's root `model` when set, e.g.
+"Codex 설정 기본값 (GPT-6-Astra)"), then the models with `visibility: "list"` by `priority` (label `display_name`,
+tooltip `description`); plus free text. Each model carries its `supported_reasoning_levels` as `efforts`; the provider's
+levels (ProviderInfo.efforts) are those of all listed models (+ the config's model), weakest first
+(`low · medium · high · xhigh · max · ultra` on codex-cli 0.154), with the catalog's descriptions. The default option
+takes the config model's levels, else the levels every listed model supports. The catalog is cached per CLI path +
+version for 30 min, then re-read in the background (the old one is served meanwhile), so only the first health check
+of a CLI waits for it. A CLI without `debug models` (or an unreadable catalog) → the default option only, no effort
+choice. maxImagesPerConversation: 90.
 
 ### anthropic-api (needs `ANTHROPIC_API_KEY`; honours `ANTHROPIC_BASE_URL`)
 `@anthropic-ai/sdk` streaming Messages API; stateless (sends `history` + current parts every turn);
@@ -258,8 +269,24 @@ Models: `claude-sonnet-5`, `claude-opus-5-5`, `claude-haiku-4-5-20251001`. maxIm
 `previous_response_id` for continuation, images as `input_image` data URLs with `detail`.
 Default model from `OPENAI_MODEL` or `gpt-5`. maxImagesPerConversation: 150.
 
-`GET /api/health` reports availability: CLI providers run `<cli> --version` (cached 60 s);
-API providers check the env key.
+`GET /api/health` reports availability: CLI providers run `<cli> --version` (cached 60 s; Codex also its model
+catalog, above); API providers check the env key.
+
+### Model and reasoning effort choice
+ProviderInfo: `models` (ModelOption `{id, label, description?, efforts?}`; `efforts` omitted = every level of the
+provider, `[]` = none) and `efforts` (EffortOption `{id, label, description?}`, Korean labels from
+`EFFORT_LABELS`: 낮음 · 보통 · 높음 · 매우 높음 · 최대 · 울트라). Only the CLI providers list efforts; the API providers
+have no effort choice. POST /sessions and POST /digest take `effort` ('' / omitted = the CLI's default: nothing is
+passed); it must be one of the provider's levels and, for a listed model, one it supports (400 otherwise; a model typed
+in by hand may take any level). The session record keeps `effort` (absent = default, as in sessions made before) and
+every turn of the session passes it — new conversations, resumes, re-primes after a rollover or a lost conversation;
+assistant messages carry it (`ChatMessage.effort`) and the notes name it ("Claude Code (opus, effort high)"). A digest
+started by a session (DESIGN §11) or by POST /digest keeps its `effort` in digest.json for every batch and the lecture
+summary. The recordings' AI alignment (§22) takes no effort: it runs with the CLI's default (Claude Code on Haiku).
+Web: the top bar "새 세션" picker shows a compact "추론" select after the model select for providers with levels
+("추론 기본값" first, the model's levels, catalog descriptions as tooltips; disabled for a model without levels). The
+choice `{provider, model, effort}` is stored in localStorage; a choice stored before efforts existed reads as 기본값,
+and a level the (new) model does not support falls back to 기본값.
 
 ## 7. Notes (review later) (`server/sessions.ts`)
 

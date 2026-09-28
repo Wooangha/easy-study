@@ -1,5 +1,6 @@
 // Internal contract between the chat orchestrator (server/chat.ts) and LLM providers.
-import type { ModelOption, ProviderId } from '../../shared/types.ts';
+import { EFFORT_LABELS } from '../../shared/types.ts';
+import type { EffortOption, ModelOption, ProviderId } from '../../shared/types.ts';
 
 /** One piece of a user turn. Images are referenced by absolute path and loaded by the provider. */
 export type Part =
@@ -49,6 +50,11 @@ export interface ProviderRunInput {
   /** '' = provider default. */
   model: string;
   /**
+   * Reasoning effort (an EffortOption id of the provider); '' or omitted = the CLI's default. Only CLI providers
+   * use it (claude: --effort <level>; codex: -c model_reasoning_effort="<level>").
+   */
+  effort?: string;
+  /**
    * One-shot call that will never be resumed (digest batches): CLI providers should not persist
    * a session (claude: --no-session-persistence without --session-id; codex: --ephemeral).
    * Defaults to false.
@@ -83,14 +89,21 @@ export interface ProviderAvailability {
   available: boolean;
   reason?: string;
   version?: string;
+  /** Models found at detection time (Codex: its model catalog); replaces Provider.models when present. */
+  models?: ModelOption[];
+  /** Reasoning efforts found at detection time; replaces Provider.efforts when present. */
+  efforts?: EffortOption[];
 }
 
 export interface Provider {
   id: ProviderId;
   label: string;
   kind: 'cli' | 'api';
+  /** Models offered before (or without) detection; detect() may report the current list instead. */
   models: ModelOption[];
   defaultModel: string;
+  /** Reasoning efforts one can pick (ProviderInfo.efforts); omitted = none. detect() may report them instead. */
+  efforts?: EffortOption[];
   /**
    * Max images one provider conversation may accumulate (history included) before the
    * orchestrator starts a fresh conversation (re-priming). Keeps requests under API limits.
@@ -123,6 +136,13 @@ export class ProviderError extends Error {
     this.name = 'ProviderError';
     this.kind = kind;
   }
+}
+
+/** An EffortOption with its Korean label (EFFORT_LABELS; an unknown level keeps its id). */
+export function effortOption(id: string, description?: string): EffortOption {
+  const option: EffortOption = { id, label: EFFORT_LABELS[id] ?? id };
+  if (description) option.description = description;
+  return option;
 }
 
 /** Kind of any thrown value ('other' unless it is a ProviderError-like object with a known kind). */

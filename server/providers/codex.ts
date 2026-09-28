@@ -1,9 +1,11 @@
 // codex provider: the user's ChatGPT subscription through the Codex CLI (DESIGN §6).
 //
 //   new:    codex exec --json --skip-git-repo-check [--ephemeral] -C <cwd> <policy -c ...>
-//           <hardening -c ...> [-m <model>] [-i <img> ...]
+//           <hardening -c ...> [-m <model>] [-c model_reasoning_effort="<level>"] [-i <img> ...]
 //   resume: codex exec resume <threadId> - --json --skip-git-repo-check <policy -c ...>
-//           <hardening -c ...> [-m <model>] [-i <img> ...]
+//           <hardening -c ...> [-m <model>] [-c model_reasoning_effort="<level>"] [-i <img> ...]
+//
+// The models and effort levels offered come from the CLI's model catalog (codexCatalog.ts, read by detect()).
 //
 // The prompt is read from stdin. Images cannot be interleaved with text, so every image part is
 // replaced by a "[Attached image #k: label]" marker and the files are passed with -i in that order.
@@ -51,8 +53,7 @@
 // ("thread not found", "no rollout found", …) or silently starts a new thread (thread.started with
 // another id, and no deck in it): both are 'resume_invalid'.
 import { constants as fsConstants } from 'node:fs';
-import { access, readFile, realpath, stat } from 'node:fs/promises';
-import os from 'node:os';
+import { access, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import type {
   Part,
@@ -65,6 +66,7 @@ import type {
 import { ProviderError } from './types.ts';
 import { describeExit, probeVersion, resolveBin, runJsonlProcess, stderrSuffix } from './proc.ts';
 import type { CliBinSpec, JsonObject } from './proc.ts';
+import { CODEX_DEFAULT_MODEL_LABEL, codexCatalog, codexConfigModel, codexModelChoices, readCodexConfig } from './codexCatalog.ts';
 
 /** Features that reach outside the sandbox; always disabled. */
 export const CODEX_DISABLED_INTEGRATIONS = ['plugins', 'apps', 'browser_use', 'computer_use', 'in_app_browser'];
@@ -79,6 +81,8 @@ export const CODEX_PERMISSION_PROFILE = 'easy_study_readonly';
 export interface CodexArgsInput {
   cwd: string;
   model: string;
+  /** Reasoning effort; '' / omitted = the config's (or the model's) default. */
+  effort?: string;
   /** Thread to continue; undefined = new conversation. */
   threadId?: string;
   /** Image files, in marker order. */
@@ -130,6 +134,7 @@ export function codexArgs(input: CodexArgsInput): string[] {
     if (BARE_KEY_RE.test(server)) args.push('-c', `mcp_servers.${server}.enabled=false`);
   }
   if (input.model) args.push('-m', input.model);
+  if (input.effort) args.push('-c', `model_reasoning_effort=${tomlString(input.effort)}`);
   for (const image of input.images) args.push('-i', image);
   return args;
 }
@@ -268,12 +273,7 @@ function countOf(text: string, needle: string): number {
 
 /** MCP servers of the user's Codex config ($CODEX_HOME/config.toml, default ~/.codex); [] when unreadable. */
 async function configuredMcpServers(): Promise<string[]> {
-  const home = process.env.CODEX_HOME?.trim() || path.join(os.homedir(), '.codex');
-  try {
-    return codexMcpServerNames(await readFile(path.join(home, 'config.toml'), 'utf8'));
-  } catch {
-    return [];
-  }
+  return codexMcpServerNames(await readCodexConfig());
 }
 
 export function imageMarker(index: number, label: string): string {
@@ -529,6 +529,7 @@ async function runCodex(input: ProviderRunInput): Promise<ProviderRunResult> {
   const args = codexArgs({
     cwd: input.cwd,
     model: input.model,
+    effort: input.effort,
     threadId,
     images,
     ephemeral,
@@ -579,15 +580,16 @@ export const codexProvider: Provider = {
   id: 'codex',
   label: 'Codex (ChatGPT 구독)',
   kind: 'cli',
-  models: [{ id: '', label: 'Codex 설정 기본값' }],
+  // Until detect() has read the model catalog.
+  models: [{ id: '', label: CODEX_DEFAULT_MODEL_LABEL }],
   defaultModel: '',
   maxImagesPerConversation: 90,
   async detect(): Promise<ProviderAvailability> {
-    return probeVersion({
-      bin: await resolveBin(CODEX_BIN_SPEC),
-      displayName: 'codex',
-      installHint: codexInstallHint(),
-    });
+    const bin = await resolveBin(CODEX_BIN_SPEC);
+    const availability = await probeVersion({ bin, displayName: 'codex', installHint: codexInstallHint() });
+    if (!availability.available) return availability;
+    const [catalog, config] = await Promise.all([codexCatalog(bin, availability.version), readCodexConfig()]);
+    return { ...availability, ...codexModelChoices(catalog, codexConfigModel(config)) };
   },
   run: runCodex,
 };

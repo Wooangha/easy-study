@@ -274,7 +274,7 @@ function AssistantMessage({
   const pending = m.id === PENDING_ASSISTANT_ID;
   const streaming = m.status === 'streaming';
   const meta: string[] = [];
-  if (m.provider) meta.push(providerWithModel(providers, m.provider, m.model));
+  if (m.provider) meta.push(providerWithModel(providers, m.provider, m.model, m.effort));
   if (m.durationMs !== undefined && !streaming) meta.push(formatDuration(m.durationMs));
 
   const copy = () => {

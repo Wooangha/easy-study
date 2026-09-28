@@ -117,6 +117,32 @@ describe('session records', () => {
     assert.deepEqual(toSession(record), { ...summary, messages: [] });
   });
 
+  test('the reasoning effort is stored with the session; a file without one (older versions) reads as the default', async () => {
+    const record = await createSession(DOC_ID, { provider: 'codex', model: 'gpt-5.5', effort: 'xhigh' });
+    assert.equal(record.effort, 'xhigh');
+    const file = path.join(docPaths(DOC_ID).sessionsDir, `${record.id}.json`);
+    assert.equal(JSON.parse(await fs.readFile(file, 'utf8')).effort, 'xhigh');
+    assert.equal((await getSession(DOC_ID, record.id))?.effort, 'xhigh');
+    assert.equal(toSummary(record).effort, 'xhigh');
+
+    const plain = await createSession(DOC_ID, { provider: 'codex', model: '', effort: '' });
+    const plainFile = path.join(docPaths(DOC_ID).sessionsDir, `${plain.id}.json`);
+    assert.ok(!('effort' in JSON.parse(await fs.readFile(plainFile, 'utf8'))), 'nothing is written for the default');
+    const legacy = { ...JSON.parse(await fs.readFile(file, 'utf8')) };
+    delete legacy.effort;
+    await fs.writeFile(file, JSON.stringify(legacy));
+    const read = await getSession(DOC_ID, record.id);
+    assert.equal(read?.effort, undefined);
+    assert.ok(!('effort' in toSummary(read!)));
+    // A level that is not one (edited by hand) is the default too: it would reach the CLI's arguments.
+    for (const effort of ['--model', 7, '']) {
+      await fs.writeFile(file, JSON.stringify({ ...legacy, effort }));
+      assert.ok(!('effort' in (await getSession(DOC_ID, record.id))!), String(effort));
+    }
+    await deleteSession(DOC_ID, record.id);
+    await deleteSession(DOC_ID, plain.id);
+  });
+
   test('default title and 404 for unknown docs', async () => {
     const record = await createSession(DOC_ID, { provider: 'codex', model: '' });
     assert.match(record.title, /^세션 \d{2}\/\d{2} \d{2}:\d{2}$/);

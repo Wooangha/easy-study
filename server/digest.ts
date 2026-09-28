@@ -103,6 +103,8 @@ export interface StartDigestOptions {
   provider: ProviderId;
   /** '' or omitted = provider default. */
   model?: string;
+  /** Reasoning effort; '' or omitted = the CLI's default. */
+  effort?: string;
   /** Redo every slide (otherwise only slides without a successful entry are done). */
   force?: boolean;
 }
@@ -206,6 +208,7 @@ function toInfo(docId: string, pageCount: number, record: DigestRecord | null, j
   const info: DigestInfo = { docId, status, done, total: pageCount, slides, summary: record.summary, markdownPath };
   if (record.provider) info.provider = record.provider;
   if (record.model !== undefined) info.model = record.model;
+  if (record.effort) info.effort = record.effort;
   if (record.error) info.error = record.error;
   if (record.startedAt) info.startedAt = record.startedAt;
   if (record.updatedAt) info.updatedAt = record.updatedAt;
@@ -283,6 +286,8 @@ export async function startDigest(
       slides: (previous?.slides ?? []).filter((entry) => entry.slide <= pageCount),
       summary: previous?.summary ?? null,
     };
+    const effort = (options.effort ?? '').trim();
+    if (effort) record.effort = effort;
     if (previous && (previous.summaryStale || summaryFailedLastTime(previous))) record.summaryStale = true;
     job.redo = options.force ? new Set(Array.from({ length: pageCount }, (_, i) => i + 1)) : null;
     job.record = record;
@@ -294,7 +299,8 @@ export async function startDigest(
 
   const info = toInfo(docId, pageCount, job.record, job);
   console.log(
-    `[digest] ${docId}: ${options.force ? 'redo ' : ''}started with ${provider.id}${job.record.model ? ` (${job.record.model})` : ''}`,
+    `[digest] ${docId}: ${options.force ? 'redo ' : ''}started with ${provider.id}${job.record.model ? ` (${job.record.model})` : ''}` +
+      (job.record.effort ? `, effort ${job.record.effort}` : ''),
   );
   void runJob(docId, job, job.record, { assets, provider, courseTitle, deps }).finally(release);
   return info;
@@ -485,6 +491,7 @@ async function runJob(docId: string, job: DigestJob, record: DigestRecord, ctx: 
         resume: null,
         history: [],
         model: record.model ?? '',
+        effort: record.effort ?? '',
         ephemeral: true,
         // The slide images are attached; the model has no reason to run commands or read files.
         allowTools: false,

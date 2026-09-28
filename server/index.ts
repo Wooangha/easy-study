@@ -12,7 +12,16 @@ import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
-import { ATTACHMENT_ID_RE, COURSE_ID_RE, DOC_ID_RE, MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, SESSION_ID_RE } from '../shared/types.ts';
+import {
+  ATTACHMENT_ID_RE,
+  COURSE_ID_RE,
+  DOC_ID_RE,
+  EFFORT_LABELS,
+  MAX_ATTACHMENTS,
+  MAX_ATTACHMENT_BYTES,
+  MODEL_ID_RE,
+  SESSION_ID_RE,
+} from '../shared/types.ts';
 import { VIEW_WIDTHS, thumbPath, viewPath } from './assets.ts';
 import type { ViewWidth } from './assets.ts';
 import {
@@ -143,8 +152,6 @@ const SSE_PING_MS = 15_000;
 const IMMUTABLE_MAX_AGE_MS = 31_536_000 * 1000; // one year → "max-age=31536000"
 /** Behind the login (remote mode) slide images are for this browser only: no shared (proxy) caches. */
 const PRIVATE_IMMUTABLE = 'private, max-age=31536000, immutable';
-/** Model names reach CLI argument lists: no leading dash, no whitespace. */
-const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:/@[\]-]{0,127}$/;
 
 export interface AppOptions {
   /** Provider availability for /api/health and session creation (default: the real registry). */
@@ -209,10 +216,17 @@ function decodeFileName(header: string | undefined): string {
 }
 
 /**
- * Provider + model of a request (POST /sessions, POST /digest): the provider must be known and
- * available; '' / omitted model = the provider's default. Throws HttpError 400 otherwise.
+ * Provider + model + reasoning effort of a request (POST /sessions, POST /digest): the provider must be known and
+ * available; '' / omitted model = the provider's default. The effort ('' / omitted = the CLI's default) must be one
+ * of the provider's levels (ProviderInfo.efforts) that a listed model supports (a model typed in by hand may take any
+ * of them). Throws HttpError 400 otherwise.
  */
-function resolveProviderChoice(infos: ProviderInfo[], provider: unknown, model: unknown): { info: ProviderInfo; model: string } {
+function resolveProviderChoice(
+  infos: ProviderInfo[],
+  provider: unknown,
+  model: unknown,
+  effort?: unknown,
+): { info: ProviderInfo; model: string; effort: string } {
   const info = infos.find((candidate) => candidate.id === provider);
   if (!info) throw new HttpError(400, `알 수 없는 제공자입니다: ${String(provider)}`);
   if (!info.available) {
@@ -220,8 +234,18 @@ function resolveProviderChoice(infos: ProviderInfo[], provider: unknown, model: 
   }
   if (model !== undefined && typeof model !== 'string') throw new HttpError(400, '모델 이름이 올바르지 않습니다');
   const resolved = (model ?? '').trim() || info.defaultModel;
-  if (resolved && !MODEL_RE.test(resolved)) throw new HttpError(400, `모델 이름이 올바르지 않습니다: ${resolved}`);
-  return { info, model: resolved };
+  if (resolved && !MODEL_ID_RE.test(resolved)) throw new HttpError(400, `모델 이름이 올바르지 않습니다: ${resolved}`);
+  if (effort !== undefined && typeof effort !== 'string') throw new HttpError(400, '추론 수준이 올바르지 않습니다');
+  const level = (effort ?? '').trim();
+  if (level) {
+    if (!info.efforts?.length) throw new HttpError(400, `${info.label}은(는) 추론 수준을 고를 수 없습니다`);
+    if (!info.efforts.some((e) => e.id === level)) throw new HttpError(400, `알 수 없는 추론 수준입니다: ${level}`);
+    const supported = info.models.find((m) => m.id === resolved)?.efforts;
+    if (supported && !supported.includes(level)) {
+      throw new HttpError(400, `이 모델은 추론 수준 '${EFFORT_LABELS[level] ?? level}'을(를) 지원하지 않습니다`);
+    }
+  }
+  return { info, model: resolved, effort: level };
 }
 
 /**
@@ -664,25 +688,26 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
     const docId = req.params.docId;
     await requireStoredDoc(docId);
     const body = jsonBody(req) as Partial<Record<keyof CreateSessionRequest, unknown>>;
-    const { info, model } = resolveProviderChoice(await getProviderInfos(), body.provider, body.model);
+    const { info, model, effort } = resolveProviderChoice(await getProviderInfos(), body.provider, body.model, body.effort);
     const record = await createSession(docId, {
       provider: info.id,
       model,
+      effort,
       title: typeof body.title === 'string' ? body.title : undefined,
     });
-    await autoStartDigest(docId, info.id, model);
+    await autoStartDigest(docId, info.id, model, effort);
     res.status(201).json(toSession(record));
   });
 
   /**
-   * The first session of a document starts its digest with the session's provider/model
+   * The first session of a document starts its digest with the session's provider/model/effort
    * (DESIGN §11; EASY_STUDY_AUTO_DIGEST=0 disables it). Never fails the request.
    */
-  const autoStartDigest = async (docId: string, provider: ProviderId, model: string) => {
+  const autoStartDigest = async (docId: string, provider: ProviderId, model: string, effort: string) => {
     if (!autoDigestEnabled()) return;
     try {
       if ((await getDigestInfo(docId)).status !== 'none') return;
-      await startDigest(docId, { provider, model }, digestDeps);
+      await startDigest(docId, { provider, model, effort }, digestDeps);
     } catch (err) {
       // e.g. 409: the document is still being processed, or a job started concurrently.
       console.warn(`[digest] auto start for ${docId} skipped: ${errorMessage(err)}`);
@@ -773,8 +798,8 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
     await requireStoredDoc(docId);
     const body = jsonBody(req) as Partial<Record<keyof StartDigestRequest, unknown>>;
     if (body.force !== undefined && typeof body.force !== 'boolean') throw new HttpError(400, 'force는 true/false 여야 합니다');
-    const { info, model } = resolveProviderChoice(await getProviderInfos(), body.provider, body.model);
-    res.status(202).json(await startDigest(docId, { provider: info.id, model, force: body.force === true }, digestDeps));
+    const { info, model, effort } = resolveProviderChoice(await getProviderInfos(), body.provider, body.model, body.effort);
+    res.status(202).json(await startDigest(docId, { provider: info.id, model, effort, force: body.force === true }, digestDeps));
   });
 
   api.post('/docs/:docId/digest/abort', async (req, res) => {

@@ -9,7 +9,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { after, afterEach, before, beforeEach, describe, test } from 'node:test';
+import { after, afterEach, before, beforeEach, describe, mock, test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import sharp from 'sharp';
@@ -19,6 +19,7 @@ import { ProviderError, providerErrorKind } from '../server/providers/types.ts';
 import {
   CLAUDE_BIN_SPEC,
   CLAUDE_CHILD_ENV_DEFAULTS,
+  CLAUDE_EFFORTS,
   CLAUDE_TOOLS,
   claudeArgs,
   claudeCodeProvider,
@@ -55,6 +56,16 @@ import {
   classifyAnthropicError,
   estimateAnthropicInputTokens,
 } from '../server/providers/anthropicApi.ts';
+import {
+  CODEX_CATALOG_TTL_MS,
+  clearCodexCatalogCache,
+  codexCatalog,
+  codexConfigModel,
+  codexModelChoices,
+  loadCodexCatalog,
+  parseCodexCatalog,
+} from '../server/providers/codexCatalog.ts';
+import type { CodexCatalogModel } from '../server/providers/codexCatalog.ts';
 import { buildOpenAIRequest, classifyOpenAIError, openaiApiProvider } from '../server/providers/openaiApi.ts';
 import { clearProviderInfoCache, getProvider, listProviders, providerInfos } from '../server/providers/index.ts';
 import {
@@ -126,6 +137,8 @@ const ENV_KEYS = [
   'CODEX_BIN',
   'FAKE_CLI_MODE',
   'FAKE_CLI_RECORD',
+  'FAKE_CODEX_CATALOG',
+  'FAKE_CODEX_CATALOG_LOG',
   'CLAUDECODE',
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_AUTH_TOKEN',
@@ -663,6 +676,37 @@ describe('claude-code provider', () => {
     assert.equal(claudeCodeProvider.maxImagesPerConversation, 48);
   });
 
+  test('effort: --effort <level> on new and resumed conversations, none for the default', FAKE_CLI, async () => {
+    const fresh = await run(claudeCodeProvider, { model: 'opus', effort: 'xhigh' });
+    assert.ifError(fresh.error);
+    let argv = record().argv;
+    assert.deepEqual(argv.slice(argv.indexOf('--model'), argv.indexOf('--model') + 4), ['--model', 'opus', '--effort', 'xhigh']);
+    const resumed = await run(claudeCodeProvider, { resume: { cliSessionId: 'sess-9' }, effort: 'low' });
+    assert.ifError(resumed.error);
+    argv = record().argv;
+    assert.equal(argv[argv.indexOf('--effort') + 1], 'low');
+    assert.deepEqual(argv.slice(-2), ['--resume', 'sess-9']);
+    assert.ok(!claudeArgs({ systemPrompt: 's', model: 'opus', effort: '' }).includes('--effort'));
+    assert.ok(!claudeArgs({ systemPrompt: 's', model: 'opus' }).includes('--effort'));
+  });
+
+  test('efforts: the levels of `claude --help` with Korean labels; Haiku takes none', () => {
+    assert.deepEqual(
+      CLAUDE_EFFORTS.map((e) => [e.id, e.label]),
+      [
+        ['low', '낮음'],
+        ['medium', '보통'],
+        ['high', '높음'],
+        ['xhigh', '매우 높음'],
+        ['max', '최대'],
+      ],
+    );
+    assert.ok(CLAUDE_EFFORTS.every((e) => e.description));
+    assert.equal(claudeCodeProvider.efforts, CLAUDE_EFFORTS);
+    assert.deepEqual(claudeCodeProvider.models.find((m) => m.id === 'haiku')?.efforts, []);
+    assert.equal(claudeCodeProvider.models.find((m) => m.id === 'opus')?.efforts, undefined, 'every level');
+  });
+
   test('claudeArgs generates a session id when none is given', () => {
     const args = claudeArgs({ systemPrompt: 's', model: '' });
     assert.equal(args[args.length - 2], '--session-id');
@@ -786,9 +830,19 @@ describe('claude-code provider', () => {
 // codex
 // ---------------------------------------------------------------------------
 
+/** What detect() reports for the fake CLI's live catalog (tests/fixtures/fake-codex.mjs), without a config model. */
+const FAKE_CODEX_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+const FAKE_CODEX_MODELS = [
+  // The config default can use the levels every listed model supports.
+  { id: '', label: 'Codex 설정 기본값', efforts: ['low', 'medium', 'high'] },
+  { id: 'gpt-fake-small', label: 'GPT-Fake-Small', efforts: ['low', 'medium', 'high'] },
+  { id: 'gpt-fake-big', label: 'GPT-Fake-Big', description: 'Big fake model.', efforts: FAKE_CODEX_EFFORTS },
+];
+
 describe('codex provider', () => {
   beforeEach(() => {
     process.env.CODEX_BIN = FAKE_CODEX;
+    clearCodexCatalogCache();
   });
 
   test('new conversation: exact argv (reads confined to the document), instructions + image markers on stdin', FAKE_CLI, async () => {
@@ -975,8 +1029,59 @@ describe('codex provider', () => {
     assert.deepEqual(images, []);
   });
 
-  test('detect reports the version', FAKE_CLI, async () => {
-    assert.deepEqual(await codexProvider.detect(), { available: true, version: 'codex-cli 9.9.9' });
+  test('detect reports the version and the models / effort levels of the model catalog', FAKE_CLI, async () => {
+    assert.deepEqual(await codexProvider.detect(), {
+      available: true,
+      version: 'codex-cli 9.9.9',
+      models: FAKE_CODEX_MODELS,
+      efforts: FAKE_CODEX_EFFORTS.map((id) => ({
+        id,
+        label: { low: '낮음', medium: '보통', high: '높음', xhigh: '매우 높음', max: '최대', ultra: '울트라' }[id],
+        description: `${id} reasoning`,
+      })),
+    });
+    process.env.CODEX_BIN = path.join(workDir, 'missing-codex');
+    const missing = await codexProvider.detect();
+    assert.equal(missing.available, false);
+    assert.equal(missing.models, undefined, 'no catalog is read without a CLI');
+  });
+
+  test("detect: the config default names config.toml's model and takes that model's levels", FAKE_CLI, async () => {
+    const home = process.env.CODEX_HOME!;
+    fs.mkdirSync(home, { recursive: true });
+    const config = path.join(home, 'config.toml');
+    fs.writeFileSync(config, 'model = "gpt-fake-hidden"\nmodel_reasoning_effort = "medium"\n');
+    let found = await codexProvider.detect();
+    assert.deepEqual(found.models?.[0], { id: '', label: 'Codex 설정 기본값 (GPT-Fake-Hidden)', efforts: ['minimal'] });
+    assert.ok(!found.models?.some((m) => m.id === 'gpt-fake-hidden'), 'hidden models are not listed');
+    assert.deepEqual(found.efforts?.map((e) => e.id), ['minimal', ...FAKE_CODEX_EFFORTS]);
+    assert.equal(found.efforts?.[0].label, '최소');
+
+    // A model the catalog does not know is named as it is written.
+    fs.writeFileSync(config, "model = 'my-model' # comment\n");
+    found = await codexProvider.detect();
+    assert.deepEqual(found.models?.[0], { id: '', label: 'Codex 설정 기본값 (my-model)', efforts: ['low', 'medium', 'high'] });
+  });
+
+  test('effort: -c model_reasoning_effort="<level>" after -m, on new and resumed conversations', FAKE_CLI, async () => {
+    const fresh = await run(codexProvider, { model: 'gpt-fake-big', effort: 'ultra' });
+    assert.ifError(fresh.error);
+    let argv = record().argv;
+    const at = argv.indexOf('-m');
+    assert.deepEqual(argv.slice(at, at + 4), ['-m', 'gpt-fake-big', '-c', 'model_reasoning_effort="ultra"']);
+    assert.equal(argv[at + 4], '-i', 'the images follow');
+
+    const resumed = await run(codexProvider, { resume: { cliSessionId: 'thread-42' }, effort: 'high' });
+    assert.ifError(resumed.error);
+    argv = record().argv;
+    assert.deepEqual(argv.slice(0, 3), ['exec', 'resume', 'thread-42']);
+    assert.ok(!argv.includes('-m'));
+    const effort = argv.indexOf('model_reasoning_effort="high"');
+    assert.ok(effort > 0 && argv[effort - 1] === '-c');
+
+    const plain = await run(codexProvider, { effort: '' });
+    assert.ifError(plain.error);
+    assert.ok(!record().argv.some((a) => a.startsWith('model_reasoning_effort')));
   });
 
   test('allowTools: false also disables the shell and the other tools; tutoring keeps the shell', () => {
@@ -1679,6 +1784,173 @@ describe('openai-api provider', () => {
 // registry
 // ---------------------------------------------------------------------------
 
+describe('codex model catalog', () => {
+  const model = (slug: string, efforts: string[], extra: Partial<CodexCatalogModel> = {}): CodexCatalogModel => ({
+    slug,
+    displayName: slug.toUpperCase(),
+    description: '',
+    visible: true,
+    priority: 1,
+    efforts: efforts.map((id) => ({ id, description: `${id}!` })),
+    ...extra,
+  });
+
+  beforeEach(() => {
+    clearCodexCatalogCache();
+  });
+
+  test('parseCodexCatalog: models with their levels; bad names, bad levels and duplicates are skipped', () => {
+    assert.equal(parseCodexCatalog('nope'), null);
+    assert.equal(parseCodexCatalog('{"data": []}'), null);
+    assert.equal(parseCodexCatalog('null'), null);
+    assert.deepEqual(parseCodexCatalog('{"models": []}'), []);
+    const parsed = parseCodexCatalog(
+      JSON.stringify({
+        models: [
+          {
+            slug: 'gpt-a',
+            display_name: ' GPT A ',
+            description: 'A\nmodel',
+            visibility: 'list',
+            priority: 3,
+            supported_reasoning_levels: [
+              { effort: 'low', description: 'Fast' },
+              { effort: 'low', description: 'again' },
+              { effort: 'Bad Level' },
+              { effort: 'high' },
+              'x',
+            ],
+          },
+          { slug: 'gpt-b', visibility: 'hide' },
+          { slug: '-x' },
+          { slug: 'with space' },
+          { display_name: 'no slug' },
+          'junk',
+        ],
+      }),
+    );
+    assert.deepEqual(parsed, [
+      {
+        slug: 'gpt-a',
+        displayName: 'GPT A',
+        description: 'A model',
+        visible: true,
+        priority: 3,
+        efforts: [
+          { id: 'low', description: 'Fast' },
+          { id: 'high', description: '' },
+        ],
+      },
+      { slug: 'gpt-b', displayName: 'gpt-b', description: '', visible: false, priority: Number.POSITIVE_INFINITY, efforts: [] },
+    ]);
+  });
+
+  test('codexModelChoices: default first, listed models by priority, levels weakest first (unknown ones last)', () => {
+    const catalog = [
+      model('b', ['high', 'low', 'turbo'], { priority: 2, description: 'B!' }),
+      model('a', ['medium', 'low'], { priority: 1 }),
+      model('hidden', ['minimal', 'low'], { visible: false, priority: 0 }),
+    ];
+    const choices = codexModelChoices(catalog, null);
+    assert.deepEqual(choices.models, [
+      { id: '', label: 'Codex 설정 기본값', efforts: ['low'] },
+      { id: 'a', label: 'A', efforts: ['medium', 'low'] },
+      { id: 'b', label: 'B', description: 'B!', efforts: ['high', 'low', 'turbo'] },
+    ]);
+    assert.deepEqual(
+      choices.efforts.map((e) => [e.id, e.label, e.description]),
+      [
+        ['low', '낮음', 'low!'],
+        ['medium', '보통', 'medium!'],
+        ['high', '높음', 'high!'],
+        ['turbo', 'turbo', 'turbo!'],
+      ],
+    );
+    // The config's model (hidden or not) sets the default's levels, and adds its own.
+    const hidden = codexModelChoices(catalog, 'hidden');
+    assert.deepEqual(hidden.models[0], { id: '', label: 'Codex 설정 기본값 (HIDDEN)', efforts: ['minimal', 'low'] });
+    assert.equal(hidden.efforts[0].id, 'minimal');
+    // No catalog (an old CLI): the default only, no levels.
+    assert.deepEqual(codexModelChoices(null, 'gpt-x'), { models: [{ id: '', label: 'Codex 설정 기본값 (gpt-x)' }], efforts: [] });
+    assert.deepEqual(codexModelChoices([], null), { models: [{ id: '', label: 'Codex 설정 기본값' }], efforts: [] });
+  });
+
+  test("codexConfigModel: the root table's model; none when a profile is selected", () => {
+    assert.equal(codexConfigModel(''), null);
+    assert.equal(codexConfigModel('model = "gpt-5.5"\nmodel_reasoning_effort = "high"\n'), 'gpt-5.5');
+    assert.equal(codexConfigModel("# c\r\nmodel='o3'   # comment\r\n"), 'o3');
+    assert.equal(codexConfigModel('model_reasoning_effort = "high"\n'), null);
+    assert.equal(codexConfigModel('[profiles.x]\nmodel = "gpt-x"\n'), null, 'not in the root table');
+    assert.equal(codexConfigModel('model = "gpt-5"\n[tui]\nmodel = "other"\n'), 'gpt-5');
+    assert.equal(codexConfigModel('profile = "work"\nmodel = "gpt-5"\n'), null);
+    assert.equal(codexConfigModel('model = ""\n'), null);
+  });
+
+  test('loadCodexCatalog: live, else --bundled, else null (old CLI, garbage)', FAKE_CLI, async () => {
+    const log = path.join(workDir, 'catalog.log');
+    process.env.FAKE_CODEX_CATALOG_LOG = log;
+    const calls = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l)) : []);
+
+    assert.deepEqual((await loadCodexCatalog(FAKE_CODEX))?.map((m) => m.slug), ['gpt-fake-big', 'gpt-fake-hidden', 'gpt-fake-small']);
+    assert.deepEqual(calls(), [['debug', 'models']]);
+
+    process.env.FAKE_CODEX_CATALOG = 'live-fails';
+    assert.deepEqual((await loadCodexCatalog(FAKE_CODEX))?.map((m) => m.slug), ['gpt-fake-bundled']);
+    assert.deepEqual(calls().slice(1), [['debug', 'models'], ['debug', 'models', '--bundled']]);
+
+    process.env.FAKE_CODEX_CATALOG = 'live-hangs';
+    const started = Date.now();
+    assert.deepEqual((await loadCodexCatalog(FAKE_CODEX, { liveMs: 400 }))?.map((m) => m.slug), ['gpt-fake-bundled']);
+    assert.ok(Date.now() - started < 3_000, 'a slow live read is given up');
+
+    for (const mode of ['unsupported', 'garbage']) {
+      process.env.FAKE_CODEX_CATALOG = mode;
+      assert.equal(await loadCodexCatalog(FAKE_CODEX), null, mode);
+    }
+    assert.equal(await loadCodexCatalog(path.join(workDir, 'no-codex')), null);
+
+    // Detection of a CLI without a catalog: available, the config default only, no levels.
+    process.env.CODEX_BIN = FAKE_CODEX;
+    process.env.FAKE_CODEX_CATALOG = 'unsupported';
+    assert.deepEqual(await codexProvider.detect(), {
+      available: true,
+      version: 'codex-cli 9.9.9',
+      models: [{ id: '', label: 'Codex 설정 기본값' }],
+      efforts: [],
+    });
+  });
+
+  test('codexCatalog: read once per CLI and version, re-read in the background once stale', FAKE_CLI, async () => {
+    const log = path.join(workDir, 'catalog.log');
+    process.env.FAKE_CODEX_CATALOG_LOG = log;
+    const count = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').length : 0);
+
+    const [first, concurrent] = await Promise.all([codexCatalog(FAKE_CODEX, 'v1'), codexCatalog(FAKE_CODEX, 'v1')]);
+    assert.equal(count(), 1, 'concurrent callers share one read');
+    assert.equal(first, concurrent);
+    assert.equal(await codexCatalog(FAKE_CODEX, 'v1'), first);
+    assert.equal(count(), 1);
+
+    // Stale: the old catalog is returned at once while it is re-read; a failed re-read keeps it.
+    process.env.FAKE_CODEX_CATALOG = 'unsupported';
+    const now = Date.now();
+    const clock = mock.method(Date, 'now', () => now + CODEX_CATALOG_TTL_MS + 1);
+    try {
+      assert.equal(await codexCatalog(FAKE_CODEX, 'v1'), first);
+      for (let i = 0; i < 100 && count() < 3; i++) await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(count(), 3, 'live + bundled re-read');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(await codexCatalog(FAKE_CODEX, 'v1'), first);
+    } finally {
+      clock.mock.restore();
+    }
+
+    // Another version (an updated CLI) is read again.
+    process.env.FAKE_CODEX_CATALOG = 'live-fails';
+    assert.deepEqual((await codexCatalog(FAKE_CODEX, 'v2'))?.map((m) => m.slug), ['gpt-fake-bundled']);
+  });
+});
+
 describe('provider registry', () => {
   test('lists the four providers and their availability (never throws)', FAKE_CLI, async () => {
     process.env.CLAUDE_BIN = FAKE_CLAUDE;
@@ -1701,6 +1973,11 @@ describe('provider registry', () => {
     assert.equal(byId['openai-api'].available, true);
     assert.equal(byId['anthropic-api'].defaultModel, 'claude-opus-5');
     assert.ok(byId['claude-code'].models.some((m) => m.id === 'sonnet'));
+    assert.deepEqual(byId['claude-code'].efforts, CLAUDE_EFFORTS);
+    assert.deepEqual(byId['claude-code'].models.find((m) => m.id === 'haiku')?.efforts, []);
+    // Codex without a CLI: the static default only; API providers offer no effort levels.
+    assert.deepEqual(byId['codex'].models, [{ id: '', label: 'Codex 설정 기본값' }]);
+    for (const id of ['codex', 'anthropic-api', 'openai-api']) assert.equal(byId[id].efforts, undefined, id);
 
     // Cached: a changed environment is not re-detected within the TTL.
     delete process.env.OPENAI_API_KEY;
@@ -1709,6 +1986,23 @@ describe('provider registry', () => {
     clearProviderInfoCache();
     const fresh = await providerInfos();
     assert.equal(fresh.find((i) => i.id === 'openai-api')?.available, false);
+    clearProviderInfoCache();
+  });
+
+  test("the Codex models and effort levels are the catalog's (copies)", FAKE_CLI, async () => {
+    process.env.CLAUDE_BIN = FAKE_CLAUDE;
+    process.env.CODEX_BIN = FAKE_CODEX;
+    clearCodexCatalogCache();
+    clearProviderInfoCache();
+    const codex = (await providerInfos()).find((i) => i.id === 'codex')!;
+    assert.equal(codex.available, true);
+    assert.deepEqual(codex.models, FAKE_CODEX_MODELS);
+    assert.deepEqual(codex.efforts?.map((e) => e.id), FAKE_CODEX_EFFORTS);
+    codex.models[2].efforts?.push('mutated');
+    codex.efforts![0].label = 'mutated';
+    const again = (await providerInfos()).find((i) => i.id === 'codex')!;
+    assert.deepEqual(again.models, FAKE_CODEX_MODELS);
+    assert.equal(again.efforts?.[0].label, '낮음');
     clearProviderInfoCache();
   });
 });

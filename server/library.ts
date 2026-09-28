@@ -26,7 +26,7 @@ import { readFileSync, unlinkSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { COURSE_ID_RE, DOC_ID_RE } from '../shared/types.ts';
+import { COURSE_ID_RE, DOC_ID_RE, EFFORT_ID_RE } from '../shared/types.ts';
 import type { DigestSlide, DigestStatus, DocMeta } from '../shared/types.ts';
 import { VIEW_WIDTHS, inlinePathFor, thumbPath, viewPath } from './assets.ts';
 import { HttpError, libraryDir } from './config.ts';
@@ -474,6 +474,7 @@ function normalizeDigestRecord(value: unknown): DigestRecord | null {
   };
   if (typeof raw.provider === 'string') record.provider = raw.provider as DigestRecord['provider'];
   if (typeof raw.model === 'string') record.model = raw.model;
+  if (typeof raw.effort === 'string' && EFFORT_ID_RE.test(raw.effort)) record.effort = raw.effort;
   if (typeof raw.startedAt === 'string') record.startedAt = raw.startedAt;
   if (typeof raw.updatedAt === 'string') record.updatedAt = raw.updatedAt;
   if (typeof raw.error === 'string' && raw.error) record.error = raw.error;

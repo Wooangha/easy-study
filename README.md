@@ -366,7 +366,13 @@ library/
 | Claude API | `ANTHROPIC_API_KEY` | 프롬프트 캐싱을 써요. |
 | OpenAI API | `OPENAI_API_KEY` | Responses API를 쓰고, 모델은 `OPENAI_MODEL`로 정해요. |
 
-모델은 새 세션을 만들 때 고를 수 있어요. "CLI 기본값"은 각 CLI 설정의 기본 모델을 따라요.
+모델은 새 세션을 만들 때 상단 **새 세션**에서 고를 수 있어요. "CLI 기본값"·"Codex 설정 기본값"은 각 CLI 설정의 기본 모델을 따라요.
+
+- **Claude Code**: Sonnet · Opus · Haiku · Fable 중에서 골라요.
+- **Codex**: 설치된 Codex CLI가 알려 주는 모델 목록(`codex debug models`, Codex의 모델 선택과 같은 목록)에서 골라요. 목록은 서버가 30분마다 새로 읽어요. 이 목록을 모르는 옛 Codex CLI에서는 기본값만 나와요.
+- 목록에 없는 모델은 **직접 입력…** 으로 이름을 넣으면 돼요.
+
+Claude Code와 Codex는 **추론** 수준도 고를 수 있어요 (낮음 · 보통 · 높음 · 매우 높음 · 최대, Codex는 모델에 따라 울트라까지). 높을수록 더 깊이 생각하지만 답이 느려지고 사용량(한도)을 더 써요. **추론 기본값**이면 아무것도 넘기지 않아서 CLI 설정(예: Codex `config.toml`의 `model_reasoning_effort`)을 따라요. 고른 모델이 지원하지 않는 수준은 목록에 나오지 않고, 모델을 바꾸면 기본값으로 돌아가요. 모델과 추론 수준은 세션을 만들 때 정해져서 그 세션의 모든 질문과, 그 세션이 시작한 정리본에 그대로 쓰여요.
 
 ## 환경 변수
 

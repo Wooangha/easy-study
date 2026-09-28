@@ -7,7 +7,36 @@ export interface ModelOption {
   /** Value passed to the provider ('' = provider/CLI default). */
   id: string;
   label: string;
+  /** Longer explanation (tooltip), e.g. the description of the Codex model catalog. */
+  description?: string;
+  /**
+   * Reasoning efforts this model supports (ids of ProviderInfo.efforts). Omitted = all of them, [] = none (the CLI
+   * default only).
+   */
+  efforts?: string[];
 }
+
+/** A reasoning-effort level of a CLI provider (claude --effort, Codex model_reasoning_effort). */
+export interface EffortOption {
+  /** Value passed to the CLI, e.g. 'high'. */
+  id: string;
+  /** Korean name, e.g. '높음' (EFFORT_LABELS). */
+  label: string;
+  /** Longer explanation (tooltip). */
+  description?: string;
+}
+
+/** Korean names of the reasoning-effort levels; an unknown level is shown by its id. */
+export const EFFORT_LABELS: Readonly<Record<string, string>> = {
+  none: '없음',
+  minimal: '최소',
+  low: '낮음',
+  medium: '보통',
+  high: '높음',
+  xhigh: '매우 높음',
+  max: '최대',
+  ultra: '울트라',
+};
 
 export interface ProviderInfo {
   id: ProviderId;
@@ -20,6 +49,11 @@ export interface ProviderInfo {
   version?: string;
   models: ModelOption[];
   defaultModel: string;
+  /**
+   * Reasoning-effort levels one can pick for this provider, weakest first (CLI providers). Omitted or empty = no
+   * choice: the provider's own default is always used. '' (not listed) = the CLI's default.
+   */
+  efforts?: EffortOption[];
 }
 
 export interface HealthResponse {
@@ -190,6 +224,8 @@ export interface ChatMessage {
   /** Present on assistant messages. */
   provider?: ProviderId;
   model?: string;
+  /** Reasoning effort of the assistant message (absent = the CLI's default). */
+  effort?: string;
   durationMs?: number;
 }
 
@@ -199,6 +235,8 @@ export interface SessionSummary {
   title: string;
   provider: ProviderId;
   model: string;
+  /** Reasoning effort (EffortOption.id); absent = the CLI's default (and sessions made before efforts existed). */
+  effort?: string;
   createdAt: string;
   updatedAt: string;
   messageCount: number;
@@ -214,6 +252,8 @@ export interface CreateSessionRequest {
   provider: ProviderId;
   /** '' or omitted = provider default. */
   model?: string;
+  /** One of ProviderInfo.efforts that the model supports; '' or omitted = the CLI's default. */
+  effort?: string;
   title?: string;
 }
 
@@ -260,6 +300,8 @@ export interface DigestInfo {
   status: DigestStatus;
   provider?: ProviderId;
   model?: string;
+  /** Reasoning effort of the digest run (absent = the CLI's default). */
+  effort?: string;
   /** Slides digested so far (successfully or failed). */
   done: number;
   total: number;
@@ -278,6 +320,8 @@ export interface StartDigestRequest {
   provider: ProviderId;
   /** '' or omitted = provider default. */
   model?: string;
+  /** Same as CreateSessionRequest.effort. */
+  effort?: string;
   /** Re-digest every slide even if a digest exists (otherwise only missing/failed slides are done). */
   force?: boolean;
 }
@@ -324,6 +368,10 @@ export interface NotesResponse {
   markdownPath: string;
 }
 
+/** A model name (CreateSessionRequest.model, …). Model names reach CLI argument lists: no leading dash, no whitespace. */
+export const MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:/@[\]-]{0,127}$/;
+/** A reasoning-effort level (EffortOption.id). */
+export const EFFORT_ID_RE = /^[a-z][a-z0-9_-]{0,31}$/;
 export const DOC_ID_RE = /^[a-z0-9][a-z0-9-]{0,80}$/;
 export const COURSE_ID_RE = /^[a-z0-9][a-z0-9-]{0,80}$/;
 export const SESSION_ID_RE = /^[a-z0-9][a-z0-9-]{0,80}$/;

@@ -2,13 +2,14 @@
 //
 //   claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages
 //          --system-prompt <prompt> --tools (Read,Glob,Grep | "") --strict-mcp-config [--add-dir <dir> ...]
-//          [--model <model>] (--session-id <new uuid> | --resume <cliSessionId> | --no-session-persistence)
+//          [--model <model>] [--effort <level>] (--session-id <new uuid> | --resume <cliSessionId> | --no-session-persistence)
 //
 // The user turn (text + base64 images, re-encoded as compact JPEGs: the CLI resends the whole
 // conversation to the Messages API, which has a 32 MB request limit) is written to stdin as one
 // stream-json line. The read-only tools let the model open slide files and, with `--add-dir`, other
 // lectures of the same course; calls that need no tools (ProviderRunInput.allowTools === false, e.g.
-// digest batches) get none. One-shot (ephemeral) calls do not persist a CLI session.
+// digest batches) get none. One-shot (ephemeral) calls do not persist a CLI session. The reasoning effort
+// (CLAUDE_EFFORTS, as `claude --help` lists them) is passed on every call, resumed ones included.
 //
 // Failures are classified (ProviderError): a --resume whose CLI session no longer exists is
 // 'resume_invalid', "Prompt is too long" / "Request too large" is 'context_overflow', login problems
@@ -24,7 +25,7 @@ import type {
   ProviderRunInput,
   ProviderRunResult,
 } from './types.ts';
-import { ProviderError } from './types.ts';
+import { ProviderError, effortOption } from './types.ts';
 import {
   childEnv,
   describeExit,
@@ -39,9 +40,20 @@ import type { CliBinSpec, JsonObject } from './proc.ts';
 /** Read-only tools the CLI may use (to open slide PNGs it has not been shown). */
 export const CLAUDE_TOOLS = 'Read,Glob,Grep';
 
+/** `claude --effort <level>` levels (claude 2.1.x), weakest first. */
+export const CLAUDE_EFFORTS = [
+  effortOption('low', '빠르게, 가볍게 생각해요'),
+  effortOption('medium', '속도와 깊이의 균형'),
+  effortOption('high', '복잡한 내용을 더 깊이 생각해요'),
+  effortOption('xhigh', '더 깊이 생각해요 (느려지고 사용량이 늘어요)'),
+  effortOption('max', '가장 깊이 생각해요 (가장 느리고 사용량이 가장 많아요)'),
+];
+
 export interface ClaudeArgsInput {
   systemPrompt: string;
   model: string;
+  /** '' / omitted = the CLI's default effort. */
+  effort?: string;
   /** New conversation: the session id we pick. */
   sessionId?: string;
   /** Continued conversation: the CLI session id to resume. */
@@ -73,6 +85,7 @@ export function claudeArgs(input: ClaudeArgsInput): string[] {
   // --add-dir is variadic in the CLI: every value is followed by another option, never a positional.
   if (tools) for (const dir of uniqueDirs(input.addDirs)) args.push('--add-dir', dir);
   if (input.model) args.push('--model', input.model);
+  if (input.effort) args.push('--effort', input.effort);
   if (input.ephemeral) args.push('--no-session-persistence');
   if (input.resumeId) args.push('--resume', input.resumeId);
   else if (!input.ephemeral) args.push('--session-id', input.sessionId ?? randomUUID());
@@ -350,6 +363,7 @@ async function runClaude(input: ProviderRunInput): Promise<ProviderRunResult> {
   const args = claudeArgs({
     systemPrompt: input.systemPrompt,
     model: input.model,
+    effort: input.effort,
     sessionId,
     resumeId,
     ephemeral,
@@ -405,10 +419,12 @@ export const claudeCodeProvider: Provider = {
     { id: '', label: 'CLI 기본값' },
     { id: 'sonnet', label: 'Sonnet' },
     { id: 'opus', label: 'Opus' },
-    { id: 'haiku', label: 'Haiku' },
+    // Haiku (4.5) takes no effort level.
+    { id: 'haiku', label: 'Haiku', efforts: [] },
     { id: 'fable', label: 'Fable' },
   ],
   defaultModel: '',
+  efforts: CLAUDE_EFFORTS,
   // Each image stays in the CLI's conversation and is resent with every turn: a resumed 90-image conversation
   // measured ~330 MB RSS in the claude process, so conversations roll over (re-prime + recap) earlier.
   maxImagesPerConversation: 48,

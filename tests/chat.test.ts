@@ -986,8 +986,23 @@ describe('HTTP server', () => {
     return streamingAnswer(() => `http answer ${call}`)(input, call);
   });
   const infos: ProviderInfo[] = [
-    { id: 'claude-code', label: 'Claude Code', kind: 'cli', available: true, models: [], defaultModel: '' },
+    {
+      id: 'claude-code',
+      label: 'Claude Code',
+      kind: 'cli',
+      available: true,
+      models: [
+        { id: '', label: 'CLI 기본값' },
+        { id: 'haiku', label: 'Haiku', efforts: [] },
+      ],
+      defaultModel: '',
+      efforts: [
+        { id: 'low', label: '낮음' },
+        { id: 'high', label: '높음' },
+      ],
+    },
     { id: 'codex', label: 'Codex', kind: 'cli', available: false, reason: 'codex CLI not found', models: [], defaultModel: '' },
+    { id: 'openai-api', label: 'OpenAI API', kind: 'api', available: true, models: [], defaultModel: 'gpt-5' },
   ];
   let docId = '';
   let sessionId = '';
@@ -1083,6 +1098,7 @@ describe('HTTP server', () => {
     const session = (await res.json()) as Session;
     assert.equal(session.title, '스모크');
     assert.equal(session.model, 'sonnet');
+    assert.ok(!('effort' in session), 'no effort: the CLI default');
     assert.deepEqual(session.messages, []);
     sessionId = session.id;
 
@@ -1214,6 +1230,50 @@ describe('HTTP server', () => {
     await expectError(await api(`/docs/${docId}/sessions/${sessionId}`, { method: 'DELETE' }), 404);
     const md = await (await api(`/docs/${docId}/notes.md`)).text();
     assert.ok(!md.includes('간트 차트 설명해줘'));
+  });
+
+  test('reasoning effort: validated, kept with the session, passed on every turn and shown in the notes', async () => {
+    const create = (body: Record<string, unknown>) => postJson(`/docs/${docId}/sessions`, { provider: 'claude-code', ...body });
+    for (const effort of ['ultra', 'HIGH', 3, null]) await expectError(await create({ effort }), 400);
+    assert.match(await expectError(await create({ model: 'haiku', effort: 'high' }), 400), /지원하지 않습니다/);
+    assert.match(
+      await expectError(await postJson(`/docs/${docId}/sessions`, { provider: 'openai-api', effort: 'high' }), 400),
+      /추론 수준을 고를 수 없습니다/,
+    );
+    // '' = the default, like an omitted effort; a model typed in by hand may take any level.
+    const plain = (await (await create({ effort: '' })).json()) as Session;
+    assert.ok(!('effort' in plain));
+    assert.equal(((await (await create({ model: 'my-model', effort: 'low' })).json()) as Session).effort, 'low');
+
+    const res = await create({ effort: 'high', title: '추론' });
+    assert.equal(res.status, 201);
+    const session = (await res.json()) as Session;
+    assert.equal(session.effort, 'high');
+    const listed = ((await (await api(`/docs/${docId}/sessions`)).json()) as Session[]).find((s) => s.id === session.id);
+    assert.equal(listed?.effort, 'high');
+
+    const before = provider.calls.length;
+    const prime = parseSse(await (await postJson(`/docs/${docId}/sessions/${session.id}/prime`, { slide: 1 })).text());
+    const primed = prime.at(-1)?.data as Extract<StreamEvent, { type: 'done' }>;
+    assert.equal(primed.assistantMessage.effort, 'high');
+    assert.equal(primed.session.effort, 'high');
+    const ask = parseSse(await (await postJson(`/docs/${docId}/sessions/${session.id}/messages`, { text: '추론 질문', slide: 2 })).text());
+    assert.equal(ask.at(-1)?.event, 'done');
+    assert.deepEqual(
+      provider.calls.slice(before).map((c) => [c.effort, c.resume === null ? 'new' : 'resumed']),
+      [
+        ['high', 'new'],
+        ['high', 'resumed'],
+      ],
+    );
+    const notes = await (await api(`/docs/${docId}/notes.md`)).text();
+    assert.match(notes, /Claude Code \(effort high\)/);
+
+    // A session without one (e.g. made before efforts existed) runs with the CLI default.
+    const plainAsk = parseSse(await (await postJson(`/docs/${docId}/sessions/${plain.id}/messages`, { text: '기본', slide: 1 })).text());
+    assert.equal(plainAsk.at(-1)?.event, 'done');
+    assert.equal(provider.calls.at(-1)?.effort, '');
+    assert.ok(!('effort' in (plainAsk.at(-1)?.data as Extract<StreamEvent, { type: 'done' }>).assistantMessage));
   });
 
   test('cross-site requests and foreign Host headers are refused', async () => {

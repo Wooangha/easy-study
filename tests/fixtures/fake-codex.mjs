@@ -2,6 +2,10 @@
 // Fake `codex` CLI for tests (pointed to by CODEX_BIN). It never talks to any service.
 //
 // - `--version` prints a version line.
+// - `debug models [--bundled]` prints a small model catalog (the live one, or with --bundled the "bundled" one) and
+//   appends its argv as a JSON line to $FAKE_CODEX_CATALOG_LOG, if set. $FAKE_CODEX_CATALOG:
+//     live (default) | live-fails (the live read exits 1; --bundled works) | live-hangs (the live read never ends)
+//     | unsupported (both fail like a CLI without `debug models`) | garbage (both print something that is not JSON)
 // - Otherwise it reads stdin until EOF, records { argv, stdin, cwd, pid, script, env } as JSON to the file
 //   named by $FAKE_CLI_RECORD (script = the path it was executed by, symlinks not resolved), then
 //   behaves according to $FAKE_CLI_MODE:
@@ -20,13 +24,62 @@ if (argv[0] === '--version') {
   process.exit(0);
 }
 
+function level(effort) {
+  return { effort, description: `${effort} reasoning` };
+}
+
+function debugModels(bundled) {
+  if (process.env.FAKE_CODEX_CATALOG_LOG) fs.appendFileSync(process.env.FAKE_CODEX_CATALOG_LOG, `${JSON.stringify(argv)}\n`);
+  const mode = process.env.FAKE_CODEX_CATALOG || 'live';
+  if (mode === 'unsupported') {
+    process.stderr.write("error: unrecognized subcommand 'models'\n");
+    process.exit(2);
+  }
+  if (mode === 'garbage') {
+    process.stdout.write('not a catalog\n');
+    process.exit(0);
+  }
+  if (!bundled && mode === 'live-fails') {
+    process.stderr.write('Error: failed to refresh the model catalog\n');
+    process.exit(1);
+  }
+  if (!bundled && mode === 'live-hangs') {
+    setInterval(() => {}, 1000);
+    return;
+  }
+  const models = bundled
+    ? [{ slug: 'gpt-fake-bundled', display_name: 'GPT-Fake-Bundled', visibility: 'list', priority: 1, supported_reasoning_levels: ['low', 'high'].map(level) }]
+    : [
+        // Listed after gpt-fake-small (priority), described, with every level.
+        {
+          slug: 'gpt-fake-big',
+          display_name: 'GPT-Fake-Big',
+          description: 'Big fake model.',
+          visibility: 'list',
+          priority: 5,
+          default_reasoning_level: 'medium',
+          supported_reasoning_levels: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'].map(level),
+          base_instructions: 'x'.repeat(200_000),
+        },
+        { slug: 'gpt-fake-hidden', display_name: 'GPT-Fake-Hidden', visibility: 'hide', priority: 0, supported_reasoning_levels: [level('minimal')] },
+        { slug: 'gpt-fake-small', display_name: 'GPT-Fake-Small', visibility: 'list', priority: 2, supported_reasoning_levels: ['low', 'medium', 'high'].map(level) },
+        // Not usable as a model name: skipped.
+        { slug: '--evil', display_name: 'Evil', visibility: 'list', priority: 1, supported_reasoning_levels: [] },
+      ];
+  process.stdout.write(`${JSON.stringify({ models }, null, 2)}\n`);
+}
+
 const mode = process.env.FAKE_CLI_MODE || 'success';
 const emit = (obj) => process.stdout.write(`${JSON.stringify(obj)}\n`);
 
 let stdin = '';
-process.stdin.setEncoding('utf8');
-process.stdin.on('data', (chunk) => (stdin += chunk));
-process.stdin.on('end', main);
+if (argv[0] === 'debug' && argv[1] === 'models') {
+  debugModels(argv.includes('--bundled'));
+} else {
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', (chunk) => (stdin += chunk));
+  process.stdin.on('end', main);
+}
 
 function main() {
   if (process.env.FAKE_CLI_RECORD) {
