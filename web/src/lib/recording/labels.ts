@@ -108,6 +108,14 @@ export function languageLabel(language: RecordingLanguage): string {
   return LANGUAGE_OPTIONS.find((o) => o.value === language)?.label ?? language;
 }
 
+const DETECTED_NAMES: Readonly<Record<string, string>> = { ko: '한국어', en: '영어', ja: '일본어', zh: '중국어' };
+
+/** The language of a recording: "한국어", or for 'auto' what whisper found — "자동 감지 (영어)" — once it did. */
+export function recordingLanguageLabel(info: Pick<RecordingInfo, 'language' | 'detectedLanguage'>): string {
+  if (info.language !== 'auto' || !info.detectedLanguage) return languageLabel(info.language);
+  return `${languageLabel('auto')} (${DETECTED_NAMES[info.detectedLanguage] ?? info.detectedLanguage})`;
+}
+
 /** "574 MB", "1.2 GB" (decimal, like download sizes are quoted). */
 export function formatSize(bytes: number): string {
   if (!(bytes > 0)) return '0 MB';

@@ -14,7 +14,7 @@ import type { RecordingsState } from '../../hooks/useRecordings.ts';
 import { confirmDialog } from '../../lib/confirm.ts';
 import { formatDate, formatTime } from '../../lib/format.ts';
 import { withParticle } from '../../lib/korean.ts';
-import { startRecording } from '../../lib/recording/actions.ts';
+import { finishRecordingElsewhere, recordedHere, startRecording } from '../../lib/recording/actions.ts';
 import { recordingFeed, updateFeedInfo } from '../../lib/recording/feeds.ts';
 import {
   RECORDING_ACCEPT,
@@ -22,14 +22,14 @@ import {
   alignmentLabel,
   durationLine,
   isLive,
-  languageLabel,
+  recordingLanguageLabel,
   recordingStatus,
   transcriptFraction,
 } from '../../lib/recording/labels.ts';
 import type { MarkerAction } from '../../lib/recording/markers.ts';
 import { markerLabel } from '../../lib/recording/markers.ts';
 import { recorder } from '../../lib/recording/recorder.ts';
-import { formatClock, segmentIndexAt, slideAtTime } from '../../lib/recording/timeline.ts';
+import { formatClock, pastLoadedEnd, segmentIndexAt, slideAtTime } from '../../lib/recording/timeline.ts';
 import { cancelRecordingUpload, uploadRecordingFiles } from '../../lib/recording/uploads.ts';
 import { isBoolean, isNumber, readStorage, storageKeys, writeStorage } from '../../lib/storage.ts';
 import { toast } from '../../lib/toast.ts';
@@ -225,6 +225,7 @@ function RecordingRow({ info, selected, onSelect }: { info: RecordingInfo; selec
           </span>
           <span className="muted small">
             {formatDate(r.createdAt)} {formatTime(r.createdAt)} · {durationLine(r)}
+            {r.language === 'auto' && r.detectedLanguage ? ` · ${recordingLanguageLabel(r)}` : ''}
           </span>
         </span>
         {f !== null && <ProgressBar fraction={f} />}
@@ -271,10 +272,32 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
   const [playing, setPlaying] = useState(false);
   const [rate, setRateState] = useState(() => readStorage(storageKeys.playbackRate, 1, isRate));
   const [audioError, setAudioError] = useState<string | null>(null);
-  /** Reload the audio of a live recording to reach its newest part. */
+  /**
+   * Reload the audio of a live recording to reach its newest part: the live WAV has the length it had when it was
+   * loaded, so a player opened during the recording is reloaded when the recording ends, and a seek past the loaded
+   * end reloads it first (the seek is applied once the new length is known).
+   */
   const [audioEpoch, setAudioEpoch] = useState(0);
+  const pendingSeek = useRef<{ t: number; play: boolean } | null>(null);
+  const liveRef = useRef(live);
+  liveRef.current = live;
   const playback = info.playback;
   const src = playback ? (audioEpoch > 0 ? `${playback.url}${playback.url.includes('?') ? '&' : '?'}v=${audioEpoch}` : playback.url) : null;
+
+  const reloadAudio = useCallback((keep: { t: number; play: boolean } | null) => {
+    pendingSeek.current = keep;
+    setAudioEpoch((n) => n + 1);
+  }, []);
+
+  const wasLive = useRef(live);
+  useEffect(() => {
+    if (wasLive.current && !live) {
+      const audio = audioRef.current;
+      // Keep the place (and keep playing) across the reload.
+      reloadAudio(audio && audio.currentTime > 0 ? { t: audio.currentTime, play: !audio.paused } : null);
+    }
+    wasLive.current = live;
+  }, [live, reloadAudio]);
 
   useEffect(() => {
     if (audioRef.current) audioRef.current.playbackRate = rate;
@@ -291,6 +314,11 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
       toast('아직 재생할 수 있는 파일이 없어요.', 'info');
       return;
     }
+    if (liveRef.current && pastLoadedEnd(audio.duration, t)) {
+      setTime(Math.max(0, t));
+      reloadAudio({ t: Math.max(0, t), play: true });
+      return;
+    }
     audio.currentTime = Math.max(0, t);
     setTime(Math.max(0, t));
     // From inside the click: allowed to start playback. Not awaited (DESIGN: do not await play() for UI state).
@@ -298,7 +326,7 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
       if (e instanceof DOMException && e.name === 'AbortError') return;
       setAudioError('재생하지 못했어요. 이 브라우저가 이 형식을 재생할 수 없을 수 있어요.');
     });
-  }, []);
+  }, [reloadAudio]);
 
   const togglePlay = () => {
     const audio = audioRef.current;
@@ -383,9 +411,17 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
   const canMark = segments.length > 0 && !aligning && info.status !== 'error';
   const status = recordingStatus(info);
   const align = alignmentLabel(info.alignment);
+  // A live recording this page is not making (another device or browser): it can be ended from here when that
+  // device is gone — otherwise it would keep every new recording from starting.
+  const recordingElsewhere = live && !recordedHere(info.id);
+  const finishElsewhere = async () => {
+    const next = await finishRecordingElsewhere(info);
+    if (next) recordings.patch(next);
+  };
   const menuSections = [
     {
       items: [
+        ...(recordingElsewhere ? [{ key: 'finish', label: '녹음 끝내기', hint: '다른 기기의 녹음', onSelect: () => void finishElsewhere() }] : []),
         { key: 'rename', label: '이름 바꾸기', onSelect: () => setRenaming(true) },
         ...(markers.length > 0
           ? [{ key: 'clear', label: '직접 표시한 구간 모두 지우기', onSelect: () => onMarker({ type: 'clear' }) }]
@@ -461,7 +497,7 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
         )}
         {info.hasManualMarkers && <span className="rec-badge tone-muted">📍 직접 표시</span>}
         <span className="muted small">
-          {languageLabel(info.language)} · {info.model}
+          {recordingLanguageLabel(info)} · {info.model}
         </span>
       </div>
       {info.error && <div className="msg-error">{info.error}</div>}
@@ -550,14 +586,27 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
         {src ? (
           <>
             <audio
-              key={src}
               ref={audioRef}
+              src={src}
               preload="metadata"
               onTimeUpdate={(e) => setTime(e.currentTarget.currentTime)}
               onDurationChange={(e) => setDuration(e.currentTarget.duration)}
               onLoadedMetadata={(e) => {
-                e.currentTarget.playbackRate = rate;
-                setDuration(e.currentTarget.duration);
+                const audio = e.currentTarget;
+                audio.playbackRate = rate;
+                setDuration(audio.duration);
+                const seek = pendingSeek.current;
+                pendingSeek.current = null;
+                if (seek) {
+                  const t = Number.isFinite(audio.duration) ? Math.min(seek.t, audio.duration) : seek.t;
+                  audio.currentTime = t;
+                  setTime(t);
+                  if (seek.play) {
+                    void audio.play().catch((err: unknown) => {
+                      if (!(err instanceof DOMException && err.name === 'AbortError')) setAudioError('재생하지 못했어요. ▶를 눌러 주세요.');
+                    });
+                  }
+                }
               }}
               onPlay={() => {
                 setPlaying(true);
@@ -566,9 +615,7 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
               onPause={() => setPlaying(false)}
               onEnded={() => setPlaying(false)}
               onError={() => setAudioError('녹음 파일을 불러오지 못했어요.')}
-            >
-              <source src={src} type={playback?.mime} />
-            </audio>
+            />
             <button type="button" className="rec-play" onClick={togglePlay} aria-label={playing ? '일시정지' : '재생'}>
               {playing ? '⏸' : '▶'}
             </button>
@@ -585,7 +632,10 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
               onChange={(e) => {
                 const t = Number(e.target.value);
                 setTime(t);
-                if (audioRef.current) audioRef.current.currentTime = t;
+                const audio = audioRef.current;
+                if (!audio) return;
+                if (live && pastLoadedEnd(audio.duration, t)) reloadAudio({ t, play: !audio.paused });
+                else audio.currentTime = t;
               }}
               aria-label="재생 위치"
             />

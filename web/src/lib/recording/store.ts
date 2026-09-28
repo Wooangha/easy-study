@@ -47,8 +47,12 @@ export interface StoredSlideEvent extends SlideViewEvent {
 export interface RecordingStore {
   readonly id: string;
   load(): Promise<LocalRecording | null>;
-  /** Appends captured audio at the current end; resolves with the new `captured`. */
-  appendAudio(bytes: Uint8Array): Promise<number>;
+  /**
+   * Appends captured audio at the current end; resolves with the new `captured`. `at` (optional): the offset the bytes
+   * belong at — bytes already stored there (a retried write that had landed) are not stored again, and a store that
+   * is not at `at` refuses them (no hole, no overlap).
+   */
+  appendAudio(bytes: Uint8Array, at?: number): Promise<number>;
   /** Persisted bytes from `offset` on, at most `max` (fewer when not captured yet; empty when already dropped). */
   read(offset: number, max: number): Promise<Uint8Array>;
   /** The server acknowledged up to `n`: blocks older than n − KEEP_ACKED_BYTES may be dropped. */
@@ -140,8 +144,12 @@ class MemoryRecordingStore implements RecordingStore {
     return e ? { ...e.rec } : null;
   }
 
-  async appendAudio(bytes: Uint8Array): Promise<number> {
+  async appendAudio(bytes: Uint8Array, at?: number): Promise<number> {
     const e = this.entry();
+    if (at !== undefined) {
+      if (e.rec.captured >= at + bytes.byteLength) return e.rec.captured;
+      if (e.rec.captured !== at) throw new Error(`audio at ${at} does not follow the stored ${e.rec.captured} bytes`);
+    }
     if (bytes.byteLength === 0) return e.rec.captured;
     e.blocks.push({ offset: e.rec.captured, bytes: bytes.slice() });
     e.rec = { ...e.rec, captured: e.rec.captured + bytes.byteLength, updatedAt: this.db.now() };

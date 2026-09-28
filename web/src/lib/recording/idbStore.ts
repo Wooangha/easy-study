@@ -75,14 +75,19 @@ class IdbRecordingStore implements RecordingStore {
     return rec ?? null;
   }
 
-  appendAudio(bytes: Uint8Array): Promise<number> {
+  appendAudio(bytes: Uint8Array, at?: number): Promise<number> {
     return this.serial(async () => {
       const tx = this.db.transaction([RECS, BLOCKS], 'readwrite');
       const recs = tx.objectStore(RECS);
       const rec = await req<LocalRecording | undefined>(recs.get(this.id));
       if (!rec) throw new Error(`recording ${this.id} has no local state`);
       if (bytes.byteLength > MAX_BLOCK_BYTES) throw new Error('audio blocks are at most 1 MiB');
-      if (bytes.byteLength > 0) {
+      // A retried write that had landed (see RecordingStore.appendAudio).
+      const stored = at !== undefined && rec.captured >= at + bytes.byteLength;
+      if (at !== undefined && !stored && rec.captured !== at) {
+        throw new Error(`audio at ${at} does not follow the stored ${rec.captured} bytes`);
+      }
+      if (bytes.byteLength > 0 && !stored) {
         const copy = bytes.slice();
         const row: BlockRow = { id: this.id, offset: rec.captured, bytes: copy.buffer };
         tx.objectStore(BLOCKS).put(row);

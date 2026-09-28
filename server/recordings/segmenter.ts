@@ -30,6 +30,17 @@ export const WINDOW_PRESETS: Readonly<Record<'live' | 'short' | 'upload', Window
   upload: { minMs: 5 * 60_000, targetMs: 10 * 60_000, maxMs: 15 * 60_000, pick: 'best' },
 });
 
+/**
+ * The preset for an uploaded file of `totalMs`: a file that fits into one window (≤ maxMs) is one window, transcribed
+ * as a whole like in the ASR spike (whisper keeps what was said as context; cutting a 13-minute lecture in two made
+ * small-q5_1 lose it on the second part: 16 % instead of 7 % Hangul error there). Longer files are cut at pauses.
+ */
+export function uploadPresetFor(totalMs: number, preset: WindowPreset = WINDOW_PRESETS.upload): WindowPreset {
+  if (totalMs > preset.maxMs) return preset;
+  const beyond = totalMs + 60_000;
+  return { minMs: beyond, targetMs: beyond, maxMs: beyond, pick: preset.pick };
+}
+
 export type WindowCut = 'silence' | 'max' | 'break' | 'stop';
 
 export interface AsrWindow {
@@ -190,6 +201,25 @@ export class Segmenter {
     this.winStart = cut === 'max' ? Math.max(0, cutF - this.overlapF) : cutF;
     this.breaks = this.breaks.filter((b) => b > cutF);
     return w;
+  }
+
+  /**
+   * A cut now, before the window would be due (a question during a live recording wants the latest speech): at the
+   * last pause of the pending audio when it ended within the last `pauseWithinMs` (a 'silence' cut; the words after
+   * it stay pending), else at the end of the audio (a 'max' cut: the next window hears the last second again, words
+   * at the cut are decided by their midpoint). Null when less than `minMs` is pending or a break is due.
+   */
+  cutNow(minMs = 2_000, pauseWithinMs = 5_000): AsrWindow | null {
+    const avail = this.frames;
+    const minF = Math.round(minMs / FRAME_MS);
+    if (avail - this.ownStart < minF || this.breaks.some((b) => b > this.ownStart && b <= avail)) return null;
+    const thr = this.threshold(avail);
+    const runs = this.silenceRuns(this.ownStart + minF, avail, avail, thr);
+    const last = runs.at(-1);
+    if (last && avail - last.end <= Math.round(pauseWithinMs / FRAME_MS)) {
+      return this.emit(Math.min(last.start + Math.floor((last.end - last.start) / 2), last.start + 20), 'silence');
+    }
+    return this.emit(avail, 'max');
   }
 
   /** Windows that can be decided with the audio seen so far. `final`: flush the rest (stop / end of file). */

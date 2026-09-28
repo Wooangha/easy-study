@@ -18,6 +18,7 @@ import type { ModelCatalog } from '../server/recordings/models.ts';
 
 const MODEL = randomBytes(300_000);
 const VAD = randomBytes(20_000);
+const MODEL_B = randomBytes(100_000);
 const sha = (b: Buffer) => createHash('sha256').update(b).digest('hex');
 
 interface Served {
@@ -113,7 +114,7 @@ before(async () => {
   tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'easy-study-models-'));
   // No engine: a finished download would otherwise warm up whatever whisper-cli this machine has.
   process.env.EASY_STUDY_WHISPER = path.join(tmp, 'no-whisper-cli');
-  served = await fixtureServer({ '/small.bin': MODEL, '/vad.bin': VAD });
+  served = await fixtureServer({ '/small.bin': MODEL, '/vad.bin': VAD, '/b.bin': MODEL_B });
 });
 
 after(async () => {
@@ -176,7 +177,57 @@ describe('model downloads', () => {
     await store.waitForDownload('small-q5_1');
     assert.equal(store.isInstalled('small-q5_1'), false);
     assert.match(store.lastError('small-q5_1') ?? '', /sha256 불일치/);
+    // The reason reaches GET /api/asr (the UI shows it with a retry button).
+    assert.match(store.list('small-q5_1')[0].error ?? '', /sha256 불일치/);
     assert.deepEqual((await fs.readdir(dir)).sort(), ['vad.bin']);
+  });
+
+  test('a corrupt part left by an earlier run is fetched again from the start (full-size or resumed)', async () => {
+    const dir = await freshDir();
+    // A full-size VAD part with the wrong bytes: before, the download "started" (202) and then failed silently.
+    await fs.writeFile(path.join(dir, 'vad.bin.part'), randomBytes(VAD.length));
+    // A model part whose bytes are wrong: the resume completes it, the hash fails, it is fetched once more.
+    await fs.writeFile(path.join(dir, 'small.bin.part'), randomBytes(1000));
+    served.requests.length = 0;
+    const store = new ModelStore({ dir: () => dir, catalog: catalog() });
+    await store.startDownload('small-q5_1');
+    await store.waitForDownload('small-q5_1');
+    assert.equal(store.isInstalled('small-q5_1'), true, store.lastError('small-q5_1') ?? '');
+    assert.equal(store.list('small-q5_1')[0].error, undefined);
+    assert.ok((await fs.readFile(path.join(dir, 'vad.bin'))).equals(VAD));
+    assert.ok((await fs.readFile(path.join(dir, 'small.bin'))).equals(MODEL));
+    assert.deepEqual(
+      served.requests.map((r) => [r.path, r.range ?? null]),
+      [
+        ['/vad.bin', null],
+        ['/small.bin', 'bytes=1000-'],
+        ['/small.bin', null],
+      ],
+    );
+  });
+
+  test('two models downloading at once share the VAD file without corrupting it', async () => {
+    const both = (): ModelCatalog => ({
+      ...catalog(),
+      models: [
+        catalog().models[0],
+        { id: 'model-b', label: 'b', file: 'b.bin', url: `${served.url}/b.bin`, sizeBytes: MODEL_B.length, sha256: sha(MODEL_B) },
+      ],
+    });
+    for (const gapMs of [0, 5, 30]) {
+      const dir = await freshDir();
+      served.plan.set('/vad.bin', ['slow', 'slow']);
+      const store = new ModelStore({ dir: () => dir, catalog: both() });
+      const first = store.startDownload('small-q5_1');
+      await new Promise((resolve) => setTimeout(resolve, gapMs));
+      await Promise.all([first, store.startDownload('model-b')]);
+      await Promise.all([store.waitForDownload('small-q5_1'), store.waitForDownload('model-b')]);
+      assert.equal(store.isInstalled('small-q5_1'), true, `${gapMs} ms: ${store.lastError('small-q5_1')}`);
+      assert.equal(store.isInstalled('model-b'), true, `${gapMs} ms: ${store.lastError('model-b')}`);
+      assert.ok((await fs.readFile(path.join(dir, 'vad.bin'))).equals(VAD));
+      assert.deepEqual((await fs.readdir(dir)).sort(), ['b.bin', 'small.bin', 'vad.bin']);
+      served.plan.delete('/vad.bin');
+    }
   });
 
   test('an interrupted download resumes with a Range request from the bytes it has', async () => {
@@ -266,6 +317,8 @@ describe('model downloads', () => {
       const missing = await fetch(`${server.url}/api/asr/models/missing/download`, { method: 'POST' });
       assert.equal(missing.status, 502);
       assert.match(((await missing.json()) as { error: string }).error, /모델을 내려받을 수 없습니다/);
+      status = (await (await fetch(`${server.url}/api/asr`)).json()) as AsrStatus;
+      assert.match(status.models.find((m) => m.id === 'missing')?.error ?? '', /HTTP 404/);
       const removed = await fetch(`${server.url}/api/asr/models/small-q5_1`, { method: 'DELETE' });
       assert.equal(removed.status, 204);
       status = (await (await fetch(`${server.url}/api/asr`)).json()) as AsrStatus;

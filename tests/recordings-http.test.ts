@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import http from 'node:http';
+import express from 'express';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
@@ -23,7 +24,7 @@ import type {
 import { defaultChatDeps } from '../server/chat.ts';
 import type { ChatDeps } from '../server/chat.ts';
 import { repoRoot } from '../server/config.ts';
-import { startServer } from '../server/index.ts';
+import { requestBodyDeadline, startServer } from '../server/index.ts';
 import type { RunningServer, ServerOptions } from '../server/index.ts';
 import { LECTURE_RECORDINGS_NOTE } from '../server/prompts.ts';
 import type { Part, Provider, ProviderRunInput } from '../server/providers/types.ts';
@@ -47,7 +48,7 @@ let whisperLog = '';
 const catalog = (): ModelCatalog => ({
   models: [
     { id: 'large-v3-turbo-q5_0', label: 'turbo', file: 'turbo.bin', url: 'http://127.0.0.1:9/turbo', sizeBytes: 16, sha256: '0' },
-    { id: 'small-q5_1', label: 'small', file: 'small.bin', url: 'http://127.0.0.1:9/small', sizeBytes: 8, sha256: '0' },
+    { id: 'small-q5_1', label: 'small', file: 'small.bin', url: 'http://127.0.0.1:9/small', sizeBytes: 8, sha256: '0', carryContext: true },
   ],
   vad: { file: 'vad.bin', url: 'http://127.0.0.1:9/vad', sizeBytes: 4, sha256: '0' },
 });
@@ -616,6 +617,15 @@ describe('lecture recordings over HTTP (fake whisper-cli / ffmpeg)', () => {
     const second = await ask(1);
     assert.match(second, /The last 1 minute of the lecture:\ntone-300 tone-320/);
     await client.json(`/docs/${DOC}/recordings/${live.body.id}`, 'DELETE');
+
+    // A question while recording: the audio not in a window yet (live windows are 20–30 s) is cut at its last pause
+    // and transcribed before the turn is built, so the speech right before the question is there.
+    const running = await client.json<RecordingInfo>(`/docs/${DOC}/recordings`, 'POST', { language: 'ko' });
+    await client.audio(DOC, running.body.id, 0, tonesPcm(12, spacedTones(6)));
+    assert.equal((await client.recording(DOC, running.body.id)).transcribedSec, 0, 'no window due yet');
+    const third = await ask(1);
+    assert.match(third, /The last 1 minute of the lecture:\ntone-300 tone-320 tone-340 tone-360 tone-380 tone-400\n/);
+    await client.json(`/docs/${DOC}/recordings/${running.body.id}`, 'DELETE');
   });
 
   test('uploads: streamed to disk, sniffed, converted (asr.wav + playback.m4a), transcribed; errors are readable', async () => {
@@ -649,10 +659,22 @@ describe('lecture recordings over HTTP (fake whisper-cli / ffmpeg)', () => {
     const lastTwo = runs.slice(-2);
     assert.ok(lastTwo[0].args.includes('-dl'));
     assert.equal(lastTwo[1].args[lastTwo[1].args.indexOf('-l') + 1], 'ko');
+    // The detected language reaches the client (the list shows "자동 감지 (한국어)"), the setting stays 'auto'.
+    assert.equal(info.language, 'auto');
+    assert.equal(info.detectedLanguage, 'ko');
+    assert.equal((await client.json<RecordingInfo[]>(`/docs/${DOC}/recordings`)).body.find((r) => r.id === created.id)?.detectedLanguage, 'ko');
     const play = await fetch(`${server.url}${info.playback?.url}`, { headers: { Range: 'bytes=4-11' } });
     assert.equal(play.status, 206);
     assert.equal(play.headers.get('content-type'), 'audio/mp4');
     assert.equal(Buffer.from(await play.arrayBuffer()).toString('latin1'), 'ftypM4A ');
+    // Unsatisfiable ranges are 416 with the size (like live playback), not "no audio yet".
+    const size = (await fs.stat(path.join(dir, 'playback.m4a'))).size;
+    for (const range of ['bytes=99999999-', `bytes=${size}-`]) {
+      const bad = await fetch(`${server.url}${info.playback?.url}`, { headers: { Range: range } });
+      assert.equal(bad.status, 416, range);
+      assert.equal(bad.headers.get('content-range'), `bytes */${size}`);
+      await bad.arrayBuffer();
+    }
 
     // Not media: 415, nothing left behind.
     const before = await fs.readdir(path.join(library, DOC, 'recordings'));
@@ -698,6 +720,7 @@ describe('lecture recordings over HTTP (fake whisper-cli / ffmpeg)', () => {
       assert.equal(res.status, 201, JSON.stringify(created));
       assert.equal(created.language, 'en');
       assert.equal(created.model, 'small-q5_1');
+      assert.equal(created.detectedLanguage, undefined, 'only for language auto');
       // One window (the whole 20 s): whisper reports 50 %, then waits.
       await waitFor(async () => {
         const info = await client.recording(DOC, created.id);
@@ -714,6 +737,38 @@ describe('lecture recordings over HTTP (fake whisper-cli / ffmpeg)', () => {
     assert.equal(runs[0].args[runs[0].args.indexOf('-l') + 1], 'en');
     assert.equal(path.basename(runs[0].args[runs[0].args.indexOf('-m') + 1]), 'small.bin');
     assert.equal((await client.json(`/docs/${DOC}/recordings/${created.id}`, 'DELETE')).status, 204);
+  });
+
+  test('uploads longer than one window: cut at pauses; small-q5_1 gets the previous chunk’s last words as its prompt', async () => {
+    await server.close();
+    const uploadPreset = { minMs: 4_000, targetMs: 6_000, maxMs: 8_000, pick: 'best' as const };
+    server = await startServer({ ...options(), recordings: { ...options().recordings, uploadPreset } });
+    client = new Client(server.url);
+    const tones = spacedTones(10);
+    const pcm = tonesPcm(20, tones);
+    const wav = Buffer.concat([Buffer.from(riffHeader(pcm.length)), pcm]);
+    for (const model of ['small-q5_1', 'large-v3-turbo-q5_0']) {
+      await fs.rm(whisperLog, { force: true });
+      const res = await client.api(`/docs/${DOC}/recordings/upload`, { method: 'POST', headers: { 'X-Language': 'ko', 'X-Model': model }, body: wav });
+      const created = (await res.json()) as RecordingInfo;
+      assert.equal(res.status, 201, JSON.stringify(created));
+      await waitFor(async () => (await client.recording(DOC, created.id)).transcriptStatus === 'ready', 20_000, 'transcription');
+      assertEachToneOnce(await client.transcript(DOC, created.id), tones);
+      const runs = (await fs.readFile(whisperLog, 'utf8')).trim().split('\n').map((l) => JSON.parse(l) as { args: string[] });
+      assert.ok(runs.length >= 3, `${runs.length} chunks`);
+      const prompts = runs.map((r) => (r.args.includes('--prompt') ? r.args[r.args.indexOf('--prompt') + 1] : null));
+      assert.equal(prompts[0], null, 'nothing before the first chunk');
+      if (model === 'small-q5_1') {
+        for (const [k, p] of prompts.slice(1).entries()) {
+          // Chunks are transcribed in order: each one hears how the one before it ended.
+          assert.match(p ?? '', /^tone-300( tone-\d+)* tone-\d+$/, `chunk ${k + 1}: ${p}`);
+        }
+        assert.ok((prompts.at(-1) ?? '').length > (prompts[1] ?? '').length);
+      } else {
+        assert.deepEqual(prompts, runs.map(() => null), 'turbo keeps no prompt (its timestamps got worse with one)');
+      }
+      await client.json(`/docs/${DOC}/recordings/${created.id}`, 'DELETE');
+    }
   });
 
   test('a large upload is streamed to disk, never buffered in memory', async () => {
@@ -750,6 +805,26 @@ describe('lecture recordings over HTTP (fake whisper-cli / ffmpeg)', () => {
     const chunked = await rawUpload(server.url, `/api/docs/${DOC}/recordings/upload`, 2 * 1024 * 1024, {});
     assert.equal(chunked.status, 413);
     await waitFor(async () => (await fs.readdir(path.join(library, DOC, 'recordings'))).length === before.length, 5_000, 'cleanup');
+  });
+
+  test('slow uploads: no 5-minute whole-request limit, but a sender that stalls gets 408 and nothing is left behind', async () => {
+    await server.close();
+    server = await startServer({ ...options(), recordings: { ...options().recordings, uploadIdleMs: 200 } });
+    client = new Client(server.url);
+    // Node's default requestTimeout (300 s for the whole request, body included) would cut every long upload off.
+    assert.equal(server.server.requestTimeout, 0);
+    const before = await fs.readdir(path.join(library, DOC, 'recordings'));
+    const stalled = await stalledUpload(server.url, `/api/docs/${DOC}/recordings/upload`, 64 * 1024);
+    assert.equal(stalled.status, 408, stalled.body);
+    assert.match(JSON.parse(stalled.body).error, /업로드가 1초 넘게 멈춰 있어서 중단했습니다/);
+    await waitFor(async () => (await fs.readdir(path.join(library, DOC, 'recordings'))).length === before.length, 5_000, 'cleanup');
+    // A sender that keeps sending, slower than the idle time in total, is fine.
+    const tones = spacedTones(3);
+    const pcm = tonesPcm(6, tones);
+    const wav = Buffer.concat([Buffer.from(riffHeader(pcm.length)), pcm]);
+    const slow = await trickleUpload(server.url, `/api/docs/${DOC}/recordings/upload`, wav, 8, 100);
+    assert.equal(slow.status, 201, slow.body);
+    await client.json(`/docs/${DOC}/recordings/${(JSON.parse(slow.body) as RecordingInfo).id}`, 'DELETE');
   });
 
   test('delete: a running live recording stops, its folder is gone; deleting the document stops its recordings', async () => {
@@ -794,6 +869,51 @@ describe('lecture recordings over HTTP (fake whisper-cli / ffmpeg)', () => {
     assert.equal(ended.durationSec, 2);
     await client.json(`/docs/${DOC}/recordings/${next.body.id}`, 'DELETE');
     await client.json(`/docs/${OTHER_DOC}/recordings/${rid}`, 'DELETE');
+  });
+
+  test('a live recording whose device is gone: its speech stops being "recent", and another client can end it', async () => {
+    await server.close();
+    server = await startServer({ ...options(), recordings: { ...options().recordings, liveSpeechIdleMs: 1_500 } });
+    client = new Client(server.url);
+    const session = await client.json<Session>(`/docs/${DOC}/sessions`, 'POST', { provider: 'claude-code' });
+    fake.setReply(() => 'answer');
+    const ask = async () => {
+      const res = await client.api(`/docs/${DOC}/sessions/${session.body.id}/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: '방금 뭐라고 했어?', slide: 1, neighbors: 0 }),
+      });
+      const raw = await res.text();
+      assert.equal(res.status, 200, raw);
+      const call = fake.calls.at(-1) as ProviderRunInput;
+      return call.parts.map((p) => (p.type === 'text' ? p.text : '<image>')).join('\n');
+    };
+    const live = await client.json<RecordingInfo>(`/docs/${DOC}/recordings`, 'POST', { language: 'ko' });
+    const rid = live.body.id;
+    await client.audio(DOC, rid, 0, tonesPcm(24, spacedTones(12)));
+    await client.json(`/docs/${DOC}/recordings/${rid}/pause`, 'POST');
+    await waitFor(async () => (await client.recording(DOC, rid)).transcribedSec >= 24, 20_000, 'live window');
+    await client.json(`/docs/${DOC}/recordings/${rid}/resume`, 'POST');
+    assert.match(await ask(), /The last 1 minute of the lecture:\ntone-300/, 'audio (or a pause/resume) just arrived');
+    // Nothing arrives any more (the laptop died, the browser was cleared): no longer "the last minutes of the lecture".
+    await new Promise((resolve) => setTimeout(resolve, 1_600));
+    assert.doesNotMatch(await ask(), /The last \d+ minutes? of the lecture/);
+    // It still holds the live slot: a new recording is refused with the recording that blocks it…
+    const refused = await client.json<{ error: string; recording?: RecordingInfo }>(`/docs/${OTHER_DOC}/recordings`, 'POST', {});
+    assert.equal(refused.status, 409);
+    assert.equal(refused.body.recording?.id, rid);
+    assert.equal(refused.body.recording?.docId, DOC);
+    // …which any client can end with the audio the server has ("녹음 끝내기" of the web: a stop without a size).
+    const ended = await client.json<RecordingInfo>(`/docs/${DOC}/recordings/${rid}/stop`, 'POST', {});
+    assert.equal(ended.status, 200, JSON.stringify(ended.body));
+    assert.equal(ended.body.status, 'ready');
+    assert.equal(ended.body.durationSec, 24);
+    const next = await client.json<RecordingInfo>(`/docs/${OTHER_DOC}/recordings`, 'POST', {});
+    assert.equal(next.status, 201, JSON.stringify(next.body));
+    // The device that was recording, if it comes back: its audio is refused (the uploader then says it ended elsewhere).
+    assert.equal((await client.audio(DOC, rid, 24 * 32_000, Buffer.alloc(3_200))).status, 409);
+    await client.json(`/docs/${OTHER_DOC}/recordings/${next.body.id}`, 'DELETE');
+    await client.json(`/docs/${DOC}/recordings/${rid}`, 'DELETE');
   });
 
   test('recordings nobody uses are dropped from memory (and load again); a subscriber or a job keeps one loaded', async () => {
@@ -1018,5 +1138,82 @@ function rawUpload(base: string, target: string, total: number, headers: Record<
     req.on('socket', () => write());
   });
 }
+
+/** Sends `sendBytes` of a WAV upload (chunked, never ended) and resolves with the answer. */
+function stalledUpload(base: string, target: string, sendBytes: number): Promise<{ status: number; body: string }> {
+  const url = new URL(target, base);
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: url.hostname, port: url.port, path: url.pathname, method: 'POST', headers: { 'Content-Type': 'audio/wav' }, agent: false }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (c: Buffer) => chunks.push(c));
+      res.on('end', () => {
+        resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') });
+        req.destroy();
+      });
+    });
+    req.on('error', reject);
+    req.write(Buffer.concat([riffHeader(sendBytes), Buffer.alloc(sendBytes, 1)]));
+  });
+}
+
+/** Sends `body` in `pieces` parts with `gapMs` between them. */
+function trickleUpload(base: string, target: string, body: Buffer, pieces: number, gapMs: number): Promise<{ status: number; body: string }> {
+  const url = new URL(target, base);
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: url.hostname, port: url.port, path: url.pathname, method: 'POST', headers: { 'Content-Type': 'audio/wav' }, agent: false }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (c: Buffer) => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') }));
+    });
+    req.on('error', reject);
+    const size = Math.ceil(body.length / pieces);
+    let at = 0;
+    const next = () => {
+      req.write(body.subarray(at, at + size));
+      at += size;
+      if (at >= body.length) req.end();
+      else setTimeout(next, gapMs);
+    };
+    next();
+  });
+}
+
+describe('request body deadline (Node requestTimeout replacement)', () => {
+  test('a body still incomplete after the deadline is 408; recording uploads are exempt', async () => {
+    const app = express();
+    app.use(requestBodyDeadline(150));
+    app.post('/api/x', express.json(), (_req, res) => {
+      res.json({ ok: true });
+    });
+    app.post('/api/docs/d-1/recordings/upload', (req, res) => {
+      req.resume();
+      req.on('end', () => res.json({ ok: true }));
+    });
+    const srv = http.createServer(app);
+    await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', resolve));
+    const { port } = srv.address() as { port: number };
+    const send = (target: string, first: string, rest: string | null, delayMs: number) =>
+      new Promise<{ status: number; body: string }>((resolve, reject) => {
+        const req = http.request({ host: '127.0.0.1', port, path: target, method: 'POST', headers: { 'Content-Type': 'application/json' }, agent: false }, (res) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (c: Buffer) => chunks.push(c));
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') }));
+        });
+        req.on('error', reject);
+        req.write(first);
+        if (rest !== null) setTimeout(() => req.end(rest), delayMs);
+      });
+    try {
+      const slow = await send('/api/x', '{"a":', null, 0);
+      assert.equal(slow.status, 408);
+      assert.match(JSON.parse(slow.body).error, /너무 오래/);
+      assert.equal((await send('/api/x', '{"a":', '1}', 20)).status, 200);
+      assert.equal((await send('/api/docs/d-1/recordings/upload', 'RIFF', 'rest', 400)).status, 200);
+    } finally {
+      srv.closeAllConnections();
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+});
 
 void ({} as StreamEvent);

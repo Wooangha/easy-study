@@ -51,12 +51,21 @@ export class ApiError extends Error {
    * the error body's `missingAttachments` (DESIGN §21). Empty otherwise.
    */
   readonly missingAttachments: readonly string[];
-  constructor(message: string, status: number, retryAfter: number | null = null, missingAttachments: readonly string[] = []) {
+  /** The JSON error body (for details such as the live recording of a 409), or null. */
+  readonly data: Readonly<Record<string, unknown>> | null;
+  constructor(
+    message: string,
+    status: number,
+    retryAfter: number | null = null,
+    missingAttachments: readonly string[] = [],
+    data: Readonly<Record<string, unknown>> | null = null,
+  ) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.retryAfter = retryAfter;
     this.missingAttachments = missingAttachments;
+    this.data = data;
   }
 }
 
@@ -76,10 +85,12 @@ export function isAbortError(e: unknown): boolean {
 async function toApiError(res: Response): Promise<ApiError> {
   let message = '';
   let missing: string[] = [];
+  let data: Record<string, unknown> | null = null;
   try {
     const text = await res.text();
     try {
       const body = JSON.parse(text) as { error?: unknown; missingAttachments?: unknown };
+      if (body && typeof body === 'object' && !Array.isArray(body)) data = body as Record<string, unknown>;
       if (typeof body.error === 'string') message = body.error;
       if (Array.isArray(body.missingAttachments)) {
         missing = body.missingAttachments.filter((id): id is string => typeof id === 'string' && ATTACHMENT_ID_RE.test(id));
@@ -92,7 +103,7 @@ async function toApiError(res: Response): Promise<ApiError> {
   }
   if (!message) message = res.ok ? '예상하지 못한 응답 형식이에요' : `HTTP ${res.status} ${res.statusText}`.trim();
   const retryAfter = res.status === 429 ? parseRetryAfter(res.headers.get('retry-after')) : null;
-  return new ApiError(message, res.ok ? 500 : res.status, retryAfter, missing);
+  return new ApiError(message, res.ok ? 500 : res.status, retryAfter, missing, data);
 }
 
 // ---------------------------------------------------------------------------
@@ -555,6 +566,21 @@ export const alignRecordingWithAi = (docId: string, rid: string, body: { provide
 
 export const renameRecording = (docId: string, rid: string, title: string) =>
   sendJSON<RecordingInfo>('PATCH', recordingPath(docId, rid), { title });
+
+/**
+ * End a live recording on the server with the audio it has (its recording device is gone: another computer, a
+ * cleared browser). The device's audio not uploaded yet is lost; transcription and alignment then finish.
+ */
+export const finishRecordingOnServer = (docId: string, rid: string) =>
+  postJSON<RecordingInfo>(`${recordingPath(docId, rid)}/stop`, {});
+
+/** The live recording a 409 of POST …/recordings names (another recording is running on the server). */
+export function busyRecordingOf(e: unknown): RecordingInfo | null {
+  const r = e instanceof ApiError && e.status === 409 ? e.data?.recording : null;
+  return r && typeof r === 'object' && typeof (r as RecordingInfo).id === 'string' && typeof (r as RecordingInfo).docId === 'string'
+    ? (r as RecordingInfo)
+    : null;
+}
 
 /** Delete a recording (the server stops a running recording or job first). */
 export const deleteRecording = (docId: string, rid: string) =>

@@ -9,7 +9,7 @@ import { setRecordingSettings } from '../../lib/recording/settings.ts';
 import { ProgressBar } from '../organize/parts.tsx';
 
 function modelOptionLabel(m: AsrModelInfo): string {
-  const state = m.installed ? '✓ 설치됨' : m.downloading ? '내려받는 중' : '내려받기 필요';
+  const state = m.installed ? '✓ 설치됨' : m.downloading ? '내려받는 중' : m.error ? '내려받기 실패' : '내려받기 필요';
   return `${m.label} · ${formatSize(m.sizeBytes)} · ${state}${m.recommended ? ' · 추천' : ''}`;
 }
 
@@ -45,10 +45,15 @@ export function AsrNotice({ asr }: { asr: AsrState }) {
     );
   }
   return (
-    <div className="rec-notice">
+    <div className={model.error ? 'rec-notice is-warn' : 'rec-notice'}>
       <div>
         받아쓰기에는 음성 인식 모델이 필요해요: <b>{model.label}</b> ({formatSize(model.sizeBytes)}). 한 번만 내려받으면 돼요.
       </div>
+      {model.error && (
+        <div className="small" role="alert">
+          ⚠️ 지난번 내려받기가 실패했어요: {model.error}
+        </div>
+      )}
       <div className="rec-notice-actions">
         <button
           type="button"
@@ -56,7 +61,7 @@ export function AsrNotice({ asr }: { asr: AsrState }) {
           disabled={asr.pending !== null}
           onClick={() => void asr.download(model.id)}
         >
-          ⬇ 내려받기 ({formatSize(model.sizeBytes)})
+          ⬇ {model.error ? '다시 내려받기' : '내려받기'} ({formatSize(model.sizeBytes)})
         </button>
         <span className="muted small">모델은 서버 컴퓨터에만 저장되고, 받아쓰기도 거기서 해요 (인터넷으로 보내지 않아요).</span>
       </div>

@@ -80,7 +80,12 @@ export interface ChatDeps {
    * What the professor said on the slides of the focus window, and the recent speech while a live recording of the
    * document runs (DESIGN §22). Omitted or undefined = the document has no transcribed recording.
    */
-  lectureSpeech?: (docId: string, slide: number, windowSlides: number[]) => Promise<BuildTurnInput['lectureSpeech']>;
+  lectureSpeech?: (
+    docId: string,
+    slide: number,
+    windowSlides: number[],
+    options?: { fresh?: boolean; signal?: AbortSignal },
+  ) => Promise<BuildTurnInput['lectureSpeech']>;
 }
 
 /** The real modules: provider registry (availability cached 60 s) and the context builder. */
@@ -317,7 +322,8 @@ async function startTurn(validated: ValidatedTurn): Promise<TurnResult> {
       const n = turnInput.neighbors;
       const windowSlides: number[] = [];
       for (let s = Math.max(1, slide - n); s <= Math.min(doc.meta.pageCount, slide + n); s++) windowSlides.push(s);
-      const speech = await deps.lectureSpeech(docId, slide, windowSlides);
+      // A question during a live recording waits a few seconds for the speech right before it (DESIGN §22).
+      const speech = await deps.lectureSpeech(docId, slide, windowSlides, { fresh: kind === 'question', signal });
       if (speech) turnInput.lectureSpeech = speech;
     } catch (err) {
       console.warn(`[chat] lecture speech of ${docId} unavailable: ${errorText(err)}`);

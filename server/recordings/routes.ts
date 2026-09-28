@@ -9,7 +9,7 @@ import { DOC_ID_RE, RECORDING_ID_RE } from '../../shared/types.ts';
 import type { ProviderId, ProviderInfo } from '../../shared/types.ts';
 import type { AcquireCliSlot } from '../cliBudget.ts';
 import { HttpError } from '../config.ts';
-import { docPaths } from '../library.ts';
+import { docPaths, isNotFound } from '../library.ts';
 import type { Provider } from '../providers/types.ts';
 import { AI_ALIGN_SYSTEM_PROMPT } from './aiPrompt.ts';
 import { SUPPORTED_UPLOADS, sniffMedia } from './ffmpeg.ts';
@@ -75,17 +75,35 @@ function jsonObject(req: Request): Record<string, unknown> {
 
 /**
  * Streams a request body into `file` (backpressure: never more than a few chunks in memory). Stops at `max` bytes.
+ * A sender that sends nothing for `idleMs` (while the disk is not the one holding it up) is cut off with 408: a
+ * transfer may take hours (Node's whole-request limit is off, DESIGN §22) but must not stall forever.
  * Returns the first bytes (for sniffing) and the size.
  */
-function receiveBody(req: Request, file: string, max: number): Promise<{ bytes: number; head: Buffer } | { tooLarge: true }> {
+function receiveBody(
+  req: Request,
+  file: string,
+  max: number,
+  idleMs: number,
+): Promise<{ bytes: number; head: Buffer } | { tooLarge: true }> {
   return new Promise((resolve, reject) => {
     const out = createWriteStream(file);
     let received = 0;
     let head = Buffer.alloc(0);
     let settled = false;
+    let idle: NodeJS.Timeout | undefined;
+    const arm = () => {
+      clearTimeout(idle);
+      if (settled) return;
+      idle = setTimeout(() => {
+        const seconds = Math.max(1, Math.round(idleMs / 1000));
+        fail(new HttpError(408, `업로드가 ${seconds}초 넘게 멈춰 있어서 중단했습니다. 다시 올려 주세요`));
+      }, idleMs);
+      idle.unref?.();
+    };
     const fail = (err: Error) => {
       if (settled) return;
       settled = true;
+      clearTimeout(idle);
       out.destroy();
       reject(err);
     };
@@ -94,6 +112,7 @@ function receiveBody(req: Request, file: string, max: number): Promise<{ bytes: 
       received += chunk.length;
       if (received > max) {
         settled = true;
+        clearTimeout(idle);
         req.pause();
         out.destroy();
         resolve({ tooLarge: true });
@@ -101,11 +120,17 @@ function receiveBody(req: Request, file: string, max: number): Promise<{ bytes: 
       }
       if (head.length < HEAD_BYTES) head = Buffer.concat([head, chunk.subarray(0, HEAD_BYTES - head.length)]);
       if (!out.write(chunk)) {
+        // The disk is behind: not the sender's fault, the idle clock waits for the drain.
+        clearTimeout(idle);
         req.pause();
-        out.once('drain', () => req.resume());
-      }
+        out.once('drain', () => {
+          arm();
+          req.resume();
+        });
+      } else arm();
     });
     req.once('end', () => {
+      clearTimeout(idle);
       if (settled) return;
       out.end(() => {
         if (settled) return;
@@ -118,6 +143,7 @@ function receiveBody(req: Request, file: string, max: number): Promise<{ bytes: 
       if (!req.complete) fail(new Error('업로드가 중간에 끊겼습니다'));
     });
     out.once('error', (err) => fail(err));
+    arm();
   });
 }
 
@@ -272,9 +298,11 @@ export function createRecordingsRouter(deps: RecordingRouteDeps): express.Router
     }
     let received: { bytes: number; head: Buffer } | { tooLarge: true };
     try {
-      received = await receiveBody(req, upload.partFile, max);
+      received = await receiveBody(req, upload.partFile, max, recordingsConfig().uploadIdleMs);
     } catch (err) {
       await abortUpload(upload.dir);
+      // A stalled sender: answer, then close the connection (the rest of its body is not read).
+      if (err instanceof HttpError && err.status === 408) res.set('Connection', 'close');
       const mapped = diskFull(err);
       throw mapped instanceof HttpError ? mapped : new HttpError(400, err instanceof Error ? err.message : '업로드가 중간에 끊겼습니다');
     }
@@ -345,9 +373,20 @@ export function createRecordingsRouter(deps: RecordingRouteDeps): express.Router
         path.basename(source.file),
         { root: path.dirname(source.file), cacheControl: false, headers: { 'Content-Type': source.mime, 'Cache-Control': 'private, no-cache' } },
         (err) => {
-          if (!err) resolve();
-          else if (!res.headersSent) reject(new HttpError(404, '재생할 오디오가 아직 없습니다'));
-          else resolve();
+          if (!err || res.headersSent) {
+            resolve();
+            return;
+          }
+          const status = (err as { status?: unknown; statusCode?: unknown }).status ?? (err as { statusCode?: unknown }).statusCode;
+          if (status === 416) {
+            // send() has set Content-Range: bytes */<size> already.
+            res.status(416).end();
+            resolve();
+          } else if (typeof status === 'number' && status >= 400 && status < 500 && status !== 404) {
+            res.status(status).end();
+            resolve();
+          } else if (status === 404 || isNotFound(err)) reject(new HttpError(404, '재생할 오디오가 아직 없습니다'));
+          else reject(err);
         },
       );
     });

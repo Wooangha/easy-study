@@ -868,19 +868,24 @@ User request: record the lecture inside the app during class and process it righ
 should know what the professor said; replay in sync with the slides. Spikes (session scratchpad `rec/spike-rec.json`,
 `rec-live/spike-live.json`, fixtures in `rec/fixtures`) are normative — reuse their verified code and numbers.
 Contracts: shared/types.ts (RecordingInfo, TranscriptSegment, RecordingTranscript, SlideViewEvent, AlignmentMarker,
-CreateLiveRecordingRequest, AsrModelInfo, AsrStatus, RecordingEvent, RECORDING_ID_RE, LIVE_SAMPLE_RATE, MAX_RECORDING_UPLOAD_BYTES),
-server/internal-types.ts BuildTurnInput.lectureSpeech.
+CreateLiveRecordingRequest, AsrModelInfo, AsrStatus, RecordingEvent, RECORDING_ID_RE, LIVE_SAMPLE_RATE, LIVE_SPEECH_IDLE_MS,
+MAX_RECORDING_UPLOAD_BYTES), server/internal-types.ts BuildTurnInput.lectureSpeech.
 
 ### Engines (all local, no API key)
 - ASR: whisper.cpp **v1.9.4** `whisper-cli` as a short-lived sidecar (like the image/PDF workers). Default model
   `large-v3-turbo-q5_0` (574 MB, sha256 394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2) + Silero VAD v6.2.0; fast model
   `small-q5_1` (190 MB) recommended on CPU-only machines. Flags: beam default (5), `-l ko|en` forced when known (auto otherwise), VAD on,
   no prompt by default, output `-ojf`. Models are downloaded on first use into `<data>/models/` (desktop: app data dir; web: `<repo>/.cache/models`,
-  env EASY_STUDY_MODELS_DIR), resumable, sha256-verified, never bundled. Binary lookup: env EASY_STUDY_WHISPER, then a bundled sidecar (desktop),
+  env EASY_STUDY_MODELS_DIR), resumable, sha256-verified, never bundled; one fetch per file at a time (every model shares the VAD file), a
+  corrupt part left by an earlier run is fetched again once from the start, and the reason of a failed download is `AsrModelInfo.error`. Binary lookup: env EASY_STUDY_WHISPER, then a bundled sidecar (desktop),
   then `<repo>/.cache/whisper/bin/whisper-cli` built by `npm run setup:whisper`, then PATH.
 - Audio decode (uploads only): minimal LGPL ffmpeg; env EASY_STUDY_FFMPEG, bundled sidecar (desktop), else `ffmpeg` on PATH. One pass →
   `asr.wav` (16 kHz mono s16) + `playback.m4a` (AAC 64k mono, +faststart). Live recordings need no ffmpeg (PCM in, WAV playback).
 - Memory: at most one whisper process at a time (queue); live transcription processes ~20–30 s windows cut at silences as audio arrives.
+- Upload chunks: a file of ≤ 15 min is one whisper run (whisper keeps the context: cutting a 13-min lecture in two made small-q5_1 go from
+  7 % to 16 % Hangul error on the second part); longer files are cut at pauses into ≤ 15-min chunks, and for `small-q5_1` (catalog
+  `carryContext`) each chunk gets the last ≤ 200 characters of the chunk before it as `--prompt` (not for turbo: its timestamps got worse; on
+  Windows only an ASCII prompt, whisper-cli reads arguments in the system code page).
 
 ### Storage `library/<docId>/recordings/<rid>/`
 `meta.json` (RecordingInfo minus derived fields), `audio.pcm` (live, append-only, fsync before ack) or `source.<ext>` + `asr.wav` (upload),
@@ -892,14 +897,14 @@ slide), `timeline.json` (SlideViewEvent[]), `markers.json` (AlignmentMarker[]). 
 | POST `/api/asr/models/:modelId/download` | – | 202 (progress via GET /api/asr) |
 | DELETE `/api/asr/models/:modelId` | – | 204 |
 | GET `/api/docs/:docId/recordings` | – | `RecordingInfo[]` newest first |
-| POST `/api/docs/:docId/recordings` | `CreateLiveRecordingRequest` | 201 `RecordingInfo` (status 'recording'; one live recording per server at a time → 409) |
-| POST `/api/docs/:docId/recordings/upload` | raw audio/video body, `X-Filename` | 201 `RecordingInfo` (status 'converting' → transcription → alignment) |
+| POST `/api/docs/:docId/recordings` | `CreateLiveRecordingRequest` | 201 `RecordingInfo` (status 'recording'; one live recording per server at a time → 409 `{error, recording}`) |
+| POST `/api/docs/:docId/recordings/upload` | raw audio/video body, `X-Filename` | 201 `RecordingInfo` (status 'converting' → transcription → alignment); no whole-request time limit (Node's `requestTimeout` is off, other requests keep a 5-min body deadline), a sender that sends nothing for 60 s → 408 |
 | POST `…/recordings/:rid/audio?offset=N` | PCM s16le 16 kHz mono bytes | 200 `{offset}` after fsync; overlap skipped, gap → 409 `{offset}` (tus-like, see the protocol spike) |
 | POST `…/recordings/:rid/slides` | `SlideViewEvent[]` | 204 |
-| POST `…/recordings/:rid/pause`, `…/resume`, `…/stop` | – | `RecordingInfo` |
+| POST `…/recordings/:rid/pause`, `…/resume`, `…/stop` | – (`stop`: optional `{bytes}`) | `RecordingInfo` (a stop without `bytes`, from any client, ends it with the audio stored) |
 | GET `…/recordings/:rid/events` | – | SSE `RecordingEvent` (`event: ping` every 10 s; `?since=<segment id>` / Last-Event-ID replay) |
 | GET `…/recordings/:rid` / `…/transcript` | – | `RecordingInfo` / `RecordingTranscript` |
-| GET `…/recordings/:rid/audio` | – | playback (Range) |
+| GET `…/recordings/:rid/audio` | – | playback (Range; unsatisfiable → 416 with `Content-Range: bytes */size`) |
 | PUT `…/recordings/:rid/markers` | `AlignmentMarker[]` | `RecordingTranscript` (re-aligned with markers as hard constraints) |
 | POST `…/recordings/:rid/align-ai` | `{ provider, model? }` | 202 (LLM alignment via the user's CLI, hybrid with the local DP; progress via events) |
 | PATCH `…/recordings/:rid` | `{ title }` | `RecordingInfo` |
@@ -912,12 +917,20 @@ queued/running transcriptions resume.
   strong lexical evidence (e.g. a short look-ahead by the student), markers always win.
 - Upload: local lexical DP (TF-IDF char n-grams + Hangul-transliteration skeleton + monotonic Viterbi with skip/back/off-slide states; spike
   code) on digest + slide text. Optional "AI 정밀 정렬": hybrid DP+LLM (haiku, rich deck, ≤150-segment chunks, independent not "refine").
-- Markers: "여기부터 p.N" from the UI are hard constraints; re-solving takes < 1 s for 60 minutes.
+- Markers: "여기부터 p.N" from the UI are hard constraints; re-solving takes < 1 s for 60 minutes. A marker is "slide N starts here" (the
+  speech before it stays below N) only when N is beyond every earlier start marker and not 3 or more slides behind the furthest slide
+  the alignment without slide markers reached before it (JUMP_BACK_MARGIN); otherwise it is a jump back to an earlier slide (only that sentence is pinned). In
+  live recordings a marker also replaces the timeline prior from its sentence on while the student kept viewing the same slide.
+- Measured with the shipped ASR config (uploads of the synthetic L7 lecture): Korean 66–68 % of speech time on the exact slide (82 % within
+  ±1), English 82 %; five correct markers → 84 % Korean.
 
 ### Tutor context (context.ts)
 For each slide of the focus window that has speech: "What the professor said on slide N (lecture recording, may contain transcription errors;
-English terms may be written in Hangul):" + text (cap 1500 chars/slide, total 4000). While a live recording of the document runs: "The last
-N minutes of the lecture:" + text (cap 3000 chars) before the question. Priming: one line saying recordings exist. System prompt: one bullet
+English terms may be written in Hangul):" + text of the newest recording with speech on that slide (two recordings of one lecture would
+repeat it; cap 1500 chars/slide, total 4000). While a live recording of the document runs (audio, a pause or a resume
+arrived within LIVE_SPEECH_IDLE_MS = 10 min; a recording whose device is gone stops counting): "The last N minutes of the lecture:" + text
+(cap 3000 chars) before the question. A question first cuts the audio not in a window yet into one (at its last pause) and waits up to 6 s
+for it, so the speech right before the question is included. Priming: one line saying recordings exist. System prompt: one bullet
 about using lecture speech.
 
 ### Web
@@ -925,12 +938,21 @@ about using lecture speech.
   permission; level meter, timer, pause/stop; live transcript strip; recording continues while switching slides/tabs; if the page reloads the
   recorder offers to continue the same recording (resend from the acknowledged offset; IndexedDB keeps unacknowledged audio).
   Capture: getUserMedia → AudioContext({sampleRate: 16000}) → AudioWorklet → s16le chunks (~1–5 s) → offset POSTs, one in flight.
-  Slide changes of the viewer post SlideViewEvents on the recording clock (captured frames / 16 000).
+  Slide changes of the viewer post SlideViewEvents on the recording clock (captured frames / 16 000); the first one is the slide shown
+  when the recording actually starts (after the permission prompt), not the one of the click, and views within its first 2 s replace
+  it as the start (align.ts START_SETTLE_SEC: a smooth scroll after a page jump passes the slides in between).
+  Pause releases the microphone and the screen wake lock ("계속" opens the microphone again). Audio the local store cannot write (quota,
+  WebKit losing IndexedDB) stays queued in memory in order and is written first once it can; past 60 s the recording pauses with the
+  reason (the clock never runs ahead of the audio the server will get); a failing stop still releases the microphone.
+  A live recording the server holds for another device or browser (gone: a dead laptop, cleared storage) can be ended from here:
+  "녹음 끝내기" in its menu, also offered when a start is refused with 409 — after a confirmation (that device's audio not uploaded is lost)
+  it POSTs …/stop without `bytes`.
   Not available on insecure origins (plain-HTTP LAN): explain HTTPS is needed.
 - Upload: "녹음 파일 올리기" per lecture (library row menu and the recording tab).
 - Right-pane tab **녹음**: recordings list (status/progress, model download prompt with size), transcript for the focused slide (or all, with
   slide headers), click a segment → play from there; player (play/pause/seek/speed) with "슬라이드 따라가기" (the viewer follows the slide being
-  discussed); "여기부터 p.N" marker editing; "AI 정밀 정렬" button; settings: model (turbo / small), language, live transcription on/off.
+  discussed; a live recording's WAV has the length it had when loaded, so the player reloads when the recording ends and before a seek past
+  its loaded end); the language whisper detected for 'auto' ("자동 감지 (영어)"); "여기부터 p.N" marker editing; "AI 정밀 정렬" button; settings: model (turbo / small), language, live transcription on/off.
 - Tutor: questions during a live recording automatically include the recent speech; a chip in the composer shows "🎙 최근 3분 포함".
 
 ### Desktop shell + CI

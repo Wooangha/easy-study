@@ -6,18 +6,18 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
-import { alignSegments, lectureSpans, markerConstraints, timelinePrior } from '../server/recordings/align/align.ts';
+import { alignSegments, furthestBefore, lectureSpans, markerConstraints, priorWithMarkers, timelinePrior } from '../server/recordings/align/align.ts';
 import type { AlignSegment } from '../server/recordings/align/align.ts';
 import { DEFAULT_DP, emissions, viterbi } from '../server/recordings/align/dp.ts';
 import { features, skeletons, tokens } from '../server/recordings/align/text.ts';
 import { alignInWorker } from '../server/recordings/align/worker.ts';
 import { buildAlignPrompt, deckLines, parseAlignRuns } from '../server/recordings/aiPrompt.ts';
-import { acceleration, findFfmpeg, findWhisper, parseWhisperJson, progressReader, whisperArgs } from '../server/recordings/asr.ts';
+import { acceleration, contextPrompt, findFfmpeg, findWhisper, parseWhisperJson, progressReader, promptFitsArgs, whisperArgs } from '../server/recordings/asr.ts';
 import { repoRoot } from '../server/config.ts';
 import { existsSync } from 'node:fs';
 import { conversionError, ffmpegArgs, parseDuration, sniffMedia } from '../server/recordings/ffmpeg.ts';
 import { parseRange } from '../server/recordings/routes.ts';
-import { Segmenter, WINDOW_PRESETS } from '../server/recordings/segmenter.ts';
+import { Segmenter, WINDOW_PRESETS, uploadPresetFor } from '../server/recordings/segmenter.ts';
 import { ownSegments } from '../server/recordings/service.ts';
 import type { AsrWindow } from '../server/recordings/segmenter.ts';
 import { readWavInfo, wavHeader, writeWavSlice } from '../server/recordings/wav.ts';
@@ -145,6 +145,37 @@ describe('slide aligner (lexical DP, DESIGN §22)', () => {
     assert.equal(labels[8], 3);
   });
 
+  test('a marker back to an earlier slide is a jump back: the speech before it keeps its slides', () => {
+    // After slide 6 the professor goes back to slide 2 for two sentences, then continues with 7 and 8.
+    const lecture: Array<[number | null, string]> = [
+      ...SPEECH.slice(0, 20),
+      [2, '아까 본 유한 오토마타 기억나죠 디에프에이와 엔에프에이'],
+      [2, '비결정적 오토마타를 결정적 오토마타로 바꾸는 부분집합 구성이요'],
+      ...SPEECH.slice(20),
+    ];
+    const segs = lecture.map(([, text], i) => ({ start: i * 5, end: i * 5 + 4.5, text }));
+    const back = 20;
+    const free = alignSegments({ slideTexts: SLIDES, segments: segs });
+    const markers = [{ t: back * 5, slide: 2 }];
+    const labels = alignSegments({ slideTexts: SLIDES, segments: segs, markers });
+    assert.equal(labels[back], 2);
+    // Nothing before the marker is pushed below slide 2 (it would be if the marker were read as "slide 2 starts here").
+    assert.deepEqual(labels.slice(0, back), free.slice(0, back));
+    assert.equal(labels.at(-1), 8);
+    assert.equal(markerConstraints(segs, markers, SLIDES.length, furthestBefore(segs, free))[0].front, false);
+    // Without the lecture's progress (the old rule) the same marker was a start.
+    assert.equal(markerConstraints(segs, markers, SLIDES.length)[0].front, true);
+    // A real start after an earlier jump-back marker still is one, and a later start still resets the frontier.
+    const both = alignSegments({ slideTexts: SLIDES, segments: segs, markers: [...markers, { t: (back + 2) * 5, slide: 7 }] });
+    assert.deepEqual(both.slice(back, back + 3), [2, 2, 7]);
+  });
+
+  test('furthestBefore: the highest slide said before a time', () => {
+    const segs = [0, 10, 20, 30].map((s) => ({ start: s, end: s + 8, text: '' }));
+    const reached = furthestBefore(segs, [1, 3, null, 2]);
+    assert.deepEqual([0, 4, 5, 14.5, 30, 99].map(reached), [0, 0, 1, 3, 3, 3]);
+  });
+
   test('re-solving with markers is fast for an hour of speech (≈ 540 segments × 49 slides)', () => {
     const slides = Array.from({ length: 49 }, (_, i) => `${SLIDES[i % SLIDES.length]} part ${i + 1} 슬라이드 ${i + 1}`);
     const segs = Array.from({ length: 540 }, (_, i) => ({ start: i * 6.6, end: i * 6.6 + 6, text: SPEECH[i % SPEECH.length][1] }));
@@ -180,6 +211,21 @@ describe('slide aligner (lexical DP, DESIGN §22)', () => {
     assert.deepEqual(labels, prior);
   });
 
+  test('live: a marker moves the following sentences too, until the student views another slide', () => {
+    const generic = Array.from({ length: 12 }, (_, i) => ({ start: i * 10, end: i * 10 + 9, text: '음 그러니까 이거는 이렇게 되는 거예요' }));
+    const prior = timelinePrior(generic, [{ t: 0, slide: 2 }, { t: 80, slide: 4 }], 120);
+    assert.deepEqual(prior, [2, 2, 2, 2, 2, 2, 2, 2, 4, 4, 4, 4]);
+    // The student kept p.2 open while the professor was already on p.3 from 30 s on.
+    const markers = [{ t: 30, slide: 3 }];
+    assert.deepEqual(priorWithMarkers(generic, prior, markers), [2, 2, 2, 3, 3, 3, 3, 3, 4, 4, 4, 4]);
+    assert.deepEqual(alignSegments({ slideTexts: SLIDES, segments: generic, prior, markers }), [2, 2, 2, 3, 3, 3, 3, 3, 4, 4, 4, 4]);
+    // A later marker ends the first one's reach; an off-slide marker clears the prior until the next marker.
+    assert.deepEqual(
+      priorWithMarkers(generic, prior, [...markers, { t: 50, slide: null }, { t: 70, slide: 2 }]),
+      [2, 2, 2, 3, 3, null, null, 2, 4, 4, 4, 4],
+    );
+  });
+
   test('dwell rule: a short look ahead or back is the student, not the lecture', () => {
     const spans = lectureSpans(
       [
@@ -198,6 +244,27 @@ describe('slide aligner (lexical DP, DESIGN §22)', () => {
         [3, 0],
         [4, 100],
       ],
+    );
+  });
+
+  test('the start: views in the first seconds replace the first one (the viewer was still settling)', () => {
+    // Record pressed right after a jump from p.9 to p.1: the smooth scroll passed p.2 when the recording started.
+    const settling = [
+      { t: 0, slide: 2 },
+      { t: 0.21, slide: 1 },
+    ];
+    assert.deepEqual(lectureSpans(settling, 30).map((s) => [s.slide, s.from, s.to]), [[1, 0, 30]]);
+    const lines = Array.from({ length: 7 }, (_, i) => ({ start: i * 4, end: i * 4 + 3.5, text: '음 그러니까 이거는 이렇게 되는 거예요' }));
+    assert.deepEqual(timelinePrior(lines, settling, 30), [1, 1, 1, 1, 1, 1, 1]);
+    // A later change is the dwell rule's again (a look at p.2 for 3 s is the student's).
+    assert.deepEqual(
+      lectureSpans([...settling, { t: 10, slide: 2 }, { t: 13, slide: 1 }], 30).map((s) => s.slide),
+      [1],
+    );
+    // A change after the settling time is a normal move.
+    assert.deepEqual(
+      lectureSpans([{ t: 0, slide: 3 }, { t: 2.5, slide: 4 }], 30).map((s) => [s.slide, s.from]),
+      [[3, 0], [4, 2.5]],
     );
   });
 
@@ -313,6 +380,53 @@ describe('ASR windows (segmenter)', () => {
     for (const w of windows) assert.ok(w.ownEndMs - w.ownStartMs <= 15 * 60_000);
     assert.ok(windows.length >= 3);
   });
+
+  test('uploads that fit into one window (≤ 15 min) are one window: whisper keeps the whole context', () => {
+    const minute = tonesPcm(60, [
+      { start: 0, end: 19.5, hz: 400 },
+      { start: 20, end: 39.5, hz: 500 },
+      { start: 40, end: 59.5, hz: 600 },
+    ]);
+    const cut = (minutes: number) => {
+      const seg = new Segmenter({ preset: uploadPresetFor(minutes * 60_000) });
+      for (let m = 0; m < minutes; m++) seg.feed(minute, m * minute.length);
+      return [...seg.poll(), ...seg.poll(true)];
+    };
+    // 13 minutes: before, two chunks (8 + 5 min) whose second one small-q5_1 transcribed badly without context.
+    const one = cut(13);
+    assert.equal(one.length, 1);
+    assert.deepEqual([one[0].ownStartMs, one[0].ownEndMs, one[0].cut], [0, 13 * 60_000, 'stop']);
+    assert.equal(cut(15).length, 1);
+    const long = cut(16);
+    assert.ok(long.length >= 2);
+    checkTiling(long, 16 * 60_000);
+    assert.deepEqual(uploadPresetFor(40 * 60_000), WINDOW_PRESETS.upload);
+  });
+
+  test('cutNow (a question during a live recording): at the last pause, else at the end with an overlap', () => {
+    // 12 s: tone, pause at 5–5.6 s, tone until the end.
+    const seg = new Segmenter({ preset: WINDOW_PRESETS.live });
+    seg.feed(tonesPcm(12, [{ start: 0.2, end: 5, hz: 440 }, { start: 5.6, end: 12, hz: 480 }]), 0);
+    assert.deepEqual(seg.poll(), [], 'not due yet (20–30 s windows)');
+    const w = seg.cutNow(2_000, 8_000);
+    assert.ok(w);
+    assert.equal(w.cut, 'silence');
+    assert.ok(w.ownEndMs > 5_000 && w.ownEndMs < 5_600, String(w.ownEndMs));
+    // Continuous sound after it: no pause in reach → a hard cut at the end; the next window overlaps it.
+    seg.feed(tonesPcm(6, [{ start: 0, end: 6, hz: 500 }]), 12 * 32_000);
+    const hard = seg.cutNow(2_000, 3_000);
+    assert.ok(hard);
+    assert.equal(hard.cut, 'max');
+    assert.equal(hard.ownEndMs, 18_000);
+    seg.feed(tonesPcm(25, [{ start: 0, end: 20, hz: 520 }]), 18 * 32_000);
+    const next = seg.poll();
+    assert.equal(next[0].ownStartMs, 18_000);
+    assert.equal(next[0].startMs, 17_000, 'hears the last second again');
+    // Too little pending: nothing.
+    const fresh = new Segmenter({ preset: WINDOW_PRESETS.live });
+    fresh.feed(tonesPcm(1, [{ start: 0, end: 1, hz: 440 }]), 0);
+    assert.equal(fresh.cutNow(), null);
+  });
 });
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -346,6 +460,21 @@ describe('engine glue', () => {
     const args = whisperArgs({ bin: 'w', model: '/m/turbo.bin', vadModel: '/m/vad.bin', wav: '/r/a.wav', outBase: '/r/out', language: 'ko', threads: 4 });
     assert.deepEqual(args, ['-m', '/m/turbo.bin', '-f', '/r/a.wav', '-l', 'ko', '-t', '4', '--vad', '-vm', '/m/vad.bin', '-ojf', '-of', '/r/out', '-pp']);
     for (const banned of ['--prompt', '-ml', '--dtw', '-nfa', '-bs', '-np']) assert.equal(args.includes(banned), false, banned);
+    // A later chunk of a long upload (models with carryContext): the previous chunk's last words as the prompt.
+    const withPrompt = whisperArgs({ bin: 'w', model: '/m/small.bin', vadModel: '/m/vad.bin', wav: '/r/a.wav', outBase: '/r/out', language: 'ko', threads: 4, prompt: ' 파스 트리를\n 봅시다. ' });
+    assert.deepEqual(withPrompt.slice(withPrompt.indexOf('--prompt'), withPrompt.indexOf('--prompt') + 2), ['--prompt', '파스 트리를 봅시다.']);
+    assert.equal(promptFitsArgs('파스 트리', 'win32'), false, 'whisper-cli reads Windows arguments in the system code page');
+    assert.equal(promptFitsArgs('parse tree', 'win32'), true);
+    assert.equal(promptFitsArgs('파스 트리', 'darwin'), true);
+  });
+
+  test('context prompt: the end of the previous text, from a sentence start, ≤ 200 characters', () => {
+    assert.equal(contextPrompt('짧은 문장입니다.'), '짧은 문장입니다.');
+    const long = `${'가'.repeat(300)}. 앞 문장은 잘립니다. 마지막 문장은 남아요 ${'나'.repeat(120)}`;
+    const p = contextPrompt(long);
+    assert.ok([...p].length <= 200);
+    assert.ok(p.startsWith('마지막 문장은') || p.startsWith('앞 문장은'), p.slice(0, 20));
+    assert.ok(p.endsWith('나'));
   });
 
   test('whisper -pp progress lines are read even when split across chunks', () => {

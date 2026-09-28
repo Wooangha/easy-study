@@ -20,6 +20,12 @@ export interface ModelFile {
 export interface CatalogModel extends ModelFile {
   id: string;
   label: string;
+  /**
+   * A chunk of a long upload gets the end of the previous chunk's text as whisper's prompt (the context a whole-file
+   * run would have). Measured: small-q5_1 needs it (a chunk transcribed alone went from 7 % to 16 % Hangul error with
+   * broken timestamps; with the prompt 6–7 %), large-v3-turbo does not and its timestamps got worse with one.
+   */
+  carryContext?: boolean;
 }
 
 export interface ModelCatalog {
@@ -49,6 +55,7 @@ export const DEFAULT_CATALOG: Readonly<ModelCatalog> = Object.freeze({
       url: `${HF_WHISPER}/ggml-small-q5_1.bin`,
       sizeBytes: 190_085_487,
       sha256: 'ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb',
+      carryContext: true,
     },
   ],
   vad: {
@@ -107,6 +114,8 @@ export class ModelStore {
   private readonly fetchImpl: typeof fetch;
   private readonly downloads = new Map<string, Download>();
   private readonly lastErrors = new Map<string, string>();
+  /** One fetch per file at a time: every model shares the VAD file (and its .part). */
+  private readonly fileLocks = new Map<string, Promise<unknown>>();
   onInstalled: ((modelId: string) => void) | undefined;
 
   constructor(options: ModelStoreOptions = {}) {
@@ -155,6 +164,8 @@ export class ModelStore {
         recommended: m.id === recommended,
       };
       if (d) info.downloading = { receivedBytes: d.received, totalBytes: d.total };
+      const error = this.lastErrors.get(m.id);
+      if (error && !d && !info.installed) info.error = error;
       return info;
     });
   }
@@ -191,9 +202,13 @@ export class ModelStore {
       try {
         await fs.mkdir(this.dir, { recursive: true });
         for (const file of files) {
-          await this.fetchFile(file, controller.signal, (n) => (download.received = base + n), () => {
-            if (first) started();
-            first = false;
+          await this.withFileLock(file, async () => {
+            // Another model's download may have fetched it meanwhile (the shared VAD model).
+            if (sizeOf(this.filePath(file)) === file.sizeBytes) return;
+            await this.fetchFile(file, controller.signal, (n) => (download.received = base + n), () => {
+              if (first) started();
+              first = false;
+            });
           });
           base += file.sizeBytes;
           download.received = base;
@@ -217,65 +232,98 @@ export class ModelStore {
     }
   }
 
+  /** Runs `fn` after every earlier fetch of the same file has ended (they would write the same `.part`). */
+  private async withFileLock<T>(file: ModelFile, fn: () => Promise<T>): Promise<T> {
+    const previous = this.fileLocks.get(file.file) ?? Promise.resolve();
+    const run = previous.then(fn, fn);
+    const tail = run.catch(() => {});
+    this.fileLocks.set(file.file, tail);
+    try {
+      return await run;
+    } finally {
+      if (this.fileLocks.get(file.file) === tail) this.fileLocks.delete(file.file);
+    }
+  }
+
   /** Waits until the running download of a model ends (tests). */
   async waitForDownload(id: string): Promise<void> {
     await this.downloads.get(id)?.done;
   }
 
-  /** Downloads one file into `<file>.part` (continuing it), verifies size and sha256, then renames it. */
+  /**
+   * Downloads one file into `<file>.part` (continuing it), verifies size and sha256, then renames it. A part left by
+   * an earlier run that turns out corrupt (a full-size part, or a resumed one) is deleted and fetched once more from
+   * the start; a fresh download that does not verify is an error.
+   */
   private async fetchFile(file: ModelFile, signal: AbortSignal, onProgress: (bytes: number) => void, onStarted: () => void): Promise<void> {
     const target = this.filePath(file);
     const part = `${target}.part`;
+    for (let attempt = 1; ; attempt++) {
+      const resumed = await this.fetchPart(file, part, signal, onProgress, onStarted);
+      const size = sizeOf(part);
+      if (size !== file.sizeBytes) throw new Error(`다운로드가 끝나지 않았습니다 (${size}/${file.sizeBytes} 바이트). 다시 시도하면 이어서 받습니다`);
+      const digest = await sha256Of(part);
+      if (digest === file.sha256) break;
+      await fs.rm(part, { force: true });
+      if (!resumed || attempt >= 2) throw new Error(`내려받은 파일이 손상되었습니다 (sha256 불일치: ${file.file}). 다시 시도해 주세요`);
+      console.warn(`[asr] ${file.file}: the partial download was corrupt, fetching it again from the start`);
+      onProgress(0);
+    }
+    await fs.rename(part, target);
+    onProgress(file.sizeBytes);
+  }
+
+  /** Fetches the rest of `part` (all of it when there is none). Resolves true when earlier bytes were kept. */
+  private async fetchPart(
+    file: ModelFile,
+    part: string,
+    signal: AbortSignal,
+    onProgress: (bytes: number) => void,
+    onStarted: () => void,
+  ): Promise<boolean> {
     let have = Math.max(0, sizeOf(part));
     if (have > file.sizeBytes) {
       await fs.rm(part, { force: true });
       have = 0;
     }
-    if (have < file.sizeBytes) {
-      const res = await this.fetchImpl(file.url, {
-        headers: have > 0 ? { Range: `bytes=${have}-` } : {},
-        redirect: 'follow',
-        signal,
-      });
-      if (res.status === 416 && have > 0) {
-        // Nothing more to send: the part is complete (checked below).
-        await res.body?.cancel();
-      } else {
-        if (res.status !== 200 && res.status !== 206) {
-          await res.body?.cancel();
-          throw new Error(`HTTP ${res.status} (${file.url})`);
-        }
-        if (!res.body) throw new Error('빈 응답');
-        const append = res.status === 206 && have > 0;
-        if (!append) have = 0;
-        onStarted();
-        let received = have;
-        onProgress(received);
-        // Chunk by chunk with an awaited write: whatever arrived before a dropped connection is on disk for the resume.
-        const fh = await fs.open(part, append ? 'a' : 'w');
-        try {
-          for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
-            received += chunk.length;
-            if (received > file.sizeBytes) throw new Error('파일이 예상보다 큽니다');
-            await fh.write(chunk);
-            onProgress(received);
-          }
-        } finally {
-          await fh.close();
-        }
-      }
-    } else {
+    if (have >= file.sizeBytes) {
       onStarted();
+      return true;
     }
-    const size = sizeOf(part);
-    if (size !== file.sizeBytes) throw new Error(`다운로드가 끝나지 않았습니다 (${size}/${file.sizeBytes} 바이트). 다시 시도하면 이어서 받습니다`);
-    const digest = await sha256Of(part);
-    if (digest !== file.sha256) {
-      await fs.rm(part, { force: true });
-      throw new Error(`내려받은 파일이 손상되었습니다 (sha256 불일치: ${file.file}). 다시 시도해 주세요`);
+    const res = await this.fetchImpl(file.url, {
+      headers: have > 0 ? { Range: `bytes=${have}-` } : {},
+      redirect: 'follow',
+      signal,
+    });
+    if (res.status === 416 && have > 0) {
+      // Nothing more to send: the part is complete (checked by the caller).
+      await res.body?.cancel();
+      onStarted();
+      return true;
     }
-    await fs.rename(part, target);
-    onProgress(file.sizeBytes);
+    if (res.status !== 200 && res.status !== 206) {
+      await res.body?.cancel();
+      throw new Error(`HTTP ${res.status} (${file.url})`);
+    }
+    if (!res.body) throw new Error('빈 응답');
+    const append = res.status === 206 && have > 0;
+    if (!append) have = 0;
+    onStarted();
+    let received = have;
+    onProgress(received);
+    // Chunk by chunk with an awaited write: whatever arrived before a dropped connection is on disk for the resume.
+    const fh = await fs.open(part, append ? 'a' : 'w');
+    try {
+      for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+        received += chunk.length;
+        if (received > file.sizeBytes) throw new Error('파일이 예상보다 큽니다');
+        await fh.write(chunk);
+        onProgress(received);
+      }
+    } finally {
+      await fh.close();
+    }
+    return append;
   }
 
   /** Cancels a running download and removes the model file (the VAD model stays: other models use it). */
@@ -290,6 +338,7 @@ export class ModelStore {
     const target = this.filePath(m);
     await fs.rm(target, { force: true });
     await fs.rm(`${target}.part`, { force: true });
+    this.lastErrors.delete(id);
   }
 
   /** Cancels every download (shutdown). */

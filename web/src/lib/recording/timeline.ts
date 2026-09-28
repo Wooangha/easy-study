@@ -113,3 +113,12 @@ export function recentMinutes(elapsedSeconds: number, cap = 3): number {
 export function transcriptLag(recordedSec: number, transcribedSec: number): number {
   return Math.max(0, recordedSec - transcribedSec);
 }
+
+/**
+ * A playback target past what the player loaded: a live recording's WAV has the length it had when it was loaded,
+ * so the player is reloaded before seeking there (`loadedSec`: the element's duration, NaN before the metadata).
+ */
+export function pastLoadedEnd(loadedSec: number, t: number): boolean {
+  const loaded = Number.isFinite(loadedSec) ? loadedSec : 0;
+  return t > loaded - 0.25;
+}

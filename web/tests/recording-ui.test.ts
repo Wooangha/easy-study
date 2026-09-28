@@ -2,8 +2,9 @@
 // "여기부터 p.N" marker reducer, and the Korean copy (status badges, microphone errors, uploads).
 // Run: node --test web/tests/*.test.ts
 import assert from 'node:assert/strict';
-import { describe, test } from 'node:test';
+import { afterEach, describe, test } from 'node:test';
 import type { AsrStatus, RecordingInfo, TranscriptSegment } from '../../shared/types.ts';
+import { ApiError, busyRecordingOf, createLiveRecording, finishRecordingOnServer } from '../src/api.ts';
 import { MAX_RECORDING_UPLOAD_BYTES } from '../../shared/types.ts';
 import {
   aiAlignModelLabel,
@@ -18,6 +19,7 @@ import {
   isRecordingFile,
   micErrorMessage,
   recordingFileProblem,
+  recordingLanguageLabel,
   recordingStatus,
   recordingUnavailableReason,
   titleFromFileName,
@@ -38,6 +40,7 @@ import {
   formatSpan,
   groupBySlide,
   groupsOfSlide,
+  pastLoadedEnd,
   recentMinutes,
   segmentIndexAt,
   slideAtTime,
@@ -116,6 +119,15 @@ describe('time ↔ segment ↔ slide', () => {
     const secs = speechSecondsBySlide(lecture);
     assert.equal(Math.round(secs.get(1)! * 10) / 10, 3.5 + 4.8 + 4);
     assert.equal(secs.has(0), false);
+  });
+
+  test('the player of a live recording is reloaded before seeking past what it loaded', () => {
+    // A live WAV has the length it had when it was loaded (186 s of a recording now 224 s long).
+    assert.equal(pastLoadedEnd(186.45, 218), true);
+    assert.equal(pastLoadedEnd(186.45, 186.3), true, 'the last moment: the end would come at once');
+    assert.equal(pastLoadedEnd(186.45, 120), false);
+    assert.equal(pastLoadedEnd(Number.NaN, 5), true, 'nothing loaded yet');
+    assert.equal(pastLoadedEnd(Number.POSITIVE_INFINITY, 5), true);
   });
 
   test('recent minutes for the composer chip and the transcript lag', () => {
@@ -216,6 +228,14 @@ describe('recording status copy', () => {
     assert.equal(recordingStatus(info()).text, '✓ 받아쓰기 완료');
     assert.equal(recordingStatus(info({ transcriptStatus: 'error' })).tone, 'error');
     assert.equal(recordingStatus(info({ transcriptStatus: 'none' })).tone, 'muted');
+  });
+
+  test('language: the setting, or for auto what whisper detected', () => {
+    assert.equal(recordingLanguageLabel(info({ language: 'ko' })), '한국어');
+    assert.equal(recordingLanguageLabel(info({ language: 'auto' })), '자동 감지');
+    assert.equal(recordingLanguageLabel(info({ language: 'auto', detectedLanguage: 'en' })), '자동 감지 (영어)');
+    assert.equal(recordingLanguageLabel(info({ language: 'auto', detectedLanguage: 'de' })), '자동 감지 (de)');
+    assert.equal(recordingLanguageLabel(info({ language: 'en', detectedLanguage: 'ko' })), '영어', 'a forced language stays');
   });
 
   test('progress, in-progress, duration line, alignment badge', () => {
@@ -342,5 +362,42 @@ describe('recording uploads', () => {
     assert.equal(recordingFileProblem({ name: 'a.m4a', type: '', size: 1000 }), null);
     assert.equal(titleFromFileName('3주차 강의.m4a'), '3주차 강의');
     assert.equal(titleFromFileName('.m4a'), '.m4a');
+  });
+});
+
+describe('a live recording another device left running', () => {
+  const realFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  test('a start refused with 409 names the recording that blocks it; "녹음 끝내기" stops it with what the server has', async () => {
+    const blocking = info({ id: 'rec-20260928-090000-abcd', status: 'recording', source: 'live', docId: 'other-doc' });
+    const calls: Array<{ path: string; method: string; body: unknown }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const call = { path: String(input), method: init?.method ?? 'GET', body: typeof init?.body === 'string' ? JSON.parse(init.body) : null };
+      calls.push(call);
+      if (call.path.endsWith('/stop')) return Response.json({ ...blocking, status: 'ready' });
+      if (call.path === '/api/docs/doc-1/recordings') {
+        return Response.json({ error: '이미 녹음 중인 강의가 있습니다', recording: blocking }, { status: 409 });
+      }
+      return Response.json({ error: 'nope' }, { status: 409 });
+    }) as typeof fetch;
+    const refused = await createLiveRecording('doc-1', {}).catch((e: unknown) => e);
+    assert.ok(refused instanceof ApiError);
+    assert.equal(refused.status, 409);
+    assert.equal(refused.message, '이미 녹음 중인 강의가 있습니다');
+    assert.deepEqual(busyRecordingOf(refused), blocking);
+    // Without the recording in the body (or another status), there is nothing to offer.
+    const plain = await createLiveRecording('doc-2', {}).catch((e: unknown) => e);
+    assert.ok(plain instanceof ApiError && plain.status === 409);
+    assert.equal(busyRecordingOf(plain), null);
+    assert.equal(busyRecordingOf(new ApiError('x', 409, null, [], { recording: { id: 1 } })), null);
+    assert.equal(busyRecordingOf(new ApiError('x', 500, null, [], { recording: blocking })), null);
+    assert.equal(busyRecordingOf(new Error('x')), null);
+    calls.length = 0;
+    const ended = await finishRecordingOnServer(blocking.docId, blocking.id);
+    assert.equal(ended.status, 'ready');
+    assert.deepEqual(calls, [{ path: `/api/docs/other-doc/recordings/${blocking.id}/stop`, method: 'POST', body: {} }]);
   });
 });

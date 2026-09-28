@@ -13,7 +13,7 @@ import { existsSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { LIVE_SAMPLE_RATE, MAX_RECORDING_UPLOAD_BYTES } from '../../shared/types.ts';
+import { LIVE_SAMPLE_RATE, LIVE_SPEECH_IDLE_MS, MAX_RECORDING_UPLOAD_BYTES } from '../../shared/types.ts';
 import type {
   AlignmentKind,
   AlignmentMarker,
@@ -31,14 +31,14 @@ import type { Label } from './align/align.ts';
 import { timelinePrior } from './align/align.ts';
 import { stripMarkdown } from './align/text.ts';
 import { alignInWorker } from './align/worker.ts';
-import { acceleration, detectLanguage, findFfmpeg, findWhisper, probeVersion, runWhisper } from './asr.ts';
+import { acceleration, contextPrompt, detectLanguage, findFfmpeg, findWhisper, probeVersion, runWhisper } from './asr.ts';
 import { EventHub, RECORDING_PING_MS, sseFrame } from './events.ts';
 import type { SseTarget } from './events.ts';
 import { conversionError, convertUpload } from './ffmpeg.ts';
 import { LiveAudio } from './live.ts';
 import type { LiveHooks } from './live.ts';
 import { ModelStore, SMALL_MODEL_ID, TURBO_MODEL_ID } from './models.ts';
-import { BYTES_PER_SECOND, Segmenter, WINDOW_PRESETS } from './segmenter.ts';
+import { BYTES_PER_SECOND, Segmenter, WINDOW_PRESETS, uploadPresetFor } from './segmenter.ts';
 import type { AsrWindow, WindowPreset } from './segmenter.ts';
 import {
   cleanTitle,
@@ -73,6 +73,8 @@ export interface RecordingsConfig {
   models: ModelStore;
   /** Largest accepted upload (bytes). */
   maxUploadBytes: number;
+  /** An upload whose sender sends nothing for this long (ms) is stopped with 408. */
+  uploadIdleMs: number;
   livePreset: WindowPreset;
   uploadPreset: WindowPreset;
   /** Test hooks of the live audio store (fault injection). */
@@ -93,12 +95,20 @@ export interface RecordingsConfig {
    * is dropped from memory; the next request loads it from its files again.
    */
   idleUnloadMs: number;
+  /**
+   * A question during a live recording: how long (ms) the turn may wait for the audio not transcribed yet (cut into a
+   * window at once) so that "the last minutes of the lecture" reach up to the question.
+   */
+  questionSpeechWaitMs: number;
+  /** A live recording's speech is "recent" for the tutor only with audio (or a pause/resume) this recently (ms). */
+  liveSpeechIdleMs: number;
 }
 
 function defaultConfig(): RecordingsConfig {
   return {
     models: new ModelStore(),
     maxUploadBytes: MAX_RECORDING_UPLOAD_BYTES,
+    uploadIdleMs: 60_000,
     livePreset: WINDOW_PRESETS.live,
     uploadPreset: WINDOW_PRESETS.upload,
     liveRealignMs: 60_000,
@@ -106,6 +116,8 @@ function defaultConfig(): RecordingsConfig {
     pingMs: RECORDING_PING_MS,
     staleStopMs: 10 * 60_000,
     idleUnloadMs: 10 * 60_000,
+    questionSpeechWaitMs: 6_000,
+    liveSpeechIdleMs: LIVE_SPEECH_IDLE_MS,
   };
 }
 
@@ -135,6 +147,8 @@ const MAX_PENDING = 8;
 const DETECT_CLIP_MS = 30_000;
 /** Minimum speech of a live window whose detected language is kept for the next ones. */
 const DETECT_MIN_SPEECH_MS = 5_000;
+/** A question waits for the live transcription only when no more than this much audio (ms) is still to transcribe. */
+const QUESTION_BACKLOG_MS = 60_000;
 
 const LANGUAGES: readonly RecordingLanguage[] = ['ko', 'en', 'auto'];
 
@@ -340,6 +354,7 @@ class Rec {
       playback: this.playback(),
     };
     if (m.error) info.error = m.error;
+    if (m.language === 'auto' && m.detectedLanguage) info.detectedLanguage = m.detectedLanguage;
     return info;
   }
 
@@ -409,7 +424,10 @@ class Rec {
   /** Persists the windows the segmenter can decide now and queues them (live transcription on). */
   private async cutWindows(final: boolean): Promise<void> {
     if (!this.seg) return;
-    const cut = this.seg.poll(final);
+    await this.addWindows(this.seg.poll(final), final);
+  }
+
+  private async addWindows(cut: AsrWindow[], final: boolean): Promise<void> {
     if (cut.length === 0) return;
     const fh = await fs.open(this.paths.windows, 'a');
     try {
@@ -480,6 +498,39 @@ class Rec {
     await this.saveMeta();
     this.queuePendingWindows();
     if (this.windowsLeft() === 0) void this.track(this.realign());
+  }
+
+  /**
+   * A question about the lecture being recorded: the audio not in a window yet becomes one now (cut at its last pause,
+   * else at its end) and is queued. Returns the index of the last window, or -1. Nothing when paused (the pause cut
+   * one already) or without live transcription.
+   */
+  async cutForQuestion(): Promise<number> {
+    if (this.isLive && this.meta.status === 'recording' && this.meta.liveTranscribe && this.seg) {
+      await this.cutWindows(false);
+      const w = this.seg.cutNow();
+      if (w) await this.addWindows([w], false);
+    }
+    return this.windows.at(-1)?.i ?? -1;
+  }
+
+  /** Audio (ms) of the windows up to `last` not transcribed yet. */
+  backlogMs(last: number): number {
+    const done = new Set(this.transcript.doneWindows);
+    return this.windows.filter((w) => w.i <= last && !done.has(w.i)).reduce((sum, w) => sum + (w.ownEndMs - w.ownStartMs), 0);
+  }
+
+  /** Resolves when every window up to `last` is transcribed, after `ms`, or when `signal` aborts. */
+  async waitForWindows(last: number, ms: number, signal?: AbortSignal): Promise<void> {
+    const deadline = Date.now() + ms;
+    while (this.backlogMs(last) > 0 && Date.now() < deadline && !this.deleted && !signal?.aborted) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+
+  /** The live recording's speech counts as "the last minutes of the lecture" (audio or a pause/resume lately). */
+  get speechIsLive(): boolean {
+    return this.isLive && Date.now() - this.lastActivity < config.liveSpeechIdleMs;
   }
 
   // --- slide timeline -------------------------------------------------------------------------------------------
@@ -588,6 +639,7 @@ class Rec {
           wav: whole ? this.paths.asrWav : wav,
           outBase: path.join(this.paths.dir, `.window-${w.i}`),
           language,
+          prompt: this.contextBefore(w),
           signal,
           onProgress: (fraction) => {
             if (this.deleted) return;
@@ -612,6 +664,17 @@ class Rec {
       }
     }
     await this.serial(() => this.windowDone(w, [], `받아쓰기 실패: ${lastError}`));
+  }
+
+  /**
+   * A later chunk of an upload, for models that need it (models.ts carryContext): the end of what was said before it,
+   * as whisper's prompt. Nothing for live windows, the first chunk, or when the chunk before is not transcribed.
+   */
+  private contextBefore(w: AsrWindow): string | undefined {
+    if (this.meta.source !== 'upload' || w.i === 0 || !config.models.model(this.meta.model)?.carryContext) return undefined;
+    const from = w.ownStartMs / 1000;
+    const before = this.transcript.segments.filter((s) => s.end <= from + 0.5 && s.start < from);
+    return before.length > 0 ? contextPrompt(before.map((s) => s.text).join(' ')) : undefined;
   }
 
   private async windowDone(w: AsrWindow, segments: Array<{ start: number; end: number; text: string }>, error: string | null): Promise<void> {
@@ -765,11 +828,11 @@ class Rec {
     }
   }
 
-  /** Cuts an uploaded recording into windows (≤ 15 min at pauses) and persists them. */
+  /** Cuts an uploaded recording into windows (one when it fits, else ≤ 15 min at pauses) and persists them. */
   private async cutUploadWindows(): Promise<void> {
     if (this.windows.length > 0) return;
     const info = await this.pcmSource();
-    const seg = new Segmenter({ preset: config.uploadPreset });
+    const seg = new Segmenter({ preset: uploadPresetFor((info.dataBytes / BYTES_PER_SECOND) * 1000, config.uploadPreset) });
     const fh = await fs.open(info.file, 'r');
     try {
       const piece = Buffer.alloc(1 << 20);
@@ -1552,7 +1615,7 @@ export async function recordingsForSpeech(
     const loaded = recs.get(recKey(docId, rid));
     const rec = loaded ? await loaded.catch(() => null) : null;
     if (rec) {
-      if (!rec.deleted) out.push({ meta: rec.meta, segments: rec.transcript.segments, durationSec: rec.durationSec(), live: rec.isLive });
+      if (!rec.deleted) out.push({ meta: rec.meta, segments: rec.transcript.segments, durationSec: rec.durationSec(), live: rec.speechIsLive });
       continue;
     }
     const meta = await readMeta(docId, rid);
@@ -1562,6 +1625,20 @@ export async function recordingsForSpeech(
     out.push({ meta, segments: state.segments, durationSec, live: false });
   }
   return out;
+}
+
+/**
+ * A question about `docId` while it is being recorded (live transcription on, audio arriving): the audio not
+ * transcribed yet is cut into a window and the turn waits for it (at most questionSpeechWaitMs, and only when little
+ * is left to transcribe), so the tutor hears what the professor said right before the question.
+ */
+export async function catchUpLiveSpeech(docId: string, signal?: AbortSignal): Promise<void> {
+  const rec = await liveRec();
+  if (!rec || rec.docId !== docId || !rec.speechIsLive || !rec.meta.liveTranscribe) return;
+  const last = await rec.serial(() => rec.cutForQuestion());
+  if (last < 0 || rec.backlogMs(last) > QUESTION_BACKLOG_MS) return;
+  if (!config.models.isInstalled(rec.meta.model)) return;
+  await rec.waitForWindows(last, config.questionSpeechWaitMs, signal);
 }
 
 // --- lifecycle -------------------------------------------------------------------------------------------------

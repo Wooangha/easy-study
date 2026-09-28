@@ -1,7 +1,8 @@
 // Local speech recognition engine (DESIGN §22 "Engines"): whisper.cpp v1.9.4 `whisper-cli` as a short-lived sidecar
 // (spawned with an argument array, never a shell), with the flags the ASR spike chose: beam search default (5),
 // `-l ko|en` forced when known (auto otherwise), Silero VAD on (it removed every hallucination on silence and
-// noise), no prompt, output `-ojf` read from the file (never stdout). Also: finding the engine and ffmpeg, their
+// noise), no prompt (except the previous chunk's last words for models that need that context, models.ts
+// carryContext), output `-ojf` read from the file (never stdout). Also: finding the engine and ffmpeg, their
 // versions, and the machine's acceleration.
 import { execFile, spawn } from 'node:child_process';
 import { accessSync, constants, existsSync, statSync } from 'node:fs';
@@ -173,14 +174,38 @@ export interface WhisperRun {
   signal?: AbortSignal;
   /** Progress of the run (0..1, in steps of 5 %) from `-pp`: long upload chunks show how far they are. */
   onProgress?: (fraction: number) => void;
+  /** `--prompt`: what was said just before this audio (a chunk of a long upload), or nothing. */
+  prompt?: string;
 }
 
 /** The whisper-cli arguments of DESIGN §22 (tests check them). `-pp` prints the progress to stderr. */
 export function whisperArgs(run: WhisperRun): string[] {
   const args = ['-m', run.model, '-f', run.wav, '-l', run.language || 'auto', '-t', String(run.threads ?? asrThreads())];
   if (run.vad !== false) args.push('--vad', '-vm', run.vadModel);
+  const prompt = run.prompt?.replace(/\s+/g, ' ').trim();
+  if (prompt && promptFitsArgs(prompt)) args.push('--prompt', prompt);
   args.push('-ojf', '-of', run.outBase, '-pp');
   return args;
+}
+
+/**
+ * whisper-cli on Windows reads its arguments in the system code page (not UTF-8), so a Korean prompt would arrive
+ * garbled: there only an ASCII prompt is passed.
+ */
+export function promptFitsArgs(prompt: string, platform: NodeJS.Platform = process.platform): boolean {
+  return platform !== 'win32' || /^[\x20-\x7e]*$/.test(prompt);
+}
+
+/** Characters of the previous chunk's text given as the prompt (whisper keeps at most half its 448-token context). */
+export const CONTEXT_PROMPT_CHARS = 200;
+
+/** The end of `text` for `--prompt`: at most `max` characters, from a sentence start when there is one. */
+export function contextPrompt(text: string, max: number = CONTEXT_PROMPT_CHARS): string {
+  const chars = [...text.replace(/\s+/g, ' ').trim()];
+  if (chars.length <= max) return chars.join('');
+  const tail = chars.slice(-max).join('');
+  const m = /[.?!。？！]\s+/.exec(tail);
+  return m && m.index + m[0].length < tail.length - 20 ? tail.slice(m.index + m[0].length) : tail;
 }
 
 /** A progress reader for whisper-cli's stderr ("whisper_print_progress_callback: progress =  45%", maybe split). */

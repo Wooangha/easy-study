@@ -169,11 +169,12 @@ describe('lecture speech from stored transcripts (speech.ts)', () => {
     await fs.writeFile(path.join(dir, 'transcript.json'), JSON.stringify({ recordingId: rid, segments, doneWindows: [0], failedWindows: {}, nextId: segments.length + 1 }));
   }
 
-  test('no recording → undefined; newest recording first; only the window; failed recordings skipped', async () => {
+  test('no recording → undefined; per slide the newest recording with speech on it; only the window; failed recordings skipped', async () => {
     assert.equal(await lectureSpeechFor('deck-abc123', 5, [4, 5, 6]), undefined);
     await recording('rec-20260101-100000-aaaa', '2026-01-01T10:00:00.000Z', [
       { id: 1, start: 0, end: 5, text: '옛 녹음 슬라이드 5', slide: 5 },
       { id: 2, start: 5, end: 9, text: '슬라이드 9', slide: 9 },
+      { id: 3, start: 9, end: 14, text: '옛 녹음 슬라이드 6', slide: 6 },
     ]);
     await recording('rec-20260102-100000-bbbb', '2026-01-02T10:00:00.000Z', [
       { id: 1, start: 0, end: 5, text: '새 녹음', slide: 5 },
@@ -186,7 +187,10 @@ describe('lecture speech from stored transcripts (speech.ts)', () => {
     assert.deepEqual(speech, {
       bySlide: [
         { slide: 4, text: '앞 슬라이드' },
-        { slide: 5, text: '새 녹음 이어서 … 옛 녹음 슬라이드 5' },
+        // Two recordings of one lecture (a phone memo and the video) would say the same twice: the newest only.
+        { slide: 5, text: '새 녹음 이어서' },
+        // A slide only the older recording has speech on still gets it.
+        { slide: 6, text: '옛 녹음 슬라이드 6' },
       ],
     });
   });

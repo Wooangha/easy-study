@@ -389,6 +389,8 @@ export interface RecordingInfo {
   source: RecordingSource;
   status: RecordingStatus;
   language: RecordingLanguage;
+  /** language 'auto': the language whisper detected once it did (e.g. 'ko', 'en'). */
+  detectedLanguage?: string;
   /** Whisper model id used (or to be used) for this recording. */
   model: string;
   /** Live recordings: transcribe while recording (false = only after stop). */
@@ -451,6 +453,8 @@ export interface AsrModelInfo {
   installed: boolean;
   /** Present while a download runs. */
   downloading?: { receivedBytes: number; totalBytes: number };
+  /** Why the last download failed (Korean; absent while downloading, once installed, or before any failure). */
+  error?: string;
   /** Recommended default for this machine. */
   recommended: boolean;
 }
@@ -480,5 +484,10 @@ export type RecordingEvent =
 export const RECORDING_ID_RE = /^[a-z0-9][a-z0-9-]{0,80}$/;
 /** Live audio format: PCM signed 16-bit little-endian, mono, 16 kHz. */
 export const LIVE_SAMPLE_RATE = 16000;
+/**
+ * A live recording's speech is "the last minutes of the lecture" for the tutor only while its device sends audio (or
+ * a pause / resume) at least this often (ms): a recording whose device is gone stops being injected.
+ */
+export const LIVE_SPEECH_IDLE_MS = 10 * 60 * 1000;
 /** Maximum size of an uploaded recording (bytes). */
 export const MAX_RECORDING_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024;

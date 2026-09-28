@@ -15,6 +15,7 @@ import {
   samplesOf,
   secondsToBytes,
 } from '../src/lib/recording/pcm.ts';
+import { ChunkPersister } from '../src/lib/recording/persister.ts';
 import { KEEP_ACKED_BYTES, MemoryRecordingDb, readBlocks, type RecordingStore } from '../src/lib/recording/store.ts';
 import {
   LiveUploader,
@@ -137,6 +138,110 @@ describe('local recording store', () => {
     await store.destroy();
     assert.equal(await store.load(), null);
     assert.deepEqual(await db.list(), []);
+  });
+});
+
+describe('writing captured audio to the local store (persister)', () => {
+  /** A store whose writes fail while `failing` is set (like QuotaExceededError, or WebKit losing its IndexedDB). */
+  function flaky(inner: RecordingStore) {
+    const ctl = { failing: false, landThenFail: 0, calls: 0 };
+    const store: RecordingStore = Object.create(inner) as RecordingStore;
+    store.appendAudio = async (bytes: Uint8Array, at?: number) => {
+      ctl.calls++;
+      if (ctl.failing) throw new DOMException('quota', 'QuotaExceededError');
+      if (ctl.landThenFail > 0) {
+        // The write lands, but the answer is lost (the connection to the database went away after the commit).
+        ctl.landThenFail--;
+        await inner.appendAudio(bytes, at);
+        throw new Error('Connection to Indexed Database server lost. Refresh the page to try again');
+      }
+      return inner.appendAudio(bytes, at);
+    };
+    return { store, ctl };
+  }
+
+  test('the offset makes appends exact: a write that landed is not stored twice, a hole is refused', async () => {
+    const db = new MemoryRecordingDb(() => 0);
+    const store = await db.create({ id: 'r', docId: 'd', title: 'x', liveTranscribe: true });
+    assert.equal(await store.appendAudio(audio(0, 100), 0), 100);
+    assert.equal(await store.appendAudio(audio(0, 100), 0), 100, 'the same bytes again: already stored');
+    await assert.rejects(store.appendAudio(audio(300, 100), 300), /does not follow the stored 100 bytes/);
+    assert.equal(await store.appendAudio(audio(100, 50)), 150, 'without an offset: at the end');
+    assert.deepEqual(await store.read(0, 1000), audio(0, 150));
+  });
+
+  test('a chunk the store refuses stays queued in memory and is written first once the store works again', async () => {
+    const db = new MemoryRecordingDb(() => 0);
+    const { store, ctl } = flaky(await db.create({ id: 'r', docId: 'd', title: 'x', liveTranscribe: true }));
+    const events: string[] = [];
+    const persister = new ChunkPersister(store, 0, {
+      onSaved: () => events.push('saved'),
+      onError: (e, unsaved, first) => events.push(`error ${unsaved} ${first} ${(e as DOMException).name}`),
+      onRecovered: () => events.push('recovered'),
+    });
+    await persister.push(audio(0, 1000));
+    ctl.failing = true;
+    await persister.push(audio(1000, 1000));
+    await persister.push(audio(2000, 500));
+    assert.deepEqual(events, ['saved', 'error 1000 true QuotaExceededError', 'error 1500 false QuotaExceededError']);
+    assert.equal(persister.unsavedBytes, 1500);
+    assert.equal((await store.load())?.captured, 1000, 'nothing after the failure is stored out of order');
+    ctl.failing = false;
+    await persister.push(audio(2500, 500));
+    assert.deepEqual(events.slice(3), ['recovered', 'saved']);
+    assert.equal(persister.unsavedBytes, 0);
+    assert.equal(persister.failing, false);
+    assert.deepEqual(await store.read(0, 10_000), audio(0, 3000), 'every byte once, in order, no hole');
+  });
+
+  test('a write that landed although it reported a failure is not stored twice when it is retried', async () => {
+    const db = new MemoryRecordingDb(() => 0);
+    const { store, ctl } = flaky(await db.create({ id: 'r', docId: 'd', title: 'x', liveTranscribe: true }));
+    const errors: number[] = [];
+    const persister = new ChunkPersister(store, 0, { onSaved: () => {}, onError: (_e, unsaved) => errors.push(unsaved) });
+    ctl.landThenFail = 1;
+    await persister.push(audio(0, 800));
+    assert.deepEqual(errors, [800]);
+    await persister.flush();
+    assert.equal(persister.unsavedBytes, 0);
+    assert.deepEqual(await store.read(0, 10_000), audio(0, 800));
+    assert.equal((await store.load())?.captured, 800);
+  });
+
+  test('a hook that throws does not stop later writes', async () => {
+    const db = new MemoryRecordingDb(() => 0);
+    const store = await db.create({ id: 'r', docId: 'd', title: 'x', liveTranscribe: true });
+    let saved = 0;
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      const persister = new ChunkPersister(store, 0, {
+        onSaved: () => {
+          saved++;
+          if (saved === 1) throw new Error('uploader gone');
+        },
+        onError: () => {},
+      });
+      await assert.doesNotReject(persister.push(audio(0, 100)));
+      await persister.push(audio(100, 100));
+      assert.equal(saved, 2);
+      assert.deepEqual(await store.read(0, 1000), audio(0, 200));
+    } finally {
+      console.warn = warn;
+    }
+  });
+
+  test('continues a recording from the bytes already stored; never rejects', async () => {
+    const db = new MemoryRecordingDb(() => 0);
+    const inner = await db.create({ id: 'r', docId: 'd', title: 'x', liveTranscribe: true });
+    await inner.appendAudio(audio(0, 400));
+    const { store, ctl } = flaky(inner);
+    const persister = new ChunkPersister(store, 400, { onSaved: () => {}, onError: () => {} });
+    ctl.failing = true;
+    await assert.doesNotReject(persister.push(audio(400, 100)));
+    ctl.failing = false;
+    await persister.flush();
+    assert.deepEqual(await store.read(0, 1000), audio(0, 500));
   });
 });
 

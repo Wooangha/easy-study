@@ -25,9 +25,11 @@ url='https://github.com/Wooangha/easy-study'
 license=('LicenseRef-custom')
 # What the app (WebKitGTK shell, native-tls → libssl) and the bundled Node (libatomic, libstdc++) link against.
 # gcc-libs: libatomic/libgcc/libstdc++ (split out of it on current Arch, where it pulls them in).
+# gst-plugins-base/-good: WebKitGTK's microphone capture (lecture recording) and WAV/Opus playback.
 depends=('cairo' 'dbus' 'gcc-libs' 'gdk-pixbuf2' 'glib2' 'glibc' 'gtk3' 'hicolor-icon-theme' 'libsoup3' 'openssl'
-         'webkit2gtk-4.1')
+         'webkit2gtk-4.1' 'gst-plugins-base' 'gst-plugins-good')
 optdepends=('noto-fonts-cjk: Korean (CJK) text in the app window'
+            'gst-libav: play uploaded lecture recordings (AAC/m4a) in the app'
             'noto-fonts-emoji: color emoji'
             'xdg-utils: open links and the library folder in the default applications')
 provides=("$_pkgname")

@@ -8,13 +8,14 @@
 //             uploaded at once, and the user continues it (a click: the microphone needs a user gesture) or ends it.
 import workletUrl from './pcm-worklet.js?url&no-inline';
 import type { RecordingInfo } from '../../../../shared/types.ts';
-import { ApiError, createLiveRecording, deleteRecording, recordingErrorMessage, recordingHttp, untilLoggedIn } from '../../api.ts';
+import { ApiError, busyRecordingOf, createLiveRecording, deleteRecording, recordingErrorMessage, recordingHttp, untilLoggedIn } from '../../api.ts';
 import { toast } from '../toast.ts';
 import { notifyRecordingsChanged } from './bus.ts';
 import { recordingFeed, updateFeedInfo } from './feeds.ts';
 import { recordingDb } from './idbStore.ts';
 import { detectPlatform, micErrorMessage, recordingUnavailableReason } from './labels.ts';
 import { BYTES_PER_SECOND, PcmChunker, WORKLET_BLOCK_FRAMES, bytesToSeconds, levelOf, meterFraction, samplesOf } from './pcm.ts';
+import { ChunkPersister } from './persister.ts';
 import { getRecordingSettings } from './settings.ts';
 import type { LocalRecording, RecordingDb, RecordingStore } from './store.ts';
 import { formatSpan } from './timeline.ts';
@@ -23,6 +24,16 @@ import { LiveUploader, type UploaderFatal, type UploaderStatus } from './uploade
 export { notifyRecordingsChanged, onRecordingsChanged } from './bus.ts';
 
 export type RecorderPhase = 'idle' | 'starting' | 'recording' | 'paused' | 'stopping';
+
+/** A start refused because the server already has a live recording (`recording`), maybe of a device that is gone. */
+export class RecordingBusyError extends Error {
+  readonly recording: RecordingInfo;
+  constructor(message: string, recording: RecordingInfo) {
+    super(message);
+    this.name = 'RecordingBusyError';
+    this.recording = recording;
+  }
+}
 
 /** A recording left unfinished by a reload / crash, waiting for "이어서 녹음" or "끝내기". */
 export interface InterruptedRecording {
@@ -53,6 +64,8 @@ export interface RecorderSnapshot {
   authRequired: boolean;
   /** The microphone went away (unplugged, taken by the system): the recording was paused. */
   micProblem: string | null;
+  /** Date.now() when the recording was paused (null unless phase 'paused'). */
+  pausedAt: number | null;
   /** False when IndexedDB is unavailable: a reload loses the audio not uploaded yet. */
   persistent: boolean;
   interrupted: InterruptedRecording[];
@@ -72,6 +85,7 @@ const IDLE: RecorderSnapshot = {
   uploadError: null,
   authRequired: false,
   micProblem: null,
+  pausedAt: null,
   persistent: true,
   interrupted: [],
   finishing: 0,
@@ -86,6 +100,11 @@ function warnEventsRefused(count: number, detail: string): void {
 const SLIDE_DEBOUNCE_MS = 300;
 /** Warn once this much audio waits for the server (30 min ≈ 58 MB in IndexedDB). */
 const BACKLOG_WARN_BYTES = 30 * 60 * BYTES_PER_SECOND;
+/**
+ * Audio the local store could not write is kept in memory (and written first once it can); past this much the
+ * recording is paused with the reason, so the clock never runs ahead of the audio the server will get.
+ */
+const MAX_UNSAVED_BYTES = 60 * BYTES_PER_SECOND;
 
 interface Capture {
   ctx: AudioContext;
@@ -107,8 +126,8 @@ interface Session {
   baseFrames: number;
   /** Frames the worklet delivered in this capture. */
   workletFrames: number;
-  /** Persisting chunks, in order. */
-  chain: Promise<unknown>;
+  /** Writes the captured chunks to the store, in order (keeps what it could not write yet). */
+  persister: ChunkPersister;
   flushWaiters: Array<() => void>;
   slideTimer: number;
   lastSlide: number | null;
@@ -430,7 +449,9 @@ class Recorder {
         });
       } catch (e) {
         if (e instanceof ApiError && e.status === 409) {
-          throw new Error(`${e.message ? `${e.message} — ` : ''}다른 녹음이 진행 중이에요. 한 번에 하나만 녹음할 수 있어요.`);
+          const message = `${e.message ? `${e.message} — ` : ''}다른 녹음이 진행 중이에요. 한 번에 하나만 녹음할 수 있어요.`;
+          const busy = busyRecordingOf(e);
+          throw busy ? new RecordingBusyError(message, busy) : new Error(message);
         }
         throw new Error(`녹음을 시작하지 못했어요: ${recordingErrorMessage(e)}`);
       }
@@ -448,7 +469,11 @@ class Recorder {
       }
       recordingFeed(docId, info.id, { info, fresh: true });
       this.begin({ docId, rid: info.id, title: info.title, liveTranscribe: info.liveTranscribe, store, baseBytes: 0 }, capture);
-      if (slide !== null) this.addSlideEvent(this.session!, 0, slide);
+      // The slide shown now: the viewer may have moved while the permission prompt and the requests ran (the slide
+      // of the click is only the fallback).
+      const v = this.viewer;
+      const first = v && v.docId === docId ? v.slide : slide;
+      if (first !== null) this.addSlideEvent(this.session!, 0, first);
       notifyRecordingsChanged(docId);
       void navigator.storage?.persist?.().catch(() => {});
     } catch (e) {
@@ -570,7 +595,13 @@ class Recorder {
       chunker: new PcmChunker(),
       baseFrames: s.baseBytes / 2,
       workletFrames: 0,
-      chain: Promise.resolve(),
+      persister: new ChunkPersister(s.store, s.baseBytes, {
+        onSaved: () => uploader.notify(),
+        onError: (e, unsavedBytes, first) => this.onStoreError(session, e, unsavedBytes, first),
+        onRecovered: () => {
+          if (this.session === session) toast('녹음을 다시 이 기기에 저장하고 있어요.', 'success', 4000);
+        },
+      }),
       flushWaiters: [],
       slideTimer: 0,
       lastSlide: null,
@@ -639,21 +670,30 @@ class Recorder {
     }
   }
 
-  private persist(s: Session, chunk: Uint8Array): Promise<unknown> {
-    s.chain = s.chain
-      .then(() => s.store.appendAudio(chunk))
-      .then(() => s.uploader.notify())
-      .catch((e: unknown) => {
-        const quota = e instanceof DOMException && e.name === 'QuotaExceededError';
-        toast(
-          quota
-            ? '저장 공간이 부족해서 녹음을 이 기기에 저장하지 못하고 있어요. 공간을 확보하거나 녹음을 멈춰 주세요.'
-            : `녹음을 이 기기에 저장하지 못했어요: ${e instanceof Error ? e.message : String(e)}`,
-          'error',
-          10000,
-        );
+  private persist(s: Session, chunk: Uint8Array): Promise<void> {
+    return s.persister.push(chunk);
+  }
+
+  /** The store refused audio: say so once, and pause when too much waits in memory. */
+  private onStoreError(s: Session, e: unknown, unsavedBytes: number, first: boolean): void {
+    const quota = e instanceof DOMException && e.name === 'QuotaExceededError';
+    const reason = quota ? '저장 공간이 부족해요' : e instanceof Error ? e.message : String(e);
+    console.warn('[easy-study] could not store recorded audio', e);
+    if (first) {
+      toast(
+        quota
+          ? '저장 공간이 부족해서 녹음을 이 기기에 저장하지 못하고 있어요. 공간을 확보해 주세요 — 잠시 메모리에 보관하고 있어요.'
+          : `녹음을 이 기기에 저장하지 못하고 있어요: ${reason} — 잠시 메모리에 보관하고 있어요.`,
+        'error',
+        10000,
+      );
+    }
+    if (unsavedBytes > MAX_UNSAVED_BYTES && this.session === s && this.snapshot.phase === 'recording') {
+      this.set({
+        micProblem: `이 기기에 녹음을 저장할 수 없어서 일시정지했어요 (${reason}). 공간을 확보한 뒤 ‘계속’을 누르고, 그래도 안 되면 새로고침한 뒤 ‘이어서 녹음’을 누르세요.`,
       });
-    return s.chain;
+      void this.pause();
+    }
   }
 
   /** Everything the worklet and the chunker hold goes to the store. */
@@ -668,8 +708,18 @@ class Recorder {
       });
     }
     const rest = s.chunker.flush();
-    if (rest) this.persist(s, rest);
-    await s.chain;
+    if (rest) await this.persist(s, rest);
+    else await s.persister.flush();
+  }
+
+  /** Closes the microphone of a session, keeping its clock (frames so far move into baseFrames). */
+  private async releaseCapture(s: Session): Promise<void> {
+    const c = s.capture;
+    if (!c) return;
+    s.baseFrames += s.workletFrames;
+    s.workletFrames = 0;
+    s.capture = null;
+    await this.closeCapture(c);
   }
 
   private onUploadStatus(st: UploaderStatus): void {
@@ -703,15 +753,30 @@ class Recorder {
 
   // ---- pause / resume / stop ---------------------------------------------------------------------------------
 
+  /**
+   * Pause: the audio so far goes to the store, then the microphone and the screen wake lock are released (the
+   * system's microphone indicator goes off during a break); "계속" opens the microphone again.
+   */
   async pause(): Promise<void> {
     const s = this.session;
     if (!s || this.snapshot.phase !== 'recording') return;
-    this.set({ phase: 'paused' });
+    this.set({ phase: 'paused', pausedAt: Date.now() });
     s.capture?.node.port.postMessage('pause');
     await this.drain(s);
-    await s.store.update({ wantPaused: true });
-    s.uploader.flush();
     this.setLevel(0);
+    // Resumed or stopped meanwhile (a quick second click): that action owns the microphone, the wake lock and the
+    // stored state now.
+    const stillPaused = () => this.session === s && this.getSnapshot().phase === 'paused';
+    if (!stillPaused()) return;
+    await this.releaseCapture(s);
+    if (!stillPaused()) return;
+    void this.releaseWakeLock();
+    try {
+      await s.store.update({ wantPaused: true });
+    } catch (e) {
+      console.warn('[easy-study] could not store the pause', e);
+    }
+    s.uploader.flush();
     notifyRecordingsChanged(s.docId);
   }
 
@@ -719,6 +784,12 @@ class Recorder {
   async resume(): Promise<void> {
     const s = this.session;
     if (!s || this.snapshot.phase !== 'paused') return;
+    if (s.persister.unsavedBytes > MAX_UNSAVED_BYTES) {
+      await s.persister.flush();
+      if (s.persister.unsavedBytes > MAX_UNSAVED_BYTES) {
+        throw new Error('아직 이 기기에 녹음을 저장할 수 없어요. 저장 공간을 확보하거나, 페이지를 새로고침한 뒤 ‘이어서 녹음’을 눌러 주세요.');
+      }
+    }
     const track = s.capture?.stream.getAudioTracks()[0];
     if (!s.capture || !track || track.readyState === 'ended') {
       // The microphone went away: open a new capture (the clock continues from the stored audio).
@@ -735,7 +806,7 @@ class Recorder {
     }
     await s.store.update({ wantPaused: false });
     s.uploader.notify();
-    this.set({ phase: 'recording', micProblem: null });
+    this.set({ phase: 'recording', micProblem: null, pausedAt: null });
     const v = this.viewer;
     if (v && v.docId === s.docId && v.slide !== s.lastSlide) this.addSlideEvent(s, this.clockSeconds(), v.slide);
     void this.holdWakeLock();
@@ -749,15 +820,29 @@ class Recorder {
     this.set({ phase: 'stopping' });
     window.clearTimeout(s.slideTimer);
     s.capture?.node.port.postMessage('pause');
-    await this.drain(s);
-    const rec = await s.store.load();
-    const captured = rec?.captured ?? 0;
-    await s.store.update({ stopBytes: captured });
-    s.uploader.flush();
-    if (s.capture) await this.closeCapture(s.capture);
-    s.capture = null;
-    this.setLevel(0);
-    void this.releaseWakeLock();
+    try {
+      await this.drain(s);
+      const rec = await s.store.load();
+      const captured = rec?.captured ?? 0;
+      await s.store.update({ stopBytes: captured });
+      if (s.persister.unsavedBytes > 0) {
+        toast(
+          `마지막 ${formatSpan(bytesToSeconds(s.persister.unsavedBytes))}은 이 기기에 저장하지 못해서 녹음에서 빠졌어요.`,
+          'error',
+          10000,
+        );
+      }
+      s.uploader.flush();
+    } catch (e) {
+      // The store failed: the recording stays (paused) — the user can try again, or reload and continue it.
+      if (this.session === s) this.set({ phase: 'paused', pausedAt: Date.now() });
+      throw new Error(`이 기기에 저장된 녹음을 읽지 못했어요: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      // Whatever happened: the microphone and the screen are released.
+      await this.releaseCapture(s);
+      this.setLevel(0);
+      void this.releaseWakeLock();
+    }
   }
 
   /** The stop was acknowledged: everything is on the server. */

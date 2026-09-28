@@ -450,6 +450,38 @@ export function securityHeaders(): express.RequestHandler {
   };
 }
 
+/** Whole-request limit of every request but a recording upload (Node's former requestTimeout default). */
+export const REQUEST_BODY_DEADLINE_MS = 300_000;
+
+/**
+ * Node's `server.requestTimeout` (5 minutes, the whole request including its body) is turned off so that a recording
+ * upload of up to 4 GB over a slow network can finish (the upload route stops a transfer that stalls instead). Every
+ * other request keeps the old bound here: a body still incomplete after `ms` is answered 408 and the connection
+ * closed. The check only looks at `req.complete` — it never reads the body.
+ */
+export function requestBodyDeadline(ms: number = REQUEST_BODY_DEADLINE_MS, exempt: (req: express.Request) => boolean = isRecordingUpload): express.RequestHandler {
+  return (req, res, next) => {
+    if (req.complete || exempt(req)) {
+      next();
+      return;
+    }
+    const timer = setTimeout(() => {
+      if (req.complete || res.writableEnded) return;
+      if (!res.headersSent) {
+        res.status(408).set('Connection', 'close').json({ error: '요청을 받는 데 너무 오래 걸려서 중단했습니다' });
+      }
+      req.socket?.destroySoon?.();
+    }, ms);
+    timer.unref?.();
+    res.once('close', () => clearTimeout(timer));
+    next();
+  };
+}
+
+function isRecordingUpload(req: express.Request): boolean {
+  return req.method === 'POST' && /^\/api\/docs\/[^/]+\/recordings\/upload\/?$/.test(req.path);
+}
+
 // ---------------------------------------------------------------------------
 // API
 // ---------------------------------------------------------------------------
@@ -1047,6 +1079,10 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
   app.disable('x-powered-by');
   app.use(securityHeaders());
   const server: http.Server = settings.tls ? await createHttpsServer(settings.tls, app) : http.createServer(app);
+  // Recording uploads may take far longer than 5 minutes (DESIGN §22): no whole-request limit of Node's; requests
+  // are bounded by requestBodyDeadline() instead, uploads by their idle timer (headers still within 60 s).
+  server.requestTimeout = 0;
+  app.use(requestBodyDeadline());
 
   // First of all: one server per library. The startup sweeps below and resumed ingests rewrite files
   // that a running server may be working on (and .auth.json has one writer).
