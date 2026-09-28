@@ -994,8 +994,9 @@ about using lecture speech.
   Not available on insecure origins (plain-HTTP LAN): explain HTTPS is needed.
 - Upload: "녹음 파일 올리기" per lecture (library row menu and the recording tab).
 - Right-pane tab **녹음**: recordings list (status/progress, model download prompt with size), transcript for the focused slide (or all, with
-  slide headers), click a segment → play from there; player (play/pause/seek; speed 0.5×–3× on a slider whose tick marks a dragged value
-  sticks to, arrow keys in 0.05 steps, or typed; any rate in range is remembered) with "슬라이드 따라가기" (the viewer follows the slide being
+  slide headers), click a segment → play from there; player (play/pause/seek; a "1.25×" button opening a speech bubble with a 0.5×–3×
+  slider whose thumb follows the pointer and is drawn onto the tick marks near it (the rate follows in 0.05 steps, applied while dragging),
+  arrow keys in 0.05 steps, or typed; any rate in range is remembered) with "슬라이드 따라가기" (the viewer follows the slide being
   discussed; a live recording's WAV has the length it had when loaded, so the player reloads when the recording ends and before a seek past
   its loaded end); the language whisper detected for 'auto' ("자동 감지 (영어)"); "여기부터 p.N" marker editing; "AI 정밀 정렬" button; settings: model (turbo / small), language, live transcription on/off.
 - Tutor: questions during a live recording automatically include the recent speech; a chip in the composer shows "🎙 최근 3분 포함".

@@ -1,24 +1,22 @@
-// Playback speed of the 녹음 tab player (DESIGN §22): a 0.5×–3× slider that sticks to its tick marks while
-// dragged, arrow keys in 0.05 steps, a typed rate, and the stored value. Pure helpers, no DOM.
+// Playback speed of the 녹음 tab player (DESIGN §22): a 0.5×–3× slider whose dragged thumb follows the pointer and
+// is drawn onto its tick marks, arrow keys in 0.05 steps, a typed rate, and the stored value. Pure helpers, no DOM.
 
 export const MIN_RATE = 0.5;
 export const MAX_RATE = 3;
-/** The slider's step (arrow keys, and where a dragged value lands between the tick marks). */
+/** The slider's step: arrow keys, and the rate a dragged thumb sets between the tick marks. */
 export const RATE_STEP = 0.05;
-/** The slider's tick marks: a dragged value close to one sticks to it; PageUp / PageDown jump between them. */
+/** The slider's tick marks: they draw a dragged thumb onto them; PageUp / PageDown jump between them. */
 export const SNAP_RATES = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3] as const;
 /**
- * How far a tick mark pulls the dragged thumb, on either side (CSS px of the thumb's travel): a clear "snap" into
- * place, the same feel on a short or a long slider (snapThreshold).
+ * How far (in ×, on either side) a tick mark holds a dragged thumb on it: about 3.5 px of the bubble's slider.
  */
-export const SNAP_PX = 5;
+export const MAGNET_HOLD = 0.04;
 /**
- * The most a mark pulls (in ×): marks 0.25 apart still leave the steps halfway between them (1.1, 1.15) to drag to.
- * The steps right next to a mark (1.2, 1.3) are typed in the box.
+ * How far (in ×, on either side) a tick mark's pull reaches, about 9 px: between it and MAGNET_HOLD the thumb moves
+ * faster than the pointer, so it slides onto the mark and off it again without a jump. Under half the 0.25 between
+ * two marks, so the thumb follows the pointer freely in between.
  */
-export const MAX_SNAP = 0.08;
-/** The pull before the slider has been measured. */
-export const SNAP_THRESHOLD = 0.06;
+export const MAGNET_REACH = 0.1;
 
 // Rates are handled in hundredths so 0.05 steps do not drift (0.1 + 0.2).
 const cents = (rate: number): number => Math.round(rate * 100);
@@ -32,22 +30,31 @@ export function clampRate(rate: number): number {
   return Math.min(MAX_RATE, Math.max(MIN_RATE, rate));
 }
 
-/** The snap threshold (in ×) of a slider whose thumb travels `trackPx`: SNAP_PX of track, at most MAX_SNAP. */
-export function snapThreshold(trackPx: number): number {
-  if (!(trackPx > 0)) return SNAP_THRESHOLD;
-  return Math.min(MAX_SNAP, Math.round((SNAP_PX * cents(MAX_RATE - MIN_RATE)) / trackPx) / 100);
+/** A fraction of the slider's travel (0 at its left end … 1 at its right end) → the rate there, not clamped. */
+export function rateAt(fraction: number): number {
+  return MIN_RATE + fraction * (MAX_RATE - MIN_RATE);
 }
 
 /**
- * A position the pointer dragged the slider to (the input's fine value) → the rate: the tick mark within
- * `threshold` of it, else the nearest 0.05 step.
+ * Where a dragged thumb is drawn for the pointer's rate `raw`: under the pointer, except near a tick mark, which
+ * holds it within MAGNET_HOLD and draws it in from MAGNET_REACH (the thumb catches up with the pointer at the edge
+ * of the reach, so the mapping has no jumps). Not rounded: the thumb moves as smoothly as the pointer.
  */
-export function snapDraggedRate(raw: number, threshold: number = SNAP_THRESHOLD): number {
+export function pullToMark(raw: number): number {
   if (!Number.isFinite(raw)) return 1;
-  const c = cents(clampRate(raw));
-  const reach = cents(threshold);
-  for (const mark of SNAP_RATES) if (Math.abs(c - cents(mark)) <= reach) return mark;
-  return clampRate((Math.round(c / STEP_CENTS) * STEP_CENTS) / 100);
+  const r = clampRate(raw);
+  let mark: number = SNAP_RATES[0];
+  for (const m of SNAP_RATES) if (Math.abs(r - m) < Math.abs(r - mark)) mark = m;
+  const off = Math.abs(r - mark);
+  if (off <= MAGNET_HOLD) return mark;
+  if (off >= MAGNET_REACH) return r;
+  return mark + (Math.sign(r - mark) * (off - MAGNET_HOLD) * MAGNET_REACH) / (MAGNET_REACH - MAGNET_HOLD);
+}
+
+/** The rate a thumb drawn at `pos` sets: the nearest 0.05 step (a tick mark the thumb is held on is one). */
+export function dragRate(pos: number): number {
+  if (!Number.isFinite(pos)) return 1;
+  return (Math.round(cents(clampRate(pos)) / STEP_CENTS) * STEP_CENTS) / 100;
 }
 
 /**

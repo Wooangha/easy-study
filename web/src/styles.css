@@ -4528,118 +4528,113 @@ kbd {
   accent-color: var(--accent);
 }
 
-/* Playback speed: a small slider with tick marks (a dragged value sticks to them) and the typed rate. The
-   slider is drawn here so the ticks line up with the thumb: a tick at fraction f sits where the thumb's center
-   is, half a thumb in from each end. Its length is what makes the steps next to a mark reachable (see
-   snapThreshold in lib/recording/rate.ts): 140px or more wherever the row has room. */
+/* Playback speed: a small button with the rate that opens a speech bubble coming out of it (above it; below only
+   when there is more room there) with the slider and the typed rate. The slider is drawn here: the fill, the tick
+   marks and the thumb sit on a rail half a thumb in from each end, so a rate at fraction f is at f of the rail.
+   While dragged the thumb follows the pointer (no transition); otherwise it glides to its rate (a pressed track,
+   the release of a drag, a key, a typed rate). */
 .rec-rate {
-  flex: 1 1 200px;
-  max-width: 240px;
-  min-width: 140px;
+  flex: none;
   display: inline-flex;
+}
+
+/* One width for every rate ("1×" … "0.75×"): the button, and the bubble's tail on it, do not move while the
+   rate changes under a dragged thumb. */
+.rec-rate-btn {
+  width: 52px;
+  height: 26px;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.rec-rate-btn:hover {
+  border-color: var(--border-strong);
+}
+
+.rec-rate-btn:focus-visible {
+  outline: 2px solid transparent;
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+
+.rec-rate-btn[aria-expanded='true'] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.rec-rate-pop {
+  --tail: 50%;
+  position: fixed;
+  z-index: 70;
+  width: 264px;
+  max-width: calc(100vw - 16px);
+  padding: 10px 12px 4px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+  /* It grows out of the tail's tip. */
+  transform-origin: var(--tail) calc(100% + 8px);
+  animation: rec-rate-pop 0.16s cubic-bezier(0.2, 0.9, 0.3, 1.12);
+}
+
+.rec-rate-pop.is-below {
+  transform-origin: var(--tail) -8px;
+}
+
+.rec-rate-pop:focus {
+  outline: none;
+}
+
+/* The tail: a square turned 45° half out of the bubble's edge, bordered on its two outer sides; its inner half
+   covers the bubble's border there. --tail is from the bubble's outer edge (as transform-origin is); `left` is from
+   inside its 1px border. */
+.rec-rate-pop::after {
+  content: '';
+  position: absolute;
+  left: calc(var(--tail) - 1px);
+  bottom: -6px;
+  width: 11px;
+  height: 11px;
+  border: solid var(--border);
+  border-width: 0 1px 1px 0;
+  border-bottom-right-radius: 3px;
+  background: inherit;
+  transform: translateX(-50%) rotate(45deg);
+}
+
+.rec-rate-pop.is-below::after {
+  top: -6px;
+  bottom: auto;
+  border-width: 1px 0 0 1px;
+  border-radius: 3px 0 0;
+}
+
+@keyframes rec-rate-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.86);
+  }
+}
+
+.rec-rate-head {
+  display: flex;
   align-items: center;
   gap: 6px;
 }
 
-.rec-rate-slider {
-  --thumb: 14px;
-  position: relative;
-  flex: 1;
-  min-width: 80px;
-  height: 26px;
-  display: flex;
-  align-items: center;
-}
-
-.rec-rate-slider input {
-  -webkit-appearance: none;
-  appearance: none;
-  /* Above the tick marks: the thumb covers the ones it sits on. */
-  position: relative;
-  z-index: 1;
-  width: 100%;
-  height: 100%;
-  margin: 0;
-  background: none;
-  cursor: pointer;
-}
-
-/* Transparent: the ring on the thumb shows the focus, the outline only in forced colors (below). */
-.rec-rate-slider input:focus-visible {
-  outline: 2px solid transparent;
-  outline-offset: 2px;
-}
-
-.rec-rate-slider input::-webkit-slider-runnable-track {
-  height: 4px;
-  border-radius: 2px;
-  background: linear-gradient(to right, var(--accent) calc(var(--fill) * 100%), var(--surface-3) 0);
-}
-
-.rec-rate-slider input::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: var(--thumb);
-  height: var(--thumb);
-  margin-top: calc((4px - var(--thumb)) / 2);
-  border: 2px solid var(--surface);
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent), var(--shadow-sm);
-}
-
-.rec-rate-slider input:focus-visible::-webkit-slider-thumb {
-  box-shadow: 0 0 0 1px var(--accent), var(--ring);
-}
-
-.rec-rate-slider input::-moz-range-track {
-  height: 4px;
-  border-radius: 2px;
-  background: var(--surface-3);
-}
-
-.rec-rate-slider input::-moz-range-progress {
-  height: 4px;
-  border-radius: 2px;
-  background: var(--accent);
-}
-
-.rec-rate-slider input::-moz-range-thumb {
-  box-sizing: border-box;
-  width: var(--thumb);
-  height: var(--thumb);
-  border: 2px solid var(--surface);
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent), var(--shadow-sm);
-}
-
-.rec-rate-slider input:focus-visible::-moz-range-thumb {
-  box-shadow: 0 0 0 1px var(--accent), var(--ring);
-}
-
-.rec-rate-ticks {
-  position: absolute;
-  left: calc(var(--thumb) / 2);
-  right: calc(var(--thumb) / 2);
-  top: calc(50% + 4px);
-  height: 5px;
-  pointer-events: none;
-}
-
-.rec-rate-tick {
-  position: absolute;
-  top: 0;
-  width: 2px;
-  height: 3px;
-  margin-left: -1px;
-  border-radius: 1px;
-  background: var(--border-strong);
-}
-
-.rec-rate-tick.is-one {
-  height: 5px;
-  background: var(--muted);
+.rec-rate-title {
+  margin-right: auto;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
 }
 
 .rec-rate-num {
@@ -4679,26 +4674,179 @@ kbd {
   color: var(--text);
 }
 
-/* Forced colors (Windows High Contrast) drop the track's gradient and paint the thumb and the ticks as Canvas. */
+/* Borderless, so it does not read as a second box next to the typed rate. */
+.rec-rate-reset {
+  flex: none;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.rec-rate-reset:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.rec-rate-reset:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.rec-rate-reset:focus-visible {
+  outline: 2px solid transparent;
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+
+/* The whole height (the track and the numbers under it) takes the pointer; the ring on the thumb shows the
+   focus (the outline only in forced colors, below). */
+.rec-rate-slider {
+  --thumb: 16px;
+  position: relative;
+  height: 44px;
+  margin-top: 2px;
+  cursor: pointer;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.rec-rate-slider:focus-visible {
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+}
+
+.rec-rate-rail {
+  position: absolute;
+  top: 13px;
+  left: calc(var(--thumb) / 2);
+  right: calc(var(--thumb) / 2);
+  height: 4px;
+  border-radius: 2px;
+  background: var(--surface-3);
+}
+
+.rec-rate-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: calc(var(--at) * 100%);
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.rec-rate-thumb {
+  position: absolute;
+  top: 50%;
+  left: calc(var(--at) * 100%);
+  width: var(--thumb);
+  height: var(--thumb);
+  margin: calc(var(--thumb) / -2) 0 0 calc(var(--thumb) / -2);
+  border: 2px solid var(--surface);
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), var(--shadow-sm);
+  transition:
+    left 0.18s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.14s ease-out,
+    box-shadow 0.14s;
+}
+
+.rec-rate-slider.is-dragging .rec-rate-fill {
+  transition: none;
+}
+
+.rec-rate-slider.is-dragging .rec-rate-thumb {
+  transition-property: transform, box-shadow;
+}
+
+/* Held on a tick mark: the thumb swells a little, as if it clicked into place. */
+.rec-rate-slider.is-caught .rec-rate-thumb {
+  transform: scale(1.18);
+}
+
+.rec-rate-slider:focus-visible .rec-rate-thumb {
+  box-shadow: 0 0 0 1px var(--accent), var(--ring);
+}
+
+/* Below the track, clear of the thumb. */
+.rec-rate-tick {
+  position: absolute;
+  top: 11px;
+  width: 2px;
+  height: 3px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: var(--border-strong);
+}
+
+.rec-rate-tick.is-major {
+  height: 5px;
+  background: var(--muted);
+}
+
+.rec-rate-tick.is-on {
+  background: var(--accent);
+}
+
+.rec-rate-label {
+  position: absolute;
+  top: 18px;
+  font-size: 10.5px;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: var(--muted);
+  transform: translateX(-50%);
+  transition: color 0.14s;
+}
+
+.rec-rate-label.is-on {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+/* Forced colors (Windows High Contrast) would paint the drawn slider as Canvas: it keeps system colors instead. */
 @media (forced-colors: active) {
-  .rec-rate-slider input::-webkit-slider-runnable-track {
+  .rec-rate-slider {
+    forced-color-adjust: none;
+  }
+
+  .rec-rate-slider:focus-visible {
+    outline-color: Highlight;
+  }
+
+  .rec-rate-rail,
+  .rec-rate-tick,
+  .rec-rate-tick.is-major {
     background: CanvasText;
   }
 
-  .rec-rate-slider input::-moz-range-track {
-    background: CanvasText;
-  }
-
-  .rec-rate-slider input::-webkit-slider-thumb {
+  .rec-rate-fill,
+  .rec-rate-thumb,
+  .rec-rate-tick.is-on {
     background: Highlight;
   }
 
-  .rec-rate-slider input::-moz-range-thumb {
-    background: Highlight;
+  .rec-rate-thumb {
+    border-color: Canvas;
+    box-shadow: none;
   }
 
-  .rec-rate-tick {
-    background: CanvasText;
+  .rec-rate-label {
+    color: CanvasText;
+  }
+
+  .rec-rate-label.is-on {
+    color: Highlight;
   }
 }
 
