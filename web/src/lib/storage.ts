@@ -15,6 +15,18 @@ export const storageKeys = {
   uploadCourse: 'uploadCourse',
   /** Collapsed courses and groups of the library (`course:<id>` / `group:<id>`, per device). */
   collapsed: 'collapsed',
+  /** Recording settings (model / language / live transcription) for new recordings (DESIGN §22). */
+  recordingSettings: 'recordingSettings',
+  /** The one-time notice about recording rules was confirmed. */
+  recordingConsent: 'recordingConsent',
+  /** 녹음 tab: playback speed, "슬라이드 따라가기", transcript mode ('current' | 'all'). */
+  playbackRate: 'playbackRate',
+  followSlides: 'followSlides',
+  transcriptMode: 'transcriptMode',
+  /** Collapsed live transcript strip under the top bar. */
+  liveStripCollapsed: 'liveStripCollapsed',
+  /** "여기부터 p.N" markers sent for a recording (the API has no GET for them). */
+  recordingMarkers: (recordingId: string) => `recordingMarkers:${recordingId}`,
   slide: (docId: string) => `slide:${docId}`,
   session: (docId: string) => `session:${docId}`,
 } as const;
@@ -65,3 +77,4 @@ export function writeStorage(key: string, value: unknown): void {
 
 export const isNumber = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 export const isString = (v: unknown): v is string => typeof v === 'string';
+export const isBoolean = (v: unknown): v is boolean => typeof v === 'boolean';

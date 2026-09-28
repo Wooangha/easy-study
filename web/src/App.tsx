@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { Attachment, DocMeta, RegionRect } from '../../shared/types.ts';
 import { ApiError, errorMessage, startDigest } from './api.ts';
 import { AttachmentContext, AttachmentPreview, type AttachmentActions } from './components/Attachments.tsx';
@@ -7,6 +7,9 @@ import { ConfirmHost } from './components/ConfirmDialog.tsx';
 import { DigestPanel, type DigestMode } from './components/DigestPanel.tsx';
 import { DocStatusView, LibraryView } from './components/LibraryView.tsx';
 import { NotesPanel, type NotesFilter } from './components/NotesPanel.tsx';
+import { RecordControl, RecordingStrip } from './components/recording/RecorderBar.tsx';
+import { RecordingUploadContext } from './components/recording/RecordingUploads.tsx';
+import { RecordingsPanel } from './components/recording/RecordingsPanel.tsx';
 import { SlideViewer, type SlideViewerHandle } from './components/SlideViewer.tsx';
 import { SplitPane } from './components/SplitPane.tsx';
 import { Toaster } from './components/Toaster.tsx';
@@ -20,6 +23,7 @@ import { useLatest } from './hooks/useLatest.ts';
 import { useNeighbors } from './hooks/useNeighbors.ts';
 import { useNotes } from './hooks/useNotes.ts';
 import { useProviderChoice } from './hooks/useProviderChoice.ts';
+import { useRecordings } from './hooks/useRecordings.ts';
 import { useStudySession } from './hooks/useStudySession.ts';
 import {
   classifyDragTypes,
@@ -31,6 +35,9 @@ import {
   type DragKinds,
 } from './lib/attachments.ts';
 import { confirmDialog } from './lib/confirm.ts';
+import { RECORDING_ACCEPT } from './lib/recording/labels.ts';
+import { recorder } from './lib/recording/recorder.ts';
+import { getRecordingUploads, subscribeRecordingUploads, uploadRecordingFiles } from './lib/recording/uploads.ts';
 import { earlierLectures } from './lib/courseContext.ts';
 import { withParticle } from './lib/korean.ts';
 import { providerWithModel } from './lib/format.ts';
@@ -92,10 +99,13 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
   const [pinnedSlide, setPinnedSlide] = useState<number | null>(null);
   const [tab, setTab] = useState<PanelTab>('chat');
   const [notesFilter, setNotesFilter] = useState<NotesFilter>('all');
+  /** Tab to show when the lecture being opened is ready (e.g. 녹음, from the recording bar). */
+  const pendingTab = useRef<PanelTab | null>(null);
   useEffect(() => {
     setPinnedSlide(null);
     setNotesFilter('all');
-    setTab('chat');
+    setTab(pendingTab.current ?? 'chat');
+    pendingTab.current = null;
   }, [readyDocId]);
   const [neighbors, setNeighbors] = useNeighbors();
   const [digestMode, setDigestModeState] = useState<DigestMode>(() =>
@@ -114,6 +124,25 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
       patchDoc(readyDocId, { digestStatus });
     }
   }, [readyDocId, digestStatus, doc, patchDoc]);
+
+  // ---- Lecture recordings (DESIGN §22) ------------------------------------------------------------------
+  // The recorder lives outside React (it survives switching lectures and the login screen); at startup it looks
+  // for a recording a reload interrupted. The viewer's slide changes are its slide-view events.
+  useEffect(() => {
+    void recorder.init();
+  }, []);
+  useEffect(() => {
+    recorder.slideViewed(readyDocId, focusedSlide);
+  }, [readyDocId, focusedSlide]);
+  const recordings = useRecordings(readyDocId, tab === 'recordings');
+  const recorderPhase = useSyncExternalStore(recorder.subscribe, () => recorder.getSnapshot().phase);
+  const recordingUploads = useSyncExternalStore(subscribeRecordingUploads, () => getRecordingUploads().length);
+  const recordingFileRef = useRef<HTMLInputElement>(null);
+  const recordingTarget = useRef<DocMeta | null>(null);
+  const pickRecordingFor = useCallback((target: DocMeta) => {
+    recordingTarget.current = target;
+    recordingFileRef.current?.click();
+  }, []);
 
   const notesState = useNotes(readyDocId);
   const refreshNotes = notesState.refresh;
@@ -200,14 +229,26 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
     },
     [refreshNotes],
   );
+  const refreshRecordings = recordings.refresh;
   const changeTab = useCallback(
     (next: PanelTab) => {
       setTab(next);
       if (next === 'notes') void refreshNotes();
       if (next === 'digest') void refreshDigest();
+      if (next === 'recordings') void refreshRecordings();
     },
-    [refreshNotes, refreshDigest],
+    [refreshNotes, refreshDigest, refreshRecordings],
   );
+  /** The 녹음 tab of the lecture being recorded (opening it first when another one is shown). */
+  const showRecordings = useCallback(() => {
+    const target = recorder.getSnapshot().docId;
+    if (target && target !== readyDocId) {
+      pendingTab.current = 'recordings';
+      setDocId(target);
+      return;
+    }
+    changeTab('recordings');
+  }, [readyDocId, setDocId, changeTab]);
   const togglePin = useCallback(() => setPinnedSlide((p) => (p === null ? focusedSlide : null)), [focusedSlide]);
 
   // ---- Upload target: the course new PDFs go into ------------------------------------------------
@@ -326,8 +367,9 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
     };
   }, [dropFilesRef, uploadTargetIdRef, suspendedRef]);
 
-  // Warn before closing the tab while an answer is streaming (closing aborts it) or an upload runs.
-  const busy = study.anyRunning || uploads.length > 0;
+  // Warn before closing the tab while an answer is streaming (closing aborts it), an upload runs or a lecture is
+  // being recorded (the audio captured so far is safe, but the recording stops).
+  const busy = study.anyRunning || uploads.length > 0 || recordingUploads > 0 || recorderPhase !== 'idle';
   useEffect(() => {
     if (!busy) return;
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
@@ -341,18 +383,22 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
   // ---- Logout (remote mode) ----------------------------------------------------------------------
   const logout = useCallback(async () => {
     if (!onLogout) return;
+    const recording = recorderPhase === 'recording' || recorderPhase === 'paused';
     if (
       busy &&
       !(await confirmDialog({
         title: '로그아웃할까요?',
-        message: '답변을 만들거나 PDF를 올리는 중이에요. 지금 로그아웃하면 이 화면에서는 결과를 볼 수 없어요.',
+        message: recording
+          ? '강의를 녹음하는 중이에요. 로그아웃하면 녹음을 끝내요 (지금까지 녹음한 것은 다시 로그인하면 마저 올라가요).'
+          : '답변을 만들거나 파일을 올리는 중이에요. 지금 로그아웃하면 이 화면에서는 결과를 볼 수 없어요.',
         confirmLabel: '로그아웃',
       }))
     ) {
       return;
     }
+    if (recording) await recorder.stop();
     void onLogout();
-  }, [busy, onLogout]);
+  }, [busy, onLogout, recorderPhase]);
 
   // ---- Documents whose conversion failed: retry or delete (DESIGN §14) ----------------------------
   const deleteDoc = useCallback(
@@ -504,6 +550,19 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
                   />
                 ) : null
               }
+              recordingCount={recordings.list?.length ?? null}
+              recordings={
+                <RecordingsPanel
+                  key={doc.id}
+                  doc={doc}
+                  focusedSlide={focusedSlide}
+                  active={tab === 'recordings'}
+                  providers={providers}
+                  choice={choice}
+                  recordings={recordings}
+                  onGoToSlide={goToSlide}
+                />
+              }
               digest={
                 <DigestPanel
                   key={doc.id}
@@ -595,7 +654,17 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
         onChoiceChange={setChoice}
         hasNotes={notesCount > 0}
         onLogout={authRequired && onLogout ? () => void logout() : undefined}
+        recordControl={
+          <RecordControl
+            doc={doc?.status === 'ready' ? doc : null}
+            focusedSlide={focusedSlide}
+            docs={docs}
+            onOpenDoc={setDocId}
+            onShowRecordings={showRecordings}
+          />
+        }
       />
+      <RecordingStrip onShowRecordings={showRecordings} />
 
       {healthError && (
         <div className="banner banner-error" role="alert">
@@ -623,7 +692,23 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
         </div>
       )}
 
-      <main className="main">{main}</main>
+      <RecordingUploadContext.Provider value={pickRecordingFor}>
+        <main className="main">{main}</main>
+      </RecordingUploadContext.Provider>
+      <input
+        ref={recordingFileRef}
+        type="file"
+        accept={RECORDING_ACCEPT}
+        multiple
+        hidden
+        onChange={(e) => {
+          const files = Array.from(e.target.files ?? []);
+          e.target.value = '';
+          const target = recordingTarget.current;
+          recordingTarget.current = null;
+          if (target && files.length > 0) void uploadRecordingFiles(target.id, target.title, files);
+        }}
+      />
 
       <input
         ref={fileInputRef}

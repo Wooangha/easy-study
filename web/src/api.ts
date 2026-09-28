@@ -1,11 +1,14 @@
 // Typed client for the easy-study HTTP API (DESIGN.md §4). Same-origin, everything under /api.
 import type {
+  AlignmentMarker,
+  AsrStatus,
   Attachment,
   AuthStatusResponse,
   Course,
   CourseGroup,
   CreateCourseRequest,
   CreateGroupRequest,
+  CreateLiveRecordingRequest,
   CreateRegionRequest,
   CreateSessionRequest,
   DigestInfo,
@@ -14,7 +17,11 @@ import type {
   LibraryLayout,
   NotesResponse,
   PrimeRequest,
+  ProviderId,
   PutLayoutRequest,
+  RecordingInfo,
+  RecordingLanguage,
+  RecordingTranscript,
   SendMessageRequest,
   Session,
   SessionSummary,
@@ -33,6 +40,7 @@ import {
   waitForLogin,
 } from './lib/auth.ts';
 import { imageContentType } from './lib/attachments.ts';
+import type { HttpResult, UploaderHttp } from './lib/recording/uploader.ts';
 
 export class ApiError extends Error {
   readonly status: number;
@@ -496,6 +504,132 @@ export const deleteAttachment = (docId: string, id: string) =>
   request<void>(attachmentUrl(docId, id), { method: 'DELETE' });
 
 // ---------------------------------------------------------------------------
+// Lecture recordings (DESIGN §22): speech recognition models, recordings, transcripts, markers
+// ---------------------------------------------------------------------------
+
+/** Resolves once requests can be sent (logged in, or no login needed): after a 401 the login screen is up. */
+export const untilLoggedIn = (): Promise<void> => whenLoggedIn();
+
+/** A request whose answer has no body the client needs (202 Accepted may carry one or not). */
+async function requestAccepted(path: string, init?: RequestInit): Promise<void> {
+  const res = await fetchWithLogin(path, init);
+  if (!res.ok) throw await toApiError(res);
+  await res.body?.cancel().catch(() => {});
+}
+
+/** Engine, acceleration, ffmpeg and the models (installed, downloading with progress). */
+export const getAsrStatus = () => request<AsrStatus>('/api/asr');
+
+/** Start downloading a model (202; progress via getAsrStatus). */
+export const downloadAsrModel = (modelId: string) =>
+  requestAccepted(`/api/asr/models/${enc(modelId)}/download`, { method: 'POST' });
+
+export const deleteAsrModel = (modelId: string) => request<void>(`/api/asr/models/${enc(modelId)}`, { method: 'DELETE' });
+
+const recordingsPath = (docId: string) => `${docPath(docId)}/recordings`;
+export const recordingPath = (docId: string, rid: string) => `${recordingsPath(docId)}/${enc(rid)}`;
+
+/** The recordings of a lecture, newest first. */
+export const listRecordings = (docId: string) => request<RecordingInfo[]>(recordingsPath(docId));
+
+/** Start a live recording (status 'recording'). 409 while another live recording runs on this server. */
+export const createLiveRecording = (docId: string, body: CreateLiveRecordingRequest) =>
+  postJSON<RecordingInfo>(recordingsPath(docId), body);
+
+export const getRecording = (docId: string, rid: string) => request<RecordingInfo>(recordingPath(docId, rid));
+
+export const getRecordingTranscript = (docId: string, rid: string) =>
+  request<RecordingTranscript>(`${recordingPath(docId, rid)}/transcript`);
+
+/** Replace the "여기부터 p.N" markers; answers the transcript re-aligned with them as hard constraints. */
+export const putRecordingMarkers = (docId: string, rid: string, markers: AlignmentMarker[]) =>
+  sendJSON<RecordingTranscript>('PUT', `${recordingPath(docId, rid)}/markers`, markers);
+
+/** "AI 정밀 정렬" with the user's CLI (202; progress and the result arrive as recording events). */
+export const alignRecordingWithAi = (docId: string, rid: string, body: { provider: ProviderId; model?: string }) =>
+  requestAccepted(`${recordingPath(docId, rid)}/align-ai`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+export const renameRecording = (docId: string, rid: string, title: string) =>
+  sendJSON<RecordingInfo>('PATCH', recordingPath(docId, rid), { title });
+
+/** Delete a recording (the server stops a running recording or job first). */
+export const deleteRecording = (docId: string, rid: string) =>
+  request<void>(recordingPath(docId, rid), { method: 'DELETE' });
+
+/** SSE of a recording: `status`, `segment` (resuming after `since`), `realigned`, `ping`. */
+export function recordingEventsUrl(docId: string, rid: string, since: number | null): string {
+  return `${recordingPath(docId, rid)}/events${since === null ? '' : `?since=${since}`}`;
+}
+
+/**
+ * Upload an existing recording (audio or video) of a lecture, with progress. The server converts it, transcribes
+ * it and aligns it to the slides (status 'converting' → …). `language` / `model` are the recording settings, sent
+ * as X-Language / X-Model (a server that does not read them uses its defaults).
+ */
+export async function uploadRecording(
+  docId: string,
+  file: Blob & { name?: string; type: string },
+  options: {
+    name?: string;
+    language?: RecordingLanguage;
+    model?: string;
+    onProgress?: (fraction: number) => void;
+    signal?: AbortSignal;
+  } = {},
+): Promise<RecordingInfo> {
+  const name = options.name ?? file.name ?? 'recording';
+  const headers: Record<string, string> = {
+    'Content-Type': file.type || 'application/octet-stream',
+    'X-Filename': enc(name),
+  };
+  if (options.language) headers['X-Language'] = options.language;
+  if (options.model) headers['X-Model'] = options.model;
+  const body = await uploadWithLogin(
+    `${recordingsPath(docId)}/upload`,
+    headers,
+    file,
+    '녹음 파일을 올리지 못했어요',
+    options.onProgress,
+    options.signal,
+  );
+  return body as RecordingInfo;
+}
+
+/**
+ * The live uploader's HTTP (lib/recording/uploader.ts): waits for a login before sending, times out, and hands a
+ * 401 back after showing the login screen (the uploader then waits with untilLoggedIn while capture goes on).
+ */
+export const recordingHttp: UploaderHttp = async (method, path, body, contentType, timeoutMs): Promise<HttpResult> => {
+  await whenLoggedIn();
+  const epoch = getAuthSnapshot().epoch;
+  const res = await fetch(path, {
+    method,
+    headers: contentType ? { 'Content-Type': contentType } : undefined,
+    body: (body ?? undefined) as BodyInit | undefined,
+    signal: AbortSignal.timeout(timeoutMs),
+    credentials: 'same-origin',
+    cache: 'no-store',
+  });
+  if (res.status === 401) {
+    await res.body?.cancel().catch(() => {});
+    if (getAuthSnapshot().epoch === epoch) markUnauthorized();
+    return { status: 401, json: null, retryAfter: 0 };
+  }
+  let json: unknown = null;
+  try {
+    const text = await res.text();
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    /* not JSON */
+  }
+  return { status: res.status, json, retryAfter: parseRetryAfter(res.headers.get('retry-after')) ?? 0 };
+};
+
+// ---------------------------------------------------------------------------
 // Server-Sent Events over fetch (POST streams)
 // ---------------------------------------------------------------------------
 
@@ -610,6 +744,12 @@ export const sendMessage = (
   onEvent: (event: StreamEvent) => void,
   signal?: AbortSignal,
 ) => postStream(`${sessionPath(docId, sid)}/messages`, body, onEvent, signal);
+
+/** User-facing message for a failed recording request: the server's own words (a 409 is not a busy chat turn here). */
+export function recordingErrorMessage(e: unknown): string {
+  if (e instanceof ApiError) return e.status === 401 ? '로그인이 필요해요' : e.message;
+  return errorMessage(e);
+}
 
 /** User-facing message for any thrown value. */
 export function errorMessage(e: unknown): string {

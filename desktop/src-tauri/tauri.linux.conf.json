@@ -3,19 +3,21 @@
   "bundle": {
     "targets": ["deb", "rpm", "appimage"],
     "icon": ["icons/32x32.png", "icons/64x64.png", "icons/128x128.png", "icons/256x256.png", "icons/icon.png"],
-    "externalBin": ["../resources/bin/es-node"],
+    "externalBin": ["../resources/bin/es-node", "../resources/bin/es-whisper", "../resources/bin/es-ffmpeg"],
     "resources": {
       "../resources/node/": "node/",
-      "../resources/server/": "server/"
+      "../resources/server/": "server/",
+      "../resources/whisper/": "whisper/",
+      "../resources/ffmpeg/": "ffmpeg/"
     },
     "linux": {
       "deb": {
         "depends": ["libatomic1", "libssl3"],
-        "recommends": ["fonts-noto-cjk", "fonts-noto-color-emoji", "xdg-utils"]
+        "recommends": ["fonts-noto-cjk", "fonts-noto-color-emoji", "xdg-utils", "gstreamer1.0-libav"]
       },
       "rpm": {
-        "depends": ["libatomic", "openssl-libs"],
-        "recommends": ["xdg-utils"],
+        "depends": ["libatomic", "openssl-libs", "gstreamer1-plugins-base", "gstreamer1-plugins-good"],
+        "recommends": ["xdg-utils", "gstreamer1-plugin-libav"],
         "compression": {
           "type": "none"
         }

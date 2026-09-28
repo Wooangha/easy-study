@@ -6,6 +6,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod config;
+mod media;
 mod pathenv;
 mod remote;
 mod server;
@@ -18,6 +19,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::utils::config::BackgroundThrottlingPolicy;
 use tauri::webview::{DownloadEvent, NewWindowFeatures, NewWindowResponse, PageLoadEvent};
 use tauri::{AppHandle, Manager, RunEvent, State, Url, WebviewUrl, WebviewWindowBuilder, WindowEvent, Wry};
 use tauri_plugin_dialog::DialogExt;
@@ -27,6 +29,8 @@ use config::lock;
 
 const MAIN: &str = "main";
 const SMOKE_ENV: &str = "EASY_STUDY_DESKTOP_SMOKE";
+/// "0": the smoke run does not check the recording tools (GET /api/asr).
+const SMOKE_ASR_ENV: &str = "EASY_STUDY_DESKTOP_SMOKE_ASR";
 
 pub struct AppState {
     /// The chooser page's URL (tauri://localhost/index.html, http://tauri.localhost/index.html on Windows).
@@ -487,8 +491,11 @@ fn on_menu(app: &AppHandle, id: &str) {
 // A failure that the chooser shows (=chooser-*) is judged by what the chooser shows. On the server's page: the web
 // client rendered, /api/health answers (with the login cookie for a remote server), the page has no IPC, and —
 // local server only — a one-page PDF uploads, converts and its slide images load (the document is deleted
-// again). A smoke run registers no single-instance handover: another running copy of the app must not turn it
-// into a silent success.
+// again), the page has what the lecture recorder needs (a secure context with navigator.mediaDevices.getUserMedia
+// and AudioWorklet: Info.plist's microphone key on macOS, media.rs on Linux; the microphone is never opened), and
+// GET /api/asr finds the speech recognition engine and ffmpeg the shell passed (DESIGN §22; the last one skipped with
+// EASY_STUDY_DESKTOP_SMOKE_ASR=0). A smoke run registers no single-instance handover: another running copy of the
+// app must not turn it into a silent success.
 // ---------------------------------------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -529,8 +536,8 @@ impl Smoke {
 /// A one-page PDF (960x540, a bar and a line of Helvetica text; tests/pdfFixtures.ts pagesPdf) for the upload check.
 const SMOKE_PDF_BASE64: &str = "JVBERi0xLjQKJeLjz9MKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFs0IDAgUl0gL0NvdW50IDEgPj4KZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL0ZvbnQgL1N1YnR5cGUgL1R5cGUxIC9CYXNlRm9udCAvSGVsdmV0aWNhIC9FbmNvZGluZyAvV2luQW5zaUVuY29kaW5nID4+CmVuZG9iago0IDAgb2JqCjw8IC9UeXBlIC9QYWdlIC9QYXJlbnQgMiAwIFIgL01lZGlhQm94IFswIDAgOTYwIDU0MF0gL1Jlc291cmNlcyA8PCAvRm9udCA8PCAvRjEgMyAwIFIgPj4gPj4gL0NvbnRlbnRzIDUgMCBSID4+CmVuZG9iago1IDAgb2JqCjw8ICAvTGVuZ3RoIDg2ID4+CnN0cmVhbQowLjIgMC40IDAuOCByZyA2MCA2MCA4NDAgMTIwIHJlIGYgQlQgL0YxIDY0IFRmIDYwIDM2MCBUZCAoZWFzeS1zdHVkeSBzbW9rZSB0ZXN0KSBUaiBFVAplbmRzdHJlYW0KZW5kb2JqCnhyZWYKMCA2CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDAxNSAwMDAwMCBuIAowMDAwMDAwMDY0IDAwMDAwIG4gCjAwMDAwMDAxMjEgMDAwMDAgbiAKMDAwMDAwMDIxOCAwMDAwMCBuIAowMDAwMDAwMzQ0IDAwMDAwIG4gCnRyYWlsZXIKPDwgL1NpemUgNiAvUm9vdCAxIDAgUiA+PgpzdGFydHhyZWYKNDgxCiUlRU9GCg==";
 
-/// Runs once per page (the result object survives a second "finished" event of the same page). __INGEST__ and
-/// __PDF__ are filled in by smoke_page_loaded.
+/// Runs once per page (the result object survives a second "finished" event of the same page). __INGEST__, __ASR__
+/// and __PDF__ are filled in by smoke_page_loaded.
 const SMOKE_PROBE_JS: &str = r#"(() => {
   if (window.__esSmoke) return;
   const s = (window.__esSmoke = { ipc: 'no-ipc' });
@@ -545,7 +552,20 @@ const SMOKE_PROBE_JS: &str = r#"(() => {
     s.health = r.status;
     if (r.ok) s.providers = (await r.json()).providers.map((p) => p.id + ':' + (p.available ? (p.version || 'yes') : 'no'));
   }, (e) => { s.health = String(e); });
+  if (__ASR__) {
+    s.asr = 'pending';
+    fetch('/api/asr').then(async (r) => {
+      if (!r.ok) { s.asr = 'HTTP ' + r.status; return; }
+      const a = await r.json();
+      s.asrStatus = { engine: a.engineAvailable, version: a.engineVersion ?? null, acceleration: a.acceleration, ffmpeg: a.ffmpegAvailable,
+        reason: a.reason ?? null, models: (a.models || []).map((m) => m.id + (m.installed ? ' (installed)' : '')) };
+      s.asr = a.engineAvailable === true && a.ffmpegAvailable === true ? 'ok' : 'FAIL';
+    }, (e) => { s.asr = 'error: ' + e; }).finally(() => { s.asrDone = true; });
+  }
   if (!__INGEST__) return;
+  // What the lecture recorder checks before it asks for the microphone (never asked here: no getUserMedia call).
+  s.recorder = { secure: window.isSecureContext === true, mediaDevices: typeof navigator.mediaDevices?.getUserMedia === 'function',
+    worklet: typeof AudioWorkletNode === 'function' };
   s.ingest = 'pending';
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   (async () => {
@@ -725,7 +745,12 @@ fn smoke_page_loaded(app: &AppHandle, url: &Url) {
     }
     // The upload check only on this computer's server (never add a document to another computer's library).
     let local = lock(&st.server_url).as_deref().and_then(|u| Url::parse(u).ok()).is_some_and(|u| origin_of(&u) == origin_of(url));
-    let probe = SMOKE_PROBE_JS.replace("__INGEST__", if local { "true" } else { "false" }).replace("__PDF__", SMOKE_PDF_BASE64);
+    // The recording tools of this computer's server (the bundled whisper-cli and ffmpeg).
+    let asr = local && std::env::var(SMOKE_ASR_ENV).map_or(true, |v| v.trim() != "0");
+    let probe = SMOKE_PROBE_JS
+        .replace("__INGEST__", if local { "true" } else { "false" })
+        .replace("__ASR__", if asr { "true" } else { "false" })
+        .replace("__PDF__", SMOKE_PDF_BASE64);
     let h = app.clone();
     std::thread::spawn(move || {
         let mut page = serde_json::Value::Null;
@@ -742,7 +767,8 @@ fn smoke_page_loaded(app: &AppHandle, url: &Url) {
                     continue 'probe;
                 }
                 let ingest_done = !local || page["ingestDone"] == true;
-                if page.get("health").is_some() && page.get("auth").is_some() && ingest_done {
+                let asr_done = !asr || page["asrDone"] == true;
+                if page.get("health").is_some() && page.get("auth").is_some() && ingest_done && asr_done {
                     break 'probe;
                 }
             }
@@ -755,13 +781,18 @@ fn smoke_page_loaded(app: &AppHandle, url: &Url) {
         let auth = &page["auth"];
         let logged_in = auth["authenticated"].as_bool() == Some(true) || auth["authRequired"].as_bool() == Some(false);
         let slides = !local || page["ingest"] == "ok";
-        if rendered && no_ipc && health && logged_in && slides {
+        let tools = !asr || page["asr"] == "ok";
+        let recorder = !local || ["secure", "mediaDevices", "worklet"].iter().all(|k| page["recorder"][k] == true);
+        if rendered && no_ipc && health && logged_in && slides && tools && recorder {
             smoke_verdict(&h, 0, "ok");
         } else {
             smoke_verdict(
                 &h,
                 4,
-                &format!("FAIL checks: rendered {rendered}, no IPC {no_ipc}, health {health}, logged in {logged_in}, PDF upload and slide images {slides}"),
+                &format!(
+                    "FAIL checks: rendered {rendered}, no IPC {no_ipc}, health {health}, logged in {logged_in}, PDF upload and slide images {slides}, \
+                     speech recognition tools {tools}, recorder APIs {recorder}"
+                ),
             );
         }
     });
@@ -838,6 +869,9 @@ fn main() {
                 .center()
                 // The page's own HTML5 drop (PDF upload onto the library) needs the files, not Tauri's handler.
                 .disable_drag_drop_handler()
+                // A lecture keeps recording (and uploading) while the window is minimized or covered: WKWebView
+                // (macOS 14+) would otherwise suspend the hidden page (DESIGN §22, rec-live spike).
+                .background_throttling(BackgroundThrottlingPolicy::Disabled)
                 .on_navigation(move |url| allow_main_navigation(&h_nav, url))
                 .on_new_window(move |url, features| new_window(&h_new, url, features))
                 // Nothing is written without the user: the web client never downloads files, so a download a
@@ -860,6 +894,7 @@ fn main() {
                 })
                 .build()?;
             *lock(&h.state::<AppState>().chooser_url) = window.url().ok();
+            media::install(&h, &window); // the lecture recorder's microphone (DESIGN §22)
 
             let cfg = config::load(&h);
             let smoke_url = std::env::var("EASY_STUDY_DESKTOP_SMOKE_URL").ok().filter(|u| smoke == Smoke::Direct && !u.is_empty());
@@ -971,6 +1006,6 @@ mod tests {
     fn the_smoke_pdf_is_a_pdf() {
         assert!(SMOKE_PDF_BASE64.starts_with("JVBERi0")); // "%PDF-"
         assert_eq!(SMOKE_PDF_BASE64.len() % 4, 0);
-        assert!(SMOKE_PROBE_JS.contains("__INGEST__") && SMOKE_PROBE_JS.contains("__PDF__"));
+        assert!(SMOKE_PROBE_JS.contains("__INGEST__") && SMOKE_PROBE_JS.contains("__PDF__") && SMOKE_PROBE_JS.contains("__ASR__"));
     }
 }

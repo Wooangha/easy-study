@@ -5,6 +5,7 @@ import { useLatest } from '../hooks/useLatest.ts';
 import { clipboardImages, defaultQuestion, readyAttachments, type Chip } from '../lib/attachments.ts';
 import { toast } from '../lib/toast.ts';
 import { AttachmentChips } from './Attachments.tsx';
+import { LectureSpeechChip } from './recording/LectureSpeech.tsx';
 import { isTypingTarget } from './SlideViewer.tsx';
 
 export const QUICK_PROMPTS = ['이 슬라이드 설명해줘', '핵심만 요약', '예시로 설명', '시험 문제 내줘'] as const;
@@ -204,6 +205,7 @@ export function Composer({
         onOpen={onOpenChip}
         onRemove={attachments.remove}
       />
+      <LectureSpeechChip docId={docId} />
       <div className={blocked ? 'composer-box is-blocked' : 'composer-box'}>
         <button
           type="button"

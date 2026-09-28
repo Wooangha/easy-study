@@ -13,5 +13,10 @@
   <!-- macOS 15+: shown when the app first connects to another computer on this network. -->
   <key>NSLocalNetworkUsageDescription</key>
   <string>다른 컴퓨터에서 실행 중인 easy-study 서버에 연결하려면 로컬 네트워크에 접근해야 해요.</string>
+  <!-- Lecture recordings (DESIGN §22): shown when the recorder first asks for the microphone. Without this key
+       WKWebView has no navigator.mediaDevices at all (rec-live spike). The app also needs the entitlement
+       com.apple.security.device.audio-input (app.entitlements): it runs with the hardened runtime. -->
+  <key>NSMicrophoneUsageDescription</key>
+  <string>강의를 녹음해 이 컴퓨터에서 바로 받아쓰려면 마이크가 필요해요. 녹음은 이 컴퓨터의 라이브러리에만 저장돼요. (easy-study records the lecture with the microphone and transcribes it on this computer; the recording stays in your library.)</string>
 </dict>
 </plist>

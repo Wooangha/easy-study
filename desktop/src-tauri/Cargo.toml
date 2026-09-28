@@ -25,6 +25,14 @@ signal-hook = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+# The lecture recorder's microphone (src/media.rs): WebView2's PermissionRequested event. The versions wry uses.
+webview2-com = "0.38"
+windows-core = "0.61"
+
+# The lecture recorder's microphone (src/media.rs): WebKitGTK's permission-request signal. The version (and the
+# feature set) wry uses.
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = { version = "2.0", features = ["v2_40"] }
 
 [profile.release]
 codegen-units = 1

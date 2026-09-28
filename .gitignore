@@ -9,6 +9,8 @@ library/
 .claude/*.lock
 .claude/settings.local.json
 dist-server/
+# Local engines and models of lecture recordings (DESIGN §22): npm run setup:whisper, downloaded models.
+.cache/
 
 # Desktop app (desktop/, DESIGN §19): generated resources (Node runtime, packed server, download cache),
 # Rust build output, the Tauri CLI, generated ACL schemas.

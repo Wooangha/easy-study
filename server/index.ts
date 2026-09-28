@@ -123,6 +123,9 @@ import {
 } from './library.ts';
 import type { ServerLock, StoredDocMeta } from './library.ts';
 import { providerInfos } from './providers/index.ts';
+import { createRecordingsRouter } from './recordings/routes.ts';
+import { configureRecordings, forgetDocRecordings, resumeRecordings, stopRecordingWork } from './recordings/service.ts';
+import type { RecordingsConfig } from './recordings/service.ts';
 import {
   buildNotes,
   createSession,
@@ -153,6 +156,8 @@ export interface AppOptions {
    * availability check of `chatDeps` (so fake chat providers are used for digests too).
    */
   digestDeps?: DigestDeps;
+  /** Lecture recordings (DESIGN §22): models store, upload limit, window presets (tests). */
+  recordings?: Partial<RecordingsConfig>;
 }
 
 // ---------------------------------------------------------------------------
@@ -534,8 +539,10 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
     await deleteDoc(docId, () => {
       if (isDigestRunning(docId)) return '정리본을 만드는 중에는 지울 수 없습니다. 정리본 만들기를 먼저 중단해 주세요';
       if (hasRunningTurns(docId)) return '답변을 생성하는 중에는 지울 수 없습니다. 답변이 끝난 뒤에 다시 시도해 주세요';
-      // From here on the document is gone for every request: attachment images still being made are not wanted.
+      // From here on the document is gone for every request: attachment images still being made are not wanted,
+      // and its recordings stop (live audio, transcription, conversion, AI alignment).
       stopAttachmentJobs(docId);
+      forgetDocRecordings(docId);
       return null;
     });
     try {
@@ -812,6 +819,16 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
     res.status(204).end();
   });
 
+  // --- lecture recordings and the ASR engine (DESIGN §22) --------------------------------------------------
+
+  api.use(
+    createRecordingsRouter({
+      resolveProvider: async (provider, model) => resolveProviderChoice(await getProviderInfos(), provider, model),
+      getProvider: chatDeps.getProvider,
+      cliSlot: chatDeps.cliSlot,
+    }),
+  );
+
   api.use((_req, _res, next) => next(new HttpError(404, 'API 경로를 찾을 수 없습니다')));
   api.use(apiErrorHandler);
   return api;
@@ -933,6 +950,11 @@ export interface ServerOptions extends AppOptions {
    * Delete attachments no message refers to after 24 h, at startup and hourly (DESIGN §21; default true).
    */
   sweepAttachments?: boolean;
+  /**
+   * Resume lecture recordings interrupted by a restart (DESIGN §22): live recordings stay resumable, conversions
+   * and transcriptions continue (default: like `resumeIngests`).
+   */
+  resumeRecordings?: boolean;
   /** Print startup information (default true). */
   log?: boolean;
   /** Address to bind (default: EASY_STUDY_HOST or 127.0.0.1). Not loopback = remote mode (DESIGN §16). */
@@ -1050,6 +1072,11 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
     if (log && interruptedDigests > 0) console.log(`[digest] marked ${interruptedDigests} unfinished digest(s) as aborted`);
     const leftovers = await removeDeletedLeftovers();
     if (log && leftovers > 0) console.log(`[library] removed ${leftovers} leftover folder(s) of deleted documents`);
+    configureRecordings(options.recordings);
+    if (options.resumeRecordings ?? options.resumeIngests ?? true) {
+      const resumed = await resumeRecordings();
+      if (log && resumed > 0) console.log(`[recordings] resumed ${resumed} unfinished recording(s)`);
+    }
 
     // The one-click login link of the startup banner (never logged: it carries the code).
     app.get('/login', gate.loginLink);
@@ -1128,7 +1155,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
       abortAllDigests();
       stopAttachmentJobs();
       // Let aborted turns and digest jobs persist their partial results; stop the image workers.
-      await Promise.all([waitForIdle(4_000), waitForDigestsIdle(4_000), stopImageWork(), sweeper?.stop()]);
+      await Promise.all([waitForIdle(4_000), waitForDigestsIdle(4_000), stopImageWork(), sweeper?.stop(), stopRecordingWork()]);
       await closeVite?.();
       await new Promise<void>((resolve) => {
         server.close(() => resolve());

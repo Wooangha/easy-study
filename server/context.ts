@@ -12,6 +12,9 @@
 // - A question may carry attachments (DESIGN §21: selected slide regions, images of the student): they follow
 //   the focus window, each introduced by its label, and count toward the image budget like slide images.
 //   Priming turns take none.
+// - Lecture recordings (DESIGN §22): a question may carry what the professor said on the slides of the focus window
+//   and, while the lecture is being recorded, its last minutes (BuildTurnInput.lectureSpeech, resolved by chat.ts;
+//   capped again here). Priming then says in one line that recordings exist.
 // - When the conversation would exceed the provider's image budget, or the orchestrator reports that
 //   the provider lost the conversation / found it too large (BuildTurnInput.forceNewConversation), a
 //   fresh conversation is started (rollover): the deck is primed again and a text recap of the
@@ -69,6 +72,11 @@ const SHORTEN_SLACK = prompts.TRUNCATED_MARK.length + 4;
 
 /** Digest titles are single short lines. */
 const MAX_TITLE_CHARS = 200;
+
+/** Lecture speech caps (DESIGN §22): per slide, all slides of the window together, the recent speech. */
+export const MAX_SLIDE_SPEECH_CHARS = 1_500;
+export const MAX_WINDOW_SPEECH_CHARS = 4_000;
+export const MAX_RECENT_SPEECH_CHARS = 3_000;
 
 type ImagePart = Extract<Part, { type: 'image' }>;
 type Sheet = DocAssets['sheets'][number];
@@ -211,6 +219,8 @@ export function buildTurn(input: BuildTurnInput): BuildTurnOutput {
       extraImages: attachments.length,
       maxImages,
     });
+    // The document has transcribed lecture recordings (DESIGN §22): one line, the speech itself comes with questions.
+    if (input.lectureSpeech) out.text(prompts.LECTURE_RECORDINGS_NOTE);
     // Recap the Q&A so far whenever a conversation starts in a session that already has some
     // (after a rollover, a recovery, or a provider state that was reset).
     const reason: prompts.RestartReason = forced ?? (overBudget ? 'budget' : 'restart');
@@ -235,6 +245,7 @@ export function buildTurn(input: BuildTurnInput): BuildTurnOutput {
 
   appendFocus(out, doc, slide, pageCount, windowSlides, new Set(attached), materialOf, agenticCli);
   appendAttachments(out, attachments, settings.maxSlideTextChars);
+  if (kind === 'question') appendLectureSpeech(out, input.lectureSpeech, windowSlides, slide);
   if (kind === 'prime') {
     // Only ask how the lecture builds on earlier ones when their summaries are actually in context.
     out.text(prompts.primeInstruction((earlier?.included ?? 0) > 0));
@@ -519,6 +530,43 @@ function appendAttachments(out: PartsBuilder, attachments: TurnAttachment[], max
     out.image({ type: 'image', path: attachment.path, detail: 'high', label: attachment.label });
     if (attachment.kind === 'region') {
       out.text(prompts.selectionTextBlock(truncateText(cleanExtractedText(attachment.text ?? ''), maxTextChars)));
+    }
+  }
+}
+
+/**
+ * LECTURE SPEECH (DESIGN §22), before the question: for each slide of the focus window that has speech, what the
+ * professor said on it (≤ 1500 characters each, ≤ 4000 together, the focused slide's first), then — while a live
+ * recording of the document runs — the last minutes of the lecture (≤ 3000 characters, the latest kept).
+ */
+function appendLectureSpeech(out: PartsBuilder, speech: BuildTurnInput['lectureSpeech'], windowSlides: number[], slide: number): void {
+  if (!speech || typeof speech !== 'object') return;
+  const inWindow = new Map<number, string>();
+  for (const entry of Array.isArray(speech.bySlide) ? speech.bySlide : []) {
+    if (!entry || !windowSlides.includes(entry.slide) || typeof entry.text !== 'string') continue;
+    const text = entry.text.replace(/\s+/g, ' ').trim();
+    if (text) inWindow.set(entry.slide, text);
+  }
+  let budget = MAX_WINDOW_SPEECH_CHARS;
+  const kept = new Map<number, string>();
+  // The focused slide first, then its neighbours nearest first.
+  const order = [...inWindow.keys()].sort((a, b) => Math.abs(a - slide) - Math.abs(b - slide) || a - b);
+  for (const s of order) {
+    const cap = Math.min(MAX_SLIDE_SPEECH_CHARS, budget);
+    if (cap <= prompts.TRUNCATED_MARK.length) break;
+    const full = inWindow.get(s) ?? '';
+    const text = full.length > cap ? truncateText(full, cap - prompts.TRUNCATED_MARK.length) : full;
+    budget -= text.length;
+    kept.set(s, text);
+  }
+  for (const s of [...kept.keys()].sort((a, b) => a - b)) out.text(prompts.slideSpeechBlock(s, kept.get(s) ?? ''));
+  const recent = speech.recent;
+  if (recent && typeof recent.text === 'string') {
+    const text = recent.text.replace(/\s+/g, ' ').trim();
+    if (text) {
+      const minutes = Math.max(1, Math.round(finiteOr(recent.minutes, 3)));
+      const tail = text.length > MAX_RECENT_SPEECH_CHARS ? `…${text.slice(text.length - MAX_RECENT_SPEECH_CHARS + 1).trimStart()}` : text;
+      out.text(prompts.recentSpeechBlock(minutes, tail));
     }
   }
 }

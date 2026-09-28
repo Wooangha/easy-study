@@ -1,8 +1,11 @@
 # Third-party notices
 
 Third-party software that easy-study ships as part of the application and whose license asks for a notice in
-binary or bundled distributions. It covers the PDF engine (DESIGN §17); the other npm dependencies (sharp and its
-libvips binaries, Express, the SDKs, …) carry their own license files in `node_modules`.
+binary or bundled distributions. It covers the PDF engine (DESIGN §17) and the lecture-recording tools and models
+(DESIGN §22: [whisper.cpp](#speech-recognition-whispercpp-v194-whisper-cli--mit),
+[FFmpeg](#audio-conversion-ffmpeg-81-with-libopus-152--lgpl-21-or-later), [Silero VAD and the Whisper
+models](#models-downloaded-on-first-use-silero-vad-v620-and-openai-whisper--mit)); the other npm dependencies (sharp
+and its libvips binaries, Express, the SDKs, …) carry their own license files in `node_modules`.
 
 ## PDF engine: `@embedpdf/pdfium` 2.15.1 (PDFium compiled to WebAssembly)
 
@@ -758,3 +761,137 @@ freely, subject to the following restrictions:
 Jean-loup Gailly        Mark Adler
 jloup@gzip.org          madler@alumni.caltech.edu
 ```
+
+## Speech recognition: whisper.cpp v1.9.4 (`whisper-cli`) — MIT
+
+The desktop app ships `whisper-cli` from [whisper.cpp](https://github.com/ggml-org/whisper.cpp) v1.9.4 (commit
+`927cfce34f31707e17f2bff35c349632fb9e2c3a`, which includes the ggml library), built by `desktop/scripts/whisper.mjs`
+(macOS: `easy-study.app/Contents/Resources/whisper/`, Windows: `whisper\` in the install folder with its DLLs, Linux:
+`/usr/bin/es-whisper`, license in `/usr/lib/easy-study/whisper/LICENSE`). Web mode (`npm start`) builds the same
+source with `npm run setup:whisper`. `whisper-cli` also compiles in two single-file libraries of its examples,
+miniaudio (public domain or MIT-0) and stb_vorbis (public domain or MIT), which ask for no notice.
+
+```text
+MIT License
+
+Copyright (c) 2023-2026 The ggml authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+## Audio conversion: FFmpeg 8.1 with libopus 1.5.2 — LGPL-2.1-or-later
+
+The desktop app ships an `ffmpeg` program (macOS: `easy-study.app/Contents/Resources/ffmpeg/`, Windows: `ffmpeg\` in
+the install folder, Linux: `/usr/bin/es-ffmpeg` with the files below in `/usr/lib/easy-study/ffmpeg/`). It converts
+uploaded lecture recordings; it runs as a separate program and is not linked into easy-study.
+
+It is **FFmpeg 8.1, licensed under the GNU Lesser General Public License version 2.1 or later**, built from the
+unmodified FFmpeg source without any GPL or non-free part (`--enable-gpl`/`--enable-nonfree` are never used; the
+build fails unless `configure` reports "License: LGPL version 2.1 or later"; `ffmpeg -L` prints the license). FFmpeg
+is a trademark of Fabrice Bellard, originator of the FFmpeg project. It links **libopus 1.5.2** statically
+(BSD-3-Clause, text below).
+
+- **Build configuration.** The `configure` flags are in `desktop/scripts/ffmpeg-min.flags` (only the file/pipe
+  protocols, common audio and video containers' audio decoders, the PCM/AAC/Opus encoders and a few audio filters);
+  `desktop/scripts/build-ffmpeg.sh` adds per target: `--extra-version=easystudy-min`; macOS
+  `--cc="clang -arch <arm64|x86_64> -mmacosx-version-min=13.5"` (x86_64 also `--enable-cross-compile --arch=x86_64
+  --target-os=darwin`); Linux `--extra-ldflags=-static --pkg-config-flags=--static` (in alpine:3.22, musl);
+  Windows `--enable-cross-compile --target-os=mingw32 --arch=x86_64 --cross-prefix=x86_64-w64-mingw32-
+  --extra-ldflags=-static` (mingw-w64). Every bundle carries the exact line of its build in `ffmpeg/BUILD.txt`
+  next to the program, together with `COPYING.LGPLv2.1`, FFmpeg's `LICENSE.md` and `opus-COPYING`.
+- **Source code.** The complete corresponding source is the unmodified release tarballs
+  <https://ffmpeg.org/releases/ffmpeg-8.1.tar.xz> (SHA-256
+  `b072aed6871998cce9b36e7774033105ca29e33632be5b6347f3206898e0756a`) and
+  <https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz> (SHA-256
+  `65c1d2f78b9f2fb20082c38cbe47c951ad5839345876e46941612ee87f9a7ce1`) plus the build scripts named above, which are
+  part of this repository (`node desktop/scripts/ffmpeg.mjs --target <triple>` rebuilds the program). Each GitHub
+  release of the desktop app also carries them, from the same place as the app, as
+  `easy-study-ffmpeg-8.1-source.tar`. You may replace the bundled `ffmpeg` with your own build of FFmpeg: easy-study
+  uses the program named by the environment variable `EASY_STUDY_FFMPEG` instead.
+
+### libopus 1.5.2 — BSD-3-Clause (`opus-COPYING`)
+
+```text
+Copyright 2001-2023 Xiph.Org, Skype Limited, Octasic,
+                    Jean-Marc Valin, Timothy B. Terriberry,
+                    CSIRO, Gregory Maxwell, Mark Borgerding,
+                    Erik de Castro Lopo, Mozilla, Amazon
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+
+- Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+
+- Redistributions in binary form must reproduce the above copyright
+notice, this list of conditions and the following disclaimer in the
+documentation and/or other materials provided with the distribution.
+
+- Neither the name of Internet Society, IETF or IETF Trust, nor the
+names of specific contributors, may be used to endorse or promote
+products derived from this software without specific prior written
+permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER
+OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+Opus is subject to the royalty-free patent licenses which are
+specified at:
+
+Xiph.Org Foundation:
+https://datatracker.ietf.org/ipr/1524/
+
+Microsoft Corporation:
+https://datatracker.ietf.org/ipr/1914/
+
+Broadcom Corporation:
+https://datatracker.ietf.org/ipr/1526/
+```
+
+### GNU Lesser General Public License, version 2.1
+
+The full text ships with every bundle as `ffmpeg/COPYING.LGPLv2.1` (and in the FFmpeg source above); it is also at
+<https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt>.
+
+## Models downloaded on first use: Silero VAD v6.2.0 and OpenAI Whisper — MIT
+
+The speech models are not part of the app or the repository: the server downloads them on first use (with the
+user's consent in the 녹음 tab) from Hugging Face into the models folder (desktop: the app data folder; web:
+`.cache/models`) and checks their SHA-256. They are the ggml conversions published with whisper.cpp
+(`ggerganov/whisper.cpp`: `ggml-large-v3-turbo-q5_0.bin`, `ggml-small-q5_1.bin`; `ggml-org/whisper-vad`:
+`ggml-silero-v6.2.0.bin`), under the licenses of the original models:
+
+- **Whisper** (large-v3-turbo, small) — MIT License, Copyright (c) 2022 OpenAI
+  (<https://github.com/openai/whisper/blob/main/LICENSE>).
+- **Silero VAD** v6.2.0 — MIT License, Copyright (c) 2020-present Silero Team
+  (<https://github.com/snakers4/silero-vad/blob/master/LICENSE>).
+
+Both use the MIT License text reproduced above for whisper.cpp, with these copyright lines. The CI check of the
+desktop app (`desktop/scripts/asr-smoke.mjs`) downloads `ggml-base-q5_1.bin` (Whisper base, same license) only for
+testing; it is never shipped.

@@ -2,6 +2,7 @@
 
 강의 PDF를 슬라이드 단위로 공부하는 로컬 웹앱이에요. 왼쪽에는 슬라이드가 스크롤되고, 오른쪽 채팅은 **지금 보고 있는 슬라이드**를 알고 답해요.
 LLM은 이미 로그인된 **Claude Code**(Claude 구독)나 **Codex**(ChatGPT 구독) CLI를 그대로 쓰고, API 키가 있으면 Claude API나 OpenAI API도 쓸 수 있어요.
+수업 중에 [강의를 녹음](#강의-녹음)하면 이 컴퓨터에서 받아써서 슬라이드마다 나누고, 튜터가 교수님이 한 말까지 알고 답해요.
 
 ```
 ┌───────────────────────────────┬────────────────────────────┐
@@ -61,6 +62,7 @@ npm run dev
   - `claude`·`codex`는 공식 설치 프로그램(`.exe`)을 권장해요. npm으로 설치한 `.cmd`도 실제 실행 파일을 찾아 쓰도록 해 뒀지만 검증하지는 못했어요.
   - Windows에서는 Codex의 읽기 제한이 꺼져 있어서 Codex가 사용자 파일 전체를 읽을 수 있어요. 민감한 파일이 있는 계정이라면 Claude Code를 쓰세요.
   - 환경 변수는 PowerShell에서 `$env:PORT=5181; npm start`처럼 지정해요.
+- **강의 녹음(웹 모드)**: 받아쓰기 엔진과 ffmpeg는 따로 준비해요 ([아래](#웹-모드npm-start에서-쓸-때)). 데스크톱 앱에는 둘 다 들어 있어요.
 
 ## 다른 컴퓨터에서 쓰기 (원격 모드)
 
@@ -113,9 +115,10 @@ Chrome/Edge는 **안전한 주소에서만** 설치를 허용해요.
 GitHub Releases(또는 Actions의 빌드 결과)에서 OS에 맞는 파일을 받으세요. 아직 코드 서명과 공증을 하지 않은 앱이라, 처음 열 때 OS가 한 번 막아요.
 
 - **macOS 13.5 이상** (Apple silicon `easy-study_<버전>_aarch64.dmg`, Intel `easy-study_<버전>_x64.dmg`): dmg를 열고 easy-study를 ‘응용 프로그램’으로 끌어다 놓아요. 처음 열 때 “확인되지 않은 개발자” 경고가 나오면 **시스템 설정 › 개인정보 보호 및 보안**에서 ‘그래도 열기’를 누르세요. 또는 터미널에서 `xattr -dr com.apple.quarantine /Applications/easy-study.app`.
+  처음 [강의를 녹음](#강의-녹음)할 때 macOS가 마이크를 써도 되는지 한 번 물어요. 서명하지 않은 앱이라 새 버전으로 바꾸면 다시 물을 수 있어요.
 - **Windows 10/11** (`easy-study_<버전>_x64-setup.exe`): 관리자 권한 없이 내 사용자 계정에만 설치돼요. SmartScreen의 “Windows의 PC 보호” 창이 뜨면 ‘추가 정보’ → ‘실행’. WebView2 런타임이 없으면(Windows 10 일부) 설치하면서 받아요.
 - **Linux** (x86_64, arm64):
-  - Ubuntu 22.04 이상·Debian 12 이상: `sudo apt install ./easy-study_<버전>_amd64.deb` (WebKitGTK, `libatomic1` 등 필요한 패키지가 같이 설치되고, 한글 글꼴 `fonts-noto-cjk`도 권장 패키지로 설치돼요).
+  - Ubuntu 22.04 이상·Debian 12 이상: `sudo apt install ./easy-study_<버전>_amd64.deb` (WebKitGTK, `libatomic1` 등 필요한 패키지가 같이 설치되고, 한글 글꼴 `fonts-noto-cjk`와 올린 녹음(m4a)을 재생하는 `gstreamer1.0-libav`도 권장 패키지로 설치돼요).
   - Fedora: `sudo dnf install ./easy-study-<버전>-1.x86_64.rpm`.
   - Arch Linux: pacman 패키지로 설치해요 ([아래](#arch-linux)).
   - AppImage: `chmod +x easy-study_<버전>_amd64.AppImage` 후 실행 (FUSE가 필요해요: `fusermount3`나 `fusermount` 중 하나면 돼요. 없으면 `--appimage-extract-and-run`을 붙이세요). deb/rpm은 배포판의 WebKitGTK 보안 업데이트를 그대로 받으니 되도록 deb/rpm을 쓰세요.
@@ -157,11 +160,13 @@ AppImage도 Arch에서 돼요 (0.2.1은 위의 `LD_PRELOAD`가 필요해요). �
 | Windows | `%LOCALAPPDATA%\dev.easystudy.desktop\library` | `%APPDATA%\dev.easystudy.desktop` | `%LOCALAPPDATA%\dev.easystudy.desktop\logs` |
 | Linux | `~/.local/share/dev.easystudy.desktop/library` | `~/.config/dev.easystudy.desktop` | `~/.local/share/dev.easystudy.desktop/logs` |
 
+받아쓰기 모델(수백 MB)은 라이브러리 옆 `models` 폴더(예: macOS `~/Library/Application Support/dev.easystudy.desktop/models`)에 받아요. 라이브러리를 다른 폴더로 골라도 모델은 여기 있어요.
+
 앱의 서버는 `http://127.0.0.1:5350`(쓰고 있으면 5351–5359)에서 이 컴퓨터에만 열려요. 포트를 기억해 두기 때문에 화면 설정(마지막으로 본 강의 등)이 다음 실행에도 이어져요. 앱을 끄면(강제 종료나 충돌이어도) 서버와 그 서버가 띄운 CLI도 같이 꺼져요.
 
 ### 직접 빌드하기
 
-필요한 것: Node.js 26, Rust (stable, `rustup`), 그리고 OS별 도구 — macOS는 Xcode Command Line Tools, Windows는 Visual Studio C++ Build Tools, Linux는 [Tauri의 패키지 목록](https://v2.tauri.app/start/prerequisites/)(`libwebkit2gtk-4.1-dev` 등)과 AppImage용 `xdg-utils`, `squashfs-tools`.
+필요한 것: Node.js 26, Rust (stable, `rustup`), `cmake`, 그리고 OS별 도구 — macOS는 Xcode Command Line Tools(와 `pkg-config`), Windows는 Visual Studio C++ Build Tools(C++ CMake 도구 포함), Linux는 [Tauri의 패키지 목록](https://v2.tauri.app/start/prerequisites/)(`libwebkit2gtk-4.1-dev` 등)과 AppImage용 `xdg-utils`, `squashfs-tools`. Linux용 ffmpeg는 `docker`로 alpine 컨테이너에서 빌드해요.
 
 ```bash
 npm ci
@@ -171,15 +176,100 @@ npm run desktop:dev          # 개발용으로 바로 실행 (tauri dev)
 npm run desktop:test         # 앱 설정 검사 (IPC는 시작 화면에만, 대상별 번들 설정); 셸 자체는 desktop/src-tauri에서 cargo test
 ```
 
-`desktop:build`는 저장소를 빌드하고(`npm run build`), 앱에 넣을 공식 Node.js(nodejs.org, SHA-256 확인, 버전은 `desktop/package.json`의 `easyStudy.nodeVersion`)와 그 대상 OS용 `node_modules`를 담은 서버를 `desktop/resources/`에 준비한 뒤 Tauri로 묶어요. 결과는 `desktop/src-tauri/target/<대상>/release/bundle/`에 나와요. Linux에서는 마지막에 AppImage에서 사용자 시스템의 것을 써야 하는 라이브러리(`libwayland-client`: Mesa가 자기 버전을 필요로 해요)를 빼요 (`desktop/scripts/appimage.mjs`, `squashfs-tools` 필요). Windows 설치 파일은 Windows에서, Linux 패키지는 Linux에서 빌드하세요. GitHub Actions(`.github/workflows/desktop.yml`)는 테스트를 먼저 돌린 뒤 macOS(arm64·x64)·Windows·Linux(x64·arm64)용을 모두 빌드하고, x86_64 Linux용은 최신 Arch Linux에서도 시험하고, `v*` 태그를 올리면 초안(draft) 릴리스를 만들어요. `APPLE_*` 시크릿을 넣으면 macOS 앱을 서명·공증해요.
+`desktop:build`는 저장소를 빌드하고(`npm run build`), 앱에 넣을 공식 Node.js(nodejs.org, SHA-256 확인, 버전은 `desktop/package.json`의 `easyStudy.nodeVersion`)와 그 대상 OS용 `node_modules`를 담은 서버, 그리고 [강의 녹음](#강의-녹음)용 도구 둘을 `desktop/resources/`에 준비한 뒤 Tauri로 묶어요. 결과는 `desktop/src-tauri/target/<대상>/release/bundle/`에 나와요. Linux에서는 마지막에 AppImage에서 사용자 시스템의 것을 써야 하는 라이브러리(`libwayland-client`: Mesa가 자기 버전을 필요로 해요)를 빼요 (`desktop/scripts/appimage.mjs`, `squashfs-tools` 필요). Windows 설치 파일은 Windows에서, Linux 패키지는 Linux에서 빌드하세요. GitHub Actions(`.github/workflows/desktop.yml`)는 테스트를 먼저 돌린 뒤 macOS(arm64·x64)·Windows·Linux(x64·arm64)용을 모두 빌드하고(녹음 도구도 대상마다 빌드해서 캐시해요), 앱을 켜 본 다음 앱에 든 녹음 도구로 받아쓰기까지 시험하고, x86_64 Linux용은 최신 Arch Linux에서도 시험하고, `v*` 태그를 올리면 초안(draft) 릴리스를 만들어요. 릴리스에는 LGPL에 따라 ffmpeg의 소스(`easy-study-ffmpeg-8.1-source.tar`)도 같이 올라가요. `APPLE_*` 시크릿을 넣으면 macOS 앱을 서명·공증해요.
+
+녹음 도구는 Node처럼 앱에 들어가요 (macOS·Windows는 앱의 `whisper/`, `ffmpeg/` 리소스, Linux는 `/usr/bin/es-whisper`, `/usr/bin/es-ffmpeg`). 앱이 서버에 `EASY_STUDY_WHISPER`, `EASY_STUDY_FFMPEG`, `EASY_STUDY_MODELS_DIR`(앱 데이터 폴더의 `models`)로 넘겨요.
+
+- **whisper-cli** (whisper.cpp 1.9.4, `desktop/scripts/whisper.mjs`): 고정한 소스(SHA-256 확인)를 대상마다 빌드해 저장소의 `.cache/whisper/<대상>/`에 두고, 버전과 빌드 옵션이 같으면 다시 빌드하지 않고 써요 (Apple silicon 약 20초). Apple silicon은 Metal, 나머지는 CPU로 받아쓰고, Windows는 CPU에 맞는 코드를 실행할 때 골라요. Intel Mac·Linux x64용은 AVX2가 있는 CPU(2013년 이후 Intel, 2015년 이후 AMD)에서 돌아요.
+- **ffmpeg** (FFmpeg 8.1 최소 LGPL 빌드 + libopus, `desktop/scripts/ffmpeg.mjs`, `build-ffmpeg.sh`, `ffmpeg-min.flags`): `.cache/ffmpeg/<대상>/`에 빌드해 두고 다시 써요. macOS는 이 Mac에서(약 30초), Linux용은 docker의 alpine 컨테이너에서, Windows용은 mingw-w64로 빌드해요.
+- 이 컴퓨터에서 빌드할 수 없는 도구(예: `cmake`나 docker가 없을 때)는 경고를 보여 주고 빼고 묶어요. 그 앱은 PATH에서 찾아요: 개발하는 Mac이라면 Homebrew의 `ffmpeg`(`brew install ffmpeg`)를 그대로 써요. 배포할 앱은 `--require-tools`로 빌드하세요(CI가 그렇게 해요): 도구가 빠지면 실패해요.
+- 웹 모드용 whisper-cli는 `node desktop/scripts/whisper.mjs --web`으로도 만들 수 있어요 (같은 빌드를 서버가 찾는 `.cache/whisper/bin/`에 넣어요).
+- `node desktop/scripts/asr-smoke.mjs --whisper <whisper-cli> --ffmpeg <ffmpeg>`: 앱에 든 두 도구를 직접 시험해요 (OS의 음성 합성으로 만든 영어 문장, 없으면 만든 소리를 올린 녹음처럼 변환하고, 작은 모델(`ggml-base-q5_1`, `.cache/asr-smoke`에 받아 둬요)로 받아써요). 마이크는 쓰지 않아요.
 
 시험용 환경 변수: `EASY_STUDY_DESKTOP_LIBRARY`(라이브러리 폴더 지정), `EASY_STUDY_DESKTOP_HOME`(설정·로그·기본 라이브러리를 다른 폴더에), `EASY_STUDY_DESKTOP_SMOKE`(확인한 뒤 앱이 스스로 종료해요. 결과는 `EASY_STUDY_DESKTOP_SMOKE`로 시작하는 줄과 종료 코드: 0 성공, 2 서버·연결 실패, 3 시간 초과(`EASY_STUDY_DESKTOP_SMOKE_TIMEOUT`, 기본 120초), 4 확인 실패, 5 실패 뒤에도 시작 화면이 ‘진행 중’에 멈춤).
 
-- `=1`: 서버를 바로 켜고, 화면이 뜨는지, `/api/health`가 답하는지, 서버 화면에 IPC가 없는지, 작은 PDF를 올려 변환하고 슬라이드 이미지를 받아지는지 확인해요 (올린 강의는 다시 지워요). `EASY_STUDY_DESKTOP_SMOKE_URL`/`_CODE`를 주면 그 서버에 연결해서 확인해요 (PDF는 올리지 않아요).
+- `=1`: 서버를 바로 켜고, 화면이 뜨는지, `/api/health`가 답하는지, 서버 화면에 IPC가 없는지, 작은 PDF를 올려 변환하고 슬라이드 이미지를 받아지는지, 화면에 녹음에 필요한 기능(안전한 주소, `getUserMedia`, AudioWorklet)이 있는지(마이크는 열지 않아요), 서버가 받아쓰기 엔진과 ffmpeg를 찾는지(`/api/asr`; `EASY_STUDY_DESKTOP_SMOKE_ASR=0`이면 건너뛰어요) 확인해요 (올린 강의는 다시 지워요). `EASY_STUDY_DESKTOP_SMOKE_URL`/`_CODE`를 주면 그 서버에 연결해서 확인해요 (PDF는 올리지 않아요).
 - `=chooser`: 시작 화면만 확인해요 (IPC로 받은 라이브러리 경로, 스타일).
 - `=chooser-local`, `=chooser-remote`: 시작 화면의 양식을 채우고 ‘연결’을 눌러요. 버튼을 누를 때와 같은 길(IPC `connect_local`/`connect_remote`)로 연결한 뒤 `=1`과 같은 확인을 해요. `=chooser-remote`는 `EASY_STUDY_DESKTOP_SMOKE_URL`/`_CODE`를 써요. 실패는 시작 화면에 보이는 오류로 판단해요.
 
-앱을 시험할 때 알아 둘 것: 스모크 실행은 이미 켜진 easy-study에 넘기지 않고 따로 실행돼요. 하지만 보통 실행은 컴퓨터 전체에서 하나만 돼요(두 번째 실행은 켜진 창을 앞으로 가져오고 끝나요). WebView의 쿠키·저장소는 `EASY_STUDY_DESKTOP_HOME`과 상관없이 OS의 앱 폴더를 같이 써요. 그러니 앱 시험은 한 번에 하나씩 하세요. macOS에서 `CFFIXED_USER_HOME`으로 WebView 데이터를 옮기면 쿠키가 저장되지 않으니 로그인 유지 시험에는 쓰지 마세요. Linux에서 WebDriver(tauri-driver)로 시험하면 `target=_blank` 링크의 새 창이 열리지 않고, 시작 화면 스크린숏이 스크립트 실행 전 모습으로 찍혀요. 새 창과 화면 모습은 앱을 직접 실행해서 xdotool과 X 스크린숏으로 확인하세요. Docker 같은 곳에서 Linux 패키지를 빌드할 때는 `xdg-utils`(AppImage에 `xdg-open`이 들어가요)와 `squashfs-tools`도 설치하세요. 구조와 계약은 [docs/DESIGN.md](docs/DESIGN.md) §19에 있어요.
+앱을 시험할 때 알아 둘 것: 스모크 실행은 이미 켜진 easy-study에 넘기지 않고 따로 실행돼요. 하지만 보통 실행은 컴퓨터 전체에서 하나만 돼요(두 번째 실행은 켜진 창을 앞으로 가져오고 끝나요). WebView의 쿠키·저장소는 `EASY_STUDY_DESKTOP_HOME`과 상관없이 OS의 앱 폴더를 같이 써요. 그러니 앱 시험은 한 번에 하나씩 하세요. macOS에서 `CFFIXED_USER_HOME`으로 WebView 데이터를 옮기면 쿠키가 저장되지 않으니 로그인 유지 시험에는 쓰지 마세요. Linux에서 WebDriver(tauri-driver)로 시험하면 `target=_blank` 링크의 새 창이 열리지 않고, 시작 화면 스크린숏이 스크립트 실행 전 모습으로 찍혀요. 새 창과 화면 모습은 앱을 직접 실행해서 xdotool과 X 스크린숏으로 확인하세요. Docker 같은 곳에서 Linux 패키지를 빌드할 때는 `xdg-utils`(AppImage에 `xdg-open`이 들어가요)와 `squashfs-tools`도 설치하세요. 구조와 계약은 [docs/DESIGN.md](docs/DESIGN.md) §19(앱)와 §22(강의 녹음)에 있어요.
+
+## 강의 녹음
+
+수업 중에 앱에서 바로 녹음하면 이 컴퓨터에서 받아쓰고([whisper.cpp](https://github.com/ggml-org/whisper.cpp)), 받아쓴 말을 슬라이드마다 나눠요. 튜터는 지금 슬라이드에서 교수님이 한 말까지 알고 답하고, 나중에는 녹음을 슬라이드와 맞춰 다시 들을 수 있어요. 이미 녹음해 둔 파일도 올릴 수 있어요. 받아쓰기는 API 키 없이 이 컴퓨터에서만 해요.
+
+> **녹음하기 전에**: 수업 녹음은 교수님과 학교의 규정을 따르세요. 허락받지 않은 수업은 녹음하지 말고, 녹음과 받아쓴 글은 내 공부에만 쓰고 다른 사람에게 나누지 마세요. 처음 녹음할 때 앱이 한 번 확인해요.
+
+### 수업 중에 녹음하기
+
+1. 강의를 열고 위쪽의 🎙 **녹음**(또는 **녹음** 탭의 **🎙 녹음 시작**)을 눌러요. 처음에는 마이크 권한을 물어요 (macOS: “easy-study”가 마이크에 접근 → 허용. Windows: 설정 › 개인 정보 및 보안 › 마이크에서 마이크 액세스와 ‘데스크톱 앱이 마이크에 액세스하도록 허용’이 켜져 있어야 해요).
+2. 녹음하는 동안 평소처럼 슬라이드를 넘기세요. 넘긴 시각이 녹음과 같이 저장되어서, 받아쓴 말이 그때 보던 슬라이드에 붙어요 (말의 내용으로 조금 보정해요). 다른 강의를 보거나 앱 창을 내려도 녹음은 계속돼요.
+3. 받아쓴 글은 몇 초에서 몇십 초 늦게 **녹음** 탭에 나타나요. 느린 컴퓨터라면 설정에서 **녹음하면서 받아쓰기**를 끄세요: 녹음을 끝낸 뒤에 한꺼번에 받아써요.
+4. 녹음하는 동안 질문하면 최근 몇 분 동안 교수님이 한 말이 질문과 같이 튜터에게 가요 (입력칸 위에 “🎙 최근 N분 포함”).
+5. 끝나면 **녹음 끝내기**. 남은 받아쓰기와 슬라이드 정렬이 이어서 진행돼요.
+
+소리는 몇 초마다 서버(이 컴퓨터)에 저장돼요. 페이지를 새로 고치거나 앱이 꺼져도 저장된 곳까지는 남고, 다시 열면 이어서 녹음할 수 있어요. 노트북은 충전기를 꽂고, 덮개를 닫지 마세요 (잠자기에 들어가면 녹음도 멈춰요). 강의실 뒤쪽이라면 외장 마이크가 훨씬 잘 받아써요.
+
+### 녹음 파일 올리기
+
+강의 목록의 메뉴나 **녹음** 탭의 **녹음 파일 올리기**로 휴대폰 녹음(m4a), mp3, wav, 녹화한 강의 동영상(mp4, mov, webm) 등을 올려요 (최대 4GB). 받아쓰기용 소리와 재생용 파일(m4a)로 바꾼 뒤 받아쓰고, 슬라이드의 글과 비교해 슬라이드마다 나눠요.
+
+### 녹음 탭
+
+- 녹음 목록과 진행 상황, 지금 보는 슬라이드에서 교수님이 한 말 (전체 보기도 돼요).
+- 받아쓴 줄을 누르면 거기서부터 재생해요. **슬라이드 따라가기**를 켜면 재생하는 부분의 슬라이드로 넘어가요.
+- 슬라이드가 잘못 붙었다면 그 줄에서 **여기부터 p.N**으로 고쳐요. 나머지는 1초 안에 다시 맞춰요.
+- **AI 정밀 정렬**: 고른 LLM(Claude Code, Codex, API)에게 받아쓴 글과 슬라이드 글(정리본이 있으면 정리본)을 보내 더 정확히 나눠요. 몇 분 걸리고 LLM 사용량이 들어요. 소리는 보내지 않고, 직접 고친 구간(📍)은 그대로 둬요.
+- 설정: 음성 인식 모델(정확·빠름), 강의 언어(한국어·영어·자동 감지), 녹음하면서 받아쓰기.
+
+영어 용어는 한글로 적히는 일이 많아요(production → 프로덕션, FIRST → 퍼스트). 튜터는 그대로 알아들어요.
+
+### 모델, 저장 공간, 메모리
+
+받아쓰기 모델은 앱이나 저장소에 들어 있지 않고, 처음 쓸 때 크기를 보여 주고 받아요 (Hugging Face에서, 이어받기가 되고 SHA-256을 확인해요). 음성 구간을 찾는 Silero VAD(0.9MB)도 같이 받아요.
+
+| 모델 | 받는 크기 | 메모리(받아쓰는 동안) | 속도 (1시간 녹음) |
+|---|---|---|---|
+| **정확** (large-v3-turbo, 기본) | 574MB | 약 1–1.6GB | Apple silicon(Metal) 약 6분. CPU만 쓰면 녹음 길이의 절반에서 2배 |
+| **빠름** (small) | 190MB | 약 0.7GB | CPU에서 정확 모델보다 약 4배 빨라요. 오류는 조금 더 많아요 |
+
+- CPU만 쓰는 컴퓨터(Windows·Linux·Intel Mac)에서는 **빠름**을 권해요. 받아쓰기는 한 번에 하나씩만 돌아서 메모리가 그 이상 늘지 않아요.
+- Apple silicon에서 처음 받아쓸 때는 준비에 20초쯤 걸려요 (그다음부터는 바로 시작해요).
+- 모델 위치: 앱은 앱 데이터 폴더의 `models`([데이터 위치](#데이터-위치)), 웹 모드는 저장소의 `.cache/models` (`EASY_STUDY_MODELS_DIR`로 바꿀 수 있어요). 녹음 탭에서 지울 수 있어요.
+- 녹음 한 시간에 쓰는 공간: 앱에서 녹음하면 약 115MB(16kHz 원음), 파일을 올리면 원본 + 받아쓰기용 소리 약 110MB + 재생용 m4a 약 28MB. 녹음을 지우면 전부 지워져요.
+
+### 개인정보
+
+- 녹음, 받아쓰기, 슬라이드 정렬은 모두 이 컴퓨터(또는 연결한 easy-study 서버)에서 해요. 소리는 인터넷으로 나가지 않아요. 인터넷은 모델을 처음 받을 때만 써요.
+- 튜터에게 질문하면 그 슬라이드의 받아쓴 글(일부)이 질문과 같이 고른 LLM(Claude Code, Codex, API)으로 가요. **AI 정밀 정렬**도 받아쓴 글과 슬라이드 글을 보내요. 녹음 파일은 보내지 않아요.
+- 녹음은 라이브러리의 강의 폴더 `recordings/`에 저장돼요 ([저장 위치](#저장-위치)). **녹음** 탭에서 지우면 소리, 받아쓴 글, 정렬이 모두 지워져요.
+
+### 다른 기기에서 녹음하기 (HTTPS)
+
+브라우저는 **안전한 주소에서만** 마이크를 쓰게 해요. 서버를 켠 컴퓨터의 데스크톱 앱이나 `http://127.0.0.1:5180`은 되지만, 다른 기기(태블릿, 다른 노트북)에서 `http://192.168.x.x:5180`처럼 일반 HTTP로 접속하면 녹음 버튼이 동작하지 않아요. [HTTPS로 쓰기](#https로-쓰기)(`tailscale serve`, 또는 `EASY_STUDY_TLS_CERT`/`_KEY`)로 접속하세요. 데스크톱 앱으로 다른 컴퓨터에 연결할 때도 `https://` 주소여야 녹음돼요. 녹음 파일 올리기는 HTTP에서도 돼요.
+iPad·iPhone의 Safari는 화면이 켜져 있고 easy-study가 앞에 있을 때만 녹음해요 (화면이 잠기거나 다른 앱으로 가면 끊겨요).
+
+### 웹 모드(npm start)에서 쓸 때
+
+데스크톱 앱에는 받아쓰기 엔진(whisper-cli)과 ffmpeg가 들어 있어요. `npm start`로 쓸 때는 따로 준비하세요.
+
+```bash
+npm run setup:whisper    # whisper.cpp를 이 컴퓨터용으로 빌드해 .cache/whisper/bin에 둬요 (cmake와 C++ 컴파일러가 필요해요)
+brew install ffmpeg      # 녹음 파일 올리기용 (Ubuntu: sudo apt install ffmpeg, Arch: sudo pacman -S ffmpeg, Windows: winget install ffmpeg)
+```
+
+직접 빌드한 프로그램은 `EASY_STUDY_WHISPER`, `EASY_STUDY_FFMPEG`로 지정할 수도 있어요. 앱에서 녹음만 하고 받아쓰기는 나중에 해도 돼요: 엔진이 없으면 녹음과 파일 올리기는 되고, 받아쓰기는 엔진이 준비되면 시작돼요.
+
+### 녹음 문제 해결
+
+- **“이 연결에서는 녹음할 수 없어요”**: 일반 HTTP 주소로 접속했어요. 위의 HTTPS 방법을 쓰거나, 서버 컴퓨터에서 앱이나 `http://127.0.0.1`로 녹음하세요.
+- **macOS에서 마이크를 거부했을 때 / 녹음은 되는데 소리가 없을 때**: 시스템 설정 › 개인정보 보호 및 보안 › 마이크에서 easy-study를 켜고 앱을 다시 켜세요. 서명하지 않은 앱이라 새 버전으로 바꾸면 권한을 다시 물을 수 있어요.
+- **Windows에서 마이크를 쓸 수 없을 때**: 설정 › 개인 정보 및 보안 › 마이크(Windows 10은 설정 › 개인 정보 › 마이크)에서 “마이크 액세스”와 “데스크톱 앱이 마이크에 액세스하도록 허용”을 켜세요.
+- **Linux에서 “마이크를 찾지 못했어요”**: 마이크가 연결되어 있어도 오디오 서버(PulseAudio 또는 PipeWire의 `pipewire-pulse`)와 WebKitGTK가 쓰는 GStreamer 플러그인이 있어야 해요 (Ubuntu·Debian `gstreamer1.0-plugins-good`, Fedora `gstreamer1-plugins-good`, Arch `gst-plugins-base gst-plugins-good`). deb/rpm은 같이 설치해요. AppImage는 시스템에 설치된 플러그인을 써요.
+- **Linux에서 올린 녹음이 재생되지 않을 때**: AAC(m4a) 재생 플러그인을 설치하세요 (`gstreamer1.0-libav`, Fedora `gstreamer1-plugin-libav`, Arch `gst-libav`). 받아쓰기와 앱에서 한 녹음의 재생은 상관없어요.
+- **받아쓰기가 너무 느릴 때**: 설정에서 **빠름** 모델로 바꾸고, **녹음하면서 받아쓰기**를 끄세요.
+- **“받아쓰기 엔진(whisper-cli)을 찾을 수 없습니다”**: 앱은 다시 설치하세요. 웹 모드는 `npm run setup:whisper`.
+- **Linux x64 앱에서 받아쓰기가 바로 실패할 때**: 앱의 whisper-cli는 AVX2가 있는 CPU(2013년 이후 Intel, 2015년 이후 AMD)용이에요. 그보다 오래된 CPU나 일부 저가 Celeron·Pentium이라면 이 컴퓨터에서 whisper.cpp를 빌드해(`node desktop/scripts/whisper.mjs --web`) 터미널에서 `EASY_STUDY_WHISPER=<그 whisper-cli> easy-study`로 켜세요. Windows 앱은 CPU에 맞는 코드를 스스로 골라요.
 
 ## 동작 방식
 
@@ -257,6 +347,8 @@ library/
     sessions/<id>.json         세션 (대화 + LLM 대화 핸들)
     notes/<id>.md              세션별 기록
     STUDY_NOTES.md             슬라이드별 Q&A 노트
+    recordings/<녹음 id>/      강의 녹음: meta.json, 소리(audio.pcm 또는 올린 원본 + asr.wav, playback.m4a),
+                               transcript.json(받아쓴 글과 슬라이드), timeline.json(넘긴 슬라이드), markers.json
   courses/<courseId>/
     course.json                과목 (강의 순서)
     COURSE.md                  과목 정리
@@ -292,6 +384,9 @@ library/
 | `EASY_STUDY_MAX_CLI_PROCS` | `2` | 동시에 띄우는 claude/codex 프로세스 최대 수(채팅 우선, 정리본은 기다려요) |
 | `EASY_STUDY_CODEX_CONFINE` | `1` | `0`이면 Codex의 읽기 제한(강의 폴더만 읽기)을 끄고 예전처럼 읽기 전용 샌드박스만 써요. 이때 Codex는 **컴퓨터의 모든 파일**(예: `~/.ssh`)을 읽을 수 있어요. 읽기 제한 때문에 Codex가 시작하지 못할 때만 쓰세요. |
 | `CLAUDE_BIN` / `CODEX_BIN` | PATH | CLI 경로 지정 |
+| `EASY_STUDY_WHISPER` | 앱에 든 것 → `.cache/whisper/bin` → PATH | 받아쓰기 엔진 `whisper-cli`의 경로 ([강의 녹음](#강의-녹음)) |
+| `EASY_STUDY_FFMPEG` | 앱에 든 것 → PATH | 녹음 파일을 변환할 `ffmpeg`의 경로 |
+| `EASY_STUDY_MODELS_DIR` | `.cache/models` (앱: 앱 데이터 폴더의 `models`) | 받아쓰기 모델을 받아 둘 폴더 |
 | `EASY_STUDY_PDF_FALLBACK_FONT` | OS 글꼴 | 글꼴을 내장하지 않은 한글·일본어·중국어 PDF를 그릴 글꼴 파일(`.ttf`/`.otf`/`.ttc`). 지정하지 않으면 macOS는 Arial Unicode·Apple SD Gothic Neo, Windows는 맑은 고딕·굴림·MS Gothic·Microsoft YaHei, Linux는 Noto Sans CJK·나눔고딕 중 있는 것을 써요. |
 
 ## 문제 해결
@@ -356,6 +451,7 @@ server/            Express 서버 (Node가 TypeScript를 바로 실행)
   digest.ts        정리본 생성 작업
   courses.ts       과목 폴더
   providers/       claude / codex CLI, Anthropic / OpenAI API 어댑터
+  recordings/      강의 녹음: 녹음 저장, 받아쓰기(whisper-cli), 파일 변환(ffmpeg), 슬라이드 정렬
 shared/types.ts    서버와 웹이 같이 쓰는 API 타입
 web/               React + Vite UI
 tests/             node:test 테스트
@@ -364,3 +460,4 @@ tests/             node:test 테스트
 ## 라이선스
 
 PDF 엔진으로 PDFium(BSD-3-Clause / Apache-2.0, `@embedpdf/pdfium` 패키지는 MIT)을 함께 배포해요. PDFium과 그 안에 들어 있는 라이브러리(FreeType, OpenJPEG, Little CMS, libjpeg-turbo, libpng, zlib, AGG)의 라이선스 전문은 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)에 있어요.
+데스크톱 앱은 강의 녹음용으로 whisper.cpp(MIT)와 FFmpeg(LGPL 2.1 이상, libopus는 BSD-3-Clause)도 함께 배포해요. FFmpeg는 GPL 부분 없이 빌드하고, 빌드 설정과 소스를 받는 법, 처음 쓸 때 받는 모델(Whisper, Silero VAD: MIT)의 라이선스도 같은 파일에 있어요.

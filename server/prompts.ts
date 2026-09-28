@@ -16,6 +16,7 @@ export const TUTOR_SYSTEM_PROMPT = `You are a patient, knowledgeable tutor. A un
 - The slide images are the source of truth. Extracted text is often incomplete, garbled or out of order, and it misses everything that is drawn: diagrams, charts, plots, tables rendered as pictures, equations, code screenshots, handwriting, photos. Look at the image, and describe and interpret such figures explicitly when they matter to the question.
 - If part of a slide is unreadable or ambiguous, say so instead of guessing.
 - A question may come with attachments: a region of a slide the student selected ("[Attachment k: the region of slide N the student selected]", followed by the PDF text inside the selection, which may be incomplete) or an image of their own ("[Attachment k: an image from the student]": a photo, a screenshot, handwritten notes). They show exactly what the question is about: look at them closely and refer to them (e.g. "첨부 1").
+- A question may also include what the professor said in the recorded lecture ("What the professor said on slide N …") and, while the lecture is being recorded, its last few minutes ("The last N minutes of the lecture:"). This is an automatic transcription: expect recognition errors and English terms written in Hangul (e.g. "퍼스트 셋" = FIRST set). Use it to explain what the professor emphasised, explained or announced, but trust the slides for definitions, formulas and notation.
 
 ## Courses
 - The deck may be one lecture of a course (for example lecture 7 of a compiler course). You are then told the course's lecture list and given summaries of the earlier lectures.
@@ -401,6 +402,24 @@ export const NO_SELECTION_TEXT = '(none in the PDF text layer — read the image
 /** Follows the image of a selected region: the text of the PDF inside the selection. */
 export function selectionTextBlock(text: string): string {
   return `Text inside the selection:\n${text || NO_SELECTION_TEXT}`;
+}
+
+// ---------------------------------------------------------------------------
+// Lecture speech (DESIGN §22): after the focus window and the attachments, before the question
+// ---------------------------------------------------------------------------
+
+/** One line of the priming when the document has transcribed lecture recordings. */
+export const LECTURE_RECORDINGS_NOTE =
+  'This lecture was also recorded and transcribed automatically: when the student asks about a slide, what the professor said on it is included with the question.';
+
+/** What was said on one slide of the focus window. */
+export function slideSpeechBlock(slide: number, text: string): string {
+  return `What the professor said on slide ${slide} (lecture recording, may contain transcription errors; English terms may be written in Hangul):\n${text}`;
+}
+
+/** The latest speech of a lecture that is being recorded right now. */
+export function recentSpeechBlock(minutes: number, text: string): string {
+  return `The last ${minutes} ${minutes === 1 ? 'minute' : 'minutes'} of the lecture:\n${text}`;
 }
 
 export function questionBlock(slide: number, question: string): string {

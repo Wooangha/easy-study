@@ -1,0 +1,59 @@
+// Small pieces that show a live recording elsewhere (DESIGN §22): the composer chip "🎙 최근 N분 포함" (questions
+// during a live recording of the lecture carry the recent speech) and the 녹음 tab badge. Each subscribes to the
+// recorder itself, so the timer ticking does not re-render the chat.
+import { useSyncExternalStore } from 'react';
+import { useRecordingFeed } from '../../hooks/useRecordingFeed.ts';
+import { recorder } from '../../lib/recording/recorder.ts';
+import { recentMinutes } from '../../lib/recording/timeline.ts';
+
+/**
+ * Minutes of recent speech the next question of `docId` includes, or null: not recording this lecture, live
+ * transcription off, or nothing transcribed yet (the server adds the recent speech only once there is some).
+ */
+function useSpeechMinutes(docId: string): { minutes: number; paused: boolean } | null {
+  const key = useSyncExternalStore(recorder.subscribe, () => {
+    const s = recorder.getSnapshot();
+    if (s.docId !== docId || (s.phase !== 'recording' && s.phase !== 'paused') || !s.liveTranscribe || !s.recordingId) {
+      return '';
+    }
+    return `${s.recordingId}|${recentMinutes(s.seconds)}|${s.phase === 'paused' ? 1 : 0}`;
+  });
+  const [rid, minutes, paused] = key ? key.split('|') : [null, '0', '0'];
+  // The same feed as the live transcript strip (one stream per recording).
+  const feed = useRecordingFeed(rid ? docId : null, rid);
+  if (!rid || !feed || feed.segments.length === 0) return null;
+  return { minutes: Number(minutes), paused: paused === '1' };
+}
+
+export function LectureSpeechChip({ docId }: { docId: string }) {
+  const speech = useSpeechMinutes(docId);
+  if (!speech) return null;
+  return (
+    <div className="composer-context">
+      <span
+        className="speech-chip"
+        title="녹음 중인 강의에서 교수님이 최근에 한 말(받아쓴 글)을 질문과 함께 튜터에게 전달해요. 받아쓰기에는 오류가 있을 수 있어요."
+      >
+        🎙 최근 {Math.max(1, speech.minutes)}분 포함{speech.paused ? ' · 녹음 일시정지' : ''}
+      </span>
+    </div>
+  );
+}
+
+/** "녹음" tab badge: ● while this lecture is being recorded, else the number of recordings. */
+export function RecordingTabBadge({ docId, count }: { docId: string; count: number | null }) {
+  const live = useSyncExternalStore(recorder.subscribe, () => {
+    const s = recorder.getSnapshot();
+    return s.docId === docId && s.phase !== 'idle' ? s.phase : null;
+  });
+  if (live === 'recording' || live === 'starting') {
+    return (
+      <span className="tab-count is-live" title="녹음 중">
+        ● REC
+      </span>
+    );
+  }
+  if (live === 'paused') return <span className="tab-count is-warn">⏸</span>;
+  if (count && count > 0) return <span className="tab-count">{count}</span>;
+  return null;
+}

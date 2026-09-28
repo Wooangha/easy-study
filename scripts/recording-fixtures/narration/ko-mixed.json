@@ -1,0 +1,242 @@
+{
+  "lang": "ko-mixed",
+  "voice": "Yuna",
+  "rate": 175,
+  "deck": "library/example-parsing-deck (a compilers course L7 Parsing III, Top-Down)",
+  "notes": "Korean lecture with English technical terms written (and spoken) as English words. Each utterance becomes one ground-truth segment. slide=null means off-slide tangent. kind=backref means the lecturer briefly flipped back to an earlier slide. {pause:s} inserts extra silence; {flip:n,dur:s} shows slide n in the video during silence without talking about it (skipped slide).",
+  "items": [
+    {
+      "slide": 1,
+      "utts": [
+        "자, 그러면 시작하겠습니다. 오늘은 Lecture 7, Parsing 세 번째 시간이고요, top-down parsing을 계속 하겠습니다.",
+        "지난 시간에 recursive descent parser랑 left recursion 없애는 거 했었죠. 오늘은 거기서 한 발 더 나가서, backtracking 없이 파싱하는 방법을 볼 거예요.",
+        "오늘 내용이 꽤 많으니까 바로 들어가겠습니다."
+      ]
+    },
+    {
+      "pause": 3.2
+    },
+    {
+      "slide": 2,
+      "utts": [
+        "음... 먼저 predictive parsing입니다. top-down parser가 production을 잘못 고르면 어떻게 되죠? 네, backtrack을 해야 됩니다.",
+        "그래서 대안은, input을 미리 좀 보고, 즉 lookahead를 해서 context를 보고 맞는 production을 고르자는 거예요.",
+        "그러면 context-free grammar에서 lookahead가 얼마나 필요하냐. 일반적으로는 임의로 많이 필요할 수 있고, 그럴 때는 CYK나 Earley algorithm 같은 걸 씁니다.",
+        "다행히도 대부분의 programming language construct는 제한된 lookahead로 파싱할 수 있는 subclass에 들어가고요, 그 중에 중요한 게 LL(1)이랑 LR(1) grammar입니다. 오늘은 LL(1)에 집중할 거예요."
+      ]
+    },
+    {
+      "slide": 3,
+      "utts": [
+        "basic idea는 이겁니다. A가 알파 또는 베타로 갈 수 있을 때, parser가 input stream의 다음 word 하나만 보고 알파랑 베타 중에 하나를 고를 수 있어야 된다는 거죠.",
+        "이걸 formal하게 쓰려면 set을 몇 개 정의해야 되는데, 첫 번째가 FIRST set입니다.",
+        "FIRST of 알파는, 알파에서 derive되는 string의 맨 첫 번째 symbol로 나올 수 있는 token들의 집합이에요.",
+        "계산하는 방법은 뒤에서 할 거니까, 일단 FIRST set은 구할 수 있다고 가정하고 넘어가겠습니다."
+      ]
+    },
+    {
+      "slide": 4,
+      "utts": [
+        "자, 그러면 이 FIRST set으로 LL(1) property를 정의해 볼게요.",
+        "A가 알파로도 가고 베타로도 가는 production이 둘 다 있으면, FIRST of 알파랑 FIRST of 베타의 교집합이 공집합이었으면 좋겠다는 겁니다.",
+        "그러면 lookahead 딱 한 개만 보고 맞는 선택을 할 수 있겠죠. 여기서 FIRST는 right-hand side 전체의 property라는 것도 주의하시고요.",
+        "근데 이 rule이 굉장히 직관적이고 예쁜데, 사실 틀렸습니다. epsilon production, 그러니까 A가 epsilon으로 가는 경우를 처리를 못 해요."
+      ]
+    },
+    {
+      "slide": 5,
+      "utts": [
+        "그래서 epsilon production이 있으면 LL(1) property 정의가 좀 복잡해집니다. 알파가 epsilon을 만들 수 있으면, A 다음에 바로 나오는 symbol을 봐야 되거든요.",
+        "그래서 FOLLOW set을 정의합니다. FOLLOW of A는, 어떤 sentential form에서 A 바로 뒤에 나올 수 있는 terminal symbol들의 집합이에요.",
+        "그러면 조건이 두 개가 되죠. FIRST of 알파랑 FIRST of 베타가 안 겹쳐야 되고, 또 FIRST of 베타랑 FOLLOW of A도 안 겹쳐야 됩니다.",
+        "이것도 FOLLOW set은 구할 수 있다고 일단 가정할게요."
+      ]
+    },
+    {
+      "slide": 6,
+      "utts": [
+        "이 두 개를 합쳐서 START set이라는 걸 정의합니다.",
+        "알파가 epsilon을 derive하면 START는 FIRST of 알파에서 epsilon 빼고 FOLLOW of A를 합친 거고, 아니면 그냥 FIRST of 알파예요.",
+        "여기서 중요한 건, START는 nonterminal이 아니라 production 단위로 정의된다는 겁니다. 옛날 교과서 판에서는 이걸 FIRST plus라고 불렀어요.",
+        "그래서 같은 nonterminal의 production 두 개에 대해서 START set이 항상 disjoint하면, 그 grammar는 LL(1) property를 가진다, predictively parsable하다, 이렇게 말합니다."
+      ]
+    },
+    {
+      "pause": 4.0
+    },
+    {
+      "slide": 7,
+      "utts": [
+        "자, 이제 FIRST set을 실제로 어떻게 계산하는지 보겠습니다. 파싱 중에 어떤 지점에서 어떤 terminal symbol이 나올 수 있는지 아는 게 유용하거든요.",
+        "top-down parser는 이걸로 production을 고르고, bottom-up parser generator는 이걸로 table을 만듭니다.",
+        "FIRST는 grammar symbol들의 string 위에서 정의되는데요, terminal이나 EOF나 epsilon은 FIRST가 자기 자신이고, nonterminal만 실제로 계산하면 됩니다."
+      ]
+    },
+    {
+      "slide": 8,
+      "utts": [
+        "음... 일단 epsilon production은 무시하고 conceptual sketch부터 볼게요.",
+        "terminal, EOF, epsilon은 자기 자신으로 initialize하고, nonterminal은 전부 공집합으로 시작합니다.",
+        "그 다음에 production을 하나씩 보면서, right-hand side 맨 앞 symbol의 FIRST set을 left-hand side nonterminal의 FIRST set에 더해 줍니다.",
+        "right-hand side가 nonterminal로 시작할 수도 있으니까, 더 이상 안 바뀔 때까지, 즉 fixed point에 도달할 때까지 반복하는 거죠."
+      ]
+    },
+    {
+      "slide": 9,
+      "utts": [
+        "이 loop nest는 monotone increasing이에요. set이 커지기만 하고 줄어들지는 않죠.",
+        "가장 큰 FIRST set은 terminal 개수 더하기 두 개 원소를 가지고, while loop 한 번 돌 때마다 적어도 하나의 set은 바뀌니까요.",
+        "최대 NT 개수 곱하기 T 개수 더하기 2, 거기에 더하기 1번 돌면 끝납니다. 그래서 반드시 terminate합니다."
+      ]
+    },
+    {
+      "slide": 10,
+      "utts": [
+        "이제 epsilon production까지 처리하는 detail을 채워 넣으면 이렇게 됩니다.",
+        "B1의 FIRST에 epsilon이 있으면 B2의 FIRST도 rhs에 더해야 되고, B2도 epsilon을 만들면 B3도 보고, 이런 식으로 계속 갑니다.",
+        "그리고 right-hand side 전체가 epsilon으로 갈 수 있으면, 그때는 left-hand side의 FIRST에 epsilon을 넣어 줍니다. 교과서 figure 3.7이랑 거의 같은 algorithm이에요.",
+        "다음 장은 그냥 넘어갈게요, 앞이랑 거의 같은 얘기예요."
+      ]
+    },
+    {
+      "flip": 11,
+      "dur": 1.6
+    },
+    {
+      "slide": 12,
+      "utts": [
+        "자, 예제를 하나 보죠. SheepNoise grammar입니다.",
+        "Goal이 SheepNoise로 가고, SheepNoise는 SheepNoise baa, 또는 그냥 baa로 갑니다. left-recursive한 grammar죠.",
+        "직관적으로 보면 EOF만 빼고 모든 symbol의 FIRST set이 baa 하나밖에 없어요. 그러면 우리 algorithm이 이 직관적인 답을 제대로 내는지 한번 확인해 봅시다."
+      ]
+    },
+    {
+      "pause": 2.5
+    },
+    {
+      "slide": 13,
+      "utts": [
+        "initialization을 하면, Goal이랑 SheepNoise는 공집합이고, baa는 baa, EOF는 EOF가 됩니다.",
+        "production은 2번, 1번, 0번 순서로 볼 건데요, 다른 순서로 해도 답은 같아요. 다만 converge하는 데 시간이 좀 더 걸릴 수 있습니다.",
+        "여기 표에서 보시는 것처럼, 처음에는 nonterminal 쪽이 전부 비어 있죠."
+      ]
+    },
+    {
+      "slide": 14,
+      "utts": [
+        "production 2번을 보면, rhs가 FIRST of baa, 그러니까 baa가 되고, 이게 FIRST of SheepNoise에 더해집니다.",
+        "production 1번은 SheepNoise baa인데, SheepNoise의 FIRST가 이미 baa니까 아무 변화가 없어요.",
+        "그러니까 첫 번째 while loop iteration에서 SheepNoise가 먼저 baa를 얻는 거예요."
+      ]
+    },
+    {
+      "slide": 15,
+      "utts": [
+        "production 0번에서는 FIRST of SheepNoise가 FIRST of Goal로 들어갑니다. 그러면 Goal도 baa가 되죠.",
+        "그리고 한 번 더 iteration을 돌아서 아무것도 안 바뀌는 걸 확인하면 끝입니다. 직관적인 답이랑 똑같이 나왔죠?",
+        "이렇게 left-recursive grammar에서도 FIRST set 계산 자체는 문제없이 됩니다. left recursion이 문제가 되는 건 parser 쪽이지, set 계산이 아니에요."
+      ]
+    },
+    {
+      "slide": null,
+      "kind": "tangent",
+      "utts": [
+        "아, 잠깐 공지 하나 할게요. 다음 주 월요일까지 programming assignment 2번 제출인데요, 이번 과제가 바로 이 parser 만드는 거예요.",
+        "작년에 보니까 마감 직전에 제출 서버가 엄청 느려져서 제출 못 한 학생들이 꽤 있었어요. 그러니까 꼭 하루 전에는 내 보시고요.",
+        "질문은 게시판에 올리면 조교님들이 답해 줄 겁니다. 그리고 중간고사 범위는 오늘 강의까지 포함이니까 참고하세요.",
+        "네, 다시 돌아가겠습니다."
+      ]
+    },
+    {
+      "pause": 3.0
+    },
+    {
+      "slide": 16,
+      "utts": [
+        "이번에는 조금 더 재밌는 예제, 괄호 grammar를 보겠습니다.",
+        "Goal이 List로 가고, List는 Pair List 또는 epsilon, Pair는 LP List RP입니다. LP는 여는 괄호, RP는 닫는 괄호예요.",
+        "여기는 epsilon production이 있으니까 아까 SheepNoise보다 조금 더 흥미롭죠. 초기값은 nonterminal은 전부 공집합, LP, RP, EOF는 자기 자신입니다."
+      ]
+    },
+    {
+      "slide": 17,
+      "utts": [
+        "production을 3번, 2번, 1번, 0번 순서로 보면, 첫 번째 iteration에서 FIRST of Pair에 LP가 들어가고, List랑 Goal에는 LP랑 epsilon이 들어갑니다."
+      ]
+    },
+    {
+      "slide": 10,
+      "kind": "backref",
+      "utts": [
+        "어... 여기서 epsilon이 왜 들어가는지 헷갈리면, 잠깐 아까 algorithm으로 다시 가 볼게요.",
+        "여기 마지막에, i가 k이고 B k의 FIRST에 epsilon이 있으면 rhs에 epsilon을 더하는 부분, 이것 때문입니다."
+      ]
+    },
+    {
+      "slide": 17,
+      "utts": [
+        "네, 다시 돌아와서, 두 번째 iteration에서는 아무것도 안 바뀌니까 fixed point에 도달한 거죠.",
+        "참고로 순서를 0, 1, 2, 3으로 adversarial하게 잡으면, List까지 한 번, Goal까지 한 번, 그리고 멈춘 걸 확인하는 데 한 번, iteration이 더 필요합니다."
+      ]
+    },
+    {
+      "slide": 18,
+      "utts": [
+        "자, 그러면 FOLLOW set은 어떻게 구할까요? FOLLOW는 어떤 nonterminal 바로 뒤에 나올 수 있는 terminal symbol들의 집합이었죠.",
+        "top-down parser는 epsilon production을 처리할 때 이게 필요합니다.",
+        "FOLLOW of start symbol은 EOF로 정의합니다. 우리가 결국 인식하고 싶은 게 start symbol 다음에 EOF가 오는 거니까요.",
+        "FOLLOW는 nonterminal 위에서만 정의되고, 값은 terminal이랑 EOF의 subset이에요. 그리고 FOLLOW를 구하려면 FIRST set이 먼저 필요합니다."
+      ]
+    },
+    {
+      "slide": 19,
+      "utts": [
+        "FOLLOW도 fixed-point algorithm입니다. start symbol만 EOF로 두고 나머지는 전부 빈 집합으로 시작해서, 더 이상 안 바뀔 때까지 계속 더해 나가요.",
+        "여기서 context는 right-hand side에서 누가 누구 옆에 붙어 있냐, 이 adjacency에서 나옵니다. 교과서 figure 3.8을 conceptual하게 줄여 놓은 버전이에요."
+      ]
+    },
+    {
+      "slide": 20,
+      "utts": [
+        "개념부터 보죠. 일단 epsilon production이 없다고 가정하면, X가 A B로 가는 production이 있을 때, FOLLOW of A에는 FIRST of B가 들어가야 됩니다. B가 A 오른쪽에 올 수 있으니까요.",
+        "그리고 FOLLOW of B에는 FOLLOW of X가 들어가야 돼요. B가 X의 맨 끝에 오니까, X 뒤에 올 수 있는 건 B 뒤에도 올 수 있는 거죠.",
+        "그래서 간단하게는 right-hand side에 나오는 pair들을 다 모아서 반복하면 되는데, 실제 algorithm은 epsilon이랑 efficiency까지 신경 씁니다."
+      ]
+    },
+    {
+      "slide": 21,
+      "utts": [
+        "이게 실제 algorithm입니다. 각 production에 대해서 TRAILER를 FOLLOW of A로 시작하고, right-hand side를 오른쪽에서 왼쪽으로, k부터 1까지 거꾸로 훑어요.",
+        "B i가 nonterminal이면 FOLLOW of B i에 TRAILER를 더하고요, B i가 epsilon을 만들 수 있으면 TRAILER에 FIRST of B i에서 epsilon 뺀 걸 더하고, 아니면 TRAILER를 FIRST of B i로 바꿔 버립니다.",
+        "B i가 terminal이면 TRAILER는 그 terminal 하나가 되고요. FOLLOW에는 절대 epsilon을 넣지 않는다는 것도 기억하세요."
+      ]
+    },
+    {
+      "pause": 5.0
+    },
+    {
+      "slide": 22,
+      "utts": [
+        "음... 다시 괄호 grammar로 FOLLOW를 구해 봅시다.",
+        "초기값은 Goal, List, Pair 전부 공집합이고, Goal이 start symbol이니까 FOLLOW of Goal만 EOF로 둡니다.",
+        "FOLLOW of List랑 FOLLOW of Pair는 아직 아무것도 모르는 상태에서 시작하는 거죠. 이제 production 0번부터 3번까지 순서대로 돌려 보겠습니다."
+      ]
+    },
+    {
+      "slide": 23,
+      "utts": [
+        "첫 번째 iteration입니다. production 0번에서 FOLLOW of List에 EOF가 들어가고,",
+        "production 1번에서는 FIRST of List랑 TRAILER에서 LP랑 EOF가 FOLLOW of Pair에 들어갑니다.",
+        "production 2번은 아무것도 안 하고, production 3번에서 RP가 FOLLOW of List에 들어가요. RP는 terminal이니까 FIRST of RP가 그냥 RP죠."
+      ]
+    },
+    {
+      "slide": 24,
+      "utts": [
+        "두 번째 iteration에서는 production 1번이 FOLLOW of List에서 RP를 가져와서 FOLLOW of Pair에 더해 줍니다. 나머지는 새로 추가되는 게 없고요.",
+        "세 번째 iteration은 결과가 똑같으니까 fixed point에 도달한 겁니다. 그래서 최종적으로 FOLLOW of Pair는 EOF, LP, RP가 되겠죠.",
+        "여기까지 질문 있나요?"
+      ]
+    }
+  ]
+}

@@ -29,7 +29,8 @@ try {
   console.error('\nserver build failed: fix the TypeScript errors above (npm run typecheck).');
   process.exit(1);
 }
-for (const entry of ['server/index.js', 'server/imageWorker.js']) {
+// Entry points started by path: the server, the image worker (child process), the slide aligner (worker thread).
+for (const entry of ['server/index.js', 'server/imageWorker.js', 'server/recordings/align/worker.js']) {
   if (!existsSync(path.join(outDir, entry))) {
     console.error(`server build failed: ${path.join(outDir, entry)} was not written.`);
     process.exit(1);

@@ -10,6 +10,8 @@ export interface ConfirmOptions {
   cancelLabel?: string;
   /** Destructive action: red confirm button, and the cancel button gets the initial focus. */
   danger?: boolean;
+  /** Only an explanation: one button (the confirm label, default "확인"); resolves true when closed with it. */
+  alert?: boolean;
 }
 
 export interface ConfirmRequest extends ConfirmOptions {

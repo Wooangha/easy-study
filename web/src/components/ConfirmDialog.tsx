@@ -68,14 +68,16 @@ export function ConfirmHost({ suspended = false }: { suspended?: boolean }) {
             </div>
           )}
           <div className="confirm-actions">
-            <button
-              ref={cancelRef}
-              type="button"
-              className="ghost-btn"
-              onClick={() => answerConfirm(request.id, false)}
-            >
-              {request.cancelLabel ?? '취소'}
-            </button>
+            {!request.alert && (
+              <button
+                ref={cancelRef}
+                type="button"
+                className="ghost-btn"
+                onClick={() => answerConfirm(request.id, false)}
+              >
+                {request.cancelLabel ?? '취소'}
+              </button>
+            )}
             <button
               ref={confirmRef}
               type="button"

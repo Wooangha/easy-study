@@ -4,11 +4,14 @@
     "targets": ["app", "dmg"],
     "resources": {
       "../resources/node/": "node/",
-      "../resources/server/": "server/"
+      "../resources/server/": "server/",
+      "../resources/whisper/": "whisper/",
+      "../resources/ffmpeg/": "ffmpeg/"
     },
     "macOS": {
       "minimumSystemVersion": "13.5",
-      "signingIdentity": "-"
+      "signingIdentity": "-",
+      "entitlements": "./app.entitlements"
     }
   }
 }

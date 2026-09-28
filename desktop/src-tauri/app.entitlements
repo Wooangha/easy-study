@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- The app itself (tauri.macos.conf.json bundle.macOS.entitlements), signed with the hardened runtime even
+       ad hoc: the lecture recorder (DESIGN §22) records in the app's WKWebView, and under the hardened runtime
+       macOS denies microphone access without this entitlement (no prompt at all). NSMicrophoneUsageDescription
+       is in Info.plist. The bundled Node, whisper-cli and ffmpeg never touch the microphone. -->
+  <key>com.apple.security.device.audio-input</key><true/>
+</dict>
+</plist>

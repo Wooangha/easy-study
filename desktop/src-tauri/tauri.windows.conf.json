@@ -4,7 +4,9 @@
     "targets": ["nsis"],
     "resources": {
       "../resources/node/": "node/",
-      "../resources/server/": "server/"
+      "../resources/server/": "server/",
+      "../resources/whisper/": "whisper/",
+      "../resources/ffmpeg/": "ffmpeg/"
     },
     "windows": {
       "webviewInstallMode": {

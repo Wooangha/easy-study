@@ -12,8 +12,9 @@ import { canOpenFiles, courseBadgeTitle, courseContextSentence, type EarlierLect
 import { providerLabel, providerWithModel } from '../lib/format.ts';
 import { Composer } from './Composer.tsx';
 import { MessageList } from './MessageList.tsx';
+import { RecordingTabBadge } from './recording/LectureSpeech.tsx';
 
-export type PanelTab = 'chat' | 'digest' | 'notes';
+export type PanelTab = 'chat' | 'digest' | 'notes' | 'recordings';
 
 interface ChatPanelProps {
   doc: DocMeta;
@@ -54,6 +55,10 @@ interface ChatPanelProps {
   onOpenAttachment: (attachment: Attachment) => void;
   /** Shown over the whole panel (the attachment preview). */
   overlay?: ReactNode;
+  /** Content of the 녹음 tab (DESIGN §22): mounted the first time the tab is opened, then kept (its player plays on). */
+  recordings: ReactNode;
+  /** Recordings of this lecture (tab badge), null while unknown. */
+  recordingCount: number | null;
 }
 
 function DigestTabBadge({ info }: { info: DigestInfo | null }) {
@@ -101,6 +106,8 @@ export function ChatPanel({
   onSendQuestion,
   onOpenAttachment,
   overlay,
+  recordings,
+  recordingCount,
 }: ChatPanelProps) {
   const { session, messages, liveTurn, running, creating } = study;
   const targetSlide = pinnedSlide ?? focusedSlide;
@@ -112,6 +119,9 @@ export function ChatPanel({
   const [notesOpenedFor, setNotesOpenedFor] = useState<string | null>(null);
   if (tab === 'notes' && notesOpenedFor !== doc.id) setNotesOpenedFor(doc.id);
   const notesMounted = notesOpenedFor === doc.id;
+  const [recordingsOpenedFor, setRecordingsOpenedFor] = useState<string | null>(null);
+  if (tab === 'recordings' && recordingsOpenedFor !== doc.id) setRecordingsOpenedFor(doc.id);
+  const recordingsMounted = recordingsOpenedFor === doc.id;
 
   // `ask` / `primeCurrent` are stable while streaming, so memoized message items do not re-render on every delta.
   const { ask, primeCurrent } = study;
@@ -243,6 +253,17 @@ export function ChatPanel({
         >
           노트{notesCount > 0 && <span className="tab-count">{notesCount}</span>}
         </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'recordings'}
+          className={tab === 'recordings' ? 'panel-tab is-active' : 'panel-tab'}
+          onClick={() => onTabChange('recordings')}
+          title="강의 녹음과 받아쓴 글"
+        >
+          녹음
+          <RecordingTabBadge docId={doc.id} count={recordingCount} />
+        </button>
       </div>
 
       <div className="chat-view" hidden={tab !== 'chat'}>
@@ -351,6 +372,10 @@ export function ChatPanel({
 
       <div className="notes-view" hidden={tab !== 'notes'}>
         {notesMounted && notes}
+      </div>
+
+      <div className="recordings-view" hidden={tab !== 'recordings'}>
+        {recordingsMounted && recordings}
       </div>
 
       {overlay}

@@ -1,0 +1,22 @@
+# configure flags of the minimal LGPL ffmpeg bundled with the desktop app (DESIGN §22; audio spike, normative).
+# Decodes lecture recordings (audio and the audio of videos) and encodes the ASR WAV and the AAC playback copy.
+# No --enable-gpl, no --enable-nonfree: `ffmpeg -L` prints the LGPL 2.1+ text. build-ffmpeg.sh adds the target's
+# cross-compile, static-link and version flags. One flag per line; lines starting with # are comments.
+--disable-everything
+--disable-autodetect
+--disable-doc
+--disable-debug
+--disable-network
+--disable-ffplay
+--disable-avdevice
+--disable-swscale
+--enable-pic
+--enable-protocol=file,pipe
+--enable-demuxer=mov,matroska,ogg,mp3,wav,w64,flac,aac,aiff,caf,amr,avi,mpegts,asf,ac3,eac3
+--enable-decoder=aac,aac_latm,mp3float,mp3,mp2float,mp2,flac,alac,opus,vorbis,amrnb,amrwb,ac3,eac3,wmav1,wmav2,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,pcm_s32be,pcm_f32le,pcm_f32be,pcm_f64le,pcm_u8,pcm_alaw,pcm_mulaw,adpcm_ima_wav,adpcm_ms
+--enable-parser=aac,aac_latm,mpegaudio,flac,opus,vorbis,ac3
+--enable-encoder=pcm_s16le,aac,libopus
+--enable-muxer=wav,ipod,mp4,webm,ogg,null
+--enable-filter=aresample,aformat,anull,atrim,volume,highpass,loudnorm,silencedetect,astats,abuffer,abuffersink
+--enable-swresample
+--enable-libopus

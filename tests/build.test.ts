@@ -7,6 +7,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
+import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { repoRoot } from '../server/config.ts';
 
@@ -36,6 +37,18 @@ describe('compiled server (dist-server)', () => {
     await fs.access(path.join(outDir, 'server', 'pdf.js'));
     assert.match(await fs.readFile(path.join(outDir, 'server', 'imageWorker.js'), 'utf8'), /import\('\.\/pdf\.js'\)/);
     await fs.access(path.join(outDir, 'shared', 'types.js'));
+    // The slide aligner of lecture recordings runs its compiled file as a worker thread (DESIGN §22).
+    const aligner = (await import(pathToFileURL(path.join(outDir, 'server', 'recordings', 'align', 'worker.js')).href)) as typeof import('../server/recordings/align/worker.ts');
+    assert.deepEqual(
+      await aligner.alignInWorker({
+        slideTexts: ['FIRST sets 퍼스트', 'FOLLOW sets 팔로우'],
+        segments: [
+          { start: 0, end: 4, text: '퍼스트 셋을 계산합니다' },
+          { start: 4, end: 8, text: '팔로우 셋은 다음에 오는 터미널' },
+        ],
+      }),
+      [1, 2],
+    );
 
     const child = spawn(process.execPath, ['--max-semi-space-size=2', entry], {
       cwd: os.tmpdir(), // nothing may depend on the working directory

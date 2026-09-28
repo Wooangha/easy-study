@@ -21,7 +21,8 @@
     "sample": "uv run --with reportlab --with pillow python scripts/make_sample_pdf.py samples/sample-lecture.pdf",
     "desktop:dev": "node desktop/scripts/build.mjs --dev",
     "desktop:build": "node desktop/scripts/build.mjs",
-    "desktop:test": "node --test desktop/scripts/*.test.mjs"
+    "desktop:test": "node --test desktop/scripts/*.test.mjs",
+    "setup:whisper": "node scripts/setup-whisper.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.128.0",

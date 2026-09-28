@@ -1,7 +1,8 @@
 # Desktop app (DESIGN §19): Tauri 2 shell + official Node runtime + the packed server, for macOS (arm64, x64),
-# Windows (x64) and Linux (x64, arm64). The repo's tests run first. Bundles are uploaded as workflow artifacts; the
-# x86_64 Linux bundles are also tested on current Arch Linux, which builds the Arch package. A `v*` tag also creates
-# a DRAFT GitHub release with all of them. Unsigned by default (macOS ad-hoc signature, no
+# Windows (x64) and Linux (x64, arm64), with the recording tools of DESIGN §22 (whisper.cpp's whisper-cli and a
+# minimal LGPL ffmpeg, built here for every target and cached). The repo's tests run first. Bundles are uploaded as
+# workflow artifacts; the x86_64 Linux bundles are also tested on current Arch Linux, which builds the Arch package.
+# A `v*` tag also creates a DRAFT GitHub release with all of them (and FFmpeg's source). Unsigned by default (macOS ad-hoc signature, no
 # notarization; unsigned Windows installer): macOS signing and notarization turn on when the APPLE_* secrets exist.
 # (A secret that is not configured arrives as an empty variable; desktop/scripts/build.mjs drops empty APPLE_*
 # variables, which the Tauri CLI would otherwise take as the signing identity "" and as notarization credentials.)
@@ -43,8 +44,63 @@ jobs:
       - run: npm test
       - run: npm run desktop:test # desktop/ configuration invariants (IPC only for the chooser, targets, bundles)
 
+  # The minimal LGPL ffmpeg of the recording tools (DESIGN §22; desktop/scripts/ffmpeg.mjs, build-ffmpeg.sh) for every
+  # target, cached until its sources, flags or scripts change: macOS on macOS; Linux in alpine containers of the
+  # target's architecture (static musl binaries: every distribution, the AppImage, Arch); Windows cross-built with
+  # mingw-w64 in an ubuntu:22.04 container (a separate program: the app's MSVC ABI does not matter). The build job
+  # takes it as an artifact.
+  ffmpeg:
+    name: ffmpeg ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-apple-darwin
+            runner: macos-latest # cross-compiled
+          - target: x86_64-pc-windows-msvc
+            runner: ubuntu-22.04 # mingw-w64
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+      - uses: actions/cache@v4
+        id: cache
+        with:
+          path: .cache/ffmpeg/${{ matrix.target }}
+          key: ffmpeg-${{ matrix.target }}-${{ hashFiles('desktop/scripts/build-ffmpeg.sh', 'desktop/scripts/ffmpeg-min.flags', 'desktop/scripts/ffmpeg.mjs') }}
+      - name: pkg-config (libopus) and nasm (x86 assembly of the Intel Mac build)
+        if: steps.cache.outputs.cache-hit != 'true' && runner.os == 'macOS'
+        run: brew install pkgconf nasm
+      # Reuses the cache when its stamp matches, else downloads the sources (SHA-256 checked) and builds.
+      - name: Build
+        run: node desktop/scripts/ffmpeg.mjs --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-${{ matrix.target }}
+          path: .cache/ffmpeg/${{ matrix.target }}
+          include-hidden-files: true # the path is under .cache
+          if-no-files-found: error
+      # LGPL-2.1: the complete corresponding source goes into every release, next to the app (THIRD_PARTY_NOTICES.md).
+      - name: FFmpeg source for the release
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: node desktop/scripts/ffmpeg.mjs --source-bundle "$RUNNER_TEMP/ffmpeg-source"
+      - uses: actions/upload-artifact@v4
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        with:
+          name: easy-study-ffmpeg-source
+          path: ${{ runner.temp }}/ffmpeg-source/*.tar
+          if-no-files-found: error
+
   build:
-    needs: test
+    needs: [test, ffmpeg]
     strategy:
       fail-fast: false
       matrix:
@@ -97,25 +153,43 @@ jobs:
           workspaces: desktop/src-tauri -> target
           key: ${{ matrix.target }}
 
-      - name: Linux build dependencies (v2.tauri.app/start/prerequisites; xdg-utils for the AppImage, squashfs-tools for appimage.mjs) + Xvfb
+      - name: Linux build dependencies (v2.tauri.app/start/prerequisites; xdg-utils for the AppImage, squashfs-tools for appimage.mjs) + Xvfb, espeak-ng (ASR check)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev \
-            libayatana-appindicator3-dev librsvg2-dev xdg-utils squashfs-tools xvfb
+            libayatana-appindicator3-dev librsvg2-dev xdg-utils squashfs-tools xvfb espeak-ng cmake
 
       - run: npm ci
       - run: npm ci
         working-directory: desktop
 
-      # web/dist + dist-server, then the official Node runtime (SHASUMS256-checked) and the packed server with
-      # production node_modules for THIS target (sharp's @img/sharp-<os>-<cpu>).
+      # The recording tools (DESIGN §22): ffmpeg from the ffmpeg job; whisper.cpp's whisper-cli built here with this
+      # runner's compiler (MSVC on Windows; Metal on Apple silicon, CPU elsewhere) and cached until its version,
+      # flags or checks change. prepare.mjs puts both next to Node in the bundle.
+      - uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg-${{ matrix.target }}
+          path: .cache/ffmpeg/${{ matrix.target }}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .cache/whisper/${{ matrix.target }}/bin
+            .cache/whisper/${{ matrix.target }}/stamp.json
+          key: whisper-${{ matrix.target }}-${{ hashFiles('desktop/scripts/whisper.mjs', 'desktop/scripts/binaries.mjs') }}
+      - name: whisper.cpp (whisper-cli)
+        run: node desktop/scripts/whisper.mjs --target ${{ matrix.target }}
+
+      # web/dist + dist-server, then the official Node runtime (SHASUMS256-checked), the packed server with
+      # production node_modules for THIS target (sharp's @img/sharp-<os>-<cpu>) and the recording tools
+      # (--require-tools: a bundle without them fails here).
       - name: Build and prepare resources
-        run: node desktop/scripts/prepare.mjs --target ${{ matrix.target }}
+        run: node desktop/scripts/prepare.mjs --target ${{ matrix.target }} --require-tools
 
       # macOS signing (optional). Nested Mach-O files in Resources must be signed BEFORE the bundle is: Tauri
       # signs only the app binary and the bundle. Node's own signature carries get-task-allow, which
-      # notarization rejects, so it is re-signed with node.entitlements.
+      # notarization rejects, so it is re-signed with node.entitlements. whisper-cli and ffmpeg need no entitlement
+      # (no JIT, no microphone: the app itself has com.apple.security.device.audio-input, app.entitlements).
       - name: Import signing certificate (macOS)
         if: runner.os == 'macOS' && env.HAS_APPLE_CERT == 'true'
         env:
@@ -138,6 +212,8 @@ jobs:
             --sign "$APPLE_SIGNING_IDENTITY" desktop/resources/node/bin/node
           find desktop/resources/server/node_modules \( -name '*.node' -o -name '*.dylib' \) -print0 |
             xargs -0 codesign --force --timestamp --options runtime --sign "$APPLE_SIGNING_IDENTITY"
+          codesign --force --timestamp --options runtime --sign "$APPLE_SIGNING_IDENTITY" \
+            desktop/resources/whisper/whisper-cli desktop/resources/ffmpeg/ffmpeg
 
       - name: tauri build
         env: # empty when not configured: build.mjs drops empty APPLE_* variables (ad-hoc signature, no notarization)
@@ -145,7 +221,20 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: node desktop/scripts/build.mjs --target ${{ matrix.target }} --skip-prepare
+        run: node desktop/scripts/build.mjs --target ${{ matrix.target }} --skip-prepare --require-tools
+
+      # The recorder records in the app's WKWebView: without NSMicrophoneUsageDescription it has no
+      # navigator.mediaDevices, and under the hardened runtime (on even when signed ad hoc) macOS denies the
+      # microphone without the audio-input entitlement.
+      - name: Microphone description and entitlement (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          app="$BUNDLE/macos/easy-study.app"
+          plutil -extract NSMicrophoneUsageDescription raw "$app/Contents/Info.plist"
+          codesign -d --entitlements - "$app" > "$RUNNER_TEMP/entitlements.txt"
+          grep com.apple.security.device.audio-input "$RUNNER_TEMP/entitlements.txt"
+          codesign -dv "$app" 2>&1 | grep -E '^CodeDirectory .*flags=.*runtime'
+          test -x "$app/Contents/Resources/whisper/whisper-cli" && test -x "$app/Contents/Resources/ffmpeg/ffmpeg"
 
       # build.mjs has taken the libraries out of the AppImage that must come from the user's system
       # (desktop/scripts/appimage.mjs: libwayland-client, which the user's Mesa needs in its own version).
@@ -166,9 +255,19 @@ jobs:
 
       # Smoke tests (EASY_STUDY_DESKTOP_SMOKE, src-tauri/src/main.rs): =chooser-local submits the chooser's own
       # form (IPC, script, styles, connect_local), =1 starts the server the way a remembered choice does. The
-      # bundled server starts in desktop mode, its page renders, /api/health answers, the page has no IPC and a
-      # PDF uploads, converts and its slide images load; nothing is left running afterwards. The library is in a
-      # dot folder, like the Linux default (~/.local/share/…). No claude/codex CLI on the runners: that is fine.
+      # bundled server starts in desktop mode, its page renders, /api/health answers, the page has no IPC, a
+      # PDF uploads, converts and its slide images load, the page has what the lecture recorder needs (a secure
+      # context with getUserMedia and AudioWorklet; the microphone is never opened) and GET /api/asr finds the
+      # whisper-cli and ffmpeg the shell passed; nothing is left running afterwards. The library is in a dot folder, like the Linux default
+      # (~/.local/share/…). No claude/codex CLI on the runners: that is fine.
+      # Then the ASR check (desktop/scripts/asr-smoke.mjs) runs the bundle's own whisper-cli and ffmpeg: the upload
+      # conversion, and a transcription with a small model (cached below) of speech from the runner's text-to-speech
+      # (a generated tone where there is none). No microphone is involved anywhere.
+      - uses: actions/cache@v4
+        if: matrix.smoke
+        with:
+          path: .cache/asr-smoke
+          key: asr-smoke-${{ hashFiles('desktop/scripts/asr-smoke.mjs') }}
       - name: Smoke test (macOS)
         if: matrix.smoke && runner.os == 'macOS'
         run: |
@@ -177,7 +276,9 @@ jobs:
           EASY_STUDY_DESKTOP_SMOKE=chooser-local EASY_STUDY_DESKTOP_SMOKE_TIMEOUT=180 "$app"
           EASY_STUDY_DESKTOP_SMOKE=1 EASY_STUDY_DESKTOP_SMOKE_TIMEOUT=180 "$app"
           sleep 1
-          ! pgrep -f 'dist-server/server/index.js'
+          if pgrep -f 'dist-server/server/index.js'; then exit 1; fi # (BSD pgrep: -a would match ancestors)
+          res="$BUNDLE/macos/easy-study.app/Contents/Resources"
+          node desktop/scripts/asr-smoke.mjs --whisper "$res/whisper/whisper-cli" --ffmpeg "$res/ffmpeg/ffmpeg"
       - name: Smoke test (Linux, installed .deb)
         if: matrix.smoke && runner.os == 'Linux'
         run: |
@@ -186,9 +287,11 @@ jobs:
           EASY_STUDY_DESKTOP_SMOKE=chooser-local EASY_STUDY_DESKTOP_SMOKE_TIMEOUT=180 xvfb-run -a easy-study
           EASY_STUDY_DESKTOP_SMOKE=1 EASY_STUDY_DESKTOP_SMOKE_TIMEOUT=180 xvfb-run -a easy-study
           sleep 1
-          ! pgrep -f 'dist-server/server/index.js'
+          if pgrep -af 'dist-server/server/index.js'; then exit 1; fi
+          node desktop/scripts/asr-smoke.mjs --whisper /usr/bin/es-whisper --ffmpeg /usr/bin/es-ffmpeg
       # With FUSE the AppImage runs from /tmp/.mount_<name>…, a dot folder; extracted into one, it runs from the
-      # same kind of path without FUSE on the runner.
+      # same kind of path without FUSE on the runner. (linuxdeploy rewrites the ELF files it bundles: the ASR check
+      # runs the AppImage's own copies.)
       - name: Smoke test (Linux, AppImage from a dot folder)
         if: matrix.smoke && runner.os == 'Linux'
         run: |
@@ -198,12 +301,15 @@ jobs:
           export EASY_STUDY_DESKTOP_HOME="$RUNNER_TEMP/es-home-appimage" EASY_STUDY_DESKTOP_LIBRARY="$RUNNER_TEMP/.es-appimage/library"
           EASY_STUDY_DESKTOP_SMOKE=1 EASY_STUDY_DESKTOP_SMOKE_TIMEOUT=180 xvfb-run -a ./squashfs-root/AppRun
           sleep 1
-          ! pgrep -f 'dist-server/server/index.js'
+          if pgrep -af 'dist-server/server/index.js'; then exit 1; fi
+          node "$GITHUB_WORKSPACE/desktop/scripts/asr-smoke.mjs" --whisper squashfs-root/usr/bin/es-whisper \
+            --ffmpeg squashfs-root/usr/bin/es-ffmpeg --models "$GITHUB_WORKSPACE/.cache/asr-smoke"
       - name: Smoke test (Windows)
         if: matrix.smoke && runner.os == 'Windows'
         shell: pwsh
         run: |
-          $exe = "desktop/src-tauri/target/${{ matrix.target }}/release/easy-study.exe"
+          $release = "desktop\src-tauri\target\${{ matrix.target }}\release"
+          $exe = "$release\easy-study.exe"
           $env:EASY_STUDY_DESKTOP_HOME = "$env:RUNNER_TEMP\es-home"
           $env:EASY_STUDY_DESKTOP_LIBRARY = "$env:RUNNER_TEMP\.es\library"
           foreach ($mode in @('chooser-local', '1')) {
@@ -213,6 +319,8 @@ jobs:
             Get-Content "$env:EASY_STUDY_DESKTOP_HOME\logs\shell.log" -Tail 8
             if ($p.ExitCode -ne 0) { throw "smoke ($mode) exited with $($p.ExitCode)" }
           }
+          node desktop/scripts/asr-smoke.mjs --whisper "$release\whisper\whisper-cli.exe" --ffmpeg "$release\ffmpeg\ffmpeg.exe"
+          if ($LASTEXITCODE -ne 0) { throw "ASR smoke failed" }
 
       - name: Rust unit tests
         if: matrix.name == 'linux-x64'
@@ -237,7 +345,9 @@ jobs:
         run: |
           # pacman's syscall sandbox fails under x86_64 emulation (Rosetta, where this job was tried out); harmless here.
           sed -i '0,/^\[options\]/s//&\nDisableSandboxSyscalls/' /etc/pacman.conf
-          pacman -Syu --noconfirm --needed base-devel namcap pacman-contrib xorg-server-xvfb fontconfig fribidi harfbuzz
+          # nodejs + espeak-ng: the ASR check of the package's es-whisper and es-ffmpeg.
+          pacman -Syu --noconfirm --needed base-devel namcap pacman-contrib xorg-server-xvfb fontconfig fribidi harfbuzz \
+            nodejs espeak-ng
           useradd -m tester
 
       - uses: actions/checkout@v4
@@ -246,6 +356,10 @@ jobs:
           pattern: easy-study-linux-*
           path: dist
           merge-multiple: true
+      - uses: actions/cache@v4
+        with:
+          path: .cache/asr-smoke
+          key: asr-smoke-${{ hashFiles('desktop/scripts/asr-smoke.mjs') }}
 
       - name: Smoke test (AppImage)
         run: |
@@ -284,8 +398,10 @@ jobs:
           done
           sleep 1
           if pgrep -af 'dist-server/server/index.js'; then exit 1; fi
+          node desktop/scripts/asr-smoke.mjs --whisper /usr/bin/es-whisper --ffmpeg /usr/bin/es-ffmpeg
           pacman -R --noconfirm easy-study-bin
           test ! -e /usr/bin/easy-study && test ! -e /usr/bin/es-node && test ! -e /usr/lib/easy-study
+          test ! -e /usr/bin/es-whisper && test ! -e /usr/bin/es-ffmpeg
 
       - uses: actions/upload-artifact@v4
         with:
@@ -302,8 +418,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      # The bundles, the Arch package and the FFmpeg source (not the ffmpeg-<target> build artifacts).
       - uses: actions/download-artifact@v4
         with:
+          pattern: easy-study-*
           path: dist
           merge-multiple: true
       - name: Draft release

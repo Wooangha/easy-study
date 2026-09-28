@@ -2,10 +2,16 @@
 // (npm run desktop:test). The shell's own logic has Rust unit tests: cargo test in desktop/src-tauri.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { HOST_LIBRARIES, elfHeader, elfSections, hostLibrariesIn, isHostLibrary } from './appimage.mjs';
-import { DESKTOP_DIR, REPO_DIR, TARGETS, hostTarget, shippedNodeVersion, targetInfo, tauriEnv } from './targets.mjs';
+import { SMOKE_MODELS, asrSmoke, mp4Boxes, readWav, toneWav } from './asr-smoke.mjs';
+import { checkBinary, elfInfo, machoInfo, peInfo } from './binaries.mjs';
+import { FFMPEG, OPUS, ffmpegBuildPlan } from './ffmpeg.mjs';
+import { RECORDING_TOOLS, placeTool } from './prepare.mjs';
+import { DESKTOP_DIR, REPO_DIR, TARGETS, externalBinOverride, hostTarget, shippedNodeVersion, targetInfo, tauriEnv } from './targets.mjs';
+import { WHISPER, whisperFlags } from './whisper.mjs';
 
 const tauriDir = path.join(DESKTOP_DIR, 'src-tauri');
 const readJson = (file) => JSON.parse(fs.readFileSync(path.join(tauriDir, file), 'utf8'));
@@ -42,15 +48,23 @@ test('per-platform bundles use the resources prepare.mjs writes', () => {
   const mac = readJson('tauri.macos.conf.json').bundle;
   const win = readJson('tauri.windows.conf.json').bundle;
   const linux = readJson('tauri.linux.conf.json').bundle;
-  const resources = { '../resources/node/': 'node/', '../resources/server/': 'server/' };
+  const resources = {
+    '../resources/node/': 'node/',
+    '../resources/server/': 'server/',
+    // The recording tools (DESIGN §22): the programs themselves on macOS/Windows, their licenses everywhere.
+    '../resources/whisper/': 'whisper/',
+    '../resources/ffmpeg/': 'ffmpeg/',
+  };
   for (const b of [mac, win, linux]) assert.deepEqual(b.resources, resources);
+  assert.deepEqual(RECORDING_TOOLS.map((t) => t.name), ['whisper', 'ffmpeg']);
   assert.deepEqual(mac.targets, ['app', 'dmg']);
   assert.equal(mac.macOS.signingIdentity, '-');
   assert.deepEqual(win.targets, ['nsis']);
   assert.equal(win.windows.nsis.installMode, 'currentUser');
   assert.equal(win.windows.webviewInstallMode.type, 'downloadBootstrapper');
-  // Linux: Node is an externalBin named es-node (/usr/bin/node would clash with the distribution's nodejs).
-  assert.deepEqual(linux.externalBin, ['../resources/bin/es-node']);
+  // Linux: Node is an externalBin named es-node (/usr/bin/node would clash with the distribution's nodejs); the
+  // recording tools the same way (/usr/bin/es-whisper, /usr/bin/es-ffmpeg: never a distribution's ffmpeg).
+  assert.deepEqual(linux.externalBin, ['../resources/bin/es-node', '../resources/bin/es-whisper', '../resources/bin/es-ffmpeg']);
   assert.ok(linux.linux.deb.depends.includes('libatomic1'));
   assert.ok(linux.linux.deb.recommends.includes('fonts-noto-cjk'));
   // xdg-open: external links, "브라우저에서 열기" and "라이브러리 폴더 열기" (tauri-plugin-opener).
@@ -213,4 +227,408 @@ test('packaging/arch/PKGBUILD installs the .deb of the version CI sets', () => {
   assert.match(pkgbuild, /^sha256sums_x86_64=\('[0-9a-f]{64}'\)$/m);
   assert.match(pkgbuild, /^sha256sums_aarch64=\('[0-9a-f]{64}'\)$/m);
   assert.match(pkgbuild, /^_pkgname=easy-study$/m);
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Lecture recordings (DESIGN §22): microphone, recording tools, CI
+// ---------------------------------------------------------------------------------------------------------------
+
+const mediaRs = fs.readFileSync(path.join(tauriDir, 'src', 'media.rs'), 'utf8');
+const serverRs = fs.readFileSync(path.join(tauriDir, 'src', 'server.rs'), 'utf8');
+const workflow = () => fs.readFileSync(path.join(REPO_DIR, '.github', 'workflows', 'desktop.yml'), 'utf8');
+
+test('macOS: the microphone is described (Korean and English) and entitled under the hardened runtime', () => {
+  const plist = fs.readFileSync(path.join(tauriDir, 'Info.plist'), 'utf8');
+  const text = /<key>NSMicrophoneUsageDescription<\/key>\s*<string>([^<]+)<\/string>/.exec(plist)?.[1];
+  assert.ok(text, 'NSMicrophoneUsageDescription (without it WKWebView has no navigator.mediaDevices)');
+  assert.match(text, /[가-힣]/);
+  assert.match(text, /microphone/i);
+  const mac = readJson('tauri.macos.conf.json').bundle.macOS;
+  assert.equal(mac.entitlements, './app.entitlements');
+  assert.equal(mac.hardenedRuntime, undefined, 'the hardened runtime stays on (the default)');
+  const entitlements = fs.readFileSync(path.join(tauriDir, 'app.entitlements'), 'utf8');
+  const keys = [...entitlements.matchAll(/<key>([^<]+)<\/key>\s*<(true|false)\/>/g)].map((m) => [m[1], m[2]]);
+  // Only the microphone: no JIT, no library validation off, no get-task-allow (notarization) for the app itself.
+  assert.deepEqual(keys, [['com.apple.security.device.audio-input', 'true']]);
+});
+
+test('Linux and Windows: audio capture only for the local server and a chosen https server', () => {
+  // The policy is one function, unit-tested in media.rs (cargo test); here: it is wired to both WebViews.
+  assert.match(mediaRs, /pub fn audio_capture_allowed\(page: &str, allowed_origin: Option<&str>, local_server: Option<&str>\) -> bool/);
+  assert.match(mediaRs, /local \|\| url\.scheme\(\) == "https"/);
+  assert.match(mediaRs, /set_enable_media_stream\(true\)/);
+  assert.match(mediaRs, /connect_permission_request/);
+  assert.match(mediaRs, /is_for_audio_device\(\) && !media\.is_for_video_device\(\) && !display/);
+  assert.match(mediaRs, /add_PermissionRequested/);
+  assert.match(mediaRs, /COREWEBVIEW2_PERMISSION_KIND_MICROPHONE/);
+  assert.match(mediaRs, /COREWEBVIEW2_PERMISSION_KIND_CAMERA\s*\{\s*unsafe \{ args\.SetState\(COREWEBVIEW2_PERMISSION_STATE_DENY\)/);
+  assert.match(mainRs, /media::install\(&h, &window\)/);
+  // Recording goes on while the window is minimized or covered (WKWebView would suspend the page).
+  assert.match(mainRs, /\.background_throttling\(BackgroundThrottlingPolicy::Disabled\)/);
+  const cargo = fs.readFileSync(path.join(tauriDir, 'Cargo.toml'), 'utf8');
+  assert.match(cargo, /\[target\.'cfg\(target_os = "linux"\)'\.dependencies\]\nwebkit2gtk = \{ version = "2\.0", features = \["v2_40"\] \}/);
+  assert.match(cargo, /webview2-com = "0\.38"\nwindows-core = "0\.61"/);
+  // The same versions wry links (one copy of each in Cargo.lock).
+  const lock = fs.readFileSync(path.join(tauriDir, 'Cargo.lock'), 'utf8');
+  for (const [name, re] of [['webkit2gtk', /^2\.0\./], ['webview2-com', /^0\.38\./]]) {
+    const versions = [...lock.matchAll(new RegExp(`name = "${name}"\\nversion = "([^"]+)"`, 'g'))].map((m) => m[1]);
+    assert.equal(versions.length, 1, name);
+    assert.match(versions[0], re, name);
+  }
+});
+
+test('the shell hands the recording tools and the models folder to the server', () => {
+  for (const key of ['EASY_STUDY_WHISPER', 'EASY_STUDY_FFMPEG', 'EASY_STUDY_MODELS_DIR']) assert.ok(serverRs.includes(`"${key}"`), key);
+  assert.match(serverRs, /bundled_tool\(res, "whisper", "whisper-cli"\)/);
+  assert.match(serverRs, /bundled_tool\(res, "ffmpeg", "ffmpeg"\)/);
+  assert.match(serverRs, /beside_app\(&format!\("es-\{dir\}"\)\)/);
+  assert.match(serverRs, /config::data_dir\(app\)\.join\("models"\)/);
+  assert.match(serverRs, /"EASY_STUDY_DESKTOP_SMOKE_ASR",/);
+  // The smoke run asks the server what it found.
+  assert.match(mainRs, /fetch\('\/api\/asr'\)/);
+  assert.match(mainRs, /a\.engineAvailable === true && a\.ffmpegAvailable === true/);
+  // … and checks, without opening the microphone, that the page could record: a secure context with getUserMedia
+  // (macOS: only with NSMicrophoneUsageDescription; Linux: enable-media-stream) and AudioWorklet.
+  assert.match(mainRs, /s\.recorder = \{ secure: window\.isSecureContext === true, mediaDevices: typeof navigator\.mediaDevices\?\.getUserMedia === 'function',/);
+  assert.match(mainRs, /let recorder = !local \|\| \["secure", "mediaDevices", "worklet"\]\.iter\(\)\.all/);
+  assert.ok(!/getUserMedia\(/.test(mainRs), 'the smoke run never asks for the microphone');
+});
+
+test('whisper.cpp: the pinned release, portable flags per target, no OpenMP', () => {
+  assert.equal(WHISPER.version, '1.9.4');
+  assert.match(WHISPER.commit, /^927cfce[0-9a-f]{33}$/);
+  assert.ok(WHISPER.url.includes(WHISPER.commit));
+  assert.match(WHISPER.sha256, /^[0-9a-f]{64}$/);
+  for (const triple of Object.keys(TARGETS)) {
+    const flags = whisperFlags(triple);
+    const info = targetInfo(triple);
+    assert.ok(flags.includes('-DGGML_NATIVE=OFF') && flags.includes('-DGGML_OPENMP=OFF'), triple);
+    assert.ok(flags.includes('-DWHISPER_CURL=OFF') && flags.includes('-DWHISPER_SDL2=OFF'), triple);
+    const metal = triple === 'aarch64-apple-darwin';
+    assert.equal(flags.includes('-DGGML_METAL=ON'), metal, triple);
+    if (metal) assert.ok(flags.includes('-DGGML_METAL_EMBED_LIBRARY=ON'));
+    if (info.os === 'win32') {
+      // DLLs next to the exe (resources/whisper/), the CPU backend chosen at run time, the static C runtime.
+      for (const f of ['-DBUILD_SHARED_LIBS=ON', '-DGGML_BACKEND_DL=ON', '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded', '-DCMAKE_POLICY_DEFAULT_CMP0091=NEW']) {
+        assert.ok(flags.includes(f), `${triple} ${f}`);
+      }
+      assert.equal(flags.includes('-DGGML_CPU_ALL_VARIANTS=ON'), info.cpu === 'x64', triple);
+    } else {
+      // One file (Linux: an externalBin).
+      assert.ok(flags.includes('-DBUILD_SHARED_LIBS=OFF'), triple);
+      assert.equal(flags.includes('-DGGML_AVX2=ON'), info.cpu === 'x64', triple);
+    }
+  }
+});
+
+test('ffmpeg: the minimal LGPL build of the audio spike', () => {
+  const lines = fs.readFileSync(path.join(DESKTOP_DIR, 'scripts', 'ffmpeg-min.flags'), 'utf8').split('\n').filter((l) => l && !l.startsWith('#'));
+  for (const f of ['--disable-everything', '--disable-autodetect', '--disable-network', '--enable-libopus', '--disable-avdevice']) assert.ok(lines.includes(f), f);
+  assert.ok(!lines.some((l) => /--enable-(gpl|nonfree|version3)/.test(l)), 'LGPL 2.1+ only');
+  const list = (name) => lines.find((l) => l.startsWith(`--enable-${name}=`)).split('=')[1].split(',');
+  // What the server's upload pass needs: any lecture container in, a 16 kHz WAV and an AAC .m4a (+faststart) out.
+  for (const d of ['mov', 'matroska', 'mp3', 'wav', 'ogg', 'flac', 'aac']) assert.ok(list('demuxer').includes(d), d);
+  for (const d of ['aac', 'opus', 'mp3', 'flac', 'vorbis']) assert.ok(list('decoder').includes(d), d);
+  assert.deepEqual(list('encoder'), ['pcm_s16le', 'aac', 'libopus']);
+  for (const m of ['wav', 'ipod']) assert.ok(list('muxer').includes(m), m);
+  assert.ok(list('filter').includes('aresample'));
+  const script = fs.readFileSync(path.join(DESKTOP_DIR, 'scripts', 'build-ffmpeg.sh'), 'utf8');
+  assert.match(script, /grep -q '\^License: LGPL version 2\.1 or later'/);
+  assert.match(script, /PKG_CONFIG_LIBDIR="\$WORK\/prefix\/lib\/pkgconfig"/);
+  assert.equal(FFMPEG.version, '8.1');
+  assert.equal(OPUS.version, '1.5.2');
+  for (const src of [FFMPEG, OPUS]) {
+    assert.match(src.sha256, /^[0-9a-f]{64}$/);
+    assert.ok(src.url.startsWith('https://') && src.url.includes(src.version));
+  }
+});
+
+test('ffmpeg builds where it can: macOS here, Linux in alpine, Windows with mingw-w64', () => {
+  const mac = 'aarch64-apple-darwin';
+  const linuxArm = 'aarch64-unknown-linux-gnu';
+  const linuxX64 = 'x86_64-unknown-linux-gnu';
+  const win = 'x86_64-pc-windows-msvc';
+  assert.deepEqual(ffmpegBuildPlan(mac, { host: mac }), { how: 'here' });
+  assert.deepEqual(ffmpegBuildPlan('x86_64-apple-darwin', { host: mac }), { how: 'here' });
+  assert.match(ffmpegBuildPlan(mac, { host: linuxX64 }).error, /macOS/);
+  assert.deepEqual(ffmpegBuildPlan(linuxArm, { host: linuxArm, alpine: true }), { how: 'here' });
+  const inDocker = ffmpegBuildPlan(linuxX64, { host: mac, docker: true });
+  assert.equal(inDocker.how, 'docker');
+  assert.equal(inDocker.image, 'alpine:3.22');
+  assert.equal(inDocker.platform, 'linux/amd64');
+  assert.match(inDocker.setup, /apk add --no-cache build-base nasm cmake pkgconf linux-headers/);
+  assert.match(ffmpegBuildPlan(linuxX64, { host: linuxX64, alpine: false, docker: false }).error, /docker/);
+  assert.deepEqual(ffmpegBuildPlan(win, { host: linuxX64, mingw: true }), { how: 'here' });
+  const winDocker = ffmpegBuildPlan(win, { host: mac, mingw: false, docker: true });
+  assert.equal(winDocker.image, 'ubuntu:22.04');
+  assert.match(winDocker.setup, /mingw-w64/);
+});
+
+test('recording tools land where the shell looks for them', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'es-place-'));
+  try {
+    const src = path.join(tmp, 'src');
+    fs.mkdirSync(src);
+    const file = (name) => {
+      fs.writeFileSync(path.join(src, name), name);
+      return path.join(src, name);
+    };
+    const whisper = RECORDING_TOOLS.find((t) => t.name === 'whisper');
+    const ffmpeg = RECORDING_TOOLS.find((t) => t.name === 'ffmpeg');
+    const place = (tool, files, triple) => {
+      const resources = path.join(tmp, triple);
+      return placeTool({ tool, files, target: triple, info: targetInfo(triple), resources });
+    };
+    // macOS / Windows: resources/<tool>/ (server.rs bundled_tool: <resources>/whisper/whisper-cli[.exe]).
+    assert.deepEqual(place(whisper, [file('whisper-cli'), file('LICENSE')], 'aarch64-apple-darwin'), ['whisper/whisper-cli', 'whisper/LICENSE']);
+    assert.equal(fs.statSync(path.join(tmp, 'aarch64-apple-darwin', 'whisper', 'whisper-cli')).mode & 0o777, 0o755);
+    assert.equal(fs.statSync(path.join(tmp, 'aarch64-apple-darwin', 'whisper', 'LICENSE')).mode & 0o777, 0o644);
+    assert.deepEqual(place(whisper, [file('whisper-cli.exe'), file('whisper.dll'), file('ggml-cpu-haswell.dll'), file('LICENSE')], 'x86_64-pc-windows-msvc'), [
+      'whisper/whisper-cli.exe',
+      'whisper/whisper.dll',
+      'whisper/ggml-cpu-haswell.dll',
+      'whisper/LICENSE',
+    ]);
+    // Linux: the externalBin es-<tool>-<triple> (→ /usr/bin/es-<tool>), licenses in resources/<tool>/.
+    assert.deepEqual(place(ffmpeg, [file('ffmpeg'), file('COPYING.LGPLv2.1'), file('BUILD.txt')], 'x86_64-unknown-linux-gnu'), [
+      'bin/es-ffmpeg-x86_64-unknown-linux-gnu',
+      'ffmpeg/COPYING.LGPLv2.1',
+      'ffmpeg/BUILD.txt',
+    ]);
+    assert.throws(() => place(ffmpeg, [file('BUILD.txt')], 'aarch64-apple-darwin'), /ffmpeg missing/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+  // A local Linux build without a tool drops it from the externalBin list (a complete build keeps the config's).
+  const linux = targetInfo('x86_64-unknown-linux-gnu');
+  assert.deepEqual(externalBinOverride(linux, { whisper: true, ffmpeg: true }), []);
+  assert.deepEqual(externalBinOverride(targetInfo('aarch64-apple-darwin'), { whisper: false, ffmpeg: false }), []);
+  const [flag, json] = externalBinOverride(linux, { whisper: true, ffmpeg: false });
+  assert.equal(flag, '--config');
+  assert.deepEqual(JSON.parse(json), { bundle: { externalBin: ['../resources/bin/es-node', '../resources/bin/es-whisper'] } });
+});
+
+/** A minimal thin Mach-O 64 with LC_LOAD_DYLIB commands. */
+function machO(cputype, dylibs) {
+  const cmds = dylibs.map((name) => {
+    const str = Buffer.from(`${name}\0`);
+    const size = Math.ceil((24 + str.length) / 8) * 8;
+    const cmd = Buffer.alloc(size);
+    cmd.writeUInt32LE(0xc, 0);
+    cmd.writeUInt32LE(size, 4);
+    cmd.writeUInt32LE(24, 8);
+    str.copy(cmd, 24);
+    return cmd;
+  });
+  const header = Buffer.alloc(32);
+  header.writeUInt32LE(0xfeedfacf, 0);
+  header.writeUInt32LE(cputype, 4);
+  header.writeUInt32LE(2, 12);
+  header.writeUInt32LE(cmds.length, 16);
+  header.writeUInt32LE(cmds.reduce((n, c) => n + c.length, 0), 20);
+  return Buffer.concat([header, ...cmds]);
+}
+
+/** A minimal ELF64 with .dynstr, .dynamic (DT_NEEDED entries) and .shstrtab. */
+function elf(machine, needed) {
+  const dynstr = Buffer.from(`\0${needed.join('\0')}\0`, 'latin1');
+  const dynamic = Buffer.alloc((needed.length + 1) * 16);
+  let at = 1;
+  needed.forEach((name, i) => {
+    dynamic.writeBigInt64LE(1n, i * 16);
+    dynamic.writeBigUInt64LE(BigInt(at), i * 16 + 8);
+    at += name.length + 1;
+  });
+  const shstr = Buffer.from('\0.dynstr\0.dynamic\0.shstrtab\0', 'latin1');
+  const off = { dynstr: 0x40, dynamic: 0x40 + dynstr.length, shstr: 0x40 + dynstr.length + dynamic.length };
+  const shoff = Math.ceil((off.shstr + shstr.length) / 8) * 8;
+  const buf = Buffer.alloc(shoff + 4 * 64);
+  buf.writeUInt32BE(0x7f454c46, 0);
+  buf[4] = 2;
+  buf[5] = 1;
+  buf.writeUInt16LE(machine, 0x12);
+  buf.writeBigUInt64LE(BigInt(shoff), 0x28);
+  buf.writeUInt16LE(64, 0x3a);
+  buf.writeUInt16LE(4, 0x3c);
+  buf.writeUInt16LE(3, 0x3e);
+  dynstr.copy(buf, off.dynstr);
+  dynamic.copy(buf, off.dynamic);
+  shstr.copy(buf, off.shstr);
+  const section = (i, nameAt, offset, size) => {
+    buf.writeUInt32LE(nameAt, shoff + i * 64);
+    buf.writeBigUInt64LE(BigInt(offset), shoff + i * 64 + 0x18);
+    buf.writeBigUInt64LE(BigInt(size), shoff + i * 64 + 0x20);
+  };
+  section(1, 1, off.dynstr, dynstr.length);
+  section(2, 9, off.dynamic, dynamic.length);
+  section(3, 18, off.shstr, shstr.length);
+  return buf;
+}
+
+/** A minimal PE32+ with one section holding the import descriptors and DLL names. */
+function pe(machine, dlls) {
+  const buf = Buffer.alloc(0x400);
+  buf.write('MZ', 0, 'latin1');
+  buf.writeUInt32LE(0x40, 0x3c);
+  buf.write('PE\0\0', 0x40, 'latin1');
+  const coff = 0x44;
+  buf.writeUInt16LE(machine, coff);
+  buf.writeUInt16LE(1, coff + 2);
+  buf.writeUInt16LE(240, coff + 16);
+  const opt = coff + 20;
+  buf.writeUInt16LE(0x20b, opt);
+  buf.writeUInt32LE(16, opt + 108);
+  buf.writeUInt32LE(0x1000, opt + 120); // import table RVA
+  const sec = opt + 240;
+  buf.write('.idata', sec, 'latin1');
+  buf.writeUInt32LE(0x200, sec + 8); // virtual size
+  buf.writeUInt32LE(0x1000, sec + 12); // virtual address
+  buf.writeUInt32LE(0x200, sec + 16); // raw size
+  buf.writeUInt32LE(0x200, sec + 20); // raw pointer
+  let names = 0x200 + (dlls.length + 1) * 20;
+  dlls.forEach((dll, i) => {
+    buf.writeUInt32LE(0x1000 + (names - 0x200), 0x200 + i * 20 + 12);
+    buf.write(`${dll}\0`, names, 'latin1');
+    names += dll.length + 1;
+  });
+  return buf;
+}
+
+test('shipped programs: right CPU, only the OS libraries', () => {
+  assert.deepEqual(machoInfo(machO(0x0100000c, ['/usr/lib/libSystem.B.dylib', '/opt/homebrew/lib/libopus.0.dylib'])), {
+    cpu: 'arm64',
+    dylibs: ['/usr/lib/libSystem.B.dylib', '/opt/homebrew/lib/libopus.0.dylib'],
+  });
+  assert.equal(machoInfo(machO(0x01000007, [])).cpu, 'x64');
+  assert.throws(() => machoInfo(Buffer.from('cafebabe00000002'.padEnd(64, '0'), 'hex')), /universal/);
+  assert.deepEqual(elfInfo(elf(62, ['libstdc++.so.6', 'libgomp.so.1', 'libc.so.6'])), { cpu: 'x64', needed: ['libstdc++.so.6', 'libgomp.so.1', 'libc.so.6'] });
+  assert.deepEqual(elfInfo(elf(183, [])), { cpu: 'arm64', needed: [] });
+  assert.deepEqual(peInfo(pe(0x8664, ['whisper.dll', 'KERNEL32.dll', 'VCRUNTIME140.dll'])), { cpu: 'x64', imports: ['whisper.dll', 'KERNEL32.dll', 'VCRUNTIME140.dll'] });
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'es-bin-'));
+  try {
+    const check = (buf, opts) => {
+      const f = path.join(tmp, 'x');
+      fs.writeFileSync(f, buf);
+      return checkBinary(f, opts);
+    };
+    assert.deepEqual(check(machO(0x0100000c, ['/usr/lib/libc++.1.dylib', '/System/Library/Frameworks/Metal.framework/Versions/A/Metal']), { os: 'darwin', cpu: 'arm64' }).length, 2);
+    // Homebrew's dylibs are only on the build machine.
+    assert.throws(() => check(machO(0x0100000c, ['/opt/homebrew/lib/libopus.0.dylib']), { os: 'darwin', cpu: 'arm64' }), /libopus/);
+    assert.throws(() => check(machO(0x01000007, []), { os: 'darwin', cpu: 'arm64' }), /built for x64, not arm64/);
+    assert.deepEqual(check(elf(183, []), { os: 'linux', cpu: 'arm64' }), []);
+    check(elf(62, ['libstdc++.so.6', 'libm.so.6', 'libgcc_s.so.1', 'libc.so.6', 'ld-linux-x86-64.so.2']), { os: 'linux', cpu: 'x64' });
+    // OpenMP's runtime is not on every Linux (the official whisper.cpp build fails on a clean Ubuntu).
+    assert.throws(() => check(elf(62, ['libgomp.so.1', 'libc.so.6']), { os: 'linux', cpu: 'x64' }), /libgomp/);
+    check(pe(0x8664, ['whisper.dll', 'ggml.dll', 'KERNEL32.dll', 'ADVAPI32.dll', 'msvcrt.dll']), { os: 'win32', cpu: 'x64', own: ['whisper.dll', 'ggml.dll'] });
+    // Not the Visual C++ runtime (a user need not have it), and no DLL that is neither Windows' nor shipped.
+    assert.throws(() => check(pe(0x8664, ['VCRUNTIME140.dll', 'KERNEL32.dll']), { os: 'win32', cpu: 'x64' }), /VCRUNTIME140/);
+    assert.throws(() => check(pe(0x8664, ['api-ms-win-crt-heap-l1-1-0.dll']), { os: 'win32', cpu: 'x64' }), /api-ms-win-crt/);
+    assert.throws(() => check(pe(0x8664, ['libwinpthread-1.dll']), { os: 'win32', cpu: 'x64' }), /libwinpthread/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('ASR smoke: WAV and MP4 readers, and the whole check with fake tools (no network, no microphone)', { skip: process.platform === 'win32' && 'the fake tools are Node scripts with a #! line' }, async () => {
+  const wav = readWav(toneWav(3, 44100, 2));
+  assert.deepEqual(wav, { format: 1, channels: 2, rate: 44100, bits: 16, seconds: 3 });
+  const box = (type, size) => {
+    const b = Buffer.alloc(size);
+    b.writeUInt32BE(size, 0);
+    b.write(type, 4, 'latin1');
+    return b;
+  };
+  assert.deepEqual(mp4Boxes(Buffer.concat([box('ftyp', 24), box('moov', 100), box('free', 8), box('mdat', 64)])), ['ftyp', 'moov', 'free', 'mdat']);
+  assert.throws(() => mp4Boxes(Buffer.from([0, 0, 0, 4, 0x66, 0x74, 0x79, 0x70])), /broken MP4 box/);
+  for (const m of Object.values(SMOKE_MODELS)) {
+    assert.match(m.sha256, /^[0-9a-f]{64}$/);
+    assert.match(m.url, /^https:\/\/huggingface\.co\/[^/]+\/[^/]+\/resolve\/[0-9a-f]{40}\//, 'a pinned revision');
+  }
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'es-asr-'));
+  try {
+    const script = (name, body) => {
+      const f = path.join(tmp, name);
+      fs.writeFileSync(f, `#!${process.execPath}\n${body}`, { mode: 0o755 });
+      return f;
+    };
+    // ffmpeg: writes each output (WAV: 16 kHz mono s16 of the input's length; .m4a: ftyp moov mdat).
+    const ffmpeg = script('ffmpeg', `
+      const fs = require('fs');
+      const args = process.argv.slice(2);
+      const outs = args.filter((a, i) => /\\.(wav|m4a)$/.test(a) && args[i - 1] !== '-i');
+      for (const out of outs) {
+        if (out.endsWith('.wav')) {
+          const data = Buffer.alloc(16000 * 2 * 3);
+          const h = Buffer.alloc(44);
+          h.write('RIFF', 0); h.writeUInt32LE(36 + data.length, 4); h.write('WAVEfmt ', 8); h.writeUInt32LE(16, 16);
+          h.writeUInt16LE(1, 20); h.writeUInt16LE(1, 22); h.writeUInt32LE(16000, 24); h.writeUInt32LE(32000, 28);
+          h.writeUInt16LE(2, 32); h.writeUInt16LE(16, 34); h.write('data', 36); h.writeUInt32LE(data.length, 40);
+          fs.writeFileSync(out, Buffer.concat([h, data]));
+        } else {
+          const box = (t, n) => { const b = Buffer.alloc(n); b.writeUInt32BE(n, 0); b.write(t, 4); return b; };
+          fs.writeFileSync(out, Buffer.concat([box('ftyp', 24), box('moov', 64), box('mdat', 128)]));
+        }
+      }
+      if (args.includes('pipe:1')) process.stdout.write('out_time_us=3000000\\nprogress=end\\n');
+    `);
+    const whisper = script('whisper-cli', `
+      const fs = require('fs');
+      const args = process.argv.slice(2);
+      const at = (flag) => args[args.indexOf(flag) + 1];
+      for (const flag of ['-m', '-f', '-l', '-vm', '-of']) if (!args.includes(flag)) { console.error('missing ' + flag); process.exit(2); }
+      if (!args.includes('--vad') || !args.includes('-ojf')) process.exit(3);
+      fs.writeFileSync(at('-of') + '.json', JSON.stringify({ result: { language: at('-l') }, transcription: [{ text: ' (tone)' }] }));
+    `);
+    const model = path.join(tmp, 'model.bin');
+    fs.writeFileSync(model, 'fake');
+    const result = await asrSmoke({ whisper, ffmpeg, model, vad: model, speechMode: 'none' });
+    assert.deepEqual(result, { spoken: false, text: '(tone)', segments: 1 });
+    await assert.rejects(asrSmoke({ whisper: path.join(tmp, 'nope'), ffmpeg, model, vad: model, speechMode: 'none' }), /--whisper: no such file/);
+    const broken = script('whisper-broken', 'process.exit(1);');
+    await assert.rejects(asrSmoke({ whisper: broken, ffmpeg, model, vad: model, speechMode: 'none' }), /exited with 1/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('CI builds the recording tools for every target, ships them and checks them in the app', () => {
+  const wf = workflow();
+  // ffmpeg: its own job per target (Windows cross-built with mingw-w64 on Linux), cached, handed over as an artifact.
+  const ff = /\n {2}ffmpeg:\n([\s\S]*?)\n {2}build:/.exec(wf)?.[1];
+  assert.ok(ff, 'job ffmpeg');
+  for (const triple of Object.keys(TARGETS).filter((t) => t !== 'aarch64-pc-windows-msvc')) assert.ok(ff.includes(`target: ${triple}`), triple);
+  assert.match(ff, /actions\/cache@v4/);
+  assert.match(ff, /hashFiles\('desktop\/scripts\/build-ffmpeg\.sh', 'desktop\/scripts\/ffmpeg-min\.flags', 'desktop\/scripts\/ffmpeg\.mjs'/);
+  assert.match(ff, /node desktop\/scripts\/ffmpeg\.mjs --target \$\{\{ matrix\.target \}\}/);
+  assert.match(ff, /name: ffmpeg-\$\{\{ matrix\.target \}\}/);
+  // upload-artifact leaves out hidden files and folders unless told (.cache is one).
+  assert.match(ff, /path: \.cache\/ffmpeg\/\$\{\{ matrix\.target \}\}\n\s+include-hidden-files: true/);
+  // LGPL: FFmpeg's source goes into the release; the release takes only easy-study-* artifacts (not ffmpeg-<target>).
+  assert.match(ff, /ffmpeg\.mjs --source-bundle/);
+  assert.match(ff, /name: easy-study-ffmpeg-source/);
+  assert.match(wf, /release:[\s\S]*download-artifact@v4\n\s+with:\n\s+pattern: easy-study-\*/);
+  const build = /\n {2}build:\n([\s\S]*?)\n {2}arch:/.exec(wf)?.[1];
+  assert.ok(build, 'job build');
+  assert.match(build, /needs: \[test, ffmpeg\]/);
+  assert.match(build, /name: ffmpeg-\$\{\{ matrix\.target \}\}\n\s+path: \.cache\/ffmpeg\/\$\{\{ matrix\.target \}\}/);
+  assert.match(build, /hashFiles\('desktop\/scripts\/whisper\.mjs', 'desktop\/scripts\/binaries\.mjs'\)/);
+  assert.match(build, /node desktop\/scripts\/whisper\.mjs --target \$\{\{ matrix\.target \}\}/);
+  // A release never goes out without them.
+  assert.match(build, /node desktop\/scripts\/prepare\.mjs --target \$\{\{ matrix\.target \}\} --require-tools/);
+  // macOS: the microphone key and entitlement in the built app; the tools signed with the app's identity.
+  assert.match(build, /codesign -d --entitlements - "\$app" > "\$RUNNER_TEMP\/entitlements\.txt"\n\s+grep com\.apple\.security\.device\.audio-input/);
+  assert.match(build, /plutil -extract NSMicrophoneUsageDescription raw "\$app\/Contents\/Info\.plist"/);
+  assert.match(build, /desktop\/resources\/whisper\/whisper-cli desktop\/resources\/ffmpeg\/ffmpeg/);
+  // The bundled tools really transcribe (a small model, speech from the runner's text-to-speech).
+  for (const where of ['$res/whisper/whisper-cli', '/usr/bin/es-whisper', 'squashfs-root/usr/bin/es-whisper', '$release\\whisper\\whisper-cli.exe']) {
+    assert.ok(build.includes(where), where);
+  }
+  assert.match(build, /espeak-ng/);
+  assert.equal((build.match(/desktop\/scripts\/asr-smoke\.mjs"? --whisper/g) ?? []).length, 4);
+  // Arch: the package carries them too (from the .deb) and removes them again.
+  const arch = /\n {2}arch:\n([\s\S]*?)\n {2}release:/.exec(wf)?.[1];
+  assert.match(arch, /node desktop\/scripts\/asr-smoke\.mjs --whisper \/usr\/bin\/es-whisper --ffmpeg \/usr\/bin\/es-ffmpeg/);
+  assert.match(arch, /test ! -e \/usr\/bin\/es-whisper && test ! -e \/usr\/bin\/es-ffmpeg/);
 });

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import type { Course, DocMeta, LibraryLayout, ProviderId, ProviderInfo, SessionSummary } from '../../../shared/types.ts';
 import { notesMarkdownUrl } from '../api.ts';
 import { indexCourses } from '../hooks/useCourses.ts';
@@ -38,6 +38,8 @@ interface TopBarProps {
   hasNotes: boolean;
   /** Remote mode (the server asks for an access code): "로그아웃" button. */
   onLogout?: () => void;
+  /** 🎙 record button / the running recording (DESIGN §22). */
+  recordControl?: ReactNode;
 }
 
 function docOptionLabel(d: DocMeta, index?: number): string {
@@ -178,6 +180,8 @@ export function TopBar(props: TopBarProps) {
           )}
         </div>
       )}
+
+      {props.recordControl}
 
       <span className="spacer" />
 

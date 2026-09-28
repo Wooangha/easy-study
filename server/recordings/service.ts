@@ -1,0 +1,1659 @@
+// Lecture recordings (DESIGN §22): the recordings of a document, recorded live in the app (PCM uploaded as it is
+// captured, transcribed a few windows behind) or uploaded as a file (converted by ffmpeg, then transcribed), aligned
+// to the slides, replayed, and used as tutor context.
+//
+// State lives on disk (store.ts); a Rec object is loaded on demand and holds a recording's in-memory state while it
+// is used: its transcript, windows, slide timeline, markers, the open live audio (live.ts), the segmenter, its SSE
+// subscribers. Mutations of one recording run one after another (a promise chain). One whisper process runs at a
+// time for the whole server (a FIFO queue, live windows first); a download of a model starts waiting jobs.
+// After a restart, live recordings left in 'recording'/'paused' stay resumable (the client resends from the
+// acknowledged offset) and unfinished conversions / transcriptions resume (resumeRecordings).
+import { randomBytes } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { LIVE_SAMPLE_RATE, MAX_RECORDING_UPLOAD_BYTES } from '../../shared/types.ts';
+import type {
+  AlignmentKind,
+  AlignmentMarker,
+  AsrStatus,
+  CreateLiveRecordingRequest,
+  RecordingInfo,
+  RecordingLanguage,
+  RecordingTranscript,
+  SlideViewEvent,
+  TranscriptSegment,
+} from '../../shared/types.ts';
+import { HttpError, desktopMode, libraryDir } from '../config.ts';
+import { docPaths, isNotFound, loadDocAssets, readStoredDoc, renameWithRetry, rmWithRetry } from '../library.ts';
+import type { Label } from './align/align.ts';
+import { timelinePrior } from './align/align.ts';
+import { stripMarkdown } from './align/text.ts';
+import { alignInWorker } from './align/worker.ts';
+import { acceleration, detectLanguage, findFfmpeg, findWhisper, probeVersion, runWhisper } from './asr.ts';
+import { EventHub, RECORDING_PING_MS, sseFrame } from './events.ts';
+import type { SseTarget } from './events.ts';
+import { conversionError, convertUpload } from './ffmpeg.ts';
+import { LiveAudio } from './live.ts';
+import type { LiveHooks } from './live.ts';
+import { ModelStore, SMALL_MODEL_ID, TURBO_MODEL_ID } from './models.ts';
+import { BYTES_PER_SECOND, Segmenter, WINDOW_PRESETS } from './segmenter.ts';
+import type { AsrWindow, WindowPreset } from './segmenter.ts';
+import {
+  cleanTitle,
+  defaultLiveTitle,
+  emptyTranscript,
+  isRecordingId,
+  listRecordingIds,
+  newRecordingId,
+  readLlmLabels,
+  readMarkers,
+  readMeta,
+  readTimeline,
+  readTranscriptState,
+  readWindows,
+  recordingPaths,
+  recordingsDir,
+  writeJsonLines,
+  writeLlmLabels,
+  writeMarkers,
+  writeMeta,
+  writeTimeline,
+  writeTranscriptState,
+} from './store.ts';
+import type { LlmLabels, RecordingMeta, RecordingPaths, TranscriptState } from './store.ts';
+import { readWavInfo, wavHeader, writeWavSlice } from './wav.ts';
+
+// ---------------------------------------------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------------------------------------------
+
+export interface RecordingsConfig {
+  models: ModelStore;
+  /** Largest accepted upload (bytes). */
+  maxUploadBytes: number;
+  livePreset: WindowPreset;
+  uploadPreset: WindowPreset;
+  /** Test hooks of the live audio store (fault injection). */
+  liveHooks?: LiveHooks;
+  /** Minimum time between two full re-alignments of a live recording while it runs (ms). */
+  liveRealignMs: number;
+  /** Status events of a recording are sent at most this often (ms). */
+  statusThrottleMs: number;
+  /** `event: ping` interval of the SSE streams (ms). */
+  pingMs: number;
+  /**
+   * A live recording stopped with audio still to come (stop {bytes} beyond what is stored) is ended with what it has
+   * when a new live recording is asked for and nothing arrived for this long (ms): the device that had the rest is gone.
+   */
+  staleStopMs: number;
+  /**
+   * A loaded recording nobody used for this long (ms) and that has nothing running (not live, no job, no subscriber)
+   * is dropped from memory; the next request loads it from its files again.
+   */
+  idleUnloadMs: number;
+}
+
+function defaultConfig(): RecordingsConfig {
+  return {
+    models: new ModelStore(),
+    maxUploadBytes: MAX_RECORDING_UPLOAD_BYTES,
+    livePreset: WINDOW_PRESETS.live,
+    uploadPreset: WINDOW_PRESETS.upload,
+    liveRealignMs: 60_000,
+    statusThrottleMs: 500,
+    pingMs: RECORDING_PING_MS,
+    staleStopMs: 10 * 60_000,
+    idleUnloadMs: 10 * 60_000,
+  };
+}
+
+let config: RecordingsConfig = defaultConfig();
+
+/** The default configuration with `partial` on top (startServer, tests). */
+export function configureRecordings(partial: Partial<RecordingsConfig> = {}): void {
+  config = { ...defaultConfig(), ...partial };
+  config.models.onInstalled = (modelId) => {
+    warmUp(modelId);
+    pumpQueue();
+  };
+}
+configureRecordings({});
+
+export function recordingsConfig(): Readonly<RecordingsConfig> {
+  return config;
+}
+
+/** Windows with less speech than this are not transcribed (silence, noise). */
+const MIN_SPEECH_MS = 300;
+/** Attempts of one window before it is given up. */
+const WINDOW_ATTEMPTS = 3;
+/** Pending requests per recording before 429 (live spike). */
+const MAX_PENDING = 8;
+/** Length of the clip whisper detects the language of an upload on. */
+const DETECT_CLIP_MS = 30_000;
+/** Minimum speech of a live window whose detected language is kept for the next ones. */
+const DETECT_MIN_SPEECH_MS = 5_000;
+
+const LANGUAGES: readonly RecordingLanguage[] = ['ko', 'en', 'auto'];
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// One recording
+// ---------------------------------------------------------------------------------------------------------------
+
+type Mutation<T> = () => Promise<T>;
+
+class Rec {
+  readonly docId: string;
+  readonly id: string;
+  readonly paths: RecordingPaths;
+  meta: RecordingMeta;
+  transcript: TranscriptState;
+  windows: AsrWindow[] = [];
+  timeline: SlideViewEvent[] = [];
+  markers: AlignmentMarker[] = [];
+  llm: LlmLabels | null = null;
+  live: LiveAudio | null = null;
+  seg: Segmenter | null = null;
+  /** Live: bytes stored (acknowledged). */
+  committed = 0;
+  /** Live: when audio or a pause/resume/stop last arrived (loading counts: a restart gives the client time again). */
+  lastActivity = Date.now();
+  /** Last request that loaded this recording or queued work on it (idle unloading). */
+  lastUsed = Date.now();
+  readonly hub = new EventHub(config.pingMs);
+  deleted = false;
+  /** Controllers of work to stop when the recording is deleted (conversion, AI alignment). */
+  readonly jobs = new Set<AbortController>();
+  aiRunning = false;
+  private chain: Promise<unknown> = Promise.resolve();
+  private pending = 0;
+  private statusTimer: NodeJS.Timeout | null = null;
+  private aligning: Promise<void> | null = null;
+  /** Background work of this recording (conversion, alignment, AI alignment): awaited by close/shutdown. */
+  private readonly background = new Set<Promise<unknown>>();
+  private closed = false;
+  private alignAgain = false;
+  private lastAlignAt = 0;
+  private wavInfo: { dataOffset: number; dataBytes: number } | null = null;
+  /** The window being transcribed and how far whisper got in it (seconds on the recording clock). */
+  private progress: { i: number; sec: number } | null = null;
+
+  constructor(meta: RecordingMeta) {
+    this.docId = meta.docId;
+    this.id = meta.id;
+    this.paths = recordingPaths(meta.docId, meta.id);
+    this.meta = meta;
+    this.transcript = emptyTranscript(meta.id);
+  }
+
+  get key(): string {
+    return recKey(this.docId, this.id);
+  }
+
+  get isLive(): boolean {
+    return this.meta.source === 'live' && !this.meta.finalized && (this.meta.status === 'recording' || this.meta.status === 'paused');
+  }
+
+  /**
+   * Runs `fn` after every earlier mutation of this recording. `limited` (client requests): 429 when too many are
+   * waiting. The server's own work (transcription results, alignment, conversion, SSE replays) is never refused.
+   */
+  serial<T>(fn: Mutation<T>, limited = false): Promise<T> {
+    if (limited && this.pending >= MAX_PENDING) {
+      throw new HttpError(429, '요청이 너무 많습니다. 잠시 뒤에 다시 보내 주세요', { retryAfterMs: 1000 });
+    }
+    this.pending++;
+    this.lastUsed = Date.now();
+    const run = this.chain.then(() => {
+      if (this.deleted) throw new HttpError(404, '녹음을 찾을 수 없습니다');
+      if (this.closed) throw new HttpError(503, '서버가 종료되는 중입니다');
+      return fn();
+    });
+    this.chain = run.catch(() => {}).finally(() => this.pending--);
+    return run;
+  }
+
+  /** Nothing of this recording runs or waits, and nobody listens: it may be dropped from memory. */
+  idle(now: number): boolean {
+    return (
+      now - this.lastUsed >= config.idleUnloadMs &&
+      !this.isLive &&
+      this.meta.status !== 'converting' &&
+      this.pending === 0 &&
+      this.aligning === null &&
+      this.background.size === 0 &&
+      this.jobs.size === 0 &&
+      !this.aiRunning &&
+      this.statusTimer === null &&
+      this.hub.size === 0 &&
+      runningJob?.rec !== this &&
+      !queue.some((j) => j.rec === this)
+    );
+  }
+
+  /** Registers background work so that close/shutdown can wait for it. */
+  track<T>(work: Promise<T>): Promise<T> {
+    this.background.add(work);
+    void work.then(
+      () => this.background.delete(work),
+      () => this.background.delete(work),
+    );
+    return work;
+  }
+
+  private async settleBackground(): Promise<void> {
+    const timeout = new Promise<void>((resolve) => setTimeout(resolve, 10_000).unref?.());
+    await Promise.race([Promise.allSettled([...this.background]), timeout]);
+  }
+
+  // --- loading / recovery -----------------------------------------------------------------------------------
+
+  async init(): Promise<void> {
+    const [transcript, windows, timeline, markers, llm] = await Promise.all([
+      readTranscriptState(this.docId, this.id),
+      readWindows(this.docId, this.id),
+      readTimeline(this.docId, this.id),
+      readMarkers(this.docId, this.id),
+      readLlmLabels(this.docId, this.id),
+    ]);
+    this.transcript = transcript;
+    this.windows = windows;
+    this.timeline = timeline.sort((a, b) => a.t - b.t);
+    this.markers = markers;
+    this.llm = llm;
+    // A done mark of a window that was lost from windows.jsonl (not fsynced before a crash) is dropped.
+    this.transcript.doneWindows = this.transcript.doneWindows.filter((i) => i < this.windows.length);
+    if (this.meta.source === 'live') await this.initLive();
+    else await this.initUpload();
+  }
+
+  private async initLive(): Promise<void> {
+    if (this.meta.finalized) {
+      this.committed = await fileSize(this.paths.audioPcm);
+    } else {
+      this.live = new LiveAudio(this.paths.audioPcm, this.paths.audioIdx, config.liveHooks);
+      const report = await this.live.open();
+      if (report.truncatedBytes > 0 || report.droppedEntries > 0) {
+        console.warn(`[recordings] ${this.id}: dropped ${report.truncatedBytes} unverified bytes (${report.droppedEntries} index entries); the client resends them`);
+      }
+      this.committed = this.live.committed;
+      this.seg = new Segmenter({ preset: config.livePreset });
+      this.seg.restore(this.windows.at(-1));
+      const from = Math.min(this.seg.resumeByte(), this.committed - (this.committed % 640));
+      this.seg.skipTo(from);
+      const piece = 1 << 20;
+      for (let at = from; at < this.committed; at += piece) {
+        this.seg.feed(await this.live.read(at, Math.min(this.committed, at + piece)), at);
+      }
+      if (this.meta.status === 'paused') this.seg.addBreak(this.committedMs());
+      await this.cutWindows(false);
+      if (this.meta.stoppedAt && (this.meta.stopBytes === undefined || this.committed >= this.meta.stopBytes)) await this.finalize();
+    }
+    this.queuePendingWindows();
+  }
+
+  private async initUpload(): Promise<void> {
+    if (this.meta.status === 'converting') {
+      void this.track(this.convert());
+      return;
+    }
+    if (this.meta.status === 'ready' && this.windows.length === 0 && this.meta.transcriptStatus !== 'ready') {
+      await this.cutUploadWindows();
+    }
+    this.queuePendingWindows();
+  }
+
+  // --- derived info --------------------------------------------------------------------------------------------
+
+  committedMs(): number {
+    return Math.floor((this.committed / BYTES_PER_SECOND) * 1000);
+  }
+
+  durationSec(): number {
+    if (this.meta.source === 'live') return round3(this.committed / BYTES_PER_SECOND);
+    return round3(this.meta.durationSec ?? 0);
+  }
+
+  info(): RecordingInfo {
+    const m = this.meta;
+    const info: RecordingInfo = {
+      id: m.id,
+      docId: m.docId,
+      title: m.title,
+      source: m.source,
+      status: m.status,
+      language: m.language,
+      model: m.model,
+      liveTranscribe: m.liveTranscribe,
+      createdAt: m.createdAt,
+      durationSec: this.durationSec(),
+      transcriptStatus: m.transcriptStatus,
+      transcribedSec: round3(Math.max(m.transcribedSec, this.progressSec())),
+      alignment: m.alignment,
+      hasManualMarkers: this.markers.length > 0,
+      playback: this.playback(),
+    };
+    if (m.error) info.error = m.error;
+    return info;
+  }
+
+  /** Where whisper is in the first unfinished window (0 when that window is not the one running). */
+  private progressSec(): number {
+    const p = this.progress;
+    if (!p) return 0;
+    const w = this.windows[p.i];
+    return w && Math.abs(w.ownStartMs / 1000 - this.meta.transcribedSec) < 0.001 ? p.sec : 0;
+  }
+
+  private playback(): RecordingInfo['playback'] {
+    const url = `/api/docs/${this.docId}/recordings/${this.id}/audio`;
+    if (this.meta.source === 'live') return this.committed > 0 ? { url, mime: 'audio/wav' } : null;
+    return this.meta.status === 'ready' ? { url, mime: 'audio/mp4' } : null;
+  }
+
+  transcriptView(): RecordingTranscript {
+    return { recordingId: this.id, segments: this.transcript.segments.map((s) => ({ ...s })) };
+  }
+
+  /** Status event now (`immediate`) or at most every statusThrottleMs. */
+  emitStatus(immediate = false): void {
+    if (immediate) {
+      if (this.statusTimer) clearTimeout(this.statusTimer);
+      this.statusTimer = null;
+      this.hub.send({ type: 'status', recording: this.info() });
+      return;
+    }
+    if (this.statusTimer) return;
+    this.statusTimer = setTimeout(() => {
+      this.statusTimer = null;
+      if (!this.deleted) this.hub.send({ type: 'status', recording: this.info() });
+    }, config.statusThrottleMs);
+    this.statusTimer.unref?.();
+  }
+
+  async saveMeta(): Promise<void> {
+    if (this.deleted) return;
+    await writeMeta(this.meta);
+  }
+
+  // --- live audio ----------------------------------------------------------------------------------------------
+
+  async append(offset: number, body: Buffer): Promise<{ offset: number }> {
+    if (this.meta.source !== 'live') throw new HttpError(409, '업로드한 녹음에는 오디오를 이어 붙일 수 없습니다');
+    if (this.meta.finalized || !this.live) {
+      // Stopped: bytes that are already stored are acknowledged again (a retry), anything else is refused.
+      if (offset + body.length <= this.committed && offset >= 0) {
+        const stored = await readRange(this.paths.audioPcm, offset, offset + body.length);
+        if (stored.equals(body)) return { offset: this.committed };
+      }
+      throw new HttpError(409, '녹음이 이미 끝났습니다', { offset: this.committed });
+    }
+    this.lastActivity = Date.now();
+    const result = await this.live.append(offset, body, false);
+    this.committed = this.live.committed;
+    if (!result.duplicate && this.seg) {
+      this.seg.feed(result.appended, result.at);
+      await this.cutWindows(false);
+      if (this.meta.stopBytes !== undefined && this.committed >= this.meta.stopBytes) await this.finalize();
+    }
+    this.emitStatus();
+    return { offset: result.offset };
+  }
+
+  /** Persists the windows the segmenter can decide now and queues them (live transcription on). */
+  private async cutWindows(final: boolean): Promise<void> {
+    if (!this.seg) return;
+    const cut = this.seg.poll(final);
+    if (cut.length === 0) return;
+    const fh = await fs.open(this.paths.windows, 'a');
+    try {
+      await fh.write(cut.map((w) => `${JSON.stringify(w)}\n`).join(''));
+      await fh.datasync();
+    } finally {
+      await fh.close();
+    }
+    this.windows.push(...cut);
+    if (this.meta.liveTranscribe || this.meta.finalized || final) for (const w of cut) enqueue(this, w);
+    this.refreshTranscriptStatus();
+  }
+
+  async pause(): Promise<RecordingInfo> {
+    if (!this.isLive) throw new HttpError(409, '녹음 중이 아닙니다');
+    this.lastActivity = Date.now();
+    if (this.meta.status !== 'paused') {
+      this.meta.status = 'paused';
+      this.seg?.addBreak(this.committedMs());
+      await this.cutWindows(false);
+      await this.saveMeta();
+    }
+    this.emitStatus(true);
+    return this.info();
+  }
+
+  async resume(): Promise<RecordingInfo> {
+    if (!this.isLive) throw new HttpError(409, '녹음 중이 아닙니다');
+    this.lastActivity = Date.now();
+    if (this.meta.status !== 'recording') {
+      this.meta.status = 'recording';
+      await this.saveMeta();
+    }
+    this.emitStatus(true);
+    return this.info();
+  }
+
+  /** Stop: `bytes` (optional) = everything the client captured; the recording ends once that much is stored. */
+  async stop(bytes: number | undefined): Promise<RecordingInfo> {
+    if (this.meta.source !== 'live') throw new HttpError(409, '업로드한 녹음은 멈출 수 없습니다');
+    if (this.meta.finalized) return this.info();
+    this.lastActivity = Date.now();
+    if (bytes !== undefined) {
+      if (bytes < this.committed) throw new HttpError(409, '종료 크기가 이미 저장된 오디오보다 작습니다', { offset: this.committed });
+      this.meta.stopBytes = bytes;
+    }
+    this.meta.stoppedAt ??= new Date().toISOString();
+    if (bytes === undefined || this.committed >= bytes) await this.finalize();
+    else await this.saveMeta();
+    this.emitStatus(true);
+    return this.info();
+  }
+
+  /** All audio is in: cut the last window, close the files, transcribe what is left, align. */
+  private async finalize(): Promise<void> {
+    if (this.meta.finalized) return;
+    this.meta.finalized = true;
+    // The last window ends at the exact end of the audio (a break at the last whole frame would leave a sliver).
+    await this.cutWindows(true);
+    this.seg = null;
+    await this.live?.close();
+    this.live = null;
+    this.meta.status = 'ready';
+    this.meta.stoppedAt ??= new Date().toISOString();
+    delete this.meta.stopBytes;
+    if (liveKey === this.key) liveKey = null;
+    this.refreshTranscriptStatus();
+    await this.saveMeta();
+    this.queuePendingWindows();
+    if (this.windowsLeft() === 0) void this.track(this.realign());
+  }
+
+  // --- slide timeline -------------------------------------------------------------------------------------------
+
+  async addSlideEvents(events: SlideViewEvent[]): Promise<void> {
+    const seen = new Set(this.timeline.map((e) => `${e.t}:${e.slide}`));
+    const fresh = events.filter((e) => !seen.has(`${e.t}:${e.slide}`));
+    if (fresh.length === 0) return;
+    this.timeline = [...this.timeline, ...fresh].sort((a, b) => a.t - b.t);
+    await writeTimeline(this.docId, this.id, this.timeline);
+  }
+
+  // --- transcription --------------------------------------------------------------------------------------------
+
+  windowsLeft(): number {
+    const done = new Set(this.transcript.doneWindows);
+    return this.windows.filter((w) => !done.has(w.i)).length;
+  }
+
+  /** Queues every window that is not done (restart, stop of a recording without live transcription). */
+  queuePendingWindows(): void {
+    if (this.meta.source === 'live' && !this.meta.liveTranscribe && !this.meta.finalized) return;
+    if (this.meta.source === 'upload' && this.meta.status !== 'ready') return;
+    const done = new Set(this.transcript.doneWindows);
+    for (const w of this.windows) if (!done.has(w.i)) enqueue(this, w);
+    this.refreshTranscriptStatus();
+  }
+
+  refreshTranscriptStatus(): void {
+    const m = this.meta;
+    const recording = m.source === 'live' && !m.finalized;
+    const left = this.windowsLeft();
+    let status = m.transcriptStatus;
+    if (runningJob?.rec === this) status = 'running';
+    else if (m.source === 'upload' && m.status === 'converting') status = 'queued';
+    else if (m.source === 'upload' && m.status === 'error') status = 'none';
+    else if (recording && !m.liveTranscribe) status = 'none';
+    else if (left > 0) status = 'queued';
+    // Live transcription follows the audio: nothing waits right now, more is coming.
+    else if (recording) status = this.windows.length > 0 || this.committed > 0 ? 'running' : 'queued';
+    else {
+      const failed = Object.keys(this.transcript.failedWindows).length;
+      status = failed > 0 && failed >= this.windowsWithSpeech() ? 'error' : 'ready';
+    }
+    m.transcriptStatus = status;
+  }
+
+  private windowsWithSpeech(): number {
+    return this.windows.filter((w) => w.speechMs >= MIN_SPEECH_MS).length;
+  }
+
+  private async pcmSource(): Promise<{ file: string; dataOffset: number; dataBytes: number }> {
+    if (this.meta.source === 'live') return { file: this.paths.audioPcm, dataOffset: 0, dataBytes: this.committed };
+    this.wavInfo ??= await readWavInfo(this.paths.asrWav);
+    return { file: this.paths.asrWav, ...this.wavInfo };
+  }
+
+  /** Language to force for a window: the recording's, or the one detected for 'auto'. */
+  private async languageFor(engine: string, model: { model: string; vad: string }, signal: AbortSignal): Promise<string> {
+    if (this.meta.language !== 'auto') return this.meta.language;
+    if (this.meta.detectedLanguage) return this.meta.detectedLanguage;
+    if (this.meta.source === 'upload') {
+      // Detect on 30 s from the middle (the first 30 s are often chatter before class), then force it.
+      const src = await this.pcmSource();
+      const mid = Math.max(0, Math.floor(src.dataBytes / 2 / 2) * 2 - (DETECT_CLIP_MS / 1000) * BYTES_PER_SECOND / 2);
+      const clip = path.join(this.paths.dir, `.detect-${randomBytes(3).toString('hex')}.wav`);
+      try {
+        await writeWavSlice(src.file, src.dataOffset, mid, mid + (DETECT_CLIP_MS / 1000) * BYTES_PER_SECOND, clip);
+        const lang = await detectLanguage({ bin: engine, model: model.model, vadModel: model.vad, wav: clip, signal });
+        if (lang) {
+          this.meta.detectedLanguage = lang;
+          await this.saveMeta();
+          return lang;
+        }
+      } catch (err) {
+        if (signal.aborted) throw err;
+        console.warn(`[recordings] ${this.id}: language detection failed: ${errorText(err)}`);
+      } finally {
+        await fs.rm(clip, { force: true }).catch(() => {});
+      }
+    }
+    return 'auto';
+  }
+
+  /** Transcribes one window (called by the queue; one at a time server-wide). */
+  async transcribeWindow(w: AsrWindow, engine: string, model: { model: string; vad: string }, signal: AbortSignal): Promise<void> {
+    if (w.speechMs < MIN_SPEECH_MS) {
+      await this.serial(() => this.windowDone(w, [], null));
+      return;
+    }
+    let lastError = '';
+    for (let attempt = 1; attempt <= WINDOW_ATTEMPTS; attempt++) {
+      this.progress = null;
+      const wav = path.join(this.paths.dir, `.window-${w.i}.wav`);
+      try {
+        const src = await this.pcmSource();
+        const startByte = Math.floor((w.startMs / 1000) * BYTES_PER_SECOND / 2) * 2;
+        const endByte = Math.min(src.dataBytes, Math.ceil((w.endMs / 1000) * BYTES_PER_SECOND / 2) * 2);
+        const whole = this.meta.source === 'upload' && startByte === 0 && endByte >= src.dataBytes;
+        if (!whole) await writeWavSlice(src.file, src.dataOffset, startByte, endByte, wav);
+        const language = await this.languageFor(engine, model, signal);
+        const result = await runWhisper({
+          bin: engine,
+          model: model.model,
+          vadModel: model.vad,
+          wav: whole ? this.paths.asrWav : wav,
+          outBase: path.join(this.paths.dir, `.window-${w.i}`),
+          language,
+          signal,
+          onProgress: (fraction) => {
+            if (this.deleted) return;
+            const sec = (w.ownStartMs + fraction * (w.ownEndMs - w.ownStartMs)) / 1000;
+            if (this.progress?.i === w.i && this.progress.sec >= sec) return;
+            this.progress = { i: w.i, sec };
+            this.emitStatus();
+          },
+        });
+        if (language === 'auto' && result.language && w.speechMs >= DETECT_MIN_SPEECH_MS && this.meta.language === 'auto') {
+          this.meta.detectedLanguage = result.language;
+        }
+        const own = ownSegments(w, result.segments);
+        await this.serial(() => this.windowDone(w, own, null));
+        return;
+      } catch (err) {
+        if (signal.aborted || this.deleted) return;
+        lastError = errorText(err);
+        console.warn(`[recordings] ${this.id}: window ${w.i} attempt ${attempt} failed: ${lastError}`);
+      } finally {
+        await fs.rm(wav, { force: true }).catch(() => {});
+      }
+    }
+    await this.serial(() => this.windowDone(w, [], `받아쓰기 실패: ${lastError}`));
+  }
+
+  private async windowDone(w: AsrWindow, segments: Array<{ start: number; end: number; text: string }>, error: string | null): Promise<void> {
+    if (this.progress?.i === w.i) this.progress = null;
+    if (this.transcript.doneWindows.includes(w.i)) return;
+    const prior = this.meta.source === 'live' ? timelinePrior(segments, this.timeline, this.durationSec()) : segments.map(() => null);
+    const fresh: TranscriptSegment[] = segments.map((s, k) => ({ id: this.transcript.nextId++, start: s.start, end: s.end, text: s.text, slide: prior[k] }));
+    this.transcript.segments.push(...fresh);
+    this.transcript.segments.sort((a, b) => a.start - b.start || a.id - b.id);
+    this.transcript.doneWindows.push(w.i);
+    this.transcript.doneWindows.sort((a, b) => a - b);
+    if (error) {
+      this.transcript.failedWindows[String(w.i)] = error;
+      this.meta.error = error;
+    }
+    await writeTranscriptState(this.docId, this.transcript);
+    this.meta.transcribedSec = this.contiguousDoneSec();
+    if (fresh.length > 0 && this.meta.alignment === 'none') this.meta.alignment = this.meta.source === 'live' && this.timeline.length > 0 ? 'timeline' : 'none';
+    this.refreshTranscriptStatus();
+    await this.saveMeta();
+    for (const s of fresh) this.hub.send({ type: 'segment', segment: { ...s } }, s.id);
+    this.emitStatus(true);
+    const finished = this.windowsLeft() === 0 && (this.meta.source === 'upload' || this.meta.finalized === true);
+    if (finished) void this.track(this.realign());
+    else if (this.meta.source === 'live' && Date.now() - this.lastAlignAt >= config.liveRealignMs && this.transcript.segments.length > 0) {
+      void this.track(this.realign());
+    }
+  }
+
+  private contiguousDoneSec(): number {
+    const done = new Set(this.transcript.doneWindows);
+    let end = 0;
+    for (const w of this.windows) {
+      if (!done.has(w.i)) break;
+      end = w.ownEndMs;
+    }
+    return end / 1000;
+  }
+
+  // --- alignment ------------------------------------------------------------------------------------------------
+
+  /** Full alignment in a worker (serialized: a request while one runs runs once more afterwards). */
+  realign(): Promise<void> {
+    if (this.aligning) {
+      this.alignAgain = true;
+      return this.aligning;
+    }
+    this.aligning = (async () => {
+      try {
+        do {
+          this.alignAgain = false;
+          await this.alignOnce();
+        } while (this.alignAgain && !this.deleted);
+      } catch (err) {
+        if (!this.deleted) console.warn(`[recordings] ${this.id}: alignment failed: ${errorText(err)}`);
+      } finally {
+        this.aligning = null;
+      }
+    })();
+    return this.aligning;
+  }
+
+  private async alignOnce(): Promise<void> {
+    this.lastAlignAt = Date.now();
+    const snapshot = this.transcript.segments.map((s) => ({ id: s.id, start: s.start, end: s.end, text: s.text }));
+    if (snapshot.length === 0 || this.deleted) return;
+    const deck = await deckOf(this.docId);
+    const llm = this.llm;
+    const labels = await alignInWorker({
+      slideTexts: deck.map(slideMaterial),
+      segments: snapshot,
+      prior: this.meta.source === 'live' ? timelinePrior(snapshot, this.timeline, this.durationSec()) : undefined,
+      markers: this.markers,
+      llm: llm ? snapshot.map((s) => (String(s.id) in llm.labels ? llm.labels[String(s.id)] : undefined)) : undefined,
+    });
+    if (this.deleted) return;
+    await this.serial(() => this.applyLabels(snapshot.map((s) => s.id), labels, llm ? 'llm' : 'lexical'));
+  }
+
+  private async applyLabels(ids: number[], labels: Label[], kind: AlignmentKind): Promise<void> {
+    const byId = new Map(this.transcript.segments.map((s) => [s.id, s]));
+    const changed: Array<{ id: number; slide: number | null }> = [];
+    ids.forEach((id, i) => {
+      const s = byId.get(id);
+      const slide = labels[i] ?? null;
+      if (s && s.slide !== slide) {
+        s.slide = slide;
+        changed.push({ id, slide });
+      }
+    });
+    if (changed.length > 0) await writeTranscriptState(this.docId, this.transcript);
+    if (this.meta.alignment !== kind) {
+      this.meta.alignment = kind;
+      await this.saveMeta();
+    }
+    if (changed.length > 0) this.hub.send({ type: 'realigned', segments: changed });
+    this.emitStatus(true);
+  }
+
+  async setMarkers(markers: AlignmentMarker[]): Promise<void> {
+    this.markers = markers;
+    await writeMarkers(this.docId, this.id, markers);
+    this.meta.hasManualMarkers = markers.length > 0;
+    await this.saveMeta();
+  }
+
+  // --- uploads --------------------------------------------------------------------------------------------------
+
+  async convert(): Promise<void> {
+    const controller = new AbortController();
+    this.jobs.add(controller);
+    const release = await conversionSlot(controller.signal).catch(() => null);
+    try {
+      if (!release || this.deleted) return;
+      const ffmpeg = findFfmpeg();
+      if (!ffmpeg) throw Object.assign(new Error('ffmpeg not found'), { code: 'ENOENT' });
+      await convertUpload({
+        ffmpeg: ffmpeg.path,
+        source: path.join(this.paths.dir, this.meta.sourceFile ?? 'source'),
+        asrWav: this.paths.asrWav,
+        playback: this.paths.playback,
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted || this.deleted || this.closed) return;
+      const info = await readWavInfo(this.paths.asrWav);
+      this.wavInfo = info;
+      await this.serial(async () => {
+        this.meta.durationSec = round3(info.dataBytes / BYTES_PER_SECOND);
+        this.meta.status = 'ready';
+        delete this.meta.error;
+        await this.saveMeta();
+      });
+      await this.serial(() => this.cutUploadWindows());
+      this.queuePendingWindows();
+      await this.serial(() => this.saveMeta());
+      this.emitStatus(true);
+    } catch (err) {
+      if (controller.signal.aborted || this.deleted) return;
+      const message = conversionError(err);
+      console.warn(`[recordings] ${this.id}: conversion failed: ${errorText(err)}`);
+      await this.serial(async () => {
+        this.meta.status = 'error';
+        this.meta.transcriptStatus = 'none';
+        this.meta.error = message;
+        await this.saveMeta();
+      }).catch(() => {});
+      this.emitStatus(true);
+    } finally {
+      release?.();
+      this.jobs.delete(controller);
+    }
+  }
+
+  /** Cuts an uploaded recording into windows (≤ 15 min at pauses) and persists them. */
+  private async cutUploadWindows(): Promise<void> {
+    if (this.windows.length > 0) return;
+    const info = await this.pcmSource();
+    const seg = new Segmenter({ preset: config.uploadPreset });
+    const fh = await fs.open(info.file, 'r');
+    try {
+      const piece = Buffer.alloc(1 << 20);
+      for (let at = 0; at < info.dataBytes; at += piece.length) {
+        const n = Math.min(piece.length, info.dataBytes - at);
+        const { bytesRead } = await fh.read(piece, 0, n, info.dataOffset + at);
+        if (bytesRead <= 0) break;
+        seg.feed(Buffer.from(piece.subarray(0, bytesRead)), at);
+      }
+    } finally {
+      await fh.close();
+    }
+    this.windows = seg.poll(true);
+    await writeJsonLines(this.paths.windows, this.windows);
+    if (this.windows.length === 0) {
+      this.meta.transcriptStatus = 'ready';
+      await this.saveMeta();
+    }
+  }
+
+  // --- teardown -------------------------------------------------------------------------------------------------
+
+  /** Stops everything of this recording (deletion). The files are removed by the caller. */
+  async shutdown(): Promise<void> {
+    this.deleted = true;
+    for (const job of this.jobs) job.abort();
+    const running = dropJobsOf(this);
+    if (this.statusTimer) clearTimeout(this.statusTimer);
+    this.hub.closeAll();
+    if (liveKey === this.key) liveKey = null;
+    await Promise.all([this.settleBackground(), running]);
+    await this.chain.catch(() => {});
+    await this.live?.close();
+    this.live = null;
+  }
+
+  /** Closes the files and streams without deleting anything (server shutdown). */
+  async close(): Promise<void> {
+    for (const job of this.jobs) job.abort();
+    if (this.statusTimer) clearTimeout(this.statusTimer);
+    this.hub.closeAll();
+    await this.settleBackground();
+    this.closed = true;
+    await this.chain.catch(() => {});
+    await this.live?.close();
+    this.live = null;
+  }
+}
+
+function round3(n: number): number {
+  return Math.round(n * 1000) / 1000;
+}
+
+/**
+ * The segments whisper found in a window, on the recording clock (+ the window's start, clamped to the audio it
+ * heard), that belong to this window: the midpoint decides only where windows overlap — after a hard cut ('max') the
+ * next window starts OVERLAP earlier and hears the end again, so text past the own region is left to it, and the
+ * start of a window that overlaps its predecessor is left to that one. Everywhere else the audio was heard by this
+ * window alone, so nothing it found there is dropped (whisper may stamp the last words slightly past the end).
+ */
+export function ownSegments(w: AsrWindow, segments: Array<{ start: number; end: number; text: string }>): Array<{ start: number; end: number; text: string }> {
+  const from = w.startMs / 1000;
+  const to = w.endMs / 1000;
+  return segments
+    .filter((s) => {
+      // Decided on whisper's own times (the next window sees the same words at the same recording time).
+      const mid = (from + (s.start + s.end) / 2) * 1000;
+      if (w.startMs < w.ownStartMs && mid < w.ownStartMs) return false;
+      return w.cut !== 'max' || mid < w.ownEndMs;
+    })
+    .map((s) => {
+      const start = round3(Math.min(to, Math.max(from, s.start + from)));
+      return { start, end: round3(Math.min(to, Math.max(start, s.end + from))), text: s.text };
+    });
+}
+
+async function fileSize(file: string): Promise<number> {
+  try {
+    return (await fs.stat(file)).size;
+  } catch (err) {
+    if (isNotFound(err)) return 0;
+    throw err;
+  }
+}
+
+async function readRange(file: string, start: number, end: number): Promise<Buffer> {
+  const fh = await fs.open(file, 'r');
+  try {
+    const buf = Buffer.alloc(Math.max(0, end - start));
+    await fh.read(buf, 0, buf.length, start);
+    return buf;
+  } finally {
+    await fh.close();
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Deck material for alignment
+// ---------------------------------------------------------------------------------------------------------------
+
+export interface DeckEntry {
+  slide: number;
+  title: string;
+  digest: string;
+  text: string;
+}
+
+/** Per slide: digest title and markdown (when present and not failed) and the extracted text. */
+export async function deckOf(docId: string): Promise<DeckEntry[]> {
+  const assets = await loadDocAssets(docId);
+  const digest = new Map((assets.digest ?? []).filter((d) => !d.failed).map((d) => [d.slide, d]));
+  return Array.from({ length: assets.meta.pageCount }, (_, i) => {
+    const d = digest.get(i + 1);
+    return { slide: i + 1, title: d?.title ?? '', digest: d?.markdown ?? '', text: assets.texts[i] ?? '' };
+  });
+}
+
+/** The spike's slide document: title twice + digest (markdown stripped) + extracted text. */
+function slideMaterial(d: DeckEntry): string {
+  return `${d.title}\n${d.title}\n${stripMarkdown(d.digest)}\n${d.text}`;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Registry
+// ---------------------------------------------------------------------------------------------------------------
+
+const recs = new Map<string, Promise<Rec>>();
+/** The loaded ones of `recs` (synchronous access: idle unloading, touching on every request). */
+const loaded = new Map<string, Rec>();
+/** Recordings being deleted (`docId/rid`). */
+const deleting = new Set<string>();
+/** The one live recording of the server (status recording/paused), `docId/rid`. */
+let liveKey: string | null = null;
+let stopping = false;
+
+function recKey(docId: string, rid: string): string {
+  return `${docId}/${rid}`;
+}
+
+async function loadRec(docId: string, rid: string): Promise<Rec> {
+  if (!isRecordingId(rid)) throw new HttpError(404, '녹음을 찾을 수 없습니다');
+  const key = recKey(docId, rid);
+  if (deleting.has(key)) throw new HttpError(404, '녹음을 찾을 수 없습니다');
+  let pending = recs.get(key);
+  const known = loaded.get(key);
+  if (known) known.lastUsed = Date.now();
+  if (!pending) {
+    const load = async (): Promise<Rec> => {
+      const meta = await readMeta(docId, rid);
+      if (!meta) throw new HttpError(404, '녹음을 찾을 수 없습니다');
+      const rec = new Rec(meta);
+      await rec.init();
+      if (rec.isLive && !liveKey) liveKey = rec.key;
+      return rec;
+    };
+    const mine: Promise<Rec> = load().then((rec) => {
+      // Still the registered one (not deleted or forgotten while it loaded): reachable for touching and unloading.
+      if (recs.get(key) === mine) loaded.set(key, rec);
+      return rec;
+    });
+    pending = mine;
+    recs.set(key, pending);
+    pending.catch(() => recs.delete(key));
+    startUnloadSweep();
+  }
+  return pending;
+}
+
+let unloadTimer: NodeJS.Timeout | null = null;
+
+/** Every minute (or idleUnloadMs when shorter): drop idle recordings from memory (DESIGN §15). */
+function startUnloadSweep(): void {
+  if (unloadTimer) return;
+  unloadTimer = setInterval(unloadIdle, Math.max(20, Math.min(60_000, config.idleUnloadMs)));
+  unloadTimer.unref?.();
+}
+
+/** Synchronous (no await): nothing can pick a recording up between the check and its removal. */
+function unloadIdle(): void {
+  const now = Date.now();
+  for (const [key, rec] of [...loaded]) {
+    if (recs.get(key) === undefined || !rec.idle(now)) continue;
+    recs.delete(key);
+    loaded.delete(key);
+    rec.hub.closeAll();
+  }
+  if (recs.size === 0 && unloadTimer) {
+    clearInterval(unloadTimer);
+    unloadTimer = null;
+  }
+}
+
+/** Recordings held in memory (tests, diagnostics). */
+export function loadedRecordings(): number {
+  return recs.size;
+}
+
+async function requireReadyDoc(docId: string): Promise<{ pageCount: number }> {
+  const doc = await readStoredDoc(docId);
+  if (!doc) throw new HttpError(404, '문서를 찾을 수 없습니다');
+  if (doc.status !== 'ready') throw new HttpError(409, '문서를 아직 처리하는 중입니다');
+  return { pageCount: doc.pageCount };
+}
+
+async function requireDocExists(docId: string): Promise<void> {
+  if (!(await readStoredDoc(docId))) throw new HttpError(404, '문서를 찾을 수 없습니다');
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Transcription queue (one whisper process at a time)
+// ---------------------------------------------------------------------------------------------------------------
+
+interface Job {
+  rec: Rec;
+  window: AsrWindow;
+}
+
+const queue: Job[] = [];
+let runningJob: (Job & { controller: AbortController; done: Promise<void> }) | null = null;
+let pumping = false;
+
+function enqueue(rec: Rec, window: AsrWindow): void {
+  if (rec.deleted) return;
+  if (runningJob?.rec === rec && runningJob.window.i === window.i) return;
+  if (queue.some((j) => j.rec === rec && j.window.i === window.i)) return;
+  queue.push({ rec, window });
+  pumpQueue();
+}
+
+/** Removes a recording's queued jobs and stops its running one; resolves when that one has ended. */
+function dropJobsOf(rec: Rec): Promise<void> {
+  for (let i = queue.length - 1; i >= 0; i--) if (queue[i].rec === rec) queue.splice(i, 1);
+  if (runningJob?.rec !== rec) return Promise.resolve();
+  runningJob.controller.abort();
+  return runningJob.done;
+}
+
+let warming: Promise<void> | null = null;
+
+/**
+ * Right after a model download on Apple Silicon: one short run so that Metal compiles its shaders now (about 15 s,
+ * once per build and machine) and not in the first window of a lecture. Only when nothing else waits; no VAD (it
+ * would skip the silent input before the encoder runs).
+ */
+function warmUp(modelId: string): void {
+  if (acceleration() !== 'metal' || runningJob || warming || queue.length > 0 || stopping) return;
+  const engine = findWhisper();
+  const model = config.models.paths(modelId);
+  if (!engine || !existsSync(engine.path) || !model) return;
+  warming = (async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'easy-study-warmup-'));
+    try {
+      const wav = path.join(dir, 'silence.wav');
+      await fs.writeFile(wav, Buffer.concat([wavHeader(BYTES_PER_SECOND), Buffer.alloc(BYTES_PER_SECOND)]));
+      await runWhisper({ bin: engine.path, model: model.model, vadModel: model.vad, wav, outBase: path.join(dir, 'out'), language: 'en', vad: false });
+    } catch (err) {
+      console.warn(`[recordings] warm-up of ${modelId} failed: ${errorText(err)}`);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+  })().finally(() => {
+    warming = null;
+    pumpQueue();
+  });
+}
+
+/** Starts the next job when none runs and the engine and the job's model are there (live windows first). */
+export function pumpQueue(): void {
+  if (runningJob || pumping || stopping || warming || queue.length === 0) return;
+  const engine = findWhisper();
+  // A missing engine (not installed yet, a wrong EASY_STUDY_WHISPER) leaves the jobs waiting instead of failing them.
+  if (!engine || !existsSync(engine.path)) return;
+  const runnable = (j: Job) => config.models.isInstalled(j.rec.meta.model);
+  let index = queue.findIndex((j) => j.rec.isLive && runnable(j));
+  if (index < 0) index = queue.findIndex(runnable);
+  if (index < 0) return;
+  const [job] = queue.splice(index, 1);
+  const model = config.models.paths(job.rec.meta.model);
+  if (!model) return;
+  const controller = new AbortController();
+  let finished: () => void = () => {};
+  runningJob = { ...job, controller, done: new Promise<void>((resolve) => (finished = resolve)) };
+  job.rec.refreshTranscriptStatus();
+  job.rec.emitStatus();
+  pumping = true;
+  void (async () => {
+    try {
+      await job.rec.transcribeWindow(job.window, engine.path, model, controller.signal);
+    } catch (err) {
+      if (!controller.signal.aborted) console.warn(`[recordings] transcription job failed: ${errorText(err)}`);
+    } finally {
+      runningJob = null;
+      pumping = false;
+      if (!job.rec.deleted) {
+        job.rec.refreshTranscriptStatus();
+        try {
+          await job.rec.serial(() => job.rec.saveMeta());
+          job.rec.emitStatus();
+        } catch {
+          // deleted or closed meanwhile
+        }
+      }
+      finished();
+      setImmediate(pumpQueue);
+    }
+  })();
+}
+
+/** Jobs waiting and running (tests, diagnostics). */
+export function queueState(): { queued: number; running: boolean } {
+  return { queued: queue.length, running: runningJob !== null };
+}
+
+/** Resolves when no transcription job waits or runs (tests), false on timeout. */
+export async function waitForTranscriptionIdle(timeoutMs = 30_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (runningJob || queue.some((j) => !j.rec.deleted && config.models.isInstalled(j.rec.meta.model) && existsSync(findWhisper()?.path ?? ''))) {
+    if (Date.now() > deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return true;
+}
+
+// Conversions: one ffmpeg at a time.
+let conversionBusy: Promise<void> = Promise.resolve();
+function conversionSlot(signal: AbortSignal): Promise<() => void> {
+  let release: () => void = () => {};
+  const mine = new Promise<void>((resolve) => (release = resolve));
+  const previous = conversionBusy;
+  conversionBusy = previous.then(() => mine);
+  return previous.then(() => {
+    if (signal.aborted) {
+      release();
+      throw new Error('aborted');
+    }
+    return release;
+  });
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Public operations (HTTP routes)
+// ---------------------------------------------------------------------------------------------------------------
+
+/** GET /api/asr */
+export async function asrStatus(): Promise<AsrStatus> {
+  const accel = acceleration();
+  const engine = findWhisper();
+  const status: AsrStatus = {
+    engineAvailable: false,
+    acceleration: accel,
+    ffmpegAvailable: false,
+    models: config.models.list(recommendedModel()),
+  };
+  if (engine?.source === 'env' && !existsSync(engine.path)) {
+    status.reason = `EASY_STUDY_WHISPER에 지정한 받아쓰기 엔진(whisper-cli)이 없습니다: ${engine.path}`;
+  } else if (!engine) {
+    status.reason = desktopMode(process.env, [])
+      ? '받아쓰기 엔진(whisper-cli)을 찾을 수 없습니다. 앱을 다시 설치하거나 EASY_STUDY_WHISPER에 whisper-cli 경로를 지정하세요'
+      : '받아쓰기 엔진(whisper-cli)이 없습니다. 저장소에서 `npm run setup:whisper`로 설치하거나 EASY_STUDY_WHISPER에 whisper-cli 경로를 지정하세요';
+  } else {
+    const probe = await probeVersion(engine.path, '--version', /whisper\.cpp version:\s*(\S+)/);
+    if (probe.ok) {
+      status.engineAvailable = true;
+      if (probe.version) status.engineVersion = probe.version;
+    } else {
+      status.reason = `받아쓰기 엔진을 실행할 수 없습니다 (${engine.path}): ${probe.error ?? '알 수 없는 오류'}`;
+    }
+  }
+  const ffmpeg = findFfmpeg();
+  if (ffmpeg) status.ffmpegAvailable = (await probeVersion(ffmpeg.path, '-version', /ffmpeg version\s+(\S+)/)).ok;
+  if (status.engineAvailable) pumpQueue();
+  return status;
+}
+
+/** turbo with Metal (Apple Silicon), small on CPU-only machines (about 4× faster there). */
+export function recommendedModel(): string {
+  return acceleration() === 'metal' ? TURBO_MODEL_ID : SMALL_MODEL_ID;
+}
+
+/** The recommended model if installed, else any installed model, else the recommended one (downloaded later). */
+function defaultModel(): string {
+  const recommended = recommendedModel();
+  if (config.models.isInstalled(recommended)) return recommended;
+  return config.models.catalog.models.find((m) => config.models.isInstalled(m.id))?.id ?? recommended;
+}
+
+export async function startModelDownload(modelId: string): Promise<void> {
+  await config.models.startDownload(modelId);
+}
+
+export async function deleteModel(modelId: string): Promise<void> {
+  if (runningJob && runningJob.rec.meta.model === modelId) throw new HttpError(409, '이 모델로 받아쓰는 중에는 지울 수 없습니다');
+  await config.models.delete(modelId);
+}
+
+/** GET /api/docs/:docId/recordings — newest first. */
+export async function listRecordings(docId: string): Promise<RecordingInfo[]> {
+  await requireDocExists(docId);
+  const out: RecordingInfo[] = [];
+  for (const rid of await listRecordingIds(docId)) {
+    const loaded = recs.get(recKey(docId, rid));
+    if (loaded) {
+      const rec = await loaded.catch(() => null);
+      if (rec && !rec.deleted) out.push(rec.info());
+      continue;
+    }
+    const meta = await readMeta(docId, rid);
+    if (!meta) continue;
+    const rec = new Rec(meta);
+    if (meta.source === 'live') rec.committed = await fileSize(rec.paths.audioPcm);
+    rec.markers = await readMarkers(docId, rid);
+    out.push(rec.info());
+  }
+  return out.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
+}
+
+export async function getRecording(docId: string, rid: string): Promise<RecordingInfo> {
+  return (await loadRec(docId, rid)).info();
+}
+
+export async function getTranscript(docId: string, rid: string): Promise<RecordingTranscript> {
+  return (await loadRec(docId, rid)).transcriptView();
+}
+
+/** The live recording of the server, if any. */
+export async function currentLiveRecording(): Promise<RecordingInfo | null> {
+  return (await liveRec())?.info() ?? null;
+}
+
+async function liveRec(): Promise<Rec | null> {
+  if (!liveKey) return null;
+  const pending = recs.get(liveKey);
+  const rec = pending ? await pending.catch(() => null) : null;
+  return rec && rec.isLive && !rec.deleted ? rec : null;
+}
+
+export function parseLanguage(value: unknown): RecordingLanguage {
+  if (value === undefined || value === null) return 'auto';
+  if (typeof value !== 'string' || !LANGUAGES.includes(value as RecordingLanguage)) throw new HttpError(400, 'language는 ko, en, auto 중 하나여야 합니다');
+  return value as RecordingLanguage;
+}
+
+export function parseModel(value: unknown): string {
+  if (value === undefined || value === null || value === '') return defaultModel();
+  if (typeof value !== 'string' || !config.models.model(value)) throw new HttpError(400, `알 수 없는 받아쓰기 모델입니다: ${String(value)}`);
+  return value;
+}
+
+/** POST /api/docs/:docId/recordings (CreateLiveRecordingRequest) → 201. 409 while another live recording runs. */
+export async function createLiveRecording(docId: string, body: Partial<Record<keyof CreateLiveRecordingRequest, unknown>>): Promise<RecordingInfo> {
+  await requireReadyDoc(docId);
+  const language = parseLanguage(body.language);
+  const model = parseModel(body.model);
+  if (body.liveTranscribe !== undefined && typeof body.liveTranscribe !== 'boolean') throw new HttpError(400, 'liveTranscribe는 true/false 여야 합니다');
+  if (creatingLive) throw new HttpError(409, '이미 녹음을 시작하는 중입니다');
+  creatingLive = true;
+  try {
+    const live = await liveRec();
+    // Stopped with audio still to come that never came (the device that recorded it is gone): end it with what is stored.
+    if (live?.meta.stoppedAt && Date.now() - live.lastActivity >= config.staleStopMs) await live.serial(() => live.stop(undefined));
+    const running = await liveRec();
+    if (running) {
+      const doc = await readStoredDoc(running.docId).catch(() => null);
+      const where = doc && running.docId !== docId ? `‘${doc.title}’의 ` : '';
+      throw new HttpError(409, `이미 녹음 중인 강의가 있습니다 (${where}‘${running.meta.title}’). 그 녹음을 먼저 끝내 주세요`, {
+        recording: running.info(),
+      });
+    }
+    return await createLive(docId, body, language, model);
+  } finally {
+    creatingLive = false;
+  }
+}
+
+let creatingLive = false;
+
+async function createLive(
+  docId: string,
+  body: Partial<Record<keyof CreateLiveRecordingRequest, unknown>>,
+  language: RecordingLanguage,
+  model: string,
+): Promise<RecordingInfo> {
+  const now = new Date();
+  const id = newRecordingId(now);
+  const meta: RecordingMeta = {
+    version: 1,
+    id,
+    docId,
+    title: cleanTitle(body.title) ?? defaultLiveTitle(now),
+    source: 'live',
+    status: 'recording',
+    language,
+    model,
+    liveTranscribe: body.liveTranscribe !== false,
+    createdAt: now.toISOString(),
+    transcriptStatus: body.liveTranscribe === false ? 'none' : 'queued',
+    transcribedSec: 0,
+    alignment: 'none',
+    hasManualMarkers: false,
+  };
+  const paths = recordingPaths(docId, id);
+  await fs.mkdir(paths.dir, { recursive: true });
+  await LiveAudio.create(paths.audioPcm, paths.audioIdx);
+  await writeMeta(meta);
+  liveKey = recKey(docId, id);
+  const rec = await loadRec(docId, id);
+  return rec.info();
+}
+
+export async function appendLiveAudio(docId: string, rid: string, offset: number, body: Buffer): Promise<{ offset: number }> {
+  const rec = await loadRec(docId, rid);
+  return rec.serial(() => rec.append(offset, body), true);
+}
+
+export async function addSlideEvents(docId: string, rid: string, raw: unknown): Promise<void> {
+  const { pageCount } = await requireReadyDoc(docId);
+  if (!Array.isArray(raw) || raw.length > 1000) throw new HttpError(400, '슬라이드 이벤트 배열(최대 1000개)이 필요합니다');
+  const events: SlideViewEvent[] = raw.map((e: unknown) => {
+    const ev = e as Partial<SlideViewEvent> | null;
+    if (!ev || typeof ev.t !== 'number' || !Number.isFinite(ev.t) || ev.t < 0 || !Number.isInteger(ev.slide) || (ev.slide as number) < 1 || (ev.slide as number) > pageCount) {
+      throw new HttpError(400, `잘못된 슬라이드 이벤트입니다: ${JSON.stringify(e).slice(0, 100)}`);
+    }
+    return { t: round3(ev.t), slide: ev.slide as number };
+  });
+  const rec = await loadRec(docId, rid);
+  if (rec.meta.source !== 'live') throw new HttpError(409, '업로드한 녹음에는 슬라이드 기록이 없습니다');
+  await rec.serial(() => rec.addSlideEvents(events), true);
+}
+
+export async function pauseRecording(docId: string, rid: string): Promise<RecordingInfo> {
+  const rec = await loadRec(docId, rid);
+  return rec.serial(() => rec.pause(), true);
+}
+
+export async function resumeRecording(docId: string, rid: string): Promise<RecordingInfo> {
+  const rec = await loadRec(docId, rid);
+  return rec.serial(() => rec.resume(), true);
+}
+
+export async function stopRecording(docId: string, rid: string, bytes: unknown): Promise<RecordingInfo> {
+  if (bytes !== undefined && (typeof bytes !== 'number' || !Number.isSafeInteger(bytes) || bytes < 0)) {
+    throw new HttpError(400, 'bytes는 0 이상의 정수여야 합니다');
+  }
+  const rec = await loadRec(docId, rid);
+  return rec.serial(() => rec.stop(bytes as number | undefined), true);
+}
+
+export async function renameRecording(docId: string, rid: string, title: unknown): Promise<RecordingInfo> {
+  const clean = cleanTitle(title);
+  if (!clean) throw new HttpError(400, '제목을 입력해 주세요');
+  const rec = await loadRec(docId, rid);
+  return rec.serial(async () => {
+    rec.meta.title = clean;
+    await rec.saveMeta();
+    rec.emitStatus(true);
+    return rec.info();
+  }, true);
+}
+
+/** PUT …/markers: replaces the markers and re-aligns with them as hard constraints. */
+export async function putMarkers(docId: string, rid: string, raw: unknown): Promise<RecordingTranscript> {
+  const { pageCount } = await requireReadyDoc(docId);
+  if (!Array.isArray(raw) || raw.length > 500) throw new HttpError(400, '마커 배열(최대 500개)이 필요합니다');
+  const byTime = new Map<number, AlignmentMarker>();
+  for (const e of raw as unknown[]) {
+    const m = e as Partial<AlignmentMarker> | null;
+    const okSlide = m?.slide === null || (Number.isInteger(m?.slide) && (m?.slide as number) >= 1 && (m?.slide as number) <= pageCount);
+    if (!m || typeof m.t !== 'number' || !Number.isFinite(m.t) || m.t < 0 || !okSlide) {
+      throw new HttpError(400, `잘못된 마커입니다: ${JSON.stringify(e).slice(0, 100)}`);
+    }
+    byTime.set(round3(m.t), { t: round3(m.t), slide: m.slide as number | null });
+  }
+  const markers = [...byTime.values()].sort((a, b) => a.t - b.t);
+  const rec = await loadRec(docId, rid);
+  await rec.serial(() => rec.setMarkers(markers), true);
+  await rec.realign();
+  return rec.transcriptView();
+}
+
+export async function deleteRecording(docId: string, rid: string): Promise<void> {
+  const rec = await loadRec(docId, rid);
+  // Until the folder is gone, nothing may load the recording again from its files (an SSE reconnect, a retry).
+  deleting.add(rec.key);
+  try {
+    recs.delete(rec.key);
+    loaded.delete(rec.key);
+    await rec.shutdown();
+    await removeDir(rec.paths.dir);
+  } finally {
+    deleting.delete(rec.key);
+  }
+}
+
+async function removeDir(dir: string): Promise<void> {
+  const trash = path.join(path.dirname(dir), `.deleted-${path.basename(dir)}-${randomBytes(3).toString('hex')}`);
+  try {
+    await renameWithRetry(dir, trash);
+  } catch (err) {
+    if (isNotFound(err)) return;
+    throw err;
+  }
+  await rmWithRetry(trash, { recursive: true, force: true }).catch((err: unknown) => {
+    console.warn(`[recordings] could not remove ${trash}: ${errorText(err)}`);
+  });
+}
+
+/** SSE subscription with replay: segments after `since`, and the slides of the older ones (they may have changed). */
+export async function subscribe(docId: string, rid: string, target: SseTarget, since: number): Promise<() => void> {
+  const rec = await loadRec(docId, rid);
+  target.write('retry: 2000\n\n');
+  // Queued behind pending mutations (segments and re-alignments are sent from inside them), and subscribed in the
+  // same step: every segment reaches the subscriber exactly once, either in the replay or as a live event.
+  await rec.serial(async () => {
+    const frames: string[] = [];
+    frames.push(sseFrame({ type: 'status', recording: rec.info() }));
+    const older: Array<{ id: number; slide: number | null }> = [];
+    for (const s of rec.transcript.segments) {
+      if (s.id > since) frames.push(sseFrame({ type: 'segment', segment: { ...s } }, s.id));
+      else older.push({ id: s.id, slide: s.slide });
+    }
+    if (since > 0 && older.length > 0) frames.push(sseFrame({ type: 'realigned', segments: older }));
+    if (target.writableEnded || target.destroyed) return;
+    target.write(frames.join(''));
+    rec.hub.add(target);
+  });
+  return () => rec.hub.remove(target);
+}
+
+/** What the playback route needs. */
+export async function playbackSource(
+  docId: string,
+  rid: string,
+): Promise<{ kind: 'file'; file: string; mime: string } | { kind: 'live'; file: string; bytes: number }> {
+  const rec = await loadRec(docId, rid);
+  if (rec.meta.source === 'live') return { kind: 'live', file: rec.paths.audioPcm, bytes: rec.committed };
+  if (rec.meta.status !== 'ready') throw new HttpError(404, '재생할 오디오가 아직 없습니다');
+  return { kind: 'file', file: rec.paths.playback, mime: 'audio/mp4' };
+}
+
+// --- uploads --------------------------------------------------------------------------------------------------
+
+/** A new upload's folder and id (the caller streams the body into `partFile`, then calls finishUpload). */
+export async function beginUpload(docId: string): Promise<{ id: string; dir: string; partFile: string }> {
+  await requireReadyDoc(docId);
+  if (!findFfmpeg()) {
+    throw new HttpError(
+      503,
+      desktopMode(process.env, [])
+        ? '녹음 파일을 변환할 ffmpeg를 찾을 수 없습니다. 앱을 다시 설치하거나 EASY_STUDY_FFMPEG에 경로를 지정하세요'
+        : '녹음 파일을 변환할 ffmpeg가 없습니다. ffmpeg를 설치하거나 EASY_STUDY_FFMPEG에 경로를 지정하세요',
+    );
+  }
+  const id = newRecordingId();
+  const dir = recordingPaths(docId, id).dir;
+  await fs.mkdir(dir, { recursive: true });
+  return { id, dir, partFile: path.join(dir, 'source.part') };
+}
+
+export async function abortUpload(dir: string): Promise<void> {
+  await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+}
+
+export interface UploadOptions {
+  language: RecordingLanguage;
+  /** Whisper model id (parseModel: the recommended installed one when not named). */
+  model: string;
+}
+
+/**
+ * Settings of an upload from the X-Language / X-Model headers (the recording settings of the web app), validated
+ * like CreateLiveRecordingRequest; missing = 'auto' and the recommended installed model.
+ */
+export function uploadOptions(language: string | undefined, model: string | undefined): UploadOptions {
+  return { language: parseLanguage(language?.trim() || undefined), model: parseModel(model?.trim() || undefined) };
+}
+
+/** The body is on disk as source.part with the sniffed extension: the recording exists from here on. */
+export async function finishUpload(
+  docId: string,
+  id: string,
+  ext: string,
+  originalName: string,
+  options: UploadOptions = { language: 'auto', model: defaultModel() },
+): Promise<RecordingInfo> {
+  const paths = recordingPaths(docId, id);
+  const sourceFile = `source.${ext}`;
+  await fs.rename(path.join(paths.dir, 'source.part'), path.join(paths.dir, sourceFile));
+  const base = originalName.replace(/\.[A-Za-z0-9]{1,5}$/, '');
+  const now = new Date();
+  const meta: RecordingMeta = {
+    version: 1,
+    id,
+    docId,
+    title: cleanTitle(base) ?? `녹음 파일 ${defaultLiveTitle(now).slice(3)}`,
+    source: 'upload',
+    status: 'converting',
+    language: options.language,
+    model: options.model,
+    liveTranscribe: false,
+    createdAt: now.toISOString(),
+    transcriptStatus: 'queued',
+    transcribedSec: 0,
+    alignment: 'none',
+    hasManualMarkers: false,
+    sourceFile,
+    originalName: cleanTitle(originalName) ?? sourceFile,
+  };
+  await writeMeta(meta);
+  const rec = await loadRec(docId, id);
+  return rec.info();
+}
+
+// --- AI alignment ----------------------------------------------------------------------------------------------
+
+export interface AiAlignJob {
+  /** Runs one LLM call; resolves with the reply text. */
+  call: (parts: import('../providers/types.ts').Part[], signal: AbortSignal) => Promise<string>;
+  provider: string;
+  model: string;
+}
+
+/** POST …/align-ai → 202: labels chunk by chunk (≤ 150 segments), fused into the DP after each chunk. */
+export async function startAiAlignment(docId: string, rid: string, job: AiAlignJob): Promise<void> {
+  const { pageCount } = await requireReadyDoc(docId);
+  const rec = await loadRec(docId, rid);
+  if (rec.aiRunning) throw new HttpError(409, 'AI 정렬이 이미 진행 중입니다');
+  if (rec.transcript.segments.length === 0) throw new HttpError(409, '받아쓴 내용이 아직 없습니다');
+  if (rec.windowsLeft() > 0 || rec.isLive) throw new HttpError(409, '받아쓰기가 끝난 뒤에 AI 정렬을 할 수 있습니다');
+  const { AI_CHUNK_SEGMENTS, buildAlignPrompt, parseAlignRuns } = await import('./aiPrompt.ts');
+  const deck = await deckOf(docId);
+  const controller = new AbortController();
+  rec.jobs.add(controller);
+  rec.aiRunning = true;
+  rec.emitStatus(true);
+  const segments = rec.transcript.segments.map((s) => ({ id: s.id, start: s.start, text: s.text }));
+  void rec.track((async () => {
+    const labels: Record<string, number | null> = {};
+    let previous: Label | undefined;
+    try {
+      for (let offset = 0; offset < segments.length; offset += AI_CHUNK_SEGMENTS) {
+        const chunk = segments.slice(offset, offset + AI_CHUNK_SEGMENTS);
+        const reply = await job.call(buildAlignPrompt(deck, chunk, offset, previous), controller.signal);
+        const parsed = parseAlignRuns(reply, offset, chunk.length, pageCount);
+        chunk.forEach((s, i) => (labels[String(s.id)] = parsed[i]));
+        previous = parsed[parsed.length - 1];
+        if (rec.deleted) return;
+        rec.llm = { provider: job.provider, model: job.model, at: new Date().toISOString(), labels: { ...labels } };
+        await rec.serial(() => writeLlmLabels(docId, rid, rec.llm as LlmLabels));
+        await rec.realign();
+      }
+      await rec.serial(async () => {
+        delete rec.meta.error;
+        await rec.saveMeta();
+      });
+    } catch (err) {
+      if (controller.signal.aborted || rec.deleted) return;
+      console.warn(`[recordings] ${rid}: AI alignment failed: ${errorText(err)}`);
+      await rec
+        .serial(async () => {
+          rec.meta.error = `AI 정렬 실패: ${errorText(err)}`;
+          await rec.saveMeta();
+        })
+        .catch(() => {});
+    } finally {
+      rec.aiRunning = false;
+      rec.jobs.delete(controller);
+      if (!rec.deleted) rec.emitStatus(true);
+    }
+  })());
+}
+
+// --- lecture speech for the tutor -------------------------------------------------------------------------------
+
+/** Loaded recordings of a document, or their state from disk. */
+export async function recordingsForSpeech(
+  docId: string,
+): Promise<Array<{ meta: RecordingMeta; segments: TranscriptSegment[]; durationSec: number; live: boolean }>> {
+  const out: Array<{ meta: RecordingMeta; segments: TranscriptSegment[]; durationSec: number; live: boolean }> = [];
+  for (const rid of await listRecordingIds(docId)) {
+    const loaded = recs.get(recKey(docId, rid));
+    const rec = loaded ? await loaded.catch(() => null) : null;
+    if (rec) {
+      if (!rec.deleted) out.push({ meta: rec.meta, segments: rec.transcript.segments, durationSec: rec.durationSec(), live: rec.isLive });
+      continue;
+    }
+    const meta = await readMeta(docId, rid);
+    if (!meta) continue;
+    const state = await readTranscriptState(docId, rid);
+    const durationSec = meta.source === 'live' ? (await fileSize(recordingPaths(docId, rid).audioPcm)) / BYTES_PER_SECOND : (meta.durationSec ?? 0);
+    out.push({ meta, segments: state.segments, durationSec, live: false });
+  }
+  return out;
+}
+
+// --- lifecycle -------------------------------------------------------------------------------------------------
+
+/**
+ * Startup (DESIGN §22 crash safety): live recordings left in 'recording'/'paused' are loaded (their audio verified
+ * and truncated to the last acknowledged commit), unfinished conversions and transcriptions are resumed; folders of
+ * uploads that never finished arriving are removed.
+ */
+export async function resumeRecordings(): Promise<number> {
+  stopping = false;
+  let resumed = 0;
+  let docs: string[] = [];
+  try {
+    docs = await fs.readdir(libraryDir());
+  } catch {
+    return 0;
+  }
+  for (const docId of docs) {
+    let ids: string[];
+    try {
+      docPaths(docId);
+      ids = await listRecordingIds(docId);
+    } catch {
+      continue;
+    }
+    // Leftovers of deleted recordings whose removal failed (e.g. a file held open on Windows).
+    for (const name of await fs.readdir(recordingsDir(docId)).catch(() => [] as string[])) {
+      if (name.startsWith('.deleted-')) await fs.rm(path.join(recordingsDir(docId), name), { recursive: true, force: true }).catch(() => {});
+    }
+    for (const rid of ids) {
+      const meta = await readMeta(docId, rid).catch(() => null);
+      if (!meta) {
+        // An upload that never finished arriving (no meta.json yet).
+        const dir = recordingPaths(docId, rid).dir;
+        const entries = await fs.readdir(dir).catch(() => [] as string[]);
+        if (!entries.includes('meta.json')) await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+        continue;
+      }
+      const unfinished =
+        meta.status === 'recording' ||
+        meta.status === 'paused' ||
+        meta.status === 'converting' ||
+        meta.transcriptStatus === 'queued' ||
+        meta.transcriptStatus === 'running' ||
+        (meta.source === 'live' && meta.stoppedAt !== undefined && !meta.finalized);
+      if (!unfinished) continue;
+      try {
+        await loadRec(docId, rid);
+        resumed++;
+      } catch (err) {
+        console.warn(`[recordings] could not resume ${docId}/${rid}: ${errorText(err)}`);
+      }
+    }
+  }
+  return resumed;
+}
+
+/** Server shutdown: stop whisper/ffmpeg/downloads, close files and streams. */
+export async function stopRecordingWork(): Promise<void> {
+  stopping = true;
+  queue.length = 0;
+  runningJob?.controller.abort();
+  await runningJob?.done;
+  await warming;
+  const all = await Promise.all([...recs.values()].map((p) => p.catch(() => null)));
+  await Promise.all(all.map((rec) => rec?.close()));
+  recs.clear();
+  loaded.clear();
+  liveKey = null;
+  if (unloadTimer) clearInterval(unloadTimer);
+  unloadTimer = null;
+  await config.models.stopAll();
+  stopping = false;
+}
+
+/** A document is being deleted (synchronous part: nothing of it may keep running). */
+export function forgetDocRecordings(docId: string): void {
+  for (const [key, pending] of [...recs]) {
+    if (!key.startsWith(`${docId}/`)) continue;
+    recs.delete(key);
+    loaded.delete(key);
+    void pending.then((rec) => rec.shutdown()).catch(() => {});
+  }
+  for (let i = queue.length - 1; i >= 0; i--) if (queue[i].rec.docId === docId) queue.splice(i, 1);
+  if (runningJob?.rec.docId === docId) runningJob.controller.abort();
+  if (liveKey?.startsWith(`${docId}/`)) liveKey = null;
+}
+
+/** For tests: forget every loaded recording without touching the files (like a restart). */
+export async function resetRecordingsForTests(): Promise<void> {
+  await stopRecordingWork();
+}
+
+export { LIVE_SAMPLE_RATE, recordingsDir };

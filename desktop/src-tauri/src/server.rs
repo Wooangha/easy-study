@@ -6,6 +6,10 @@
 //! is killed, on every OS. Backstops: POSIX process group (killed after the server exits), Linux
 //! PR_SET_PDEATHSIG, Windows Job Object with KILL_ON_JOB_CLOSE. Errors before listening (e.g. the library is
 //! locked by `npm start`) come on stderr in Korean; the chooser shows the last lines.
+//!
+//! Lecture recordings (DESIGN §22): the server transcribes with the bundled whisper-cli and decodes uploads with
+//! the bundled ffmpeg; the shell passes their paths (EASY_STUDY_WHISPER, EASY_STUDY_FFMPEG) and the folder for the
+//! downloaded speech models (EASY_STUDY_MODELS_DIR = <app data dir>/models, next to the default library).
 
 use std::collections::VecDeque;
 use std::fs;
@@ -46,6 +50,7 @@ const STRIP_ENV: &[&str] = &[
     "EASY_STUDY_DESKTOP_SMOKE_TIMEOUT",
     "EASY_STUDY_DESKTOP_SMOKE_URL",
     "EASY_STUDY_DESKTOP_SMOKE_CODE",
+    "EASY_STUDY_DESKTOP_SMOKE_ASR",
     "NODE_OPTIONS",
     "WATCH_REPORT_DEPENDENCIES",
 ];
@@ -108,6 +113,8 @@ fn spawn_server(app: &AppHandle) -> Result<(), String> {
     let library = config::library(app, &cfg);
     fs::create_dir_all(&library.path)
         .map_err(|e| format!("라이브러리 폴더를 만들 수 없어요: {} ({e})", library.path.display()))?;
+    let tools = Tools::find(&res, config::data_dir(app).join("models"));
+    let _ = fs::create_dir_all(&tools.models);
     let port = pick_port(cfg.port);
     config::update(app, |c| c.port = Some(port));
 
@@ -121,7 +128,7 @@ fn spawn_server(app: &AppHandle) -> Result<(), String> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    child_env(&mut cmd, &path_env, port, &library.path);
+    child_env(&mut cmd, &path_env, port, &library.path, &tools);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -140,10 +147,11 @@ fn spawn_server(app: &AppHandle) -> Result<(), String> {
     config::log(
         app,
         &format!(
-            "spawned server pid {} port {port} in {} ms; library {}; PATH ({how}): {path_env}",
+            "spawned server pid {} port {port} in {} ms; library {}; {}; PATH ({how}): {path_env}",
             child.id(),
             t.elapsed().as_millis(),
-            library.path.display()
+            library.path.display(),
+            tools.describe()
         ),
     );
     config::append_log(&log_file, &format!("---- easy-study desktop: server pid {} port {port} library {}", child.id(), library.path.display()));
@@ -371,8 +379,7 @@ fn node_path(res: &Path) -> PathBuf {
     }
     #[cfg(target_os = "linux")]
     {
-        let beside = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("es-node")));
-        match beside.filter(|p| p.is_file()) {
+        match beside_app("es-node") {
             Some(p) => p,
             None => res.join("node").join("bin").join("node"),
         }
@@ -383,7 +390,71 @@ fn node_path(res: &Path) -> PathBuf {
     }
 }
 
-fn child_env(cmd: &mut Command, path_env: &str, port: u16, library: &Path) {
+/// A file next to the app binary (Linux externalBins).
+#[cfg(target_os = "linux")]
+fn beside_app(name: &str) -> Option<PathBuf> {
+    std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join(name))).filter(|p| p.is_file())
+}
+
+/// A bundled helper program like Node (desktop/scripts/prepare.mjs): a resource `<dir>/<name>[.exe]` on macOS and
+/// Windows, the externalBin `es-<dir>` next to the app binary on Linux (/usr/bin/es-whisper, /usr/bin/es-ffmpeg).
+/// None when this build has none (a local build without it: the server then looks on PATH).
+fn bundled_tool(res: &Path, dir: &str, name: &str) -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = (res, name);
+        beside_app(&format!("es-{dir}"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let file = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
+        Some(res.join(dir).join(file)).filter(|p| p.is_file())
+    }
+}
+
+/// What the server needs for lecture recordings (DESIGN §22).
+struct Tools {
+    /// whisper.cpp's whisper-cli (speech recognition).
+    whisper: Option<PathBuf>,
+    /// The minimal LGPL ffmpeg (decodes uploaded recordings).
+    ffmpeg: Option<PathBuf>,
+    /// Where the speech models are downloaded (the app data dir, never the bundle).
+    models: PathBuf,
+}
+
+impl Tools {
+    fn find(res: &Path, models: PathBuf) -> Tools {
+        Tools { whisper: bundled_tool(res, "whisper", "whisper-cli"), ffmpeg: bundled_tool(res, "ffmpeg", "ffmpeg"), models }
+    }
+
+    /// The server's variables. A path the user set before starting the app wins over the bundled program (an own
+    /// build, e.g. for a CPU the bundled one does not support); without either the server looks on PATH.
+    fn env(&self, user: impl Fn(&str) -> Option<String>) -> Vec<(&'static str, String)> {
+        let mut out = vec![(ENV_MODELS, self.models.to_string_lossy().into_owned())];
+        for (key, bundled) in [(ENV_WHISPER, &self.whisper), (ENV_FFMPEG, &self.ffmpeg)] {
+            let own = user(key).filter(|v| !v.trim().is_empty());
+            if let Some(path) = own.or_else(|| bundled.as_ref().map(|p| p.to_string_lossy().into_owned())) {
+                out.push((key, path));
+            }
+        }
+        out
+    }
+
+    fn describe(&self) -> String {
+        let show = |p: &Option<PathBuf>| p.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "PATH".into());
+        format!("whisper {}; ffmpeg {}; models {}", show(&self.whisper), show(&self.ffmpeg), self.models.display())
+    }
+}
+
+const ENV_WHISPER: &str = "EASY_STUDY_WHISPER";
+const ENV_FFMPEG: &str = "EASY_STUDY_FFMPEG";
+const ENV_MODELS: &str = "EASY_STUDY_MODELS_DIR";
+
+fn user_env(key: &str) -> Option<String> {
+    std::env::var(key).ok()
+}
+
+fn child_env(cmd: &mut Command, path_env: &str, port: u16, library: &Path, tools: &Tools) {
     #[allow(unused_mut)]
     let mut path_value = path_env.to_string();
     #[cfg(target_os = "linux")]
@@ -400,6 +471,7 @@ fn child_env(cmd: &mut Command, path_env: &str, port: u16, library: &Path) {
         .env("EASY_STUDY_HOST", "127.0.0.1")
         .env("EASY_STUDY_LIBRARY", library)
         .env("EASY_STUDY_DESKTOP", "1");
+    cmd.envs(tools.env(user_env));
 }
 
 /// Linux: PR_SET_PDEATHSIG is tied to the THREAD that forked the child, so every server is spawned by one
@@ -491,5 +563,39 @@ mod tests {
         assert_eq!(ready_url("  easy-study   →  http://127.0.0.1:5351"), None);
         assert_eq!(ready_url(r#"EASY_STUDY_READY {"url":"http://192.168.0.2:5353"}"#), None);
         assert_eq!(ready_url("EASY_STUDY_READY not json"), None);
+    }
+
+    fn tools(whisper: Option<&str>, ffmpeg: Option<&str>) -> Tools {
+        Tools { whisper: whisper.map(PathBuf::from), ffmpeg: ffmpeg.map(PathBuf::from), models: PathBuf::from("/data/models") }
+    }
+
+    #[test]
+    fn recording_tools_reach_the_server() {
+        let none = |_: &str| None;
+        let bundled = tools(Some("/app/whisper/whisper-cli"), Some("/app/ffmpeg/ffmpeg"));
+        assert_eq!(
+            bundled.env(none),
+            vec![
+                (ENV_MODELS, "/data/models".to_string()),
+                (ENV_WHISPER, "/app/whisper/whisper-cli".to_string()),
+                (ENV_FFMPEG, "/app/ffmpeg/ffmpeg".to_string()),
+            ]
+        );
+        // Not bundled (a local build without ffmpeg): the server looks on PATH (Homebrew's ffmpeg, say).
+        assert_eq!(tools(Some("/w"), None).env(none), vec![(ENV_MODELS, "/data/models".into()), (ENV_WHISPER, "/w".into())]);
+        // The user's own programs win; an empty variable does not count. The models folder is always the app's.
+        let user = |key: &str| match key {
+            ENV_WHISPER => Some("/home/me/whisper-cli".to_string()),
+            ENV_FFMPEG => Some("  ".to_string()),
+            _ => Some("/elsewhere".to_string()),
+        };
+        assert_eq!(
+            bundled.env(user),
+            vec![
+                (ENV_MODELS, "/data/models".to_string()),
+                (ENV_WHISPER, "/home/me/whisper-cli".to_string()),
+                (ENV_FFMPEG, "/app/ffmpeg/ffmpeg".to_string()),
+            ]
+        );
     }
 }

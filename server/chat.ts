@@ -27,6 +27,7 @@ import type { BuildTurnInput, BuildTurnOutput, ContextSettings, DocAssets, Provi
 import { loadDocAssets } from './library.ts';
 import { attachmentLabel } from './prompts.ts';
 import { getProvider, providerInfos } from './providers/index.ts';
+import { lectureSpeechFor } from './recordings/speech.ts';
 import { providerErrorKind } from './providers/types.ts';
 import type { Part, Provider, ProviderRunResult } from './providers/types.ts';
 import { getSession, repairInterruptedMessages, saveSession, toSession, writeNotes } from './sessions.ts';
@@ -75,6 +76,11 @@ export interface ChatDeps {
    * Omitted = no limit.
    */
   cliSlot?: AcquireCliSlot;
+  /**
+   * What the professor said on the slides of the focus window, and the recent speech while a live recording of the
+   * document runs (DESIGN §22). Omitted or undefined = the document has no transcribed recording.
+   */
+  lectureSpeech?: (docId: string, slide: number, windowSlides: number[]) => Promise<BuildTurnInput['lectureSpeech']>;
 }
 
 /** The real modules: provider registry (availability cached 60 s) and the context builder. */
@@ -89,6 +95,7 @@ export function defaultChatDeps(): ChatDeps {
     appendHistory,
     contextSettings: () => defaultContextSettings(),
     cliSlot: acquireCliSlot,
+    lectureSpeech: lectureSpeechFor,
   };
 }
 
@@ -304,6 +311,18 @@ async function startTurn(validated: ValidatedTurn): Promise<TurnResult> {
     settings,
     maxImagesPerConversation: provider.maxImagesPerConversation,
   };
+  if (deps.lectureSpeech) {
+    // Never fails the turn: without the speech the tutor still has the slides.
+    try {
+      const n = turnInput.neighbors;
+      const windowSlides: number[] = [];
+      for (let s = Math.max(1, slide - n); s <= Math.min(doc.meta.pageCount, slide + n); s++) windowSlides.push(s);
+      const speech = await deps.lectureSpeech(docId, slide, windowSlides);
+      if (speech) turnInput.lectureSpeech = speech;
+    } catch (err) {
+      console.warn(`[chat] lecture speech of ${docId} unavailable: ${errorText(err)}`);
+    }
+  }
   if (held.items.length > 0) {
     turnInput.attachments = held.items.map(({ attachment, path }, i) => ({
       kind: attachment.kind,

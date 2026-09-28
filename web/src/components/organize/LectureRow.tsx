@@ -3,6 +3,7 @@ import { thumbUrl } from '../../api.ts';
 import { formatDate } from '../../lib/format.ts';
 import { dndId, type DropData } from '../../lib/libraryDnd.ts';
 import type { LayoutEntry } from '../../lib/libraryLayout.ts';
+import { RecordingUploadBadge, useRecordingUploadPicker } from '../recording/RecordingUploads.tsx';
 import { SlideImage } from '../SlideImage.tsx';
 import { dropMarkClass, useDropMark, useOrgItem } from './LibraryDnd.tsx';
 import { DigestBadge, DocProgress, DragHandle, FailedDocActions } from './parts.tsx';
@@ -32,8 +33,12 @@ export function LectureRow({ doc, index, courseId, entries, onOpen, onMove, onRe
   });
   const mark = useDropMark(dndId.lecture(doc.id));
   const ready = doc.status === 'ready';
+  const pickRecording = useRecordingUploadPicker();
 
   const sections: MenuSection[] = [
+    ...(ready && pickRecording
+      ? [{ items: [{ key: 'recording', label: '🎙 녹음 파일 올리기', hint: '음성·동영상', onSelect: () => pickRecording(doc) }] }]
+      : []),
     {
       items: [
         { key: 'remove', label: '과목에서 빼기', hint: '미분류로', onSelect: () => onMove(null) },
@@ -73,6 +78,7 @@ export function LectureRow({ doc, index, courseId, entries, onOpen, onMove, onRe
           <span className="doc-sub">
             {ready ? `${doc.pageCount}장` : doc.status === 'error' ? '처리 실패' : '변환 중'} · {formatDate(doc.createdAt)}
             <DigestBadge status={doc.digestStatus} />
+            <RecordingUploadBadge docId={doc.id} />
           </span>
           {doc.status === 'processing' && <DocProgress doc={doc} compact />}
           {doc.status === 'error' && <span className="doc-error">{doc.error ?? '처리 중 오류가 발생했어요'}</span>}

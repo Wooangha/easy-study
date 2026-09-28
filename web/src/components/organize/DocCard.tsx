@@ -2,7 +2,9 @@ import type { Course, DocMeta, LibraryLayout } from '../../../../shared/types.ts
 import { viewUrl } from '../../api.ts';
 import { formatDate } from '../../lib/format.ts';
 import { dndId, type DropData } from '../../lib/libraryDnd.ts';
+import { RecordingUploadBadge, useRecordingUploadPicker } from '../recording/RecordingUploads.tsx';
 import { SlideImage } from '../SlideImage.tsx';
+import { PopoverMenu } from './PopoverMenu.tsx';
 import { useOrgItem } from './LibraryDnd.tsx';
 import { CourseOptions, DigestBadge, DocProgress, DragHandle, FailedDocActions } from './parts.tsx';
 
@@ -20,6 +22,8 @@ interface DocCardProps {
 export function DocCard({ doc, courses, layout, onOpen, onMove, onRetry, onDelete }: DocCardProps) {
   const ready = doc.status === 'ready';
   const hasCourses = courses.length > 0;
+  const pickRecording = useRecordingUploadPicker();
+  const canUploadRecording = ready && pickRecording !== null;
   const data: DropData = { role: 'lecture', docId: doc.id, courseId: null };
   const { setNodeRef, setActivatorNodeRef, listeners, attributes, isDragging } = useOrgItem({
     id: dndId.lecture(doc.id),
@@ -49,16 +53,15 @@ export function DocCard({ doc, courses, layout, onOpen, onMove, onRetry, onDelet
             {doc.fileName} · {formatDate(doc.createdAt)}
             {ready && ` · ${doc.pageCount}장`}
           </div>
-          {doc.digestStatus !== 'none' && (
-            <div className="doc-badges">
-              <DigestBadge status={doc.digestStatus} />
-            </div>
-          )}
+          <div className="doc-badges">
+            {doc.digestStatus !== 'none' && <DigestBadge status={doc.digestStatus} />}
+            <RecordingUploadBadge docId={doc.id} />
+          </div>
           {doc.status === 'processing' && <DocProgress doc={doc} compact />}
           {doc.status === 'error' && <div className="doc-error">{doc.error ?? '처리 중 오류가 발생했어요'}</div>}
         </div>
       </button>
-      {(hasCourses || doc.status === 'error') && (
+      {(hasCourses || doc.status === 'error' || canUploadRecording) && (
         <div className="doc-card-foot">
           {doc.status === 'error' && <FailedDocActions doc={doc} onRetry={onRetry} onDelete={onDelete} />}
           {hasCourses && (
@@ -81,6 +84,23 @@ export function DocCard({ doc, courses, layout, onOpen, onMove, onRetry, onDelet
                 <CourseOptions courses={courses} layout={layout} />
               </select>
             </div>
+          )}
+          {canUploadRecording && (
+            <PopoverMenu
+              label={`‘${doc.title}’ 강의 메뉴`}
+              sections={[
+                {
+                  items: [
+                    {
+                      key: 'recording',
+                      label: '🎙 녹음 파일 올리기',
+                      hint: '음성·동영상',
+                      onSelect: () => pickRecording?.(doc),
+                    },
+                  ],
+                },
+              ]}
+            />
           )}
         </div>
       )}

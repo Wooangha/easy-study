@@ -1,0 +1,247 @@
+{
+  "lang": "en",
+  "voice": "Samantha",
+  "rate": 150,
+  "deck": "library/example-parsing-deck (a compilers course L7 Parsing III, Top-Down)",
+  "notes": "English lecture, same structure as ko-mixed (same tangent position, same back-reference 17->10->17, same skipped slide 11, same pauses). Each utterance becomes one ground-truth segment.",
+  "items": [
+    {
+      "slide": 1,
+      "utts": [
+        "Okay, let's get started. This is lecture seven, Parsing part three, and we're continuing with top-down parsing.",
+        "Last time we talked about recursive descent and eliminating left recursion. Today we'll go one step further and see how to parse without any backtracking.",
+        "We have a lot to cover today, so let's jump right in."
+      ]
+    },
+    {
+      "pause": 3.2
+    },
+    {
+      "slide": 2,
+      "utts": [
+        "Um, so first, predictive parsing. What happens if a top-down parser picks the wrong production? Right, it may need to backtrack.",
+        "The alternative is to look ahead in the input and use context to pick the correct production.",
+        "So how much lookahead do we need for a context-free grammar? In general, an arbitrarily large amount, and then you'd use something like the Cocke-Younger-Kasami or Earley's algorithm.",
+        "Fortunately, most programming language constructs fall into large subclasses that need only limited lookahead. The interesting ones are LL(1) and LR(1) grammars, and today we focus on LL(1)."
+      ]
+    },
+    {
+      "slide": 3,
+      "utts": [
+        "The basic idea is this. Given A goes to alpha or beta, the parser should be able to choose between alpha and beta just by looking at the next word in the input stream.",
+        "To formalize that, we need a few sets. The first one is the FIRST set.",
+        "FIRST of alpha is the set of tokens that can appear as the first symbol in some string derived from alpha.",
+        "We'll see how to compute it later, so for now, just assume we can compute FIRST sets."
+      ]
+    },
+    {
+      "slide": 4,
+      "utts": [
+        "Now we can state the LL(1) property.",
+        "If both A goes to alpha and A goes to beta appear in the grammar, we'd like FIRST of alpha intersected with FIRST of beta to be empty.",
+        "Then the parser can always make the right choice with a lookahead of exactly one symbol. And notice that FIRST is a property of the entire right-hand side.",
+        "This rule is beautiful and intuitive. Unfortunately, it's wrong. It can't handle epsilon productions, like A goes to epsilon."
+      ]
+    },
+    {
+      "slide": 5,
+      "utts": [
+        "So epsilon productions complicate the definition. If alpha can derive epsilon, then we also need to know what can come right after A.",
+        "That's the FOLLOW set. FOLLOW of A is the set of terminal symbols that can appear immediately after A in some sentential form.",
+        "Now we want two conditions. FIRST of alpha and FIRST of beta are disjoint, and FIRST of beta and FOLLOW of A are disjoint.",
+        "Again, assume for now that we can compute FOLLOW sets."
+      ]
+    },
+    {
+      "slide": 6,
+      "utts": [
+        "We combine the two into the START set.",
+        "If epsilon is in FIRST of alpha, START is FIRST of alpha minus epsilon, union FOLLOW of A. Otherwise, it's just FIRST of alpha.",
+        "Note that START is defined over productions, not over nonterminals. In older editions of the textbook, this was called FIRST plus.",
+        "A grammar has the LL(1) property if, for any two productions of the same nonterminal, their START sets are disjoint. Such a grammar is predictively parsable."
+      ]
+    },
+    {
+      "pause": 4.0
+    },
+    {
+      "slide": 7,
+      "utts": [
+        "Alright, now let's actually compute FIRST sets. In parsing, it's useful to know which terminal symbols can occur at a given point.",
+        "A top-down parser uses this to choose a production, and a bottom-up parser generator uses it to build its tables.",
+        "FIRST is defined over strings of grammar symbols. For a terminal, EOF, or epsilon, FIRST is just the symbol itself, so we only need to compute it for nonterminals."
+      ]
+    },
+    {
+      "slide": 8,
+      "utts": [
+        "Um, let's start with a conceptual sketch, and ignore epsilon productions for now.",
+        "Initialize each terminal, EOF, and epsilon to itself, and every nonterminal to the empty set.",
+        "Then loop over the productions, and add the FIRST set of the leading symbol on the right-hand side to the FIRST set of the left-hand side.",
+        "Because a right-hand side can start with a nonterminal, we iterate until nothing changes, that is, until we reach a fixed point."
+      ]
+    },
+    {
+      "slide": 9,
+      "utts": [
+        "This loop nest is monotone increasing. Sets only grow, they never shrink.",
+        "The largest FIRST set has the number of terminals plus two elements, and at least one set changes in every iteration.",
+        "So the while loop runs at most NT times T plus two, plus one times. It always terminates.",
+        "So the algorithm is guaranteed to reach a fixed point, no matter what order we visit the productions in."
+      ]
+    },
+    {
+      "slide": 10,
+      "utts": [
+        "Now let's fill in the details for epsilon productions.",
+        "If FIRST of B1 contains epsilon, we also add FIRST of B2 to the rhs, and if B2 can vanish too, we look at B3, and so on.",
+        "And if the entire right-hand side can go to epsilon, we add epsilon to FIRST of the left-hand side. This is essentially Figure 3.7 in the textbook.",
+        "I'm going to skip the next slide, it's basically the same story."
+      ]
+    },
+    {
+      "flip": 11,
+      "dur": 1.6
+    },
+    {
+      "slide": 12,
+      "utts": [
+        "Let's look at an example, the SheepNoise grammar.",
+        "Goal goes to SheepNoise, and SheepNoise goes to SheepNoise baa, or just baa. It's left-recursive.",
+        "Here's the table of what we expect. Goal, SheepNoise, and baa all map to baa, and EOF maps to EOF.",
+        "Intuitively, every symbol except EOF has a FIRST set of just baa. So does our algorithm produce that intuitive answer? Let's check."
+      ]
+    },
+    {
+      "pause": 2.5
+    },
+    {
+      "slide": 13,
+      "utts": [
+        "After initialization, Goal and SheepNoise are empty, baa is baa, and EOF is EOF.",
+        "We'll take the productions in the order two, one, zero. Any other order gives the same answer, it just might take longer to converge.",
+        "As you can see in the table, the nonterminals all start out empty."
+      ]
+    },
+    {
+      "slide": 14,
+      "utts": [
+        "Production two sets the rhs to FIRST of baa, which is baa, and adds it to FIRST of SheepNoise.",
+        "Production one, SheepNoise baa, has no visible effect, because FIRST of SheepNoise is already baa.",
+        "So in the very first iteration of the while loop, SheepNoise already picks up baa."
+      ]
+    },
+    {
+      "slide": 15,
+      "utts": [
+        "Production zero puts FIRST of SheepNoise into FIRST of Goal, so Goal also gets baa.",
+        "Then one more iteration to see that nothing changes anymore, and we're done. Same as the intuitive answer, right?",
+        "So even for a left-recursive grammar, computing FIRST sets works just fine. Left recursion is a problem for the parser, not for computing the sets."
+      ]
+    },
+    {
+      "slide": null,
+      "kind": "tangent",
+      "utts": [
+        "Oh, quick announcement before I forget. Programming assignment two is due next Monday, and that assignment is exactly building this kind of parser.",
+        "Last year the submission server got really slow right before the deadline, and quite a few students missed it. So please submit at least a day early.",
+        "Post your questions on the board, and the TAs will answer them. Also, the midterm covers everything up to and including today's lecture.",
+        "Okay, let's get back to it."
+      ]
+    },
+    {
+      "pause": 3.0
+    },
+    {
+      "slide": 16,
+      "utts": [
+        "Here's a slightly more interesting example, the parentheses grammar.",
+        "Goal goes to List, List goes to Pair List or epsilon, and Pair goes to LP List RP, where LP is the open paren and RP is the close paren.",
+        "This one has an epsilon production, so it's more interesting than SheepNoise. Initially, the nonterminals are empty, and LP, RP, and EOF map to themselves."
+      ]
+    },
+    {
+      "slide": 17,
+      "utts": [
+        "If we take the productions in the order three, two, one, zero, the first iteration adds LP to FIRST of Pair, and LP and epsilon to FIRST of List and FIRST of Goal."
+      ]
+    },
+    {
+      "slide": 10,
+      "kind": "backref",
+      "utts": [
+        "Uh, if it's not clear why epsilon shows up there, let me go back to the algorithm for a second.",
+        "See this last part. If i equals k, and epsilon is in FIRST of B k, we add epsilon to the rhs. That's where it comes from."
+      ]
+    },
+    {
+      "slide": 17,
+      "utts": [
+        "Okay, back to the example. In the second iteration nothing changes, so we've reached the fixed point.",
+        "By the way, in the adversarial order, zero, one, two, three, you'd need one iteration to reach List, one to reach Goal, and one more to notice that they stopped changing."
+      ]
+    },
+    {
+      "slide": 18,
+      "utts": [
+        "So how do we compute FOLLOW sets? FOLLOW is the set of terminal symbols that can follow a given nonterminal.",
+        "A top-down parser needs this to deal with epsilon productions.",
+        "FOLLOW of the start symbol is EOF, because the whole point is to recognize the start symbol followed by EOF.",
+        "FOLLOW is defined over the nonterminals, and each FOLLOW set is a subset of the terminals plus EOF. And to build FOLLOW sets, we need FIRST sets first."
+      ]
+    },
+    {
+      "slide": 19,
+      "utts": [
+        "This is again a fixed-point algorithm. All sets start out empty except FOLLOW of the start symbol, and we keep adding to them until they stop changing.",
+        "The context comes from adjacency in the right-hand side. This is a conceptual version of Figure 3.8 in the textbook.",
+        "So the structure is exactly the same as for FIRST sets. Initialize, then loop until nothing changes."
+      ]
+    },
+    {
+      "slide": 20,
+      "utts": [
+        "Here's the concept. Assume there are no epsilon productions. If the grammar has a production X goes to A B, then FOLLOW of A should include FIRST of B, since B can legally appear to the right of A.",
+        "And FOLLOW of B should include FOLLOW of X, since B can occur at the end of X, so anything that follows X can follow B.",
+        "So a simple algorithm would just collect those pairs and iterate. The full algorithm also deals with epsilon productions and efficiency."
+      ]
+    },
+    {
+      "slide": 21,
+      "utts": [
+        "And this is the real algorithm. For each production, TRAILER starts as FOLLOW of A, and we walk the right-hand side backwards, from k down to one.",
+        "If B i is a nonterminal, add TRAILER to FOLLOW of B i. Then, if B i can derive epsilon, add FIRST of B i minus epsilon to TRAILER. Otherwise, replace TRAILER with FIRST of B i.",
+        "If B i is a terminal, TRAILER becomes just that one symbol. And remember, we never add epsilon to a FOLLOW set."
+      ]
+    },
+    {
+      "pause": 5.0
+    },
+    {
+      "slide": 22,
+      "utts": [
+        "Um, let's go back to the parentheses grammar and compute FOLLOW.",
+        "Initially Goal, List, and Pair are all empty, and since Goal is the start symbol, FOLLOW of Goal is set to EOF.",
+        "We don't know anything yet about FOLLOW of List or FOLLOW of Pair. Now let's run through productions zero to three, in order."
+      ]
+    },
+    {
+      "slide": 23,
+      "utts": [
+        "Iteration one. Production zero adds EOF to FOLLOW of List.",
+        "Production one adds LP and EOF to FOLLOW of Pair, from FIRST of List and the TRAILER.",
+        "Production two does nothing, and production three adds RP to FOLLOW of List, since FIRST of RP is just RP.",
+        "So after the first iteration, FOLLOW of List is EOF and RP, and FOLLOW of Pair is EOF and LP."
+      ]
+    },
+    {
+      "slide": 24,
+      "utts": [
+        "In iteration two, production one adds RP to FOLLOW of Pair, coming from FOLLOW of List. Nothing else is new.",
+        "Notice how RP had to travel through FOLLOW of List to reach FOLLOW of Pair. That's why we needed a second iteration.",
+        "Iteration three gives the same result, so we've reached a fixed point. The final FOLLOW of Pair is EOF, LP, and RP.",
+        "Any questions so far?"
+      ]
+    }
+  ]
+}
