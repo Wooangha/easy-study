@@ -1,3 +1,5 @@
+import { SwitchServerButton } from './LoginScreen.tsx';
+
 interface LocalOnlyScreenProps {
   /** The server's refusal message. */
   message: string | null;
@@ -42,6 +44,7 @@ export function LocalOnlyScreen({ message, onRetry }: LocalOnlyScreenProps) {
         <button type="button" className="primary-btn auth-submit" onClick={onRetry}>
           다시 확인
         </button>
+        <SwitchServerButton />
       </main>
     </div>
   );

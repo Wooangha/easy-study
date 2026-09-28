@@ -2,14 +2,17 @@
 //  - the bundled chooser page (ui/, the ONLY page with IPC: capabilities/chooser.json has no `remote` key),
 //  - the local server's UI ("이 컴퓨터에서 실행": the bundled Node runs the packed server, see server.rs), or
 //  - another computer's easy-study server ("다른 컴퓨터에 연결": URL + access code, see remote.rs).
-// Pages served over http(s) get no IPC. Links to other sites open in the system browser.
+// Pages served over http(s) get no IPC. Links to other sites open in the system browser. The shell and the pages
+// talk through bridge.rs (a static marker, pushed state, reserved navigations); in-app updates: update.rs (DESIGN §24).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod bridge;
 mod config;
 mod media;
 mod pathenv;
 mod remote;
 mod server;
+mod update;
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -21,7 +24,7 @@ use serde::Serialize;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::utils::config::BackgroundThrottlingPolicy;
 use tauri::webview::{DownloadEvent, NewWindowFeatures, NewWindowResponse, PageLoadEvent};
-use tauri::{AppHandle, Manager, RunEvent, State, Url, WebviewUrl, WebviewWindowBuilder, WindowEvent, Wry};
+use tauri::{AppHandle, Manager, RunEvent, State, Url, WebviewUrl, WebviewWindowBuilder, WindowEvent, Wry, RESTART_EXIT_CODE};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
@@ -56,6 +59,18 @@ pub struct AppState {
     smoke_page_started: AtomicBool,
     /// The smoke run's verdict was given.
     smoke_done: AtomicBool,
+    /// The origin of the page the main window last loaded (None: the chooser): where state is pushed.
+    page_origin: Mutex<Option<String>>,
+    /// The origin shown before the chooser came back ("방금까지 연결", display only).
+    previous: Mutex<Option<String>>,
+    /// The chooser section to open (menu "설정…" when the page has no settings), taken by get_state once.
+    chooser_focus: Mutex<Option<String>>,
+    /// A note for the chooser (not an error).
+    notice: Mutex<Option<String>>,
+    /// A remembered connection opened at launch: config.auto_connect_pending is cleared once its page is up.
+    auto_connect: AtomicBool,
+    pub update: update::Updates,
+    pub bridge: bridge::Bridge,
 }
 
 impl AppState {
@@ -76,6 +91,13 @@ impl AppState {
             smoke_chooser_started: AtomicBool::new(false),
             smoke_page_started: AtomicBool::new(false),
             smoke_done: AtomicBool::new(false),
+            page_origin: Mutex::new(None),
+            previous: Mutex::new(None),
+            chooser_focus: Mutex::new(None),
+            notice: Mutex::new(None),
+            auto_connect: AtomicBool::new(false),
+            update: update::Updates::default(),
+            bridge: bridge::Bridge::default(),
         }
     }
 
@@ -97,11 +119,11 @@ fn quit(app: &AppHandle, code: i32) {
     app.exit(code);
 }
 
-fn main_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
+pub(crate) fn main_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
     app.get_webview_window(MAIN)
 }
 
-fn origin_of(url: &Url) -> String {
+pub(crate) fn origin_of(url: &Url) -> String {
     url.origin().ascii_serialization()
 }
 
@@ -116,7 +138,13 @@ pub fn go_to(app: &AppHandle, url: &str) {
 
 /// Back to the chooser (it reads everything it shows from get_state).
 pub fn show_chooser(app: &AppHandle) {
-    let chooser = lock(&app.state::<AppState>().chooser_url).clone();
+    let st = app.state::<AppState>();
+    let chooser = lock(&st.chooser_url).clone();
+    // (Not the chooser itself: on Windows it is served over http from tauri.localhost.)
+    let shown = main_window(app).and_then(|w| w.url().ok()).filter(|u| matches!(u.scheme(), "http" | "https") && !is_chooser(app, u));
+    if let Some(shown) = shown {
+        *lock(&st.previous) = Some(origin_of(&shown));
+    }
     if let (Some(url), Some(w)) = (chooser, main_window(app)) {
         let _ = w.navigate(url);
         let _ = w.set_focus();
@@ -133,24 +161,40 @@ fn is_chooser(app: &AppHandle, url: &Url) -> bool {
     lock(&app.state::<AppState>().chooser_url).as_ref().is_some_and(|c| origin_of(c) == origin_of(url))
 }
 
-fn is_allowed_page(app: &AppHandle, url: &Url) -> bool {
+pub(crate) fn is_allowed_page(app: &AppHandle, url: &Url) -> bool {
     url.scheme() == "about" || lock(&app.state::<AppState>().allowed_origin).as_deref() == Some(origin_of(url).as_str())
 }
 
 fn open_externally(app: &AppHandle, url: &Url) {
     if matches!(url.scheme(), "http" | "https" | "mailto") {
-        config::log(app, &format!("opening in the system browser: {url}"));
+        bridge::log_limited(app, "external", &format!("opening in the system browser: {url}"));
         if let Err(e) = app.opener().open_url(url.as_str(), None::<&str>) {
             // e.g. a minimal Linux without xdg-open (the .deb only recommends xdg-utils)
             config::log(app, &format!("could not open {url} in the system browser: {e}"));
         }
     } else {
-        config::log(app, &format!("blocked navigation to {url}"));
+        bridge::log_limited(app, "blocked", &format!("blocked navigation to {url}"));
     }
 }
 
-/// The main window stays on the chooser or the chosen server; anything else goes to the system browser.
+/// The main window stays on the chooser or the chosen server; anything else goes to the system browser. A page's
+/// action (bridge.rs: `<origin>/__easy-study-desktop/<action>`) is done on a thread and the navigation cancelled.
+/// Runs on the UI thread: nothing here may block.
 fn allow_main_navigation(app: &AppHandle, url: &Url) -> bool {
+    let allowed = lock(&app.state::<AppState>().allowed_origin).clone();
+    match bridge::classify(url, allowed.as_deref()) {
+        bridge::Nav::Action(action) => {
+            let (h, origin) = (app.clone(), origin_of(url));
+            bridge::log_limited(app, "action", &format!("page action {action:?} from {origin}"));
+            std::thread::spawn(move || bridge::on_action(&h, action, origin));
+            return false;
+        }
+        bridge::Nav::Reserved => {
+            bridge::log_limited(app, "reserved", &format!("ignored reserved navigation {url}"));
+            return false;
+        }
+        bridge::Nav::Other => {}
+    }
     if is_chooser(app, url) || is_allowed_page(app, url) {
         return true;
     }
@@ -161,6 +205,11 @@ fn allow_main_navigation(app: &AppHandle, url: &Url) -> bool {
 /// target=_blank links and window.open (notes.md, digest.md, links in answers): the server's own pages open
 /// in an app window (same cookies, no IPC: its label matches no capability); other sites in the browser.
 fn new_window(app: &AppHandle, url: Url, features: NewWindowFeatures) -> NewWindowResponse<Wry> {
+    // The reserved path never acts from a new window (links in answers open with target=_blank).
+    if bridge::is_reserved(&url) {
+        bridge::log_limited(app, "reserved", &format!("ignored reserved new window {url}"));
+        return NewWindowResponse::Deny;
+    }
     if !is_allowed_page(app, &url) || url.scheme() == "about" {
         open_externally(app, &url);
         return NewWindowResponse::Deny;
@@ -173,10 +222,11 @@ fn new_window(app: &AppHandle, url: Url, features: NewWindowFeatures) -> NewWind
         .title("easy-study")
         .disable_drag_drop_handler()
         .on_navigation(move |u| {
-            is_allowed_page(&h_nav, u) || {
-                open_externally(&h_nav, u);
-                false
-            }
+            !bridge::is_reserved(u)
+                && (is_allowed_page(&h_nav, u) || {
+                    open_externally(&h_nav, u);
+                    false
+                })
         })
         .on_new_window(move |u, f| new_window(&h_new, u, f))
         .on_document_title_changed(|w, title| {
@@ -212,6 +262,18 @@ struct StateDto {
     stderr_tail: Vec<String>,
     log_file: String,
     shortcut: String,
+    /// This build's version.
+    version: String,
+    /// "system" | "light" | "dark".
+    theme: &'static str,
+    /// Automatic update checks are on.
+    update_check: bool,
+    update: update::UpdateState,
+    /// A section to open once ("settings").
+    focus: Option<String>,
+    /// The origin shown before the chooser came back.
+    previous: Option<String>,
+    notice: Option<String>,
 }
 
 #[tauri::command]
@@ -223,24 +285,90 @@ fn get_state(app: AppHandle, state: State<'_, AppState>) -> StateDto {
         remote_url: cfg.remote_url.clone(),
         configured: config::exists(&app),
         library: config::library(&app, &cfg),
-        busy: lock(&state.busy).clone(),
+        busy: lock(&state.busy).clone().or_else(|| lock(&state.update.state).busy_line()),
         running: server_url.is_some(),
         server_url,
         error: lock(&state.error).clone(),
         stderr_tail: server::tail(&app),
         log_file: config::log_dir(&app).join("server.log").to_string_lossy().into_owned(),
         shortcut: if cfg!(target_os = "macos") { "⌘⇧K".into() } else { "Ctrl+Shift+K".into() },
+        version: app.package_info().version.to_string(),
+        theme: match cfg.theme.as_str() {
+            "light" => "light",
+            "dark" => "dark",
+            _ => "system",
+        },
+        update_check: cfg.update_check != Some(false),
+        update: lock(&state.update.state).clone(),
+        focus: lock(&state.chooser_focus).take(),
+        previous: lock(&state.previous).clone(),
+        notice: lock(&state.notice).clone(),
     }
+}
+
+/// The checks and the install run on their own threads (they block: dialogs, downloads); the chooser polls get_state.
+#[tauri::command]
+fn check_update(app: AppHandle) {
+    std::thread::spawn(move || {
+        update::check(&app, update::How::Manual);
+    });
+}
+
+#[tauri::command]
+fn install_update(app: AppHandle) {
+    std::thread::spawn(move || update::request_install(&app, update::Trigger::Chooser));
+}
+
+#[tauri::command]
+fn cancel_update(app: AppHandle) {
+    update::cancel(&app);
+}
+
+#[tauri::command]
+fn set_theme(app: AppHandle, theme: String) -> Result<(), String> {
+    if !matches!(theme.as_str(), "system" | "light" | "dark") {
+        return Err(format!("알 수 없는 테마예요: {theme}"));
+    }
+    bridge::set_theme(&app, &theme);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_update_check(app: AppHandle, on: bool) {
+    config::update(&app, |c| c.update_check = if on { None } else { Some(false) });
+    lock(&app.state::<AppState>().update.state).auto = on;
+    config::log(&app, &format!("automatic update checks {}", if on { "on" } else { "off" }));
+    bridge::push_state(&app);
+}
+
+#[tauri::command]
+fn forget_choice(app: AppHandle) {
+    bridge::forget_choice(&app);
+}
+
+#[tauri::command]
+fn open_logs(app: AppHandle) -> Result<(), String> {
+    app.opener().open_path(config::log_dir(&app).to_string_lossy(), None::<&str>).map_err(|e| e.to_string())
+}
+
+/// Nothing connects while an update replaces the app (the chooser shows it as busy; this is the backstop).
+fn not_installing(app: &AppHandle) -> Result<(), String> {
+    if update::replacing(app) {
+        return Err("업데이트를 설치하는 중이에요. 끝나면 앱이 다시 시작돼요.".into());
+    }
+    Ok(())
 }
 
 #[tauri::command]
 fn connect_local(app: AppHandle, remember: bool) -> Result<(), String> {
+    not_installing(&app)?;
     config::update(&app, |c| c.mode = if remember { "local".into() } else { String::new() });
     server::start(&app)
 }
 
 #[tauri::command]
 async fn connect_remote(app: AppHandle, url: String, code: Option<String>, remember: bool) -> Result<(), String> {
+    not_installing(&app)?;
     tauri::async_runtime::spawn_blocking(move || open_remote(&app, &url, code, remember))
         .await
         .map_err(|e| e.to_string())?
@@ -380,9 +508,18 @@ fn build_menu(h: &AppHandle) -> tauri::Result<Menu<Wry>> {
     let reload = MenuItem::with_id(h, "reload", "새로 고침", true, Some("CmdOrCtrl+R"))?;
     let browser = MenuItem::with_id(h, "open-browser", "브라우저에서 열기", true, None::<&str>)?;
     let library = MenuItem::with_id(h, "open-library", "라이브러리 폴더 열기", true, None::<&str>)?;
+    let settings = MenuItem::with_id(h, "settings", "설정…", true, Some("CmdOrCtrl+,"))?;
+    // Its text names a found version ("업데이트 설치 (0.5.1)…"): the way in when the page ignores the pushed state.
+    let check_update = MenuItem::with_id(h, "check-update", "업데이트 확인…", true, None::<&str>)?;
+    if let Some(st) = h.try_state::<AppState>() {
+        *lock(&st.update.menu) = Some(check_update.clone());
+    }
     #[cfg(target_os = "macos")]
     {
         let name = h.package_info().name.clone();
+        // The app's own quit item (not the predefined one, whose terminate: cannot be held off): it goes through
+        // ExitRequested, which waits while an update replaces the app.
+        let quit = MenuItem::with_id(h, "quit", format!("{name} 종료"), true, Some("CmdOrCtrl+Q"))?;
         let app_menu = Submenu::with_items(
             h,
             &name,
@@ -390,13 +527,16 @@ fn build_menu(h: &AppHandle) -> tauri::Result<Menu<Wry>> {
             &[
                 &PredefinedMenuItem::about(h, Some(&format!("{name}에 관하여")), None)?,
                 &PredefinedMenuItem::separator(h)?,
+                &settings,
+                &check_update,
+                &PredefinedMenuItem::separator(h)?,
                 &PredefinedMenuItem::services(h, Some("서비스"))?,
                 &PredefinedMenuItem::separator(h)?,
                 &PredefinedMenuItem::hide(h, Some(&format!("{name} 가리기")))?,
                 &PredefinedMenuItem::hide_others(h, Some("기타 가리기"))?,
                 &PredefinedMenuItem::show_all(h, Some("모두 보기"))?,
                 &PredefinedMenuItem::separator(h)?,
-                &PredefinedMenuItem::quit(h, Some(&format!("{name} 종료")))?,
+                &quit,
             ],
         )?;
         // The Edit menu is what makes ⌘C / ⌘V / ⌘A work in a WKWebView.
@@ -448,6 +588,9 @@ fn build_menu(h: &AppHandle) -> tauri::Result<Menu<Wry>> {
                 &browser,
                 &library,
                 &PredefinedMenuItem::separator(h)?,
+                &settings,
+                &check_update,
+                &PredefinedMenuItem::separator(h)?,
                 &quit,
             ],
         )?;
@@ -455,14 +598,78 @@ fn build_menu(h: &AppHandle) -> tauri::Result<Menu<Wry>> {
     }
 }
 
-fn on_menu(app: &AppHandle, id: &str) {
-    match id {
-        "choose" => show_chooser(app),
-        "reload" => {
+#[derive(Clone, Copy)]
+enum Leave {
+    Choose,
+    Reload,
+}
+
+/// A menu item's flow runs (its dialog is open, its check runs): a second click of the same item does nothing. One
+/// flag per item: a slow update check must not hold up "연결 대상 바꾸기…" (the way back to the chooser).
+static CHOOSE_FLOW: AtomicBool = AtomicBool::new(false);
+static RELOAD_FLOW: AtomicBool = AtomicBool::new(false);
+static SETTINGS_FLOW: AtomicBool = AtomicBool::new(false);
+static CHECK_FLOW: AtomicBool = AtomicBool::new(false);
+
+/// Runs `f` on its own thread (menu handlers run on the UI thread: dialogs, eval_json and checks would block it),
+/// one at a time per item.
+fn menu_thread(app: &AppHandle, flow: &'static AtomicBool, f: impl FnOnce(&AppHandle) + Send + 'static) {
+    if flow.swap(true, SeqCst) {
+        return;
+    }
+    let h = app.clone();
+    std::thread::spawn(move || {
+        f(&h);
+        flow.store(false, SeqCst);
+    });
+}
+
+/// Menu "연결 대상 바꾸기…" / "새로 고침": asks first when the page records or holds audio it has not sent (a page
+/// that does not answer, e.g. an older remote UI, is left as before).
+fn leave_page(app: &AppHandle, how: Leave) {
+    if let bridge::PageAnswer::Busy(busy) = bridge::page_answer(app) {
+        if busy.holds_audio() {
+            let (text, ok) = match how {
+                Leave::Choose => (
+                    "강의를 녹음하는 중이에요. 바꾸면 녹음이 멈춰요 (녹음한 부분은 저장돼 있어서 같은 서버에 다시 연결하면 마저 올라가요).",
+                    "바꾸기",
+                ),
+                Leave::Reload => ("강의를 녹음하는 중이에요. 새로 고치면 녹음이 멈춰요 (녹음한 부분은 저장돼 있어서 다시 열면 마저 올라가요).", "다시 고침"),
+            };
+            if !bridge::confirm(app, text, ok, "취소") {
+                return;
+            }
+            bridge::allow_leave(app);
+        }
+    }
+    match how {
+        Leave::Choose => show_chooser(app),
+        Leave::Reload => {
             if let Some(w) = main_window(app) {
                 let _ = w.eval("location.reload()");
             }
         }
+    }
+}
+
+/// Menu "설정…": the page's settings dialog, or the chooser's "앱 설정" (the chooser, an older remote UI). The chooser
+/// opens it from get_state (it asks every second).
+fn open_settings(app: &AppHandle) {
+    if bridge::open_page_settings(app) {
+        return;
+    }
+    *lock(&app.state::<AppState>().chooser_focus) = Some("settings".into());
+    if !on_chooser(app) {
+        show_chooser(app);
+    }
+}
+
+fn on_menu(app: &AppHandle, id: &str) {
+    match id {
+        "choose" => menu_thread(app, &CHOOSE_FLOW, |h| leave_page(h, Leave::Choose)),
+        "reload" => menu_thread(app, &RELOAD_FLOW, |h| leave_page(h, Leave::Reload)),
+        "settings" => menu_thread(app, &SETTINGS_FLOW, open_settings),
+        "check-update" => menu_thread(app, &CHECK_FLOW, update::menu_check),
         "open-browser" => {
             let url = main_window(app).and_then(|w| w.url().ok()).filter(|u| matches!(u.scheme(), "http" | "https"));
             if let Some(url) = url.or_else(|| lock(&app.state::<AppState>().server_url).as_deref().and_then(|u| Url::parse(u).ok())) {
@@ -489,10 +696,10 @@ fn on_menu(app: &AppHandle, id: &str) {
 //   =chooser-local   submit the chooser's own form for "이 컴퓨터에서 실행" (its submit handler → IPC connect_local);
 //   =chooser-remote  fill in EASY_STUDY_DESKTOP_SMOKE_URL / _CODE and submit "다른 컴퓨터에 연결" (→ connect_remote).
 // A failure that the chooser shows (=chooser-*) is judged by what the chooser shows. On the server's page: the web
-// client rendered, /api/health answers (with the login cookie for a remote server), the page has no IPC, and —
-// local server only — a one-page PDF uploads, converts and its slide images load (the document is deleted
-// again), the page has what the lecture recorder needs (a secure context with navigator.mediaDevices.getUserMedia
-// and AudioWorklet: Info.plist's microphone key on macOS, media.rs on Linux; the microphone is never opened), and
+// client rendered, /api/health answers (with the login cookie for a remote server), the page has no IPC but the
+// shell's marker and pushed state (update phase idle: smoke runs never check for updates), and — local server
+// only — a one-page PDF uploads, converts and its slide images load (the document is deleted again), the page has
+// what the lecture recorder needs (a secure context with navigator.mediaDevices.getUserMedia and AudioWorklet: Info.plist's microphone key on macOS, media.rs on Linux; the microphone is never opened), and
 // GET /api/asr finds the speech recognition engine and ffmpeg the shell passed (DESIGN §22; the last one skipped with
 // EASY_STUDY_DESKTOP_SMOKE_ASR=0). A smoke run registers no single-instance handover: another running copy of the
 // app must not turn it into a silent success.
@@ -591,7 +798,13 @@ const SMOKE_PROBE_JS: &str = r#"(() => {
   });
 })()"#;
 
-const SMOKE_RESULT_JS: &str = "JSON.stringify({ url: location.href, title: document.title, rendered: document.getElementById('root')?.childElementCount ?? -1, ...window.__esSmoke })";
+/// `desktop` and `updatePhase`: the shell's marker (bridge::INIT_SCRIPT) and its pushed state (no update check runs in
+/// a smoke run: the phase stays idle). `justUpdated` and `toasts` are only reported (desktop.json `updatedFrom` set to
+/// another version gives the "updated" toast).
+const SMOKE_RESULT_JS: &str = "JSON.stringify({ url: location.href, title: document.title, rendered: document.getElementById('root')?.childElementCount ?? -1, \
+     desktop: window.__EASY_STUDY_DESKTOP__?.v ?? null, updatePhase: window.__easyStudyDesktopState?.update?.phase ?? null, \
+     justUpdated: window.__easyStudyDesktopState?.justUpdated ?? null, \
+     toasts: Array.from(document.querySelectorAll('.toast-message'), (t) => t.textContent), ...window.__esSmoke })";
 
 /// What the chooser shows: status kind ('' when hidden, else info / busy / error), its text, and whether the
 /// "연결" button is disabled (the chooser disables every control while it is busy).
@@ -614,7 +827,9 @@ fn smoke_verdict(app: &AppHandle, code: i32, msg: &str) {
 }
 
 /// Evaluates `js` — an expression whose value is a JSON string — in the main window (Null without an answer).
-fn eval_json(app: &AppHandle, js: &str) -> serde_json::Value {
+/// Blocks up to 10 s for the answer, which the main thread delivers: NEVER call it on the main thread (menu
+/// handlers, synchronous commands, navigation callbacks), where it would hang and answer Null.
+pub(crate) fn eval_json(app: &AppHandle, js: &str) -> serde_json::Value {
     let Some(w) = main_window(app) else { return serde_json::Value::Null };
     let (tx, rx) = std::sync::mpsc::channel();
     let _ = w.eval_with_callback(js, move |result| {
@@ -783,7 +998,8 @@ fn smoke_page_loaded(app: &AppHandle, url: &Url) {
         let slides = !local || page["ingest"] == "ok";
         let tools = !asr || page["asr"] == "ok";
         let recorder = !local || ["secure", "mediaDevices", "worklet"].iter().all(|k| page["recorder"][k] == true);
-        if rendered && no_ipc && health && logged_in && slides && tools && recorder {
+        let shell = page["desktop"] == 1 && page["updatePhase"] == "idle";
+        if rendered && no_ipc && health && logged_in && slides && tools && recorder && shell {
             smoke_verdict(&h, 0, "ok");
         } else {
             smoke_verdict(
@@ -791,7 +1007,7 @@ fn smoke_page_loaded(app: &AppHandle, url: &Url) {
                 4,
                 &format!(
                     "FAIL checks: rendered {rendered}, no IPC {no_ipc}, health {health}, logged in {logged_in}, PDF upload and slide images {slides}, \
-                     speech recognition tools {tools}, recorder APIs {recorder}"
+                     speech recognition tools {tools}, recorder APIs {recorder}, desktop marker and state {shell}"
                 ),
             );
         }
@@ -799,6 +1015,26 @@ fn smoke_page_loaded(app: &AppHandle, url: &Url) {
 }
 
 // ---------------------------------------------------------------------------------------------------------
+
+/// A page of the allowed origin finished loading in the main window: it gets the shell's state, and a remembered
+/// connection that opened at launch counts as working once its page has been up for 30 s.
+fn page_loaded(app: &AppHandle, url: &Url) {
+    let st = app.state::<AppState>();
+    if !matches!(url.scheme(), "http" | "https") || !is_allowed_page(app, url) {
+        return;
+    }
+    *lock(&st.page_origin) = Some(origin_of(url));
+    bridge::push_state(app);
+    if st.auto_connect.swap(false, SeqCst) {
+        let h = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(30));
+            if !h.state::<AppState>().quitting.load(SeqCst) {
+                config::update(&h, |c| c.auto_connect_pending = false);
+            }
+        });
+    }
+}
 
 /// Linux: the single-instance plugin needs a D-Bus session bus (it panics without one, e.g. in a bare
 /// container); every desktop session has one. The library lock still keeps a second server away.
@@ -815,6 +1051,7 @@ fn single_instance_possible() -> bool {
 }
 
 fn main() {
+    update::keep_ssl_env(); // first: it changes the environment, which is only safe before any thread starts
     pathenv::start_resolving();
     let smoke = Smoke::parse(&std::env::var(SMOKE_ENV).unwrap_or_default());
 
@@ -835,8 +1072,24 @@ fn main() {
     let app = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        // Driven from Rust only (update.rs): its JS commands stay denied, no capability grants them.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::new(smoke))
-        .invoke_handler(tauri::generate_handler![get_state, connect_local, connect_remote, pick_library, set_library, open_library])
+        .invoke_handler(tauri::generate_handler![
+            get_state,
+            connect_local,
+            connect_remote,
+            pick_library,
+            set_library,
+            open_library,
+            check_update,
+            install_update,
+            cancel_update,
+            set_theme,
+            set_update_check,
+            forget_choice,
+            open_logs
+        ])
         .menu(build_menu)
         .on_menu_event(|app, event| on_menu(app, event.id().as_ref()))
         .setup(move |app| {
@@ -845,6 +1098,11 @@ fn main() {
             config::log(&h, &format!("start {} {} ({})", h.package_info().name, h.package_info().version, std::env::consts::ARCH));
             pathenv::use_cache(config::config_dir(&h).join("path-cache.txt"));
             config::data_dir(&h); // created with owner-only permissions (Linux keeps the WebView's cookies there)
+            let cfg = config::load(&h);
+            // The theme before the first window: windows start with the app's (a theme given to a window builder
+            // would win over later changes on Windows).
+            h.set_theme(config::theme(&cfg));
+            update::setup(&h, smoke.on());
 
             // SIGTERM (logout, kill, systemd) / SIGINT / SIGHUP: leave through app.exit so RunEvent::Exit stops
             // the server gracefully (Tauri does not handle these signals itself).
@@ -856,14 +1114,19 @@ fn main() {
                 std::thread::spawn(move || {
                     if let Some(sig) = signals.forever().next() {
                         config::log(&hs, &format!("signal {sig}: quitting"));
+                        // Not while an update replaces the app (a half-written AppImage would not start again).
+                        update::wait_until_replaced(&hs, Duration::from_secs(60));
                         hs.exit(0);
                     }
                 });
             }
 
             let (h_nav, h_new, h_load, h_dl) = (h.clone(), h.clone(), h.clone(), h.clone());
+            let version = h.package_info().version.to_string();
             let window = WebviewWindowBuilder::new(app, MAIN, WebviewUrl::App("index.html".into()))
                 .title("easy-study")
+                // The pages know they are inside the app (main frame only; no IPC: bridge.rs).
+                .initialization_script(bridge::init_script(&version, std::env::consts::OS))
                 .inner_size(1280.0, 840.0)
                 .min_inner_size(480.0, 400.0)
                 .center()
@@ -883,11 +1146,14 @@ fn main() {
                     false
                 })
                 .on_page_load(move |_w, payload| {
-                    if matches!(payload.event(), PageLoadEvent::Finished) {
-                        config::log(&h_load, &format!("page loaded {}", payload.url()));
+                    if matches!(payload.event(), PageLoadEvent::Started) {
+                        *lock(&h_load.state::<AppState>().page_origin) = None;
+                    } else if matches!(payload.event(), PageLoadEvent::Finished) {
+                        bridge::log_limited(&h_load, "page", &format!("page loaded {}", payload.url()));
                         if is_chooser(&h_load, payload.url()) {
                             smoke_chooser_loaded(&h_load);
                         } else {
+                            page_loaded(&h_load, payload.url());
                             smoke_page_loaded(&h_load, payload.url());
                         }
                     }
@@ -896,10 +1162,28 @@ fn main() {
             *lock(&h.state::<AppState>().chooser_url) = window.url().ok();
             media::install(&h, &window); // the lecture recorder's microphone (DESIGN §22)
 
-            let cfg = config::load(&h);
             let smoke_url = std::env::var("EASY_STUDY_DESKTOP_SMOKE_URL").ok().filter(|u| smoke == Smoke::Direct && !u.is_empty());
+            let st = h.state::<AppState>();
+            // The last launch ended right after its automatic connection (a crash, a forced quit): the chooser comes
+            // first, so a page that brings the app down (or keeps it busy) cannot lock the user out.
+            let crashed = smoke == Smoke::Off && cfg.auto_connect_pending;
+            if crashed {
+                config::update(&h, |c| c.auto_connect_pending = false);
+            }
+            let saved = if crashed && !cfg.mode.is_empty() {
+                config::log(&h, "the app closed right after its last automatic connection: the chooser comes first");
+                *lock(&st.notice) =
+                    Some("지난번에 연결한 직후 앱이 닫혀서 이번에는 연결 선택 화면을 먼저 보여 드려요. 연결할 곳을 골라 주세요.".into());
+                ""
+            } else {
+                cfg.mode.as_str()
+            };
+            if smoke == Smoke::Off && matches!(saved, "local" | "remote") {
+                config::update(&h, |c| c.auto_connect_pending = true);
+                st.auto_connect.store(true, SeqCst);
+            }
             let mode = match smoke {
-                Smoke::Off => cfg.mode.as_str(),
+                Smoke::Off => saved,
                 Smoke::Direct if smoke_url.is_some() => "smoke-remote",
                 Smoke::Direct => "local",
                 _ => "", // the chooser
@@ -952,13 +1236,29 @@ fn main() {
 
     // run_return, then exit with EXIT_CODE: the runtime ends the event loop with 0 whatever app.exit() said.
     app.run_return(|app, event| match event {
+        // While an update replaces the app, nothing but its restart may end it (update.rs).
+        RunEvent::WindowEvent { label, event: WindowEvent::CloseRequested { api, .. }, .. } if label == MAIN && update::replacing(app) => {
+            config::log(app, "close postponed: an update is being installed");
+            api.prevent_close();
+        }
         // Closing the main window ends the app (and the server) even when note windows are open.
         RunEvent::WindowEvent { label, event: WindowEvent::Destroyed, .. } if label == MAIN => app.exit(0),
-        RunEvent::ExitRequested { .. } => app.state::<AppState>().quitting.store(true, SeqCst),
+        RunEvent::ExitRequested { code, api, .. } => {
+            if code != Some(RESTART_EXIT_CODE) && update::replacing(app) {
+                config::log(app, "quit postponed: an update is being installed");
+                api.prevent_exit();
+            } else {
+                app.state::<AppState>().quitting.store(true, SeqCst);
+            }
+        }
         RunEvent::Exit => {
             app.state::<AppState>().quitting.store(true, SeqCst);
             config::log(app, "exit: stopping the server");
             server::stop(app);
+            // A normal quit (or the restart after an update): the next launch connects as remembered.
+            if config::load(app).auto_connect_pending {
+                config::update(app, |c| c.auto_connect_pending = false);
+            }
         }
         _ => {}
     });

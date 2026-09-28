@@ -203,7 +203,10 @@ export function micErrorMessage(error: unknown, platform: MicPlatform = 'other')
     case 'SecurityError':
       return (
         '마이크 사용이 허용되지 않았어요. 주소창의 마이크(🔒) 아이콘에서 이 사이트의 마이크를 허용하고, ' +
-        `${PRIVACY_SETTING[platform]}에서 이 앱(또는 브라우저)이 켜져 있는지 확인해 주세요.`
+        `${PRIVACY_SETTING[platform]}에서 이 앱(또는 브라우저)이 켜져 있는지 확인해 주세요.` +
+        // macOS keeps the permission per signature: after an update of the desktop app (signed without a developer
+        // ID) the switch can show "on" and still deny (DESIGN §24).
+        (platform === 'mac' ? ' 켜져 있는데도 안 되면 껐다가 다시 켜 주세요 (앱을 업데이트한 뒤에 그럴 수 있어요).' : '')
       );
     case 'NotFoundError':
     case 'DevicesNotFoundError':

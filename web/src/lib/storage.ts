@@ -27,6 +27,11 @@ export const storageKeys = {
   liveStripCollapsed: 'liveStripCollapsed',
   /** The newest subscription usage limits of each provider (DESIGN §23; the account's, cached per device). */
   usageLimits: 'usageLimits',
+  /**
+   * 화면 테마 'light' | 'dark' (absent = 시스템 설정, DESIGN §24). Also read by web/public/theme-boot.js before the
+   * first paint, under this exact name: keep the two in sync.
+   */
+  theme: 'theme',
   /** "여기부터 p.N" markers sent for a recording (the API has no GET for them). */
   recordingMarkers: (recordingId: string) => `recordingMarkers:${recordingId}`,
   slide: (docId: string) => `slide:${docId}`,

@@ -4,6 +4,10 @@
 # workflow artifacts; the x86_64 Linux bundles are also tested on current Arch Linux, which builds the Arch package.
 # A `v*` tag also creates a DRAFT GitHub release with all of them (and FFmpeg's source). Unsigned by default (macOS ad-hoc signature, no
 # notarization; unsigned Windows installer): macOS signing and notarization turn on when the APPLE_* secrets exist.
+# In-app updates (DESIGN §24): the macOS builds also pack the .app as the updater's .app.tar.gz; the Windows installer
+# and the AppImages serve the updater as they are. Nothing is signed for the updater here and no updater key is ever
+# in CI: desktop/scripts/publish-release.mjs checks the draft, signs on the maintainer's Mac and publishes to
+# Wooangha/easy-study-releases with latest.json. Actions are pinned by commit (the tag in the comment).
 # (A secret that is not configured arrives as an empty variable; desktop/scripts/build.mjs drops empty APPLE_*
 # variables, which the Tauri CLI would otherwise take as the signing identity "" and as notarization credentials.)
 name: desktop
@@ -34,8 +38,8 @@ jobs:
     name: repo tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 26
           cache: npm
@@ -67,11 +71,11 @@ jobs:
             runner: ubuntu-22.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 26
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         id: cache
         with:
           path: .cache/ffmpeg/${{ matrix.target }}
@@ -82,7 +86,7 @@ jobs:
       # Reuses the cache when its stamp matches, else downloads the sources (SHA-256 checked) and builds.
       - name: Build
         run: node desktop/scripts/ffmpeg.mjs --target ${{ matrix.target }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ffmpeg-${{ matrix.target }}
           path: .cache/ffmpeg/${{ matrix.target }}
@@ -92,7 +96,7 @@ jobs:
       - name: FFmpeg source for the release
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: node desktop/scripts/ffmpeg.mjs --source-bundle "$RUNNER_TEMP/ffmpeg-source"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         with:
           name: easy-study-ffmpeg-source
@@ -130,9 +134,9 @@ jobs:
     env:
       BUNDLE: desktop/src-tauri/target/${{ matrix.target }}/release/bundle
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 26
           cache: npm
@@ -141,14 +145,14 @@ jobs:
             desktop/package-lock.json
 
       # rustup comes with GitHub's runners: no third-party action that follows a branch (this job gets the
-      # APPLE_* secrets once they are configured).
+      # APPLE_* secrets once they are configured). Every action is pinned by commit.
       - name: Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
           rustup target add ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: desktop/src-tauri -> target
           key: ${{ matrix.target }}
@@ -167,11 +171,11 @@ jobs:
       # The recording tools (DESIGN §22): ffmpeg from the ffmpeg job; whisper.cpp's whisper-cli built here with this
       # runner's compiler (MSVC on Windows; Metal on Apple silicon, CPU elsewhere) and cached until its version,
       # flags or checks change. prepare.mjs puts both next to Node in the bundle.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ffmpeg-${{ matrix.target }}
           path: .cache/ffmpeg/${{ matrix.target }}
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             .cache/whisper/${{ matrix.target }}/bin
@@ -236,17 +240,41 @@ jobs:
           codesign -dv "$app" 2>&1 | grep -E '^CodeDirectory .*flags=.*runtime'
           test -x "$app/Contents/Resources/whisper/whisper-cli" && test -x "$app/Contents/Resources/ffmpeg/ffmpeg"
 
+      # The in-app updater's macOS artifact (DESIGN §24): the .app as built (not re-signed) in a .tar.gz with exactly
+      # one top folder, since tauri-plugin-updater drops the first path segment of every entry ("-C dir ." would add a
+      # "./"). tar-rs resolves hard-link targets against the process's working folder, so a hard link would break every
+      # install. No "._" AppleDouble files (COPYFILE_DISABLE) and no extended attributes. It is signed later, by
+      # publish-release.mjs. No `! cmd` checks: bash -e does not stop on a negated command.
+      - name: Updater archive (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          v=$(node -p "require('./package.json').version")
+          case "${{ matrix.target }}" in aarch64-*) a=aarch64 ;; *) a=x64 ;; esac
+          app="$BUNDLE/macos/easy-study.app"
+          test "$(plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist")" = "$v"
+          if [ -n "$(find "$app" -type f -links +1)" ]; then echo '::error::hard links in the bundle'; exit 1; fi
+          out="$BUNDLE/macos/easy-study_${v}_${a}.app.tar.gz"
+          COPYFILE_DISABLE=1 tar --no-xattrs -czf "$out" -C "$BUNDLE/macos" easy-study.app
+          tar -tzf "$out" > "$RUNNER_TEMP/applist.txt"
+          grep -qx 'easy-study\.app/Contents/Info\.plist' "$RUNNER_TEMP/applist.txt"
+          if grep -qv '^easy-study\.app/' "$RUNNER_TEMP/applist.txt" || grep -q -e '/\._' -e '^\._' "$RUNNER_TEMP/applist.txt"; then
+            echo '::error::the updater archive must hold easy-study.app/ only, without AppleDouble files'
+            exit 1
+          fi
+          ls -l "$out"
+
       # build.mjs has taken the libraries out of the AppImage that must come from the user's system
       # (desktop/scripts/appimage.mjs: libwayland-client, which the user's Mesa needs in its own version).
       - name: AppImage without host libraries (Linux)
         if: runner.os == 'Linux'
         run: node desktop/scripts/appimage.mjs --check "$BUNDLE"/appimage/*.AppImage
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: easy-study-${{ matrix.name }}
           path: |
             ${{ env.BUNDLE }}/dmg/*.dmg
+            ${{ env.BUNDLE }}/macos/*.app.tar.gz
             ${{ env.BUNDLE }}/nsis/*.exe
             ${{ env.BUNDLE }}/deb/*.deb
             ${{ env.BUNDLE }}/rpm/*.rpm
@@ -263,7 +291,7 @@ jobs:
       # Then the ASR check (desktop/scripts/asr-smoke.mjs) runs the bundle's own whisper-cli and ffmpeg: the upload
       # conversion, and a transcription with a small model (cached below) of speech from the runner's text-to-speech
       # (a generated tone where there is none). No microphone is involved anywhere.
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         if: matrix.smoke
         with:
           path: .cache/asr-smoke
@@ -350,13 +378,13 @@ jobs:
             nodejs espeak-ng
           useradd -m tester
 
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: easy-study-linux-*
           path: dist
           merge-multiple: true
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .cache/asr-smoke
           key: asr-smoke-${{ hashFiles('desktop/scripts/asr-smoke.mjs') }}
@@ -403,7 +431,7 @@ jobs:
           test ! -e /usr/bin/easy-study && test ! -e /usr/bin/es-node && test ! -e /usr/lib/easy-study
           test ! -e /usr/bin/es-whisper && test ! -e /usr/bin/es-ffmpeg
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: easy-study-arch-x64
           path: |
@@ -418,8 +446,9 @@ jobs:
     permissions:
       contents: write
     steps:
-      # The bundles, the Arch package and the FFmpeg source (not the ffmpeg-<target> build artifacts).
-      - uses: actions/download-artifact@v4
+      # The bundles (with the macOS updater archives), the Arch package and the FFmpeg source (not the
+      # ffmpeg-<target> build artifacts).
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: easy-study-*
           path: dist

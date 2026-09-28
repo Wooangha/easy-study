@@ -1,4 +1,4 @@
-/* The desktop app's start page. Colors follow web/src/styles.css (light + dark). */
+/* The desktop app's start page. Colors follow web/src/styles.css (light + dark, the system's or the app's theme). */
 :root {
   color-scheme: light dark;
   --font: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Pretendard Variable', 'Pretendard', 'Noto Sans KR',
@@ -20,8 +20,10 @@
   --danger-soft: #fdeff0;
   --ring: 0 0 0 3px rgba(75, 107, 245, 0.3);
 }
+/* Dark: the system's (unless the app is set to light), or the app's setting (data-theme, from get_state). The two
+   blocks hold the same declarations. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme='light']) {
     --bg: #0e1015;
     --surface: #161920;
     --surface-2: #1c2029;
@@ -39,6 +41,25 @@
     --ring: 0 0 0 3px rgba(123, 145, 255, 0.35);
   }
 }
+:root[data-theme='dark'] {
+  --bg: #0e1015;
+  --surface: #161920;
+  --surface-2: #1c2029;
+  --border: #282d38;
+  --border-strong: #3a4150;
+  --text: #e5e8ee;
+  --text-2: #b5bccb;
+  --muted: #868fa2;
+  --accent: #7b91ff;
+  --accent-strong: #9aabff;
+  --accent-soft: #1e2542;
+  --accent-contrast: #0e1015;
+  --danger: #ff6b72;
+  --danger-soft: #3a1c21;
+  --ring: 0 0 0 3px rgba(123, 145, 255, 0.35);
+}
+:root[data-theme='light'] { color-scheme: light; }
+:root[data-theme='dark'] { color-scheme: dark; }
 
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -157,3 +178,42 @@ pre {
   color: var(--text);
 }
 footer { margin-top: 28px; text-align: center; }
+
+.remember-hint { margin: 8px 0 0; }
+#previous { margin: 4px 0 0; }
+
+.update-note {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 16px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+}
+.update-note p { margin: 0; }
+.update-note.error { background: var(--danger-soft); border-color: var(--danger); }
+.update-note button { flex: none; }
+
+.settings { margin-top: 24px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 10px 16px; }
+.settings > summary { font-size: 14px; font-weight: 600; color: var(--text); padding: 2px 0; }
+.settings-body { display: grid; gap: 16px; margin: 12px 0 6px; }
+.setting { display: grid; gap: 6px; }
+.setting p { margin: 0; }
+.segmented { display: flex; flex-wrap: wrap; gap: 6px; }
+.segmented label {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 5px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+}
+.segmented label:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+.segmented input, .check input { accent-color: var(--accent); margin: 0; }
+.check { display: flex; gap: 8px; align-items: center; color: var(--text-2); font-size: 14px; cursor: pointer; }
+progress { width: 100%; height: 6px; accent-color: var(--accent); }

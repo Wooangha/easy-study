@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 // Builds the desktop app for one target (default: this machine), or runs it in development:
 //   node desktop/scripts/build.mjs [--target <rust triple>] [--bundles app,dmg] [--skip-prepare] [--skip-build]
-//                                  [--require-tools] [--debug]
+//                                  [--require-tools] [--debug] [--tauri-config <file.json>]
 //   node desktop/scripts/build.mjs --dev
 // (npm run desktop:build / npm run desktop:dev in the repo.) Steps: npm ci in desktop/ when the Tauri CLI is
 // missing → prepare.mjs (repo build + resources for the target, including the recording tools whisper-cli and
 // ffmpeg, built into <repo>/.cache when missing; --require-tools: fail instead of leaving one out) →
 // `tauri build --target <t> --bundles <b>` → Linux: appimage.mjs removes the libraries the AppImage must take
-// from the user's system (needs squashfs-tools).
+// from the user's system (needs squashfs-tools). --tauri-config merges a config file over tauri.conf.json
+// (`tauri build --config`): only for local test builds such as the updater e2e (update-e2e.mjs); CI never uses it.
 // Output: desktop/src-tauri/target/<triple>/release/bundle/<kind>/…
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -40,6 +41,7 @@ if (arg('skip-prepare') === true) {
 
 const tauriArgs = dev ? ['dev'] : ['build', '--target', target, '--bundles', bundles, ...(arg('debug') === true ? ['--debug'] : [])];
 tauriArgs.push(...externalBinOverride(info, stamp.tools));
+if (typeof arg('tauri-config') === 'string') tauriArgs.push('--config', path.resolve(arg('tauri-config')));
 console.log(`== tauri ${tauriArgs.join(' ')}`);
 const env = tauriEnv();
 const ignored = Object.keys(process.env).filter((key) => !(key in env));

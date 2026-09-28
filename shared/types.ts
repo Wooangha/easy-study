@@ -61,6 +61,32 @@ export interface HealthResponse {
   providers: ProviderInfo[];
   /** Absolute path of the library directory on disk (so the user can find notes). */
   libraryDir: string;
+  /** The server's version (package.json), e.g. "0.5.0". Absent from servers before it was added. */
+  version?: string;
+}
+
+/**
+ * GET /api/desktop/busy (desktop mode only, DESIGN §24): what a restart of the app's server would interrupt, asked by
+ * the shell before an update is installed. Counts and the live recording only — no paths, no content.
+ */
+export interface DesktopBusyResponse {
+  /** The server's live recording ('recording' or 'paused'; it stays resumable across a restart), or null. */
+  recording: {
+    id: string;
+    docId: string;
+    status: RecordingStatus;
+    /** The recording's and its lecture's titles, for the shell's warning ("‘{docTitle}’의 ‘{title}’ 녹음…"). */
+    title: string;
+    docTitle: string | null;
+  } | null;
+  /** Transcription jobs waiting or running. */
+  transcriptions: number;
+  /** 정리본 LLM calls running. */
+  digests: number;
+  /** Chat turns (answers) running. */
+  chatTurns: number;
+  /** Speech-recognition models being downloaded. */
+  modelDownloads: number;
 }
 
 /** GET /api/auth/status (DESIGN §16; answered without a session). */

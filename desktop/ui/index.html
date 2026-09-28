@@ -10,7 +10,8 @@
 </head>
 <body>
 <!-- The desktop app's own start page (DESIGN §19): the ONLY page with IPC. It picks where the easy-study
-     server runs; the server's pages (this computer or another one) get no IPC. -->
+     server runs; the server's pages (this computer or another one) get no IPC. "⚙ 앱 설정" holds the app's own
+     settings and its updates (DESIGN §24). -->
 <main>
   <header class="brand">
     <img src="icon.svg" alt="" width="48" height="48">
@@ -19,6 +20,11 @@
       <p class="sub">어디에서 공부할까요?</p>
     </div>
   </header>
+
+  <section id="update-note" class="update-note" aria-live="polite" hidden>
+    <p id="update-note-text"></p>
+    <button type="button" id="update-note-action" class="secondary"></button>
+  </section>
 
   <section id="status" class="status" role="status" aria-live="polite" hidden>
     <p id="status-text"></p>
@@ -89,10 +95,54 @@
       <label class="remember"><input type="checkbox" id="remember" checked> 다음에도 바로 연결</label>
       <button type="submit" id="connect">연결</button>
     </div>
+    <p class="hint remember-hint">켜 두면 다음부터 이 화면 없이 바로 연결해요. ⚙ 설정에서 언제든 바꿀 수 있어요.</p>
+    <p id="previous" class="hint" hidden></p>
   </form>
 
+  <details id="settings" class="settings">
+    <summary>⚙ 앱 설정</summary>
+    <div class="settings-body">
+      <div class="setting">
+        <span class="label" id="theme-label">화면 테마</span>
+        <div class="segmented" role="radiogroup" aria-labelledby="theme-label">
+          <label><input type="radio" name="theme" value="system"> 시스템 설정 따르기</label>
+          <label><input type="radio" name="theme" value="light"> 라이트</label>
+          <label><input type="radio" name="theme" value="dark"> 다크</label>
+        </div>
+      </div>
 
-  <footer class="hint" id="footer">연결 대상은 나중에 메뉴 <b>연결 › 연결 대상 바꾸기…</b> (<kbd id="shortcut">Ctrl+Shift+K</kbd>)에서 바꿀 수 있어요.</footer>
+      <div class="setting">
+        <span class="label">업데이트</span>
+        <p><span id="app-version"></span> · <span id="update-status"></span></p>
+        <p id="update-reason" class="hint" hidden></p>
+        <progress id="update-progress" max="1" hidden></progress>
+        <div class="buttons">
+          <button type="button" id="update-check" class="secondary">지금 확인</button>
+          <button type="button" id="update-install" class="secondary" hidden>설치하고 다시 시작</button>
+          <button type="button" id="update-download" class="secondary" hidden>다운로드 페이지 열기 ↗</button>
+          <button type="button" id="update-cancel" class="link" hidden>취소</button>
+        </div>
+        <label class="check"><input type="checkbox" id="update-auto"> 시작할 때 새 버전 확인 (GitHub에서 확인해요)</label>
+      </div>
+
+      <div class="setting">
+        <span class="label">시작할 때</span>
+        <p id="startup-text"></p>
+        <div class="buttons">
+          <button type="button" id="forget-choice" class="secondary" hidden>다음부터 이 화면 먼저 보기</button>
+        </div>
+      </div>
+
+      <div class="setting">
+        <div class="buttons">
+          <button type="button" id="open-logs" class="secondary">로그 폴더 열기</button>
+        </div>
+      </div>
+    </div>
+  </details>
+
+
+  <footer class="hint" id="footer">연결 대상은 나중에 앱 화면 오른쪽 위 <b>⚙ 설정 › 연결 대상 바꾸기…</b>, 또는 메뉴 <b>연결 › 연결 대상 바꾸기…</b> (<kbd id="shortcut">Ctrl+Shift+K</kbd>)에서 바꿀 수 있어요.</footer>
 </main>
 <script src="chooser.js"></script>
 </body>

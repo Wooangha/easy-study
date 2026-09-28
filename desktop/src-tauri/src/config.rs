@@ -32,6 +32,32 @@ pub struct Config {
     /// A library folder the user picked; None = <app data dir>/library.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library: Option<String>,
+    /// The app's theme: "" = the system's, "light" or "dark" (every window, the chooser and the pages).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub theme: String,
+    /// Automatic update checks at launch and every 6 hours (None = on).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_check: Option<bool>,
+    /// The version an in-app update was installed from (set just before the install, read once at the next launch).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_from: Option<String>,
+    /// Set before a remembered connection opens at launch, cleared once its page has been up for a while (or the
+    /// app quit normally): still set at the next launch means the app died right after connecting, and the
+    /// chooser comes first.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_connect_pending: bool,
+    /// Fields this build does not know (written by a newer version): kept when an older build rewrites the file.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// The theme setting as Tauri's (None = the system's).
+pub fn theme(cfg: &Config) -> Option<tauri::Theme> {
+    match cfg.theme.as_str() {
+        "light" => Some(tauri::Theme::Light),
+        "dark" => Some(tauri::Theme::Dark),
+        _ => None,
+    }
 }
 
 /// Where the local server keeps its library, and why.
@@ -156,5 +182,30 @@ pub fn log(app: &AppHandle, msg: &str) {
 pub fn rotate(file: &Path, max: u64) {
     if fs::metadata(file).map(|m| m.len() > max).unwrap_or(false) {
         let _ = fs::rename(file, file.with_extension("log.1"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_written_by_a_newer_build_survive_a_rewrite() {
+        let newer = r#"{"mode":"local","port":5351,"theme":"dark","updateCheck":false,"futureSetting":{"a":[1,2]},"other":"x"}"#;
+        let mut cfg: Config = serde_json::from_str(newer).unwrap();
+        assert_eq!((cfg.mode.as_str(), cfg.port, cfg.theme.as_str(), cfg.update_check), ("local", Some(5351), "dark", Some(false)));
+        assert_eq!(theme(&cfg), Some(tauri::Theme::Dark));
+        cfg.mode = String::new();
+        let written: serde_json::Value = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(written["futureSetting"], serde_json::json!({ "a": [1, 2] }));
+        assert_eq!(written["other"], "x");
+        assert_eq!(written["mode"], "");
+        // Defaults stay out of the file.
+        let plain: serde_json::Value = serde_json::to_value(Config::default()).unwrap();
+        assert_eq!(plain, serde_json::json!({ "mode": "" }));
+        assert_eq!(theme(&Config::default()), None);
+        let pending: Config = serde_json::from_str(r#"{"mode":"remote","autoConnectPending":true,"updatedFrom":"0.5.0"}"#).unwrap();
+        assert!(pending.auto_connect_pending && pending.extra.is_empty());
+        assert_eq!(pending.updated_from.as_deref(), Some("0.5.0"));
     }
 }

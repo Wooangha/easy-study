@@ -3,7 +3,7 @@
 //   node server/index.ts --dev          Express + Vite in middleware mode (HMR), TypeScript run directly
 //   node dist-server/server/index.js    production: the compiled server (npm run build) serving web/dist
 //   EASY_STUDY_DESKTOP=1 ...            desktop mode, started by the desktop app (DESIGN §19, server/desktop.ts)
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import https from 'node:https';
@@ -98,7 +98,7 @@ import {
   updateGroup,
   writeCourseMarkdown,
 } from './courses.ts';
-import { runDesktopServer } from './desktop.ts';
+import { DESKTOP_ACTION_PATH, desktopBusy, runDesktopServer } from './desktop.ts';
 import {
   abortAllDigests,
   abortDigest,
@@ -165,6 +165,8 @@ export interface AppOptions {
   digestDeps?: DigestDeps;
   /** Lecture recordings (DESIGN §22): models store, upload limit, window presets (tests). */
   recordings?: Partial<RecordingsConfig>;
+  /** Desktop mode (DESIGN §19, §24): the routes only the desktop app's shell uses (GET /api/desktop/busy). */
+  desktop?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -173,6 +175,21 @@ export interface AppOptions {
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+let cachedVersion: string | undefined | null = null;
+
+/** The version in package.json (read once; undefined when it cannot be read). */
+function serverVersion(): string | undefined {
+  if (cachedVersion === null) {
+    try {
+      const pkg = JSON.parse(readFileSync(path.join(repoRoot(), 'package.json'), 'utf8')) as { version?: unknown };
+      cachedVersion = typeof pkg.version === 'string' ? pkg.version : undefined;
+    } catch {
+      cachedVersion = undefined;
+    }
+  }
+  return cachedVersion;
 }
 
 /** DocMeta with its derived fields (course, digest status): only GET /docs/:docId needs them. */
@@ -551,8 +568,19 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
 
   api.get('/health', async (_req, res) => {
     const body: HealthResponse = { ok: true, providers: await getProviderInfos(), libraryDir: libraryDir() };
+    const version = serverVersion();
+    if (version) body.version = version;
     res.json(body);
   });
+
+  // What a restart would interrupt, for the desktop app's shell before it installs an update (DESIGN §24). Desktop
+  // mode only (loopback, no login by design); elsewhere it does not exist (404).
+  if (options.desktop) {
+    api.get('/desktop/busy', async (_req, res) => {
+      res.set('Cache-Control', 'no-store');
+      res.json(await desktopBusy());
+    });
+  }
 
   // --- documents -------------------------------------------------------------------------------
 
@@ -1139,6 +1167,12 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
       if (log && resumed > 0) console.log(`[recordings] resumed ${resumed} unfinished recording(s)`);
     }
 
+    // A page action of the desktop app that its shell did not intercept (DESIGN §24): 204 No Content leaves the page
+    // where it is instead of loading the web client again. No side effects, in every mode.
+    app.use(DESKTOP_ACTION_PATH, (req, res, next) => {
+      if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+      res.set('Cache-Control', 'no-store').status(204).end();
+    });
     // The one-click login link of the startup banner (never logged: it carries the code).
     app.get('/login', gate.loginLink);
     app.use('/api', createApiRouter(options, gate));

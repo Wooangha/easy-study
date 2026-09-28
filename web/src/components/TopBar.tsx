@@ -41,6 +41,10 @@ interface TopBarProps {
   onLogout?: () => void;
   /** 🎙 record button / the running recording (DESIGN §22). */
   recordControl?: ReactNode;
+  /** ⚙ 설정 (DESIGN §24). */
+  onOpenSettings: () => void;
+  /** Inside the desktop app: a new version waits (a dot on ⚙). */
+  updatePending?: boolean;
 }
 
 function docOptionLabel(d: DocMeta, index?: number): string {
@@ -214,6 +218,17 @@ export function TopBar(props: TopBarProps) {
           로그아웃
         </button>
       )}
+
+      <button
+        type="button"
+        className="icon-btn settings-btn"
+        aria-label={props.updatePending ? '설정 (새 버전 있음)' : '설정'}
+        title={props.updatePending ? '설정 · 새 버전 있음' : '설정'}
+        onClick={props.onOpenSettings}
+      >
+        <span aria-hidden>⚙</span>
+        {props.updatePending && <span className="settings-dot" aria-hidden />}
+      </button>
     </header>
   );
 }

@@ -3,7 +3,7 @@ name = "easy-study"
 version = "0.4.2"
 description = "easy-study desktop app: the bundled server or another computer's (DESIGN §19)"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.88"
 publish = false
 
 [build-dependencies]
@@ -14,10 +14,19 @@ tauri = { version = "2.11", features = [] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
+# In-app updates (src/update.rs, DESIGN §24). ~2.12: 2.13 needs tauri 2.12. native-tls: the OS trust store, as remote.rs.
+tauri-plugin-updater = { version = "~2.12", default-features = false, features = ["native-tls", "zip", "system-proxy"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The remote probe verifies HTTPS with the OS's own trust store, as the WebView does.
 native-tls = "0.2"
+# The versions tauri-plugin-updater uses: its HTTP client (a manual check tells a missing release from an outage),
+# the signature's trusted comment, version comparison and release dates.
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "system-proxy"] }
+base64 = "0.22"
+minisign-verify = "0.2"
+semver = "1"
+time = { version = "0.3", features = ["formatting"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -33,6 +42,8 @@ windows-core = "0.61"
 # feature set) wry uses.
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit2gtk = { version = "2.0", features = ["v2_40"] }
+# The CA bundle OpenSSL finds here (update.rs keep_ssl_env: the updater would set Debian's paths otherwise).
+openssl-probe = "0.2"
 
 [profile.release]
 codegen-units = 1

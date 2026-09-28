@@ -1204,7 +1204,8 @@ describe('HTTP server', () => {
     const res = await api('/health');
     assert.equal(res.status, 200);
     const body = await res.json();
-    assert.deepEqual(body, { ok: true, providers: infos, libraryDir: path.resolve(tmpRoot) });
+    const { version } = JSON.parse(await fs.readFile(path.join(repoRoot(), 'package.json'), 'utf8')) as { version: string };
+    assert.deepEqual(body, { ok: true, providers: infos, libraryDir: path.resolve(tmpRoot), version });
   });
 
   test('upload validates and ingests a PDF', async () => {

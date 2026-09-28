@@ -175,6 +175,11 @@ export function hasRunningTurns(docId: string): boolean {
   return false;
 }
 
+/** Turns running right now, across all documents (the desktop app's busy check, DESIGN §24). */
+export function runningTurnCount(): number {
+  return runningTurns.size;
+}
+
 function withTimeout(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
   return new Promise((resolve) => {
     const timer = setTimeout(() => resolve(false), timeoutMs);

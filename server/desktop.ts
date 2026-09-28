@@ -16,18 +16,31 @@
 // - Every child process is gone when the server exits, whatever the path (server/children.ts): the graceful
 //   stop ends them, the exit hook kills what is left, and on POSIX the process group gets SIGTERM for the
 //   grandchildren of the CLIs.
+// - `GET /api/desktop/busy` (DESIGN §24) tells the shell what a restart would interrupt before it installs an
+//   update: registered only in desktop mode (`desktop: true` in the options), 404 otherwise.
 //
 // Outside desktop mode none of this applies: stdin is never read (`npm start` in a terminal, or with stdin
 // closed), and the banner and signal handling of server/index.ts are unchanged.
 import type { AddressInfo } from 'node:net';
 import path from 'node:path';
+import type { DesktopBusyResponse } from '../shared/types.ts';
+import { runningTurnCount } from './chat.ts';
 import { signalProcessGroupOnExit } from './children.ts';
 import { ConfigError, fallbackFontProblem, isLoopbackHost, libraryDir } from './config.ts';
+import { digestCallsInFlight } from './digest.ts';
 import type { RunningServer, ServerOptions } from './index.ts';
-import { LibraryLockedError } from './library.ts';
+import { LibraryLockedError, readStoredDoc } from './library.ts';
+import { currentLiveRecording, queueState, recordingsConfig } from './recordings/service.ts';
 
 /** First word of the ready line. */
 export const READY_PREFIX = 'EASY_STUDY_READY';
+
+/**
+ * Path prefix of the desktop app's page actions (DESIGN §24): a page in the app's window navigates to
+ * `<origin>/__easy-study-desktop/<action>`, and the shell cancels that navigation and acts. The server answers the
+ * prefix with 204 in every mode, so a navigation that ever gets through leaves the page where it is.
+ */
+export const DESKTOP_ACTION_PATH = '/__easy-study-desktop';
 
 /** How long a graceful stop may take before the server exits anyway (below the shell's own wait). */
 export const DESKTOP_SHUTDOWN_TIMEOUT_MS = 5_000;
@@ -60,14 +73,35 @@ export function ignoredNetworkSettings(env: NodeJS.ProcessEnv = process.env): st
 }
 
 /**
- * startServer options of desktop mode: local mode on 127.0.0.1 and desktopPort(). Throws ConfigError without
- * EASY_STUDY_LIBRARY (the default library inside the installed app is read-only or inside its signature).
+ * startServer options of desktop mode: local mode on 127.0.0.1 and desktopPort(), with the desktop-only routes.
+ * Throws ConfigError without EASY_STUDY_LIBRARY (the default library inside the installed app is read-only or inside
+ * its signature).
  */
 export function desktopServerOptions(env: NodeJS.ProcessEnv = process.env): ServerOptions {
   if (!env.EASY_STUDY_LIBRARY?.trim()) {
     throw new ConfigError('데스크톱 모드에는 라이브러리 폴더가 필요합니다 (EASY_STUDY_LIBRARY).');
   }
-  return { port: desktopPort(env), host: '127.0.0.1', auth: 'off', password: null, tls: null };
+  return { port: desktopPort(env), host: '127.0.0.1', auth: 'off', password: null, tls: null, desktop: true };
+}
+
+/**
+ * GET /api/desktop/busy: what stopping this server would interrupt. The shell asks before it installs an update (the
+ * server is stopped first) and turns the answer into a warning; the page in the window answers for itself
+ * (`window.__easyStudyBusy`), this covers browser tabs opened with "브라우저에서 열기" too. Cheap and without side
+ * effects: no version probes (asrStatus() would run whisper-cli and ffmpeg and start queued transcriptions).
+ */
+export async function desktopBusy(): Promise<DesktopBusyResponse> {
+  const live = await currentLiveRecording();
+  const queue = queueState();
+  const { models } = recordingsConfig();
+  const doc = live ? await readStoredDoc(live.docId).catch(() => null) : null;
+  return {
+    recording: live ? { id: live.id, docId: live.docId, status: live.status, title: live.title, docTitle: doc?.title ?? null } : null,
+    transcriptions: queue.queued + (queue.running ? 1 : 0),
+    digests: digestCallsInFlight(),
+    chatTurns: runningTurnCount(),
+    modelDownloads: models.catalog.models.filter((m) => models.isDownloading(m.id)).length,
+  };
 }
 
 /** File system errors on the library folder itself (the first thing startup writes is its lock file). */

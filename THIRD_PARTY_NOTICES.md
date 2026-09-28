@@ -4,8 +4,10 @@ Third-party software that easy-study ships as part of the application and whose 
 binary or bundled distributions. It covers the PDF engine (DESIGN §17) and the lecture-recording tools and models
 (DESIGN §22: [whisper.cpp](#speech-recognition-whispercpp-v194-whisper-cli--mit),
 [FFmpeg](#audio-conversion-ffmpeg-81-with-libopus-152--lgpl-21-or-later), [Silero VAD and the Whisper
-models](#models-downloaded-on-first-use-silero-vad-v620-and-openai-whisper--mit)); the other npm dependencies (sharp
-and its libvips binaries, Express, the SDKs, …) carry their own license files in `node_modules`.
+models](#models-downloaded-on-first-use-silero-vad-v620-and-openai-whisper--mit)), the [libvips binaries of
+sharp](#image-processing-sharp-0354-with-libvips-8186--lgpl-30-or-later) and the [code highlighting of the web
+client](#web-client-highlightjs-1112--bsd-3-clause); the other npm dependencies (sharp itself, Express, the SDKs, …)
+carry their own license files in `node_modules`.
 
 ## PDF engine: `@embedpdf/pdfium` 2.15.1 (PDFium compiled to WebAssembly)
 
@@ -898,3 +900,58 @@ user's consent in the 녹음 tab) from Hugging Face into the models folder (desk
 Both use the MIT License text reproduced above for whisper.cpp, with these copyright lines. The CI check of the
 desktop app (`desktop/scripts/asr-smoke.mjs`) downloads `ggml-base-q5_1.bin` (Whisper base, same license) only for
 testing; it is never shipped.
+
+## Image processing: sharp 0.35.4 with libvips 8.18.6 — LGPL-3.0-or-later
+
+The server makes the slide images with [sharp](https://github.com/lovell/sharp) (Apache-2.0), whose prebuilt npm
+package `@img/sharp-libvips-<os>-<cpu>` 1.3.3 contains **libvips 8.18.6** and the libraries it is built with as one
+shared library (`lib/libvips-cpp.8.18.6.dylib`, `.so.8.18.6` or `.dll`, with glib's files). libvips, glib, fribidi,
+libexif, libheif, librsvg, pango and proxy-libintl are under the **GNU Lesser General Public License version 3 or
+later**; the other libraries in it are under the permissive licenses listed in the package's `README.md` (which also
+names each license), with every version in its `versions.json`. The desktop app ships that package unmodified in the
+server's `node_modules/@img/` (web mode installs it with `npm install`); the library is loaded by sharp at run time
+and can be replaced there by a compatible build.
+
+- **Source code.** libvips: <https://github.com/libvips/libvips/releases/tag/v8.18.6>; the build scripts of the
+  prebuilt package, with the source location of every library in it: <https://github.com/lovell/sharp-libvips/tree/v1.3.3>.
+- The LGPL version 3 text: <https://www.gnu.org/licenses/lgpl-3.0.txt> (with the GPL version 3 it refers to,
+  <https://www.gnu.org/licenses/gpl-3.0.txt>).
+
+## Web client: highlight.js 11.12 — BSD-3-Clause
+
+The web client highlights code in answers with [highlight.js](https://highlightjs.org/) 11.12 (its language
+definitions are bundled into the client through `lowlight`). The colors of its GitHub themes (`styles/github.css` and
+`styles/github-dark.css`, by github.com, maintained by @Hirse) are copied into `web/src/styles.css` as the `--hl-*`
+tokens, so that the app's 라이트 / 다크 setting can switch them.
+
+```text
+BSD 3-Clause License
+
+Copyright (c) 2006, Ivan Sagalaev.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+* Redistributions of source code must retain the above copyright notice, this
+  list of conditions and the following disclaimer.
+
+* Redistributions in binary form must reproduce the above copyright notice,
+  this list of conditions and the following disclaimer in the documentation
+  and/or other materials provided with the distribution.
+
+* Neither the name of the copyright holder nor the names of its
+  contributors may be used to endorse or promote products derived from
+  this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```

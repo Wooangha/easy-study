@@ -1,6 +1,8 @@
 // Invariants of the desktop app's configuration (DESIGN §19). Run: node --test desktop/scripts/*.test.mjs
 // (npm run desktop:test). The shell's own logic has Rust unit tests: cargo test in desktop/src-tauri.
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -9,8 +11,34 @@ import { HOST_LIBRARIES, elfHeader, elfSections, hostLibrariesIn, isHostLibrary 
 import { SMOKE_MODELS, asrSmoke, mp4Boxes, readWav, toneWav } from './asr-smoke.mjs';
 import { checkBinary, elfInfo, machoInfo, peInfo } from './binaries.mjs';
 import { FFMPEG, OPUS, ffmpegBuildPlan } from './ffmpeg.mjs';
+import { parsePublicKey, parseSignature, trustedFields, verify, verifyTrusted } from './minisign.mjs';
 import { RECORDING_TOOLS, placeTool } from './prepare.mjs';
+import { DEFAULT_KEY, parseOptions } from './publish-release.mjs';
+import {
+  CI_UPLOADER,
+  CI_WORKFLOW,
+  PUBLIC_REPO,
+  UPDATER_ENDPOINT,
+  UPDATER_KEYS,
+  UPDATER_KEY_ID,
+  appArchiveProblems,
+  classifyAsset,
+  compareVersions,
+  latestJson,
+  latestJsonProblems,
+  missingAssets,
+  notesSummary,
+  peResourceRange,
+  pkgbuildProblems,
+  provenanceProblems,
+  publicAssetList,
+  readTarGz,
+  releaseDownloadUrl,
+  sha256sums,
+  versionInfoString,
+} from './release-assets.mjs';
 import { DESKTOP_DIR, REPO_DIR, TARGETS, externalBinOverride, hostTarget, shippedNodeVersion, targetInfo, tauriEnv, textSha256 } from './targets.mjs';
+import { APP_TAR_ARGS, e2eConfig, packApp, serveDir, writeLatest } from './update-e2e.mjs';
 import { WHISPER, pickVcomp, whisperFlags } from './whisper.mjs';
 
 const tauriDir = path.join(DESKTOP_DIR, 'src-tauri');
@@ -120,11 +148,19 @@ test('empty APPLE_* variables (GitHub secrets that are not configured) never rea
   assert.match(fs.readFileSync(path.join(DESKTOP_DIR, 'scripts', 'build.mjs'), 'utf8'), /execFileSync\(process\.execPath, \[cli, \.\.\.tauriArgs\], \{[^}]*\benv\b/);
 });
 
-test('CI workflow: pinned actions, release assets are files, smoke tests cover the chooser and a dot-folder library', () => {
+test('CI workflow: actions pinned by commit, release assets are files, smoke tests cover the chooser and a dot-folder library', () => {
   const workflow = fs.readFileSync(path.join(REPO_DIR, '.github', 'workflows', 'desktop.yml'), 'utf8');
-  const uses = [...workflow.matchAll(/^\s*-?\s*uses:\s*(\S+)/gm)].map((m) => m[1]);
+  const uses = [...workflow.matchAll(/^\s*-?\s*uses:\s*(.*)$/gm)].map((m) => m[1]);
   assert.ok(uses.length >= 5);
-  for (const ref of uses) assert.match(ref, /@(v\d+(\.\d+)*|[0-9a-f]{40})$/, `${ref}: a version tag or a commit, not a branch`);
+  // A tag can be moved (the build job gets the APPLE_* secrets, the release job a write token): a full commit, with
+  // its tag as a comment for the reader.
+  for (const ref of uses) assert.match(ref, /^[\w.-]+\/[\w.-]+@[0-9a-f]{40} # v\d+\.\d+\.\d+$/, `${ref}: owner/repo@<commit> # vX.Y.Z`);
+  const pins = new Map();
+  for (const ref of uses) {
+    const [action, sha] = ref.split(' ')[0].split('@');
+    assert.equal(pins.get(action) ?? sha, sha, `${action}: one commit everywhere`);
+    pins.set(action, sha);
+  }
   // download-artifact puts every bundle kind in its own folder (dist/dmg, dist/deb…): gh wants files.
   assert.match(workflow, /find dist -type f/);
   assert.doesNotMatch(workflow, /gh release create[^\n]*dist\/\*/);
@@ -622,7 +658,7 @@ test('CI builds the recording tools for every target, ships them and checks them
   const ff = /\n {2}ffmpeg:\n([\s\S]*?)\n {2}build:/.exec(wf)?.[1];
   assert.ok(ff, 'job ffmpeg');
   for (const triple of Object.keys(TARGETS).filter((t) => t !== 'aarch64-pc-windows-msvc')) assert.ok(ff.includes(`target: ${triple}`), triple);
-  assert.match(ff, /actions\/cache@v4/);
+  assert.match(ff, /actions\/cache@[0-9a-f]{40} # v4\./);
   assert.match(ff, /hashFiles\('desktop\/scripts\/build-ffmpeg\.sh', 'desktop\/scripts\/ffmpeg-min\.flags', 'desktop\/scripts\/ffmpeg\.mjs'/);
   assert.match(ff, /node desktop\/scripts\/ffmpeg\.mjs --target \$\{\{ matrix\.target \}\}/);
   assert.match(ff, /name: ffmpeg-\$\{\{ matrix\.target \}\}/);
@@ -631,7 +667,7 @@ test('CI builds the recording tools for every target, ships them and checks them
   // LGPL: FFmpeg's source goes into the release; the release takes only easy-study-* artifacts (not ffmpeg-<target>).
   assert.match(ff, /ffmpeg\.mjs --source-bundle/);
   assert.match(ff, /name: easy-study-ffmpeg-source/);
-  assert.match(wf, /release:[\s\S]*download-artifact@v4\n\s+with:\n\s+pattern: easy-study-\*/);
+  assert.match(wf, /release:[\s\S]*download-artifact@[0-9a-f]{40} # v4[.\d]*\n\s+with:\n\s+pattern: easy-study-\*/);
   const build = /\n {2}build:\n([\s\S]*?)\n {2}arch:/.exec(wf)?.[1];
   assert.ok(build, 'job build');
   assert.match(build, /needs: \[test, ffmpeg\]/);
@@ -680,4 +716,447 @@ test('libopus is built and installed as Release (multi-config generators such as
 test('.gitattributes checks text files out with LF on every OS', () => {
   const attrs = fs.readFileSync(path.join(REPO_DIR, '.gitattributes'), 'utf8');
   assert.match(attrs, /^\* text=auto eol=lf$/m);
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// In-app updates and public releases (DESIGN §24): updater config, CI's updater archive, the publish script
+// ---------------------------------------------------------------------------------------------------------------
+
+test('updater: tauri.conf.json compiles in the release key, the public endpoint and requireSignedVersion, nothing dangerous', () => {
+  const updater = readJson('tauri.conf.json').plugins?.updater;
+  assert.ok(updater, 'plugins.updater');
+  assert.deepEqual(Object.keys(updater).sort(), ['endpoints', 'pubkey', 'requireSignedVersion', 'windows']);
+  // ~/.tauri/easy-study-updater.key.pub (the private key is never in the repo or CI; its loss ends in-app updates).
+  assert.equal(parsePublicKey(updater.pubkey).keyId, UPDATER_KEY_ID);
+  assert.deepEqual(updater.endpoints, [UPDATER_ENDPOINT]);
+  assert.equal(UPDATER_ENDPOINT, 'https://github.com/Wooangha/easy-study-releases/releases/latest/download/latest.json');
+  assert.equal(updater.requireSignedVersion, true);
+  assert.deepEqual(updater.windows, { installMode: 'passive' });
+  // No insecure transport, no downgrades; no updater artifacts built by CI (they would need the private key there).
+  for (const file of ['tauri.conf.json', 'tauri.macos.conf.json', 'tauri.windows.conf.json', 'tauri.linux.conf.json']) {
+    assert.doesNotMatch(fs.readFileSync(path.join(tauriDir, file), 'utf8'), /dangerous|allowDowngrades|createUpdaterArtifacts/, file);
+  }
+  // The plugin's JS commands stay denied: the only capability grants nothing (see the first test).
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(tauriDir, 'capabilities', 'chooser.json'), 'utf8')).permissions, []);
+});
+
+test('updater: the page marker is main-frame only, static, and gives pages no IPC', () => {
+  const src = fs.readdirSync(path.join(tauriDir, 'src')).filter((f) => f.endsWith('.rs')).map((f) => fs.readFileSync(path.join(tauriDir, 'src', f), 'utf8')).join('\n');
+  const script = /pub const INIT_SCRIPT: &str =\s*"((?:[^"\\]|\\.)*)";/.exec(src)?.[1];
+  assert.ok(script, 'pub const INIT_SCRIPT');
+  assert.match(script, /^window\.__EASY_STUDY_DESKTOP__ = Object\.freeze\(\{ v: 1, /);
+  assert.doesNotMatch(script, /__TAURI|invoke|ipc/i);
+  // The version comes from the app at run time (package_info), never a literal.
+  assert.doesNotMatch(script, /\d+\.\d+\.\d+/);
+  assert.match(src, /package_info\(\)\s*\.version/);
+  assert.match(src, /\.initialization_script\(/);
+  assert.doesNotMatch(src, /initialization_script_for_all_frames/);
+  assert.equal(readJson('tauri.conf.json').app.withGlobalTauri, false);
+});
+
+test('CI: macOS updater archive with one top folder, no signing key, no config overlay, no negated checks', () => {
+  const wf = workflow();
+  const build = /\n {2}build:\n([\s\S]*?)\n {2}arch:/.exec(wf)?.[1];
+  const step = /- name: Updater archive \(macOS\)\n\s+if: runner\.os == 'macOS'\n\s+run: \|\n([\s\S]*?)\n\n/.exec(build)?.[1];
+  assert.ok(step, 'step "Updater archive (macOS)"');
+  assert.ok(build.indexOf('Microphone description and entitlement (macOS)') < build.indexOf('Updater archive (macOS)'));
+  assert.ok(build.indexOf('Updater archive (macOS)') < build.indexOf('upload-artifact'));
+  // The names release-assets.mjs expects (easy-study_<v>_aarch64|x64.app.tar.gz), the version the app carries.
+  assert.match(step, /v=\$\(node -p "require\('\.\/package\.json'\)\.version"\)/);
+  assert.match(step, /aarch64-\*\) a=aarch64 ;; \*\) a=x64 ;;/);
+  assert.match(step, /out="\$BUNDLE\/macos\/easy-study_\$\{v\}_\$\{a\}\.app\.tar\.gz"/);
+  assert.match(step, /test "\$\(plutil -extract CFBundleShortVersionString raw "\$app\/Contents\/Info\.plist"\)" = "\$v"/);
+  // The same tar as update-e2e.mjs pack; the folder itself, never "-C dir ." (a "./" breaks the updater's skip(1)).
+  assert.ok(step.includes(`COPYFILE_DISABLE=1 tar ${APP_TAR_ARGS.join(' ')} "$out" -C "$BUNDLE/macos" easy-study.app`));
+  assert.match(step, /find "\$app" -type f -links \+1/);
+  assert.match(step, /tar -tzf "\$out" > "\$RUNNER_TEMP\/applist\.txt"/);
+  assert.match(step, /grep -qv '\^easy-study\\\.app\/' "\$RUNNER_TEMP\/applist\.txt"/);
+  assert.match(step, /grep -q -e '\/\\\._' -e '\^\\\._'/);
+  // bash -e never stops on `! cmd` (only the step's last command would count): no such line anywhere.
+  assert.doesNotMatch(wf, /^\s*!\s/m);
+  assert.match(build, /path: \|\n(\s+\$\{\{ env\.BUNDLE \}\}\/[^\n]+\n)*\s+\$\{\{ env\.BUNDLE \}\}\/macos\/\*\.app\.tar\.gz\n/);
+  // The key never reaches CI: nothing is signed for the updater there, and the e2e overlay is local only.
+  for (const re of [/TAURI_SIGNING/, /createUpdaterArtifacts/, /--tauri-config/, /--config\b/, /--no-sign/, /signer/]) assert.doesNotMatch(wf, re);
+  const buildMjs = fs.readFileSync(path.join(DESKTOP_DIR, 'scripts', 'build.mjs'), 'utf8');
+  assert.match(buildMjs, /if \(typeof arg\('tauri-config'\) === 'string'\) tauriArgs\.push\('--config', path\.resolve\(arg\('tauri-config'\)\)\);/);
+});
+
+test('PKGBUILD: the sources come from the public releases repo', () => {
+  const pkgbuild = fs.readFileSync(path.join(REPO_DIR, 'packaging', 'arch', 'PKGBUILD'), 'utf8');
+  assert.match(pkgbuild, /^url='https:\/\/github\.com\/Wooangha\/easy-study-releases'$/m);
+  assert.match(pkgbuild, /^source_x86_64=\("[^"]*::\$url\/releases\/download\/v\$pkgver\/\$\{_pkgname\}_\$\{pkgver\}_amd64\.deb"\)$/m);
+  const srcinfo = fs.readFileSync(path.join(REPO_DIR, 'packaging', 'arch', '.SRCINFO'), 'utf8');
+  assert.match(srcinfo, /^\turl = https:\/\/github\.com\/Wooangha\/easy-study-releases$/m);
+  assert.doesNotMatch(srcinfo, /github\.com\/Wooangha\/easy-study\//);
+  // The publish script's check of a release's PKGBUILD (url, pkgver, the draft's .deb checksums).
+  const version = /^pkgver=(.*)$/m.exec(pkgbuild)[1];
+  const sum = (arch) => new RegExp(`^sha256sums_${arch}=\\('([0-9a-f]{64})'\\)$`, 'm').exec(pkgbuild)[1];
+  const debs = { amd64: sum('x86_64'), arm64: sum('aarch64') };
+  assert.deepEqual(pkgbuildProblems(pkgbuild, { version, debs }), []);
+  assert.match(pkgbuildProblems(pkgbuild, { version: '9.9.9', debs }).join(), /pkgver/);
+  assert.match(pkgbuildProblems(pkgbuild, { version, debs: { ...debs, arm64: 'f'.repeat(64) } }).join(), /sha256sums_aarch64/);
+  const private_ = pkgbuild.replace(/^url=.*$/m, "url='https://github.com/Wooangha/easy-study'");
+  assert.match(pkgbuildProblems(private_, { version, debs }).join(), /must come from https:\/\/github\.com\/Wooangha\/easy-study-releases/);
+});
+
+// The asset names of CI's v0.4.2 draft plus the macOS updater archives of later drafts.
+const draftNames = (v) => [
+  `easy-study-${v}-1.aarch64.rpm`,
+  `easy-study-${v}-1.x86_64.rpm`,
+  `easy-study-bin-${v}-1-x86_64.pkg.tar.zst`,
+  'easy-study-ffmpeg-8.1-source.tar',
+  `easy-study_${v}_aarch64.AppImage`,
+  `easy-study_${v}_aarch64.dmg`,
+  `easy-study_${v}_amd64.AppImage`,
+  `easy-study_${v}_amd64.deb`,
+  `easy-study_${v}_arm64.deb`,
+  `easy-study_${v}_x64-setup.exe`,
+  `easy-study_${v}_x64.dmg`,
+  'PKGBUILD',
+  `easy-study_${v}_aarch64.app.tar.gz`,
+  `easy-study_${v}_x64.app.tar.gz`,
+];
+
+test('release assets: an allowlist (nothing unexpected goes public), updater keys, no bare linux key', () => {
+  const names = draftNames('0.5.0');
+  const keys = Object.fromEntries(names.map((n) => [n, classifyAsset(n, '0.5.0').keys]));
+  assert.deepEqual(keys['easy-study_0.5.0_aarch64.app.tar.gz'], ['darwin-aarch64']);
+  assert.deepEqual(keys['easy-study_0.5.0_x64.app.tar.gz'], ['darwin-x86_64']);
+  assert.deepEqual(keys['easy-study_0.5.0_x64-setup.exe'], ['windows-x86_64-nsis', 'windows-x86_64']);
+  assert.deepEqual(keys['easy-study_0.5.0_amd64.AppImage'], ['linux-x86_64-appimage']);
+  assert.deepEqual(keys['easy-study_0.5.0_aarch64.AppImage'], ['linux-aarch64-appimage']);
+  for (const n of ['easy-study_0.5.0_amd64.deb', 'easy-study-0.5.0-1.x86_64.rpm', 'easy-study_0.5.0_x64.dmg', 'PKGBUILD']) assert.deepEqual(keys[n], [], n);
+  assert.deepEqual(UPDATER_KEYS, ['darwin-aarch64', 'darwin-x86_64', 'windows-x86_64-nsis', 'windows-x86_64', 'linux-x86_64-appimage', 'linux-aarch64-appimage']);
+  assert.ok(!UPDATER_KEYS.includes('linux-x86_64') && !UPDATER_KEYS.includes('linux-aarch64'), 'deb/rpm would fall back to a bare linux key');
+  assert.deepEqual(missingAssets(names, '0.5.0'), []);
+  // v0.4.2's draft (before the updater) lacks the macOS archives.
+  assert.deepEqual(missingAssets(draftNames('0.4.2').slice(0, -2), '0.4.2'), ['updater darwin-aarch64', 'updater darwin-x86_64']);
+  assert.deepEqual(missingAssets(names.filter((n) => !n.includes('ffmpeg')), '0.5.0'), ['FFmpeg source (LGPL)']);
+  // Unknown or generated names, other versions, signatures: refused.
+  for (const bad of ['latest.json', 'SHA256SUMS.txt', 'easy-study_0.5.0_aarch64.app.tar.gz.sig', 'easy-study_0.4.2_amd64.deb', 'notes.md', 'easy-study_0.5.0_amd64.AppImage.zsync', 'easy-study_0.5.0.1_x64.dmg']) {
+    assert.throws(() => classifyAsset(bad, '0.5.0'), /unexpected asset/, bad);
+  }
+  classifyAsset('easy-study-libvips-8.17.2-source.tar.gz', '0.5.0');
+  classifyAsset('easy-study_0.5.0-e2e.2_aarch64.app.tar.gz', '0.5.0-e2e.2');
+  const order = publicAssetList(names);
+  assert.deepEqual(order.slice(-2), ['SHA256SUMS.txt', 'latest.json']);
+  assert.equal(order.length, names.length + 2);
+  assert.equal(sha256sums([{ name: 'b', sha256: '2'.repeat(64) }, { name: 'a', sha256: '1'.repeat(64) }]), `${'1'.repeat(64)}  a\n${'2'.repeat(64)}  b\n`);
+});
+
+test('release assets: latest.json for tauri-plugin-updater, and its checks before publishing', () => {
+  const version = '0.5.0';
+  const baseUrl = releaseDownloadUrl('v0.5.0');
+  assert.equal(baseUrl, `https://github.com/${PUBLIC_REPO}/releases/download/v0.5.0`);
+  const updater = draftNames(version).filter((n) => classifyAsset(n, version).keys.length > 0);
+  const artifacts = updater.map((name) => ({ name, signature: `${Buffer.from(`sig of ${name}`).toString('base64')}\n` }));
+  const latest = latestJson({ version, notes: '노트', pubDate: '2026-10-05T09:00:00Z', baseUrl, artifacts });
+  assert.deepEqual(Object.keys(latest), ['version', 'notes', 'pub_date', 'platforms']);
+  assert.deepEqual(Object.keys(latest.platforms), UPDATER_KEYS);
+  assert.deepEqual(latest.platforms['darwin-aarch64'], {
+    url: `${baseUrl}/easy-study_0.5.0_aarch64.app.tar.gz`,
+    signature: Buffer.from('sig of easy-study_0.5.0_aarch64.app.tar.gz').toString('base64'),
+  });
+  assert.deepEqual(latest.platforms['windows-x86_64'], latest.platforms['windows-x86_64-nsis']);
+  assert.deepEqual(latestJsonProblems(latest, { version, baseUrl, uploaded: draftNames(version) }), []);
+  // What would make it unsafe or broken.
+  const broken = (edit) => {
+    const copy = structuredClone(latest);
+    edit(copy);
+    return latestJsonProblems(copy, { version, baseUrl, uploaded: draftNames(version) }).join('; ');
+  };
+  assert.match(broken((j) => (j.version = '0.5.1')), /version "0\.5\.1"/);
+  assert.match(broken((j) => (j.platforms['linux-x86_64'] = j.platforms['linux-x86_64-appimage'])), /unexpected platform keys linux-x86_64/);
+  assert.match(broken((j) => delete j.platforms['darwin-x86_64']), /missing platform keys darwin-x86_64/);
+  assert.match(broken((j) => (j.platforms['darwin-aarch64'].url = j.platforms['darwin-x86_64'].url)), /darwin-aarch64: url/);
+  assert.match(broken((j) => (j.platforms['linux-aarch64-appimage'].url = j.platforms['linux-aarch64-appimage'].url.replace('https:', 'http:'))), /not https/);
+  assert.match(latestJsonProblems(latest, { version, baseUrl, uploaded: [] }).join(), /not among the release's assets/);
+  assert.throws(() => latestJson({ version: 'v0.5.0', notes: '', pubDate: '2026-10-05T09:00:00Z', baseUrl, artifacts }), /without "v"/);
+  assert.throws(() => latestJson({ version, notes: '', pubDate: '2026-10-05 09:00', baseUrl, artifacts }), /RFC 3339/);
+  assert.throws(() => latestJson({ version, notes: '', pubDate: '2026-10-05T09:00:00Z', baseUrl, artifacts: [{ name: 'easy-study_0.5.0_x64.dmg', signature: 'x' }] }), /not an updater artifact/);
+  assert.throws(() => latestJson({ version, notes: '', pubDate: '2026-10-05T09:00:00Z', baseUrl, artifacts: [{ ...artifacts[0], signature: 'a b' }] }), /one-line/);
+  // Notes: the first paragraph that is not a heading, as plain text.
+  assert.equal(notesSummary('# easy-study 0.5.0\n\n<!-- draft -->\n앱 안에서 **업데이트**할 수 있어요.\n[설정](https://x) 화면도 생겼어요.\n\n- 둘째 문단'), '앱 안에서 업데이트할 수 있어요.\n설정 화면도 생겼어요.');
+  assert.equal([...notesSummary('가'.repeat(1200))].length, 1000);
+  assert.ok(notesSummary('가'.repeat(1200)).endsWith('…'));
+  // Versions: the script refuses one older than the public latest.
+  assert.ok(compareVersions('0.5.0', '0.4.2') > 0);
+  assert.ok(compareVersions('0.10.0', '0.9.9') > 0);
+  assert.ok(compareVersions('v0.5.1', '0.5.1') === 0);
+  assert.ok(compareVersions('0.5.0-e2e.1', '0.5.0-e2e.2') < 0);
+  assert.ok(compareVersions('0.5.0-e2e.2', '0.5.0') < 0);
+  assert.ok(compareVersions('0.5.0-e2e.10', '0.5.0-e2e.9') > 0);
+});
+
+test('release assets: a draft counts only when CI uploaded every file during a successful run of the tag', () => {
+  const commit = 'c'.repeat(40);
+  const run = { id: 1, conclusion: 'success', head_sha: commit, head_branch: 'v0.5.0', path: CI_WORKFLOW, created_at: '2026-10-01T10:00:00Z', updated_at: '2026-10-01T10:30:00Z' };
+  const asset = (name, over = {}) => ({ name, uploader: { login: CI_UPLOADER }, state: 'uploaded', digest: `sha256:${'a'.repeat(64)}`, created_at: '2026-10-01T10:29:00Z', ...over });
+  const release = { tag_name: 'v0.5.0', author: { login: CI_UPLOADER } };
+  const check = (over = {}) => provenanceProblems({ release, assets: [asset('PKGBUILD')], runs: [run], tag: 'v0.5.0', commit, ...over }).join('; ');
+  assert.equal(check(), '');
+  assert.match(check({ assets: [asset('PKGBUILD', { uploader: { login: 'Wooangha' } })] }), /uploaded by Wooangha, not github-actions\[bot\]/);
+  assert.match(check({ assets: [asset('PKGBUILD', { state: 'starter' })] }), /state starter/);
+  assert.match(check({ assets: [asset('PKGBUILD', { digest: null })] }), /no sha256 digest/);
+  assert.match(check({ assets: [asset('PKGBUILD', { created_at: '2026-10-01T11:00:00Z' })] }), /outside the desktop run/);
+  assert.match(check({ release: { ...release, author: { login: 'someone' } } }), /created by someone/);
+  assert.match(check({ runs: [{ ...run, conclusion: 'failure' }] }), /no successful/);
+  assert.match(check({ runs: [{ ...run, head_sha: 'd'.repeat(40) }] }), /no successful/);
+  assert.match(check({ runs: [{ ...run, head_branch: 'main' }] }), /no successful/);
+  assert.match(check({ runs: [{ ...run, path: '.github/workflows/other.yml' }] }), /no successful/);
+  assert.match(check({ tag: 'v0.5.1' }), /the release is for v0\.5\.0/);
+});
+
+test('minisign: the verifier checks the key id, BLAKE2b-512 of the file and the trusted comment (node:crypto keys)', async () => {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+  const raw = Buffer.from(publicKey.export({ format: 'jwk' }).x, 'base64url');
+  const minisignKey = (id) => {
+    const text = `untrusted comment: minisign public key: ${Buffer.from(id).reverse().toString('hex').toUpperCase()}\n${Buffer.concat([Buffer.from('Ed'), id, raw]).toString('base64')}\n`;
+    return Buffer.from(text).toString('base64'); // Tauri's wrapping (tauri.conf.json, .key.pub)
+  };
+  const id = crypto.randomBytes(8);
+  const pubkey = minisignKey(id);
+  const signText = (data, comment, { algorithm = 'ED', keyId = id, globalComment = comment } = {}) => {
+    const message = algorithm === 'ED' ? crypto.createHash('blake2b512').update(data).digest() : data;
+    const sig = crypto.sign(null, message, privateKey);
+    const global = crypto.sign(null, Buffer.concat([sig, Buffer.from(globalComment)]), privateKey);
+    const lines = ['untrusted comment: signature from tauri secret key', Buffer.concat([Buffer.from(algorithm), keyId, sig]).toString('base64'), `trusted comment: ${comment}`, global.toString('base64')];
+    return Buffer.from(`${lines.join('\n')}\n`).toString('base64');
+  };
+  const data = Buffer.from('an updater artifact');
+  const comment = 'timestamp:1790000000\tfile:easy-study_0.5.0_aarch64.app.tar.gz\tversion:0.5.0';
+  const good = signText(data, comment);
+  assert.equal(parsePublicKey(pubkey).keyId, Buffer.from(id).reverse().toString('hex').toUpperCase());
+  assert.deepEqual(await verify(pubkey, good, data), { timestamp: '1790000000', file: 'easy-study_0.5.0_aarch64.app.tar.gz', version: '0.5.0' });
+  assert.deepEqual(verifyTrusted(pubkey, good), trustedFields(comment));
+  assert.equal(parseSignature(good).keyId, parsePublicKey(pubkey).keyId);
+  await assert.rejects(verify(pubkey, good, Buffer.from('an updater artifacT')), /file does not match/);
+  // A version edited into the trusted comment (the global signature covers it).
+  await assert.rejects(verify(pubkey, signText(data, comment.replace('0.5.0', '0.5.1'), { globalComment: comment }), data), /trusted comment does not match/);
+  await assert.rejects(verify(minisignKey(crypto.randomBytes(8)), good, data), /signed with key/);
+  await assert.rejects(verify(pubkey, signText(data, comment, { algorithm: 'Ed' }), data), /prehashed/);
+  const other = crypto.generateKeyPairSync('ed25519');
+  const otherRaw = Buffer.from(other.publicKey.export({ format: 'jwk' }).x, 'base64url');
+  const sameIdOtherKey = Buffer.from(`untrusted comment: x\n${Buffer.concat([Buffer.from('Ed'), id, otherRaw]).toString('base64')}\n`).toString('base64');
+  await assert.rejects(verify(sameIdOtherKey, good, data), /does not match/);
+  // From a file (streamed), as the publish script checks the 150 MB artifacts.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'es-minisign-'));
+  try {
+    fs.writeFileSync(path.join(tmp, 'a'), data);
+    assert.equal((await verify(pubkey, good, { file: path.join(tmp, 'a') })).version, '0.5.0');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+  assert.throws(() => parseSignature('not a signature'), /neither minisign text nor base64/);
+});
+
+const tauriCli = path.join(DESKTOP_DIR, 'node_modules', '@tauri-apps', 'cli', 'tauri.js');
+test('minisign: verifies what `tauri signer sign --app-version` writes (a throwaway key in a temp folder)', { skip: !fs.existsSync(tauriCli) && 'no Tauri CLI (npm ci in desktop/)' }, async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'es-signer-'));
+  try {
+    const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('TAURI_SIGNING_')));
+    const key = path.join(tmp, 'throwaway.key');
+    assert.equal(spawnSync(process.execPath, [tauriCli, 'signer', 'generate', '--ci', '-p', '', '-w', key], { env }).status, 0);
+    const file = path.join(tmp, 'easy-study_0.5.0-e2e.2_aarch64.app.tar.gz');
+    fs.writeFileSync(file, crypto.randomBytes(100_000));
+    assert.equal(spawnSync(process.execPath, [tauriCli, 'signer', 'sign', '-f', key, '-p', '', '--app-version', '0.5.0-e2e.2', file], { env }).status, 0);
+    const pub = fs.readFileSync(`${key}.pub`, 'utf8');
+    const fields = await verify(pub, fs.readFileSync(`${file}.sig`, 'utf8'), { file });
+    assert.equal(fields.file, path.basename(file));
+    assert.equal(fields.version, '0.5.0-e2e.2');
+    assert.match(fields.timestamp, /^\d+$/);
+    fs.appendFileSync(file, 'x');
+    await assert.rejects(verify(pub, fs.readFileSync(`${file}.sig`, 'utf8'), { file }), /does not match/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('macOS updater archive: packed as CI does, read back entry by entry (hard links, top folder, Info.plist)', { skip: process.platform === 'win32' && 'tar with hard links' }, async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'es-apptar-'));
+  try {
+    const app = path.join(tmp, 'b', 'easy-study.app');
+    const deep = path.join(app, 'Contents', 'Resources', 'd'.repeat(60), 'e'.repeat(60));
+    fs.mkdirSync(path.join(app, 'Contents', 'MacOS'), { recursive: true });
+    fs.mkdirSync(deep, { recursive: true });
+    const plist = (v) => `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict>\n<key>CFBundleShortVersionString</key>\n<string>${v}</string>\n</dict></plist>\n`;
+    fs.writeFileSync(path.join(app, 'Contents', 'Info.plist'), plist('0.5.0'));
+    fs.writeFileSync(path.join(app, 'Contents', 'MacOS', 'easy-study'), crypto.randomBytes(3000));
+    fs.writeFileSync(path.join(deep, `${'f'.repeat(70)}.txt`), 'long path');
+    const out = await packApp({ app, version: '0.5.0', outDir: path.join(tmp, 'out'), arch: 'aarch64' });
+    assert.equal(path.basename(out), 'easy-study_0.5.0_aarch64.app.tar.gz');
+    const archive = await readTarGz(out, ['easy-study.app/Contents/Info.plist']);
+    assert.deepEqual(appArchiveProblems(archive, '0.5.0'), []);
+    assert.equal(archive.files['easy-study.app/Contents/Info.plist'].toString(), plist('0.5.0'));
+    assert.ok(archive.entries.some((e) => e.name.endsWith(`${'e'.repeat(60)}/${'f'.repeat(70)}.txt`) && e.type === 'file' && e.name.length > 200));
+    assert.ok(archive.entries.every((e) => e.name.startsWith('easy-study.app/')));
+    assert.match(appArchiveProblems(archive, '0.5.1').join(), /CFBundleShortVersionString 0\.5\.0, expected 0\.5\.1/);
+    // "-C dir ." gives "./easy-study.app/…" (the updater would unpack a folder named easy-study.app inside the app).
+    spawnSync('tar', ['-czf', path.join(tmp, 'dot.tar.gz'), '-C', path.join(tmp, 'b'), '.'], { env: { ...process.env, COPYFILE_DISABLE: '1' } });
+    assert.match(appArchiveProblems(await readTarGz(path.join(tmp, 'dot.tar.gz'), []), '0.5.0').join(), /not under easy-study\.app\//);
+    // A hard link: every macOS install would fail (tar-rs resolves its target against the working folder).
+    fs.linkSync(path.join(app, 'Contents', 'MacOS', 'easy-study'), path.join(app, 'Contents', 'MacOS', 'copy'));
+    await assert.rejects(packApp({ app, version: '0.5.0', outDir: path.join(tmp, 'out'), arch: 'aarch64' }), /hard link/);
+    await assert.rejects(packApp({ app: path.join(tmp, 'b'), version: '0.5.0', outDir: tmp }), /must be named easy-study\.app/);
+    fs.writeFileSync(path.join(tmp, 'broken.tar.gz'), (await import('node:zlib')).gzipSync(Buffer.alloc(700, 1)));
+    await assert.rejects(readTarGz(path.join(tmp, 'broken.tar.gz')), /broken tar header/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('Windows installer: the version resource names the version it installs (read before signing)', () => {
+  // A 32-bit PE like NSIS's installer stub: headers, a section table with .text and .rsrc, and in .rsrc a
+  // VS_VERSIONINFO string table as makensis writes it (UTF-16LE key, NUL, padding, value, NUL).
+  const exe = (strings) => {
+    const buf = Buffer.alloc(0x1000);
+    buf.write('MZ', 0, 'latin1');
+    buf.writeUInt32LE(0x80, 0x3c);
+    buf.write('PE\0\0', 0x80, 'latin1');
+    buf.writeUInt16LE(0x14c, 0x84); // i386
+    buf.writeUInt16LE(2, 0x86); // sections
+    buf.writeUInt16LE(0xe0, 0x94); // optional header size (PE32)
+    const table = 0x80 + 24 + 0xe0;
+    buf.write('.text', table, 'latin1');
+    buf.write('.rsrc', table + 40, 'latin1');
+    buf.writeUInt32LE(0x800, table + 40 + 16); // size of raw data
+    buf.writeUInt32LE(0x600, table + 40 + 20); // pointer to raw data
+    let at = 0x600 + 6;
+    for (const [key, value] of strings) {
+      at += buf.write(`${key}\0`, at, 'utf16le');
+      if ((at - 0x600) % 4) at += 2; // align the value to 32 bits
+      at += buf.write(`${value}\0`, at, 'utf16le') + 6;
+    }
+    return buf;
+  };
+  const read = (buf) => {
+    const range = peResourceRange(buf.subarray(0, 0x400));
+    return range && versionInfoString(buf.subarray(range.offset, range.offset + range.size), 'ProductVersion');
+  };
+  assert.deepEqual(peResourceRange(exe([])), { offset: 0x600, size: 0x800 });
+  assert.equal(read(exe([['FileVersion', '0.5.0'], ['ProductVersion', '0.5.1'], ['ProductName', 'easy-study']])), '0.5.1');
+  assert.equal(read(exe([['Product', '0.5.1'], ['ProductVersion', '0.5.0-e2e.2']])), '0.5.0-e2e.2');
+  assert.equal(read(exe([['FileVersion', '0.5.1']])), null);
+  assert.equal(peResourceRange(Buffer.from('#!/bin/sh\n'.padEnd(200, ' '))), null);
+  assert.equal(peResourceRange(Buffer.from('\x7fELF'.padEnd(200, '\0'), 'latin1')), null);
+});
+
+test('tar reader: GNU long names, pax paths, hard links, checksums (as GNU tar on Linux writes them)', async () => {
+  const header = (name, { type = '0', size = 0, link = '', magic = 'ustar  \0' } = {}) => {
+    const h = Buffer.alloc(512);
+    h.write(name.slice(0, 100), 0);
+    h.write('0000644\0', 100);
+    h.write(`${size.toString(8).padStart(11, '0')}\0`, 124);
+    h.write(' '.repeat(8), 148);
+    h.write(type, 156);
+    h.write(link, 157);
+    h.write(magic, 257);
+    h.write(`${h.reduce((n, b) => n + b, 0).toString(8).padStart(6, '0')}\0 `, 148);
+    return h;
+  };
+  const data = (buf) => Buffer.concat([buf, Buffer.alloc((512 - (buf.length % 512)) % 512)]);
+  const pax = (key, value) => {
+    let len = key.length + value.length + 3;
+    while (`${len} ${key}=${value}\n`.length !== len) len = `${len} ${key}=${value}\n`.length;
+    return Buffer.from(`${len} ${key}=${value}\n`);
+  };
+  const longName = `easy-study.app/Contents/Resources/${'x'.repeat(120)}.txt`;
+  const paxName = `easy-study.app/Contents/${'p'.repeat(110)}.txt`;
+  const record = pax('path', paxName);
+  const tar = Buffer.concat([
+    header('easy-study.app/', { type: '5' }),
+    header('././@LongLink', { type: 'L', size: longName.length + 1 }),
+    data(Buffer.from(`${longName}\0`)),
+    header(longName.slice(0, 100), { size: 5 }),
+    data(Buffer.from('hello')),
+    header('pax_global_header', { type: 'g', size: 11, magic: 'ustar\x0000' }),
+    data(Buffer.from('9 a=bcde\n\n')),
+    header('PaxHeaders/x', { type: 'x', size: record.length, magic: 'ustar\x0000' }),
+    data(record),
+    header('truncated-by-pax.txt', { size: 3, magic: 'ustar\x0000' }),
+    data(Buffer.from('pax')),
+    header('easy-study.app/Contents/hl', { type: '1', link: 'easy-study.app/Contents/x' }),
+    Buffer.alloc(1024),
+  ]);
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'es-tar-'));
+  try {
+    const file = path.join(tmp, 'a.tar.gz');
+    fs.writeFileSync(file, (await import('node:zlib')).gzipSync(tar));
+    const { entries, files } = await readTarGz(file, [longName, paxName]);
+    assert.deepEqual(entries.map((e) => [e.name, e.type]), [
+      ['easy-study.app/', 'dir'],
+      [longName, 'file'],
+      [paxName, 'file'],
+      ['easy-study.app/Contents/hl', 'hardlink'],
+    ]);
+    assert.equal(files[longName].toString(), 'hello');
+    assert.equal(files[paxName].toString(), 'pax');
+    assert.equal(entries[3].link, 'easy-study.app/Contents/x');
+    assert.match(appArchiveProblems({ entries, files }, '0.5.0').join('; '), /hl: hard link/);
+    const bad = Buffer.from(tar);
+    bad[600] ^= 1; // inside the GNU long-name header
+    fs.writeFileSync(file, (await import('node:zlib')).gzipSync(bad));
+    await assert.rejects(readTarGz(file), /broken tar header/);
+    fs.writeFileSync(file, (await import('node:zlib')).gzipSync(tar.subarray(0, 1536 + 100)));
+    await assert.rejects(readTarGz(file), /truncated tar/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('publish-release.mjs: a dry run unless --publish; a real run needs the reviewed commit and approved notes', () => {
+  const dry = parseOptions(['--tag', 'v0.5.0']);
+  assert.equal(dry.dryRun, true);
+  assert.equal(dry.version, '0.5.0');
+  assert.equal(dry.key, path.join(os.homedir(), '.tauri', 'easy-study-updater.key'));
+  assert.equal(DEFAULT_KEY, '~/.tauri/easy-study-updater.key');
+  assert.equal(dry.work, path.join(REPO_DIR, '.cache', 'publish', 'v0.5.0'));
+  assert.equal(parseOptions(['--tag', 'v0.5.0', '--dry-run', '--notes', 'n.md']).dryRun, true);
+  assert.throws(() => parseOptions(['--tag', 'v0.5.0', '--publish']), /--commit/);
+  assert.throws(() => parseOptions(['--tag', 'v0.5.0', '--publish', '--commit', 'abcdef1']), /--notes/);
+  assert.throws(() => parseOptions(['--tag', 'v0.5.0', '--publish', '--dry-run', '--commit', 'abcdef1', '--notes', 'n.md']), /exclude/);
+  assert.throws(() => parseOptions(['--tag', '0.5.0']), /--tag vX\.Y\.Z/);
+  assert.throws(() => parseOptions(['--tag', 'v0.5.0', '--clobber']), /unknown argument/);
+  assert.throws(() => parseOptions(['--tag', 'v0.5.0', '--commit', 'main']), /hex/);
+  const real = parseOptions(['--tag', 'v0.5.0', '--publish', '--commit', 'abcdef1', '--notes', 'n.md', '--key', '/k', '--skip-private', '--not-latest']);
+  assert.deepEqual([real.dryRun, real.key, real.skipPrivate, real.notLatest], [false, '/k', true, true]);
+  // The key is only ever a path handed to the Tauri CLI; a published release is never overwritten.
+  const src = fs.readFileSync(path.join(DESKTOP_DIR, 'scripts', 'publish-release.mjs'), 'utf8');
+  assert.doesNotMatch(src, /(readFileSync|createReadStream|copyFileSync|cpSync)\([^)]*\bkey\b/);
+  assert.match(src, /\[cli, 'signer', 'sign', '-f', key, '-p', '', '--app-version', version, file\], \{ env \}/);
+  assert.match(src, /filter\(\(\[k\]\) => !k\.startsWith\('TAURI_SIGNING_'\)\)/);
+  assert.doesNotMatch(src, /--clobber/);
+  assert.match(src, /assertPublicDraft\(tag, pub\.id\);\n\s+if \(current\) api\(`repos\/\$\{PUBLIC_REPO\}\/releases\/assets\/\$\{current\.id\}`, \{ method: 'DELETE' \}\)/);
+});
+
+test('update e2e: a throwaway key only, latest.json from the same helper, one folder served on 127.0.0.1', async () => {
+  const fakeKey = (id) => Buffer.from(`untrusted comment: k\n${Buffer.concat([Buffer.from('Ed'), Buffer.from(id, 'hex').reverse(), crypto.randomBytes(32)]).toString('base64')}\n`).toString('base64');
+  assert.throws(() => e2eConfig({ version: '0.5.0-e2e.1', pubkey: fakeKey(UPDATER_KEY_ID), port: 8777 }), /throwaway key/);
+  const config = e2eConfig({ version: '0.5.0-e2e.1', pubkey: fakeKey('0123456789ABCDEF'), port: 8777 });
+  assert.equal(config.identifier, 'dev.easystudy.desktop.e2e');
+  assert.deepEqual(config.plugins.updater.endpoints, ['http://127.0.0.1:8777/latest.json']);
+  assert.equal(config.plugins.updater.requireSignedVersion, true);
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'es-e2e-'));
+  let server;
+  try {
+    const name = 'easy-study_0.5.0-e2e.2_aarch64.app.tar.gz';
+    fs.writeFileSync(path.join(tmp, name), 'archive');
+    fs.writeFileSync(path.join(tmp, `${name}.sig`), `${Buffer.from('sig').toString('base64')}\n`);
+    fs.writeFileSync(path.join(tmp, '.hidden'), 'no');
+    server = await serveDir(tmp, 0);
+    const port = server.address().port;
+    const latest = writeLatest({ dir: tmp, version: '0.5.0-e2e.2', port });
+    assert.deepEqual(Object.keys(latest.platforms), ['darwin-aarch64']);
+    assert.equal(latest.platforms['darwin-aarch64'].url, `http://127.0.0.1:${port}/${name}`);
+    const res = await fetch(`http://127.0.0.1:${port}/latest.json`);
+    assert.deepEqual(await res.json(), latest);
+    const head = await fetch(`http://127.0.0.1:${port}/${name}`, { method: 'HEAD' });
+    assert.equal(head.headers.get('content-length'), '7');
+    for (const p of ['/.hidden', '/..%2F..%2Fetc%2Fpasswd', '/sub/x', '/']) assert.equal((await fetch(`http://127.0.0.1:${port}${p}`)).status, 404, p);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/latest.json`, { method: 'POST' })).status, 404);
+    assert.equal(server.address().address, '127.0.0.1');
+  } finally {
+    server?.close();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });

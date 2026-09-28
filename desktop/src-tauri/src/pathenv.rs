@@ -228,6 +228,10 @@ fn login_shell_path(timeout: Duration) -> Option<String> {
         // The rc files run with the user's own environment, not the AppImage's libraries and paths.
         cmd.env_clear().envs(appimage_clean_env(&appdir));
     }
+    // Linux: the CA paths the shell set for the updater (update::keep_ssl_env), unless they were the user's own.
+    for key in crate::update::ssl_env_not_from_user() {
+        cmd.env_remove(key);
+    }
     let mut child = cmd
         .args(["-i", "-l", "-c", &format!("printf '%s' {BEGIN}; printenv PATH; printf '%s' {END}")])
         .env("EASY_STUDY_RESOLVING_SHELL_ENV", "1")

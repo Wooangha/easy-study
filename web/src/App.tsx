@@ -10,10 +10,12 @@ import { NotesPanel, type NotesFilter } from './components/NotesPanel.tsx';
 import { RecordControl, RecordingStrip } from './components/recording/RecorderBar.tsx';
 import { RecordingUploadContext } from './components/recording/RecordingUploads.tsx';
 import { RecordingsPanel } from './components/recording/RecordingsPanel.tsx';
+import { SettingsDialog } from './components/SettingsDialog.tsx';
 import { SlideViewer, type SlideViewerHandle } from './components/SlideViewer.tsx';
 import { SplitPane } from './components/SplitPane.tsx';
 import { Toaster } from './components/Toaster.tsx';
 import { TopBar } from './components/TopBar.tsx';
+import { UpdateBanner } from './components/UpdateBanner.tsx';
 import { useAttachments } from './hooks/useAttachments.ts';
 import { useCourses } from './hooks/useCourses.ts';
 import { useDigest } from './hooks/useDigest.ts';
@@ -35,6 +37,20 @@ import {
   type DragKinds,
 } from './lib/attachments.ts';
 import { confirmDialog } from './lib/confirm.ts';
+import {
+  SHELL_LEAVE_MS,
+  allowLeave,
+  desktopMarker,
+  exposePageHook,
+  firstUpdatedToast,
+  leaveAllowed,
+  settingsSection,
+  updatePending,
+  updatedToast,
+  useDesktopState,
+  type PageBusy,
+  type SettingsSection,
+} from './lib/desktop.ts';
 import { RECORDING_ACCEPT } from './lib/recording/labels.ts';
 import { recorder } from './lib/recording/recorder.ts';
 import { getRecordingUploads, subscribeRecordingUploads, uploadRecordingFiles } from './lib/recording/uploads.ts';
@@ -137,6 +153,11 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
   const recordings = useRecordings(readyDocId, tab === 'recordings');
   const recorderPhase = useSyncExternalStore(recorder.subscribe, () => recorder.getSnapshot().phase);
   const recordingUploads = useSyncExternalStore(subscribeRecordingUploads, () => getRecordingUploads().length);
+  /** Recorded audio still on its way to the server (a restart or leaving would stop it). */
+  const audioBacklog = useSyncExternalStore(recorder.subscribe, () => {
+    const s = recorder.getSnapshot();
+    return s.unsentSeconds > 0 || s.finishing > 0;
+  });
   const recordingFileRef = useRef<HTMLInputElement>(null);
   const recordingTarget = useRef<DocMeta | null>(null);
   const pickRecordingFor = useCallback((target: DocMeta) => {
@@ -373,12 +394,83 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
   useEffect(() => {
     if (!busy) return;
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      // A navigation of the desktop app that was already asked about, or one it cancels anyway (DESIGN §24).
+      if (leaveAllowed()) return;
       e.preventDefault();
       e.returnValue = '';
     };
     window.addEventListener('beforeunload', onBeforeUnload);
     return () => window.removeEventListener('beforeunload', onBeforeUnload);
   }, [busy]);
+
+  // ---- The desktop app (DESIGN §24): its update state, and the hooks its shell calls ------------------
+  // What an update or a change of server would interrupt: for the banner and 설정 (re-rendered when it changes)…
+  const pageBusy = useMemo<PageBusy>(() => {
+    const s = recorder.getSnapshot();
+    return {
+      recording: recorderPhase !== 'idle',
+      unsentSeconds: s.unsentSeconds,
+      finishing: s.finishing,
+      recordingUploads,
+      uploads: uploads.length,
+      answering: study.anyRunning,
+    };
+    // audioBacklog: the snapshot's numbers are read when it changes.
+  }, [recorderPhase, audioBacklog, recordingUploads, uploads.length, study.anyRunning]);
+  // …and for the shell, read when it asks (window.__easyStudyBusy). The hooks exist in browsers too, unused there.
+  const uploadCountRef = useLatest(uploads.length);
+  useEffect(() => {
+    const removeBusy = exposePageHook('__easyStudyBusy', () => {
+      const s = recorder.getSnapshot();
+      return {
+        recording: s.phase !== 'idle',
+        unsentSeconds: s.unsentSeconds,
+        finishing: s.finishing,
+        recordingUploads: getRecordingUploads().length,
+        uploads: uploadCountRef.current,
+        answering: studyRef.current.anyRunning,
+      };
+    });
+    // The shell navigates after asking the user in its own dialog: the page must not ask again ("Leave site?").
+    const removeAllowLeave = exposePageHook('__easyStudyAllowLeave', () => {
+      allowLeave(SHELL_LEAVE_MS);
+      return true;
+    });
+    return () => {
+      removeBusy();
+      removeAllowLeave();
+    };
+  }, [uploadCountRef, studyRef]);
+
+  // 설정 (⚙, the app menu "설정…" through __easyStudyOpenSettings). Under the login screen it opens after the login.
+  const [settings, setSettings] = useState<{ section: SettingsSection | null } | null>(null);
+  const pendingSettings = useRef<{ section: SettingsSection | null } | null>(null);
+  useEffect(() => {
+    if (suspended) {
+      setSettings(null);
+    } else if (pendingSettings.current) {
+      setSettings(pendingSettings.current);
+      pendingSettings.current = null;
+    }
+  }, [suspended]);
+  useEffect(
+    () =>
+      exposePageHook('__easyStudyOpenSettings', (section?: unknown) => {
+        const request = { section: settingsSection(section) };
+        if (suspendedRef.current) pendingSettings.current = request;
+        else setSettings(request);
+        return true;
+      }),
+    [suspendedRef],
+  );
+
+  const desktop = useDesktopState();
+  const update = desktop?.update ?? null;
+  const justUpdated = desktop?.justUpdated ?? null;
+  useEffect(() => {
+    if (!justUpdated || !firstUpdatedToast(justUpdated)) return;
+    toast(updatedToast(justUpdated, desktopMarker()?.os), 'success', 12_000);
+  }, [justUpdated]);
 
   // ---- Logout (remote mode) ----------------------------------------------------------------------
   const logout = useCallback(async () => {
@@ -658,6 +750,8 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
         onChoiceChange={setChoice}
         hasNotes={notesCount > 0}
         onLogout={authRequired && onLogout ? () => void logout() : undefined}
+        onOpenSettings={() => setSettings({ section: null })}
+        updatePending={updatePending(update)}
         recordControl={
           <RecordControl
             doc={doc?.status === 'ready' ? doc : null}
@@ -669,6 +763,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
         }
       />
       <RecordingStrip onShowRecordings={showRecordings} />
+      <UpdateBanner update={update} busy={pageBusy} />
 
       {healthError && (
         <div className="banner banner-error" role="alert">
@@ -748,7 +843,15 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
           </div>
         </div>
       )}
-      <Toaster />
+      {/* A modal dialog covers the page, toasts too: while 설정 is open, it shows them. */}
+      {settings === null && <Toaster />}
+      <SettingsDialog
+        open={settings !== null}
+        section={settings?.section ?? null}
+        onClose={() => setSettings(null)}
+        health={health}
+        busy={pageBusy}
+      />
       <ConfirmHost suspended={suspended} />
     </div>
   );

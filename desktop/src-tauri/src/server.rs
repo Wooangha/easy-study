@@ -466,6 +466,10 @@ fn child_env(cmd: &mut Command, path_env: &str, port: u16, library: &Path, tools
     for key in STRIP_ENV {
         cmd.env_remove(key);
     }
+    // Linux: the CA paths the shell set for the updater (update::keep_ssl_env), unless they were the user's own.
+    for key in crate::update::ssl_env_not_from_user() {
+        cmd.env_remove(key);
+    }
     cmd.env("PATH", path_value)
         .env("PORT", port.to_string())
         .env("EASY_STUDY_HOST", "127.0.0.1")

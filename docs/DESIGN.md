@@ -89,7 +89,9 @@ All JSON. Errors: HTTP 4xx/5xx with `{ "error": string }` (plus machine-readable
 
 | Method & path | Body | Response |
 |---|---|---|
-| GET `/api/health` | – | `HealthResponse` |
+| GET `/api/health` | – | `HealthResponse` (with the server's `version` from package.json, §24) |
+| GET `/api/desktop/busy` | – | `DesktopBusyResponse`: desktop mode only (404 otherwise), for the shell before an update (§24): the live recording (ids, status, its and its lecture's titles) and counts of transcriptions, 정리본 calls, answers and model downloads; no paths or content, `no-store` |
+| GET `/__easy-study-desktop/*` (not under /api) | – | 204 in every mode: a desktop page action the shell did not intercept leaves the page where it is (§8, §24) |
 | GET `/api/docs` | – | `DocMeta[]` newest first |
 | POST `/api/docs` | raw PDF bytes, `Content-Type: application/pdf`, header `X-Filename` (URI-encoded original name) | `DocMeta` (201). Max 300 MB. Rejects non-`%PDF` bodies (400). |
 | GET `/api/docs/:docId` | – | `DocMeta` |
@@ -344,7 +346,68 @@ Prime turns are excluded from notes. Error/aborted answers are shown as `_(answe
   - **Notes tab**: `GET /api/docs/:id/notes` rendered grouped by slide (slide thumbnail + Q/A cards,
     collapsible), filter "현재 슬라이드만", button to open the raw STUDY_NOTES.md; path shown so the user
     knows where the file lives.
-- Korean UI copy. Light/dark via `prefers-color-scheme`. No external CDNs (everything bundled).
+- Korean UI copy. Light/dark via `prefers-color-scheme`, or forced by the 화면 테마 setting (below). No external CDNs
+  (everything bundled).
+
+### Settings, theme and the desktop bridge (the web half of §24)
+- **⚙ 설정** (web/src/components/SettingsDialog.tsx): the last button of the top bar, at the right end of whichever line
+  it lands on (`margin-left: auto`: the bar wraps at the app's default 1280 px; on phones in the top right corner of
+  the first line), with a dot while the desktop app has an update waiting. A modal `<dialog>` like ConfirmHost (Esc, the
+  backdrop and ✕ close it, focus returns; keys pressed in it do not reach the app's shortcuts), so the open lecture stays
+  mounted. Sections 화면 · 공부 · 녹음 · 데스크톱 앱 (only when `window.__EASY_STUDY_DESKTOP__` exists) · 정보, stacked;
+  from 800 px a list on the left jumps to them and follows the scrolling. While it is open it shows the toasts (the
+  page's own Toaster is under the modal's backdrop).
+  - 화면: 테마 (시스템 설정 따르기 / 라이트 / 다크) as a radio group. 공부: ±N (useNeighbors is a small shared store, so
+    the chat panel's ±N and this select show the same value; web/tests/settings-stores.test.ts covers it and the theme
+    store). 녹음: `<AsrSettings>` with its own `useAsrStatus` (loaded
+    while open) and "녹음 안내 다시 보기" (clears `easy-study:recordingConsent`). 정보: the server's version
+    (`/api/health` `version`; a remote server older than the app — or without a version — gets a hint), the library
+    folder (copy button), the keyboard shortcuts.
+  - 데스크톱 앱: version and update status line, 업데이트 확인 / 업데이트하고 다시 시작 / 다운로드 페이지 열기 (install
+    'download' kinds, with a found version or in phase error, e.g. after an update that did not take), the
+    release notes as plain text (`<details>`), "연결: 이 컴퓨터 / 다른 컴퓨터 ({origin})", "시작할 때: …",
+    연결 대상 바꾸기… (a confirmDialog first when the page records, still sends audio, answers or uploads) and 다음 실행
+    때 선택 화면 보기 (only when the connection starts automatically).
+- **Theme** (web/src/lib/theme.ts, web/public/theme-boot.js): styles.css keeps the light tokens on `:root` and the dark ones
+  twice, identically — under `@media (prefers-color-scheme: dark) { :root:not([data-theme='light']) }` and under
+  `:root[data-theme='dark']` — plus `color-scheme` for a forced theme; the same for `--rec`. highlight.js's GitHub theme
+  colors are `--hl-*` tokens (the media-conditioned theme imports are gone; BSD-3-Clause, THIRD_PARTY_NOTICES.md).
+  web/tests/theme.test.ts checks the two blocks, the tokens against highlight.js's files, and theme-boot.js in node:vm.
+  - Browser: localStorage `easy-study:theme` (JSON like every storage.ts item; absent = system). theme-boot.js, a classic
+    script first in `<head>` (not inline, so a `script-src 'self'` CSP stays possible), sets `data-theme` and the root's
+    inline `color-scheme` before the first paint; other tabs follow through the `storage` event. applyTheme also sets both
+    theme-color metas to the forced theme's top bar color (#ffffff / #161920), restoring them for 시스템 설정.
+  - App: the setting is the shell's (desktop.json `theme`). A change here navigates to `theme/<v>` and is shown at once;
+    every state push applies `theme` and copies it to this origin's localStorage. theme-boot.js ignores that copy on macOS
+    and Windows (the shell has already set the window's theme, and a copy made while another server was shown would only
+    flash) and uses it on Linux, where the WebView may not follow the shell.
+- **Desktop bridge** (web/src/lib/desktop.ts; the shell's side is in §24):
+  - `desktopMarker()` reads the static marker `{v:1, version, os}`; `useDesktopState()` is a useSyncExternalStore over
+    `window.__easyStudyDesktopState` and the `easy-study-desktop` event. The push is untrusted input: every field is
+    checked (known enums, version-like strings, finite counts, `releaseUrl` https only, `origin` http(s), notes cut to
+    2000 characters); a malformed push is ignored and the previous state stays. Pages of other computers get fewer update
+    fields (no notes, dates, errors of their own) and must work with them.
+  - `desktopAction(name)` navigates to `<page origin>/__easy-study-desktop/<name>` (choose, forget-choice, check-update,
+    install-update, dismiss-update, cancel-update, theme/system|light|dark; nothing else is built) after allowing the
+    page to be left for 1 s: App.tsx's beforeunload guard (answers, uploads, recordings) asks `leaveAllowed()` first,
+    because WebView2 runs beforeunload even for a navigation the shell cancels. The server answers the prefix with 204
+    in every mode, so an action that is not intercepted leaves the page where it is.
+  - Hooks App.tsx installs for the shell (in browsers too, unused there): `__easyStudyBusy()` → `{recording,
+    unsentSeconds, finishing, recordingUploads, uploads, answering}` read live from the recorder, the recording uploads
+    and the app's state (`recording` is any recorder phase but idle, paused included); `__easyStudyOpenSettings(section?)`
+    → true (under the login screen the dialog opens after the login); `__easyStudyAllowLeave()` → true, allowing 3 s for
+    the navigation the shell makes after asking the user in its own dialog (the chooser, reload, install).
+  - **UpdateBanner** under the top bar (`.banner-info`) for phases available / downloading (progress, 취소) / downloaded /
+    installing / error, unless dismissed ("나중에" hides it at once and sends dismiss-update). The install button is
+    disabled with a hint while audio could be cut off (recording, unsent audio, finishing, recording uploads — the shell
+    blocks those too) and asks first for answers and PDF uploads; install 'download' kinds get the reason (a translocated
+    macOS app) or "이 설치 방식(deb|rpm|Arch)에서는 새 패키지를 받아…" and the release page link (target=_blank, so the
+    system browser). macOS in-app installs show the microphone hint (the ad-hoc signature changes with every version).
+    `justUpdated` gives the toast "easy-study {v} 버전으로 업데이트했어요." (on macOS with the microphone fix) once per
+    version and tab (sessionStorage `easy-study:toastedUpdate`): the shell sends it with every push of that launch.
+    An error text that is a sentence of its own ("업데이트가 끝나지 않았어요…") gets no "업데이트하지 못했어요:" in front.
+  - LoginScreen and LocalOnlyScreen have "다른 서버에 연결…" (→ choose) inside the app; over a mounted app its warning
+    is shown inline (the app's dialogs cannot be answered under the login screen).
 
 ## 9. Module ownership (parallel implementation)
 
@@ -1082,3 +1145,166 @@ app shows what each answer and each session used, live, and the plan's limits wh
 - Korean counts (web/src/lib/usage.ts): below 1만 with separators ("9,876"), then 만 with one decimal below 100만
   ("4.7만", "123만"), then 억.
 - The 정리본 status line shows "토큰 12.3만" for the latest run (tooltip: exact numbers).
+
+## 24. Desktop updates, settings, changing the connection
+
+From 0.5.0 the desktop app updates itself, has settings (⚙ in the web UI, "⚙ 앱 설정" in the chooser) and an obvious
+way back to the chooser. The capability invariant of §19 is unchanged: `capabilities/chooser.json` still grants nothing,
+only the chooser has IPC, and the updater plugin is driven from Rust only (its JS commands are denied to every page, the
+chooser included). The web half (settings dialog, theme, banner, hooks) is in §8 "Settings, theme and the desktop bridge".
+
+### Shell ↔ page (desktop/src-tauri/src/bridge.rs; pages served over http(s) never get IPC)
+- **Marker**: `initialization_script` of the main window, main frame only (never page-N windows):
+  `window.__EASY_STUDY_DESKTOP__ = Object.freeze({v:1, version, os})`. `version` is `package_info().version` at run time
+  (never a literal), `os` macos|windows|linux; both JSON-quoted. desktop.test.mjs checks it never names `__TAURI`.
+- **Pushed state**: `window.__easyStudyDesktopState = {v:1, theme, connection:{kind, origin, startup}, update, justUpdated}`
+  then `dispatchEvent(new Event('easy-study-desktop'))`, serde_json through `eval` (never text built from what a page
+  said), guarded by `location.origin === <origin>` in the page. Sent on every page load (PageLoadEvent::Finished) of the
+  allowed origin and on every change; download progress at most every 250 ms. `justUpdated` is in every push of the
+  launch (macOS may report two loads when the server was ready before the chooser, and a login screen may come first). The chooser is never pushed to (it polls
+  get_state). Another computer's page gets `update` without notes, date, checkedAt, lastError, lastErrorAt.
+- **UpdateState** (update.rs, camelCase, optional fields left out, never null): phase idle|checking|latest|available|
+  downloading|downloaded|installing|error, current, version?, notes? (latest.json is not signed: plain text only, ≤2000
+  chars), date?, releaseUrl, received, total?, error?, install inApp|download|none, reason?, kind app|nsis|appimage|deb|
+  rpm|arch|none, checkedAt?, auto, dismissed, lastError?, lastErrorAt? (dates RFC 3339 UTC). `error`, `reason` and
+  `lastError` are always one of the fixed Korean texts of update.rs (no paths, no user names); raw errors go to
+  shell.log only. The web shows `reason` whenever install is download.
+- **Actions**: a navigation to `<allowed origin>/__easy-study-desktop/<action>`: choose, forget-choice, check-update,
+  install-update, dismiss-update, cancel-update, theme/system|light|dark. `bridge::classify` runs first in
+  `allow_main_navigation`: a known action on the allowed http(s) origin is done on its own thread and the navigation
+  cancelled; the prefix anywhere else (another origin or scheme, an unknown action) is cancelled and never opened in the
+  browser; the query is ignored. `new_window` and the page-N windows refuse the prefix without acting (answers open links
+  with target=_blank). The server answers the prefix with 204 in every mode, so a navigation that gets through changes
+  nothing. `theme/*` and `forget-choice` do nothing when the value is unchanged; a page's `theme/*` is applied at most
+  once a second (the newest one asked for wins), so a page toggling in a loop cannot rewrite desktop.json or flip every
+  window each time.
+- **Hooks the shell calls** (eval, worker threads only: `eval_json` needs the main thread to answer and must never run
+  on it): `__easyStudyBusy()`, `__easyStudyOpenSettings()` (only `true` counts as handled; otherwise the chooser opens
+  with its 앱 설정), `__easyStudyAllowLeave()` (before show_chooser, reload and the install navigation, only after the
+  user agreed in a native dialog, so beforeunload never asks twice).
+- **What a page can start** (PageDialogs, unit-tested): a remote page's dialogs at most one per 60 s, and after the user
+  said no (or a Block) none from that origin for the rest of the session: state is still pushed and the banner, menu
+  and chooser keep working. This computer's page (the trusted bundle) only a 3 s gap and never refused, so the user's
+  own banner works after one 취소. The check happens once, when the action arrives: one flow can show its confirm and
+  its busy dialog. A page opens the release page at most once a minute, and its `install-update` with nothing found
+  counts as a manual check (at most one request to GitHub every 30 s). Log lines a page can cause (reserved paths,
+  blocked navigations, page loads, actions, "already on its way", failed checks, theme changes) are limited to 20 per
+  kind and minute (shell.log is rotated at launch only).
+
+### Busy gate (bridge::decide, unit-tested)
+Asked before an install (and again after the download): the page (`__easyStudyBusy`) and this computer's server
+(`GET /api/desktop/busy` over loopback; desktop mode only, no side effects, never asrStatus()).
+
+| Answer | Result |
+|---|---|
+| page recording (any recorder phase but idle, paused too) | Block "강의를 녹음하는 중이에요…" (native OK dialog) |
+| page unsentSeconds > 0, finishing > 0 or recordingUploads > 0 | Block (audio only the page has) |
+| page answering or PDF uploads | Warn, unless the page started the install (it asked the user itself) |
+| page without an answer (older remote UI, hung) / server without an answer | Warn ("확인하지 못했어요") |
+| server live recording (recording or paused) that the page does not hold | Warn naming it: "‘{doc}’의 ‘{title}’ 녹음이 아직 끝나지 않았어요" (it resumes after the restart; a forgotten one must not block forever) |
+| server transcriptions, digests, chat turns, model downloads | Warn listing them (chat turns less the page's own answer: "다른 창에서 답변 N개…") |
+| nothing | Go |
+
+Warn is a native [설치하고 다시 시작] [취소]. A lying page can only hurt itself (a "busy" answer blocks its own install;
+the chooser, where no page is asked, still installs). Menu "연결 대상 바꾸기…" and "새로 고침" ask first
+([바꾸기]/[다시 고침] [취소]) when the page holds audio; a page-started choose is not asked again (the page asked).
+
+### Updater (desktop/src-tauri/src/update.rs; tauri-plugin-updater ~2.12, native-tls)
+- Config (tauri.conf.json `plugins.updater`, asserted exactly by desktop.test.mjs): the pubkey of
+  `~/.tauri/easy-study-updater.key.pub` (key id 8428B81A03E58D53), the one endpoint
+  `https://github.com/Wooangha/easy-study-releases/releases/latest/download/latest.json`, `requireSignedVersion` (the
+  signature's trusted comment binds the version), `windows.installMode` passive. No dangerous* keys, no allowDowngrades,
+  no createUpdaterArtifacts (so CI never needs the private key). No runtime or env override exists.
+- Install kind (pure `install_kind`, unit-tested): macOS only a real `…/X.app/Contents/MacOS/<bin>` counts (`cargo run`
+  would otherwise have target/debug replaced), a translocated or /Volumes copy gets download with "앱을 ‘응용 프로그램’
+  폴더로 옮긴 뒤…"; Windows NSIS inApp; Linux AppImage with `$APPIMAGE` inApp, without it (extracted) download; Arch
+  (pacman marker; its binary says Deb), deb and rpm download: they check through the `linux-<arch>-appimage` key and are
+  never installed by the plugin (no root prompts). Debug builds are download.
+- Checks: 15 s after launch, then every 6 h by wall clock; never in smoke runs or debug builds, or with `updateCheck`
+  false. A manual check (chooser, menu, page) runs at most every 30 s. Timeouts: 20 s for latest.json, 15 s connect and
+  60 s per read for every request (the download too), plus a watchdog that drops the download after 90 s without data,
+  and 취소 (cancel-update). The plugin reports every non-2xx as ReleaseNotFound: one GET of the endpoint decides (404 =
+  latest, before the first public release too; anything else = the network error). Automatic failures are silent
+  (lastError); manual ones show the fixed text.
+- The found Update and its verified bytes (with their version) sit under one mutex: a check that finds another version
+  drops the bytes. After download() the signature's trusted comment (decoded with minisign-verify as the plugin does:
+  the third line; the first, untrusted one is not signed and may say anything) must name this build's file suffix
+  (`_aarch64.app.tar.gz`, `_x64.app.tar.gz`, `_x64-setup.exe`, `_amd64.AppImage`, `_aarch64.AppImage`) and the version.
+- Install flow (`request_install`, a worker thread, single-flight with an RAII flag released on every return path):
+  1. check if nothing is held; not inApp → open releaseUrl (a page: once a minute) and stop;
+  2. another computer's page → native confirm "easy-study {v} 버전을 설치하고 앱을 다시 시작할까요?";
+  3. busy gate; 4. download (phase downloading, progress pushed) unless the bytes are held; 5. busy gate again (Block:
+  stay "downloaded"; Warn: ask only if it differs from what was accepted);
+  6. phase installing (the chooser shows the busy line from it), `__easyStudyAllowLeave`, show_chooser, desktop.json
+  `updatedFrom = current`; 7. server::stop on every OS (Windows' install() exits without RunEvent::Exit);
+  8. `update.install(bytes)` (macOS may ask for an administrator password on the main thread; hence the worker);
+  `on_before_exit` is a no-op, so a Windows installer that fails to start leaves the window visible;
+  9. `request_restart()` (runs RunEvent::Exit). On failure: phase error with the fixed text, bytes kept (다시 시도 does
+  not download again), updatedFrom cleared, the window shown and focused.
+- While files are replaced the app cannot quit: CloseRequested of the main window and ExitRequested (unless the restart
+  code) are prevented, SIGTERM waits up to 60 s. On macOS the app menu's quit item is the app's own for this reason;
+  the Dock's Quit and logout (`terminate:`) cannot be held off.
+- Next launch: `updatedFrom` ≠ current → justUpdated pushed during that launch (one toast per tab); `updatedFrom` =
+  current → the update did not take: logged, phase error "업데이트가 끝나지 않았어요 (지금 {cur}). 다운로드 페이지에서
+  직접 설치해 주세요." (an automatic check that fails keeps it; one that finds the version shows it as the reason), and
+  one-click install is off for the session (no download-and-restart loop). Stale `tauri_current_app*` /
+  `tauri_updated_app*` folders older than a day are removed (temp dir; on Linux also ~/.cache and the AppImage's folder),
+  and on Windows `%TEMP%\easy-study-<v>-updater-*` with v ≤ the running version.
+- Not done: restoring a missing or truncated `$APPIMAGE` from the plugin's backup (an AppImage that cannot start runs
+  none of our code; the backup stays in `tauri_current_app*`).
+- Linux: the plugin's check() sets SSL_CERT_FILE / SSL_CERT_DIR to Debian's paths when unset (from a worker thread, for
+  good). `update::keep_ssl_env()`, the first line of main(), sets them to what openssl-probe finds on this system
+  instead (only paths that exist), and server::child_env and pathenv's login shell remove them again unless the user had
+  set them. (A process restarted after an update inherits them as if the user had: they name existing CA files.)
+- Menu: "설정…" (⌘, / Ctrl+,) and "업데이트 확인…" (its text becomes "업데이트 설치 ({v})…" once a version is found:
+  the way in when the window shows an older remote UI) in the app menu (macOS) or 연결 (Windows/Linux). Every menu
+  flow that can block runs on its own thread, one at a time per item (a slow check never holds up 연결 대상 바꾸기…).
+  "업데이트 확인…" waits for a check that runs, then checks, and answers in native dialogs; it says "최신" only when a
+  check said so (otherwise the failure, or lastError of an automatic check it waited for).
+- The chooser: connect_local / connect_remote refuse while an update replaces the app. New commands (own origin only):
+  check_update, install_update, cancel_update (all return at once; the chooser polls get_state every second),
+  set_theme, set_update_check, forget_choice, open_logs. get_state gains version, theme, updateCheck, update, focus
+  (consumed once), previous ("방금까지 연결"), notice.
+
+### Theme and connection
+- desktop.json `theme` ("" = system, light, dark) is applied with `AppHandle::set_theme` in setup before the first
+  window and on every change; no window builder gets `.theme()` (on Windows a window's own theme would win over later
+  app-wide changes). Pages get it pushed; the chooser sets `data-theme` from get_state (dual-selector tokens as in §8).
+- "다음에도 바로 연결" stays checked by default; the ways back: ⚙ 설정 › 연결 대상 바꾸기…, "다음 실행 때 선택 화면
+  보기" (forget-choice), "다른 서버에 연결…" on the login screens, the chooser's 앱 설정 (시작할 때), the menu (⌘⇧K).
+- Auto-connect loop breaker: `autoConnectPending` is written before a remembered connection opens at launch and cleared
+  when its page has been up 30 s, on a normal exit and before an update restart. Still set at the next launch (the app
+  died or was force-quit right after connecting) → the chooser comes first with a note.
+- desktop.json keeps fields it does not know (`#[serde(flatten)] extra`): a downgrade does not drop a newer build's settings.
+
+### Releases (desktop/scripts; runbook in docs/HANDOFF.md)
+- CI (desktop.yml) packs the macOS updater archive `easy-study_<v>_<arch>.app.tar.gz` right after the build: one top
+  folder `easy-study.app/`, no `._` files, no xattrs, no hard links (tar-rs would resolve them against the working
+  folder), Info.plist version = package.json. The Windows installer and the AppImages are the updater artifacts as they
+  are. CI never signs for the updater and has no key; every action is pinned by commit SHA (tag in a comment).
+- The public repository `Wooangha/easy-study-releases` holds installers only (the source stays private): the 5 updater
+  artifacts, dmg/deb/rpm, the Arch package and its PKGBUILD (whose sources point there), the FFmpeg source (LGPL), and
+  SHA256SUMS.txt and latest.json made by the script. latest.json has exactly the keys darwin-aarch64, darwin-x86_64,
+  windows-x86_64, windows-x86_64-nsis, linux-x86_64-appimage, linux-aarch64-appimage (never a bare linux-<arch>, which
+  deb/rpm installs would fall back to).
+- `publish-release.mjs` (dry run by default; `--publish --commit <sha> --notes <file>` for real) refuses unless: the
+  draft and every asset were uploaded by github-actions[bot] (state uploaded, a sha256 digest) during a successful
+  desktop.yml run for the tag's commit; the tag commit on GitHub equals the local tag, is an ancestor of origin/main and
+  GitHub's main, and equals `--commit` (what the user reviewed); package.json and the updater config at the tag match;
+  every asset name is allowlisted and all required ones are there; downloads (by asset id) match the digests; the macOS
+  archives hold the tag's version (Info.plist) and so does the Windows installer (its version resource's
+  ProductVersion). The AppImages are squashfs images and are not looked into: only their name, the CI run and the
+  digest vouch for them. It signs with `tauri signer sign --app-version` (the key stays a path), verifies each
+  signature with the key compiled into the tag (minisign.mjs: key id, `file:` = the asset for that platform key,
+  `version:` = the tag's), uploads to a public draft (latest.json last), publishes, fetches latest.json and every URL
+  without auth, then publishes the private draft. A published public release is never changed or deleted: a difference
+  on a re-run aborts with "cut a new patch version". So a GitHub compromise alone no longer gets code signed (the
+  security review's "denial only" holds only with these checks); a compromise of the key does.
+- One key, no password, no recovery key (lead's decision). Losing `~/.tauri/easy-study-updater.key` means no release can
+  ever be installed in-app again: every 0.5.0+ install trusts only it, and a new key needs a manual reinstall by every
+  user. A leak lets whoever can also write the public repo ship code to every install. Keep the offline backup current.
+- `update-e2e.mjs` (config / pack / sign / serve) tests the flow with a throwaway key, a separate identifier
+  (`dev.easystudy.desktop.e2e`) and an endpoint on 127.0.0.1, built with `build.mjs --tauri-config` (never used by CI);
+  it refuses the release key. Still to do by hand on macOS: an update of a quarantined copy started through
+  LaunchServices (Gatekeeper, `codesign --verify`, whether the microphone permission survives the new ad-hoc
+  signature); on Windows and a Linux AppImage the first real update.

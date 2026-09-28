@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { ApiError, errorMessage, login } from '../api.ts';
 import { formatWait, hasHangul, isLoopbackHost, markLoggedIn, normalizeAccessCode, type LoginReason } from '../lib/auth.ts';
+import { desktopAction, desktopMarker, leaveConfirm, readPageBusy } from '../lib/desktop.ts';
 
 interface LoginScreenProps {
   reason: LoginReason | null;
@@ -194,6 +195,8 @@ export function LoginScreen({ reason, overlay }: LoginScreenProps) {
           </details>
         </div>
 
+        <SwitchServerButton />
+
         {insecure && (
           <p className="auth-foot">
             🔓 암호화되지 않은 연결(HTTP)이에요. 같은 Wi‑Fi처럼 믿을 수 있는 네트워크에서만 사용하세요. 이
@@ -201,6 +204,36 @@ export function LoginScreen({ reason, overlay }: LoginScreenProps) {
           </p>
         )}
       </main>
+    </div>
+  );
+}
+
+/**
+ * Inside the desktop app: back to its chooser — a wrong server, or a forgotten access code (DESIGN §24). Over the app
+ * (the session ended while it was in use) a recording may still run underneath: the first click says so, inline (the
+ * app's dialogs cannot be answered under this screen).
+ */
+export function SwitchServerButton() {
+  const [warning, setWarning] = useState<string | null>(null);
+  if (!desktopMarker()) return null;
+  const choose = () => {
+    const confirm = warning === null ? leaveConfirm(readPageBusy()) : null;
+    if (confirm) {
+      setWarning(confirm.message ?? confirm.title);
+      return;
+    }
+    desktopAction('choose');
+  };
+  return (
+    <div className="auth-switch">
+      {warning && (
+        <p className="auth-switch-warning" role="alert">
+          ⚠️ {warning}
+        </p>
+      )}
+      <button type="button" className="auth-switch-btn" onClick={choose}>
+        {warning ? '그래도 다른 서버에 연결' : '다른 서버에 연결…'}
+      </button>
     </div>
   );
 }

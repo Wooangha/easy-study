@@ -13,7 +13,7 @@ import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { after, afterEach, describe, test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import type { DocMeta } from '../shared/types.ts';
+import type { DesktopBusyResponse, DocMeta, HealthResponse } from '../shared/types.ts';
 import { VIEW_WIDTHS, inlinePathFor, thumbPath, viewPath } from '../server/assets.ts';
 import { killRunningChildren, runningChildCount, trackChild } from '../server/children.ts';
 import { ConfigError, desktopMode, repoRoot } from '../server/config.ts';
@@ -395,6 +395,9 @@ describe('desktop mode (EASY_STUDY_DESKTOP=1)', () => {
     const turn = await startHangingTurn(server, url, record);
     const group = server.child.pid!;
     assert.ok((await processGroupMembers(group)).length >= 3, 'server, CLI and its child');
+    // The shell's busy check before an update sees the answer being made (DESIGN §24).
+    const busy = (await (await fetch(`${url}/api/desktop/busy`)).json()) as DesktopBusyResponse;
+    assert.equal(busy.chatTurns, 1);
 
     server.child.stdin!.end();
     assert.deepEqual(await exitWithin(server, 8_000), { code: 0, signal: null });
@@ -537,6 +540,81 @@ describe('desktop mode (EASY_STUDY_DESKTOP=1)', () => {
     assert.doesNotMatch(server.stdout(), /접속 코드/);
     server.child.stdin!.end();
     assert.equal((await exitWithin(server, 8_000)).code, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The routes of the app's updates and settings (DESIGN §24)
+// ---------------------------------------------------------------------------
+
+const PACKAGE_VERSION = (JSON.parse(readFileSync(path.join(repoRoot(), 'package.json'), 'utf8')) as { version: string }).version;
+
+/** The page actions the shell intercepts; one that gets through is 204 with no body, whatever its query. */
+async function assertPageActionsAre204(url: string): Promise<void> {
+  for (const p of ['/__easy-study-desktop/choose', '/__easy-study-desktop/theme/dark?from=test', '/__easy-study-desktop/unknown']) {
+    const res = await fetch(url + p);
+    assert.equal(res.status, 204, p);
+    assert.equal(await res.text(), '', p);
+    assert.equal(res.headers.get('cache-control'), 'no-store', p);
+  }
+  const post = await fetch(`${url}/__easy-study-desktop/choose`, { method: 'POST' });
+  assert.notEqual(post.status, 204, 'only GET/HEAD');
+  await post.arrayBuffer();
+}
+
+describe('desktop routes: busy check, page actions, version (DESIGN §24)', () => {
+  test('desktop mode: GET /api/desktop/busy has counts and the live recording only; actions 204; health has the version', async () => {
+    const library = await tempDir('easy-study-desktop-lib-');
+    await writeReadyDoc(library);
+    const server = startServerProcess(library, { EASY_STUDY_MODELS_DIR: await tempDir('easy-study-desktop-models-') });
+    const { url } = await waitForReady(server);
+
+    const health = (await (await fetch(`${url}/api/health`)).json()) as HealthResponse;
+    assert.equal(health.version, PACKAGE_VERSION);
+
+    const idle = await fetch(`${url}/api/desktop/busy`);
+    assert.equal(idle.status, 200);
+    assert.equal(idle.headers.get('cache-control'), 'no-store');
+    assert.equal(idle.headers.get('access-control-allow-origin'), null, 'no CORS: other sites cannot read it');
+    assert.deepEqual(await idle.json(), { recording: null, transcriptions: 0, digests: 0, chatTurns: 0, modelDownloads: 0 });
+
+    // A live recording: its ids, status and titles (for the shell's warning), nothing else — no paths, no audio.
+    const created = await fetch(`${url}/api/docs/${DOC_ID}/recordings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: '3주차 강의', liveTranscribe: false }),
+    });
+    assert.equal(created.status, 201, await created.clone().text());
+    const recording = (await created.json()) as { id: string };
+    const busy = await fetch(`${url}/api/desktop/busy`);
+    const body = (await busy.json()) as DesktopBusyResponse;
+    assert.deepEqual(body.recording, { id: recording.id, docId: DOC_ID, status: 'recording', title: '3주차 강의', docTitle: 'Deck' });
+    assert.deepEqual(Object.keys(body).sort(), ['chatTurns', 'digests', 'modelDownloads', 'recording', 'transcriptions']);
+    assert.ok(!JSON.stringify(body).includes(library), 'no library path');
+    const paused = await fetch(`${url}/api/docs/${DOC_ID}/recordings/${recording.id}/pause`, { method: 'POST' });
+    assert.equal(paused.status, 200, await paused.clone().text());
+    assert.equal(((await (await fetch(`${url}/api/desktop/busy`)).json()) as DesktopBusyResponse).recording?.status, 'paused');
+
+    await assertPageActionsAre204(url);
+    server.child.stdin!.end();
+    assert.equal((await exitWithin(server, 8_000)).code, 0);
+  });
+
+  test('outside desktop mode: no busy route (404, JSON), page actions still 204, health has the version', async () => {
+    const library = await tempDir('easy-study-desktop-lib-');
+    const server = startServerProcess(library, {}, { desktop: false, stdin: 'ignore' });
+    await waitFor('the banner', () => {
+      if (server.child.exitCode !== null) assert.fail(`the server exited:\n${server.stdout()}\n${server.stderr()}`);
+      return /library {5}→/.test(server.stdout());
+    });
+    const url = /→\s+(http:\/\/127\.0\.0\.1:\d+)/.exec(server.stdout())![1];
+
+    const busy = await fetch(`${url}/api/desktop/busy`);
+    assert.equal(busy.status, 404);
+    assert.match(busy.headers.get('content-type') ?? '', /application\/json/);
+    await busy.arrayBuffer();
+    assert.equal(((await (await fetch(`${url}/api/health`)).json()) as HealthResponse).version, PACKAGE_VERSION);
+    await assertPageActionsAre204(url);
   });
 });
 
@@ -684,6 +762,7 @@ describe('desktop helpers', () => {
       auth: 'off',
       password: null,
       tls: null,
+      desktop: true,
     });
     assert.throws(() => desktopServerOptions({ PORT: '5351' }), (err: Error) => err instanceof ConfigError && /EASY_STUDY_LIBRARY/.test(err.message));
     assert.throws(() => desktopServerOptions({ EASY_STUDY_LIBRARY: '  ' }), ConfigError);

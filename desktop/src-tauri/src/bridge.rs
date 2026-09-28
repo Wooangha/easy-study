@@ -1,0 +1,816 @@
+//! The pages' way to the shell and back (DESIGN §24), without IPC: pages served over http(s) never get Tauri's IPC
+//! (capabilities/chooser.json), so
+//! - the shell marks the main window's pages with a static object (INIT_SCRIPT: the app's version and OS) and pushes
+//!   its state into them (push_state: serde_json through eval, never text put together from what a page said);
+//! - a page asks for an action by navigating to `<its origin>/__easy-study-desktop/<action>`: the main window's
+//!   navigation handler catches it (classify) and cancels the navigation. Actions carry no parameters and only work
+//!   on the origin the window may show; what they can start is rate-limited (PageDialogs), and so are the log lines
+//!   a page can cause.
+//! - Before the shell restarts the app or navigates away from a page, busy_gate asks the page
+//!   (window.__easyStudyBusy) and this computer's server (GET /api/desktop/busy): nothing that could lose recorded
+//!   audio is interrupted, and the user decides about the rest.
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+use serde::Serialize;
+use tauri::{AppHandle, Manager, Url};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+
+use crate::config::{self, lock};
+use crate::update::{self, UpdateState};
+use crate::AppState;
+
+/// The reserved path. The server answers it with 204, so a navigation that is not caught leaves the page alone.
+pub const PREFIX: &str = "/__easy-study-desktop/";
+
+/// The static marker (main window, main frame only): the page knows it is inside the app, which version and OS.
+/// __VERSION__ and __OS__ are replaced with JSON strings (init_script).
+pub const INIT_SCRIPT: &str = "window.__EASY_STUDY_DESKTOP__ = Object.freeze({ v: 1, version: __VERSION__, os: __OS__ });";
+
+/// What the page is doing (null: a page without the hook, e.g. an older remote server's UI).
+pub const BUSY_JS: &str = "JSON.stringify(typeof window.__easyStudyBusy === 'function' ? window.__easyStudyBusy() : null)";
+
+/// Opens the page's own settings dialog (true), if it has one.
+pub const OPEN_SETTINGS_JS: &str =
+    "JSON.stringify(typeof window.__easyStudyOpenSettings === 'function' ? window.__easyStudyOpenSettings() === true : null)";
+
+/// Lets the page go without its own "leave this page?" prompt (the user already agreed in the shell's dialog).
+pub const ALLOW_LEAVE_JS: &str =
+    "JSON.stringify(typeof window.__easyStudyAllowLeave === 'function' ? window.__easyStudyAllowLeave() : null)";
+
+/// A page's own dialogs: at most one every REMOTE_GAP from another computer's page (one every LOCAL_GAP from this
+/// computer's), and none from another computer's page after the user said no to one of its dialogs.
+const REMOTE_GAP: Duration = Duration::from_secs(60);
+const LOCAL_GAP: Duration = Duration::from_secs(3);
+/// The release page a page opens in the browser (download kinds): at most once a minute.
+const OPEN_GAP: Duration = Duration::from_secs(60);
+/// Progress pushes.
+const PUSH_GAP: Duration = Duration::from_millis(250);
+/// Theme changes a page asks for.
+const THEME_GAP: Duration = Duration::from_secs(1);
+/// Log lines a page can cause, per kind and minute.
+const LOG_LINES: u32 = 20;
+
+pub fn init_script(version: &str, os: &str) -> String {
+    let json = |s: &str| serde_json::Value::String(s.to_string()).to_string();
+    INIT_SCRIPT.replace("__VERSION__", &json(version)).replace("__OS__", &json(os))
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Navigation
+// ---------------------------------------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    Choose,
+    ForgetChoice,
+    CheckUpdate,
+    InstallUpdate,
+    DismissUpdate,
+    CancelUpdate,
+    /// "system", "light" or "dark".
+    Theme(&'static str),
+}
+
+impl Action {
+    fn parse(name: &str) -> Option<Action> {
+        Some(match name {
+            "choose" => Action::Choose,
+            "forget-choice" => Action::ForgetChoice,
+            "check-update" => Action::CheckUpdate,
+            "install-update" => Action::InstallUpdate,
+            "dismiss-update" => Action::DismissUpdate,
+            "cancel-update" => Action::CancelUpdate,
+            "theme/system" => Action::Theme("system"),
+            "theme/light" => Action::Theme("light"),
+            "theme/dark" => Action::Theme("dark"),
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Nav {
+    /// A page of the allowed origin asks for this.
+    Action(Action),
+    /// The reserved path otherwise (another origin, not http(s), an unknown action): cancelled, never opened.
+    Reserved,
+    /// Anything else: the window's usual rules.
+    Other,
+}
+
+/// The reserved path, on any origin.
+pub fn is_reserved(url: &Url) -> bool {
+    url.path().starts_with(PREFIX) || url.path() == PREFIX.trim_end_matches('/')
+}
+
+/// Sorts a navigation of the main window (`allowed_origin`: the origin it may show). The query is ignored.
+pub fn classify(url: &Url, allowed_origin: Option<&str>) -> Nav {
+    if !is_reserved(url) {
+        return Nav::Other;
+    }
+    let origin = url.origin().ascii_serialization();
+    if !matches!(url.scheme(), "http" | "https") || allowed_origin != Some(origin.as_str()) {
+        return Nav::Reserved;
+    }
+    match url.path().strip_prefix(PREFIX).and_then(Action::parse) {
+        Some(action) => Nav::Action(action),
+        None => Nav::Reserved,
+    }
+}
+
+/// This computer's server's origin (None in remote mode).
+fn local_origin(app: &AppHandle) -> Option<String> {
+    let url = lock(&app.state::<AppState>().server_url).clone()?;
+    Url::parse(&url).ok().map(|u| crate::origin_of(&u))
+}
+
+pub fn is_local(app: &AppHandle, origin: &str) -> bool {
+    local_origin(app).as_deref() == Some(origin)
+}
+
+/// A page action (on its own thread: dialogs and checks block).
+pub fn on_action(app: &AppHandle, action: Action, origin: String) {
+    let local = is_local(app, &origin);
+    match action {
+        // Like the menu. The page asked about its own work before (it is the only one that can lose anything).
+        Action::Choose => crate::show_chooser(app),
+        Action::ForgetChoice => forget_choice(app),
+        Action::CheckUpdate => {
+            update::check(app, update::How::Manual);
+        }
+        Action::InstallUpdate => {
+            if page_may_ask(app, &origin, local) {
+                update::request_install(app, update::Trigger::Page { origin, local });
+            } else {
+                log_limited(app, "page-install", &format!("install-update from {origin} ignored (asked too recently, or refused)"));
+                push_state(app);
+            }
+        }
+        Action::DismissUpdate => {
+            lock(&app.state::<AppState>().update.state).dismissed = true;
+            push_state(app);
+        }
+        Action::CancelUpdate => update::cancel(app),
+        Action::Theme(theme) => page_theme(app, theme),
+    }
+}
+
+/// "system" | "light" | "dark": saved, applied to every window (the menus and title bars too), and pushed. Nothing
+/// happens when it is the current theme.
+pub fn set_theme(app: &AppHandle, theme: &str) {
+    let stored = match theme {
+        "light" | "dark" => theme,
+        _ => "",
+    };
+    if config::load(app).theme == stored {
+        return;
+    }
+    let cfg = config::update(app, |c| c.theme = stored.to_string());
+    app.set_theme(config::theme(&cfg));
+    log_limited(app, "theme", &format!("theme {}", if stored.is_empty() { "system" } else { stored }));
+    push_state(app);
+}
+
+/// A page's theme/*: at most one change every THEME_GAP, the last one asked for wins (a page switching in a loop
+/// would otherwise rewrite desktop.json and flip every window each time).
+fn page_theme(app: &AppHandle, theme: &'static str) {
+    let st = app.state::<AppState>();
+    let Some(wait) = lock(&st.bridge.theme).ask(theme, Instant::now()) else { return };
+    std::thread::sleep(wait);
+    let newest = lock(&st.bridge.theme).take(Instant::now());
+    if let Some(theme) = newest {
+        set_theme(app, theme);
+    }
+}
+
+/// The chooser comes first at the next launch. Nothing happens when it already does.
+pub fn forget_choice(app: &AppHandle) {
+    if config::load(app).mode.is_empty() {
+        return;
+    }
+    config::update(app, |c| c.mode = String::new());
+    config::log(app, "startup: the chooser comes first from now on");
+    push_state(app);
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Pushed state
+// ---------------------------------------------------------------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Connection {
+    /// "local" | "remote".
+    kind: &'static str,
+    origin: String,
+    /// "auto": the remembered connection opens at launch; "ask": the chooser comes first.
+    startup: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PageState {
+    v: u8,
+    theme: &'static str,
+    connection: Connection,
+    update: UpdateState,
+    /// The version this launch was updated to (for a toast).
+    just_updated: Option<String>,
+}
+
+#[derive(Default)]
+pub struct Bridge {
+    dialogs: Mutex<PageDialogs>,
+    last_push: Mutex<Option<Instant>>,
+    logs: Mutex<HashMap<&'static str, LogLimit>>,
+    theme: Mutex<PageTheme>,
+}
+
+/// Pushes the shell's state into the main window's page when it shows the allowed origin (never the chooser, which
+/// asks get_state). Never blocks: it may run on any thread.
+pub fn push_state(app: &AppHandle) {
+    let st = app.state::<AppState>();
+    let Some(origin) = lock(&st.page_origin).clone() else { return };
+    if lock(&st.allowed_origin).as_deref() != Some(origin.as_str()) {
+        return;
+    }
+    let Some(w) = crate::main_window(app) else { return };
+    *lock(&st.bridge.last_push) = Some(Instant::now());
+    let local = is_local(app, &origin);
+    let cfg = config::load(app);
+    let update = {
+        let s = lock(&st.update.state);
+        if local {
+            s.clone()
+        } else {
+            s.for_remote()
+        }
+    };
+    let state = PageState {
+        v: 1,
+        theme: match cfg.theme.as_str() {
+            "light" => "light",
+            "dark" => "dark",
+            _ => "system",
+        },
+        connection: Connection {
+            kind: if local { "local" } else { "remote" },
+            origin: origin.clone(),
+            startup: if cfg.mode.is_empty() { "ask" } else { "auto" },
+        },
+        update,
+        // Every push of this launch: the first page load can be replaced by a second one (macOS reports two when the
+        // server was ready before the chooser), and a login screen may come first. The page toasts once per version.
+        just_updated: lock(&st.update.just_updated).clone(),
+    };
+    let (Ok(origin), Ok(state)) = (serde_json::to_string(&origin), serde_json::to_string(&state)) else { return };
+    // The origin check in the page: a navigation may have replaced it since.
+    let _ = w.eval(format!(
+        "(() => {{ if (location.origin !== {origin}) return; window.__easyStudyDesktopState = {state}; \
+         window.dispatchEvent(new Event('easy-study-desktop')); }})()"
+    ));
+}
+
+/// push_state at most every 250 ms (download progress; phase changes use push_state).
+pub fn push_state_throttled(app: &AppHandle) {
+    let recent = lock(&app.state::<AppState>().bridge.last_push).is_some_and(|t| t.elapsed() < PUSH_GAP);
+    if !recent {
+        push_state(app);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Limits on what a page can start
+// ---------------------------------------------------------------------------------------------------------
+
+#[derive(Default, Debug)]
+pub struct PageDialogs {
+    /// When the last dialog a page caused was closed.
+    last: Option<Instant>,
+    /// Origins whose dialog the user answered with no (or that were blocked): no more dialogs this session.
+    refused: Vec<String>,
+    last_open: Option<Instant>,
+}
+
+impl PageDialogs {
+    /// Whether a page of `origin` may start something that shows a dialog now.
+    pub fn may_ask(&self, origin: &str, local: bool, now: Instant) -> bool {
+        if !local && self.refused.iter().any(|o| o == origin) {
+            return false;
+        }
+        let gap = if local { LOCAL_GAP } else { REMOTE_GAP };
+        self.last.is_none_or(|t| now.saturating_duration_since(t) >= gap)
+    }
+
+    /// A dialog a page caused was closed (`accepted`: the user went on).
+    pub fn asked(&mut self, origin: &str, local: bool, accepted: bool, now: Instant) {
+        self.last = Some(now);
+        if !accepted && !local && !self.refused.iter().any(|o| o == origin) {
+            self.refused.push(origin.to_string());
+        }
+    }
+
+    /// Whether a page may open the release page in the browser now (and counts it).
+    pub fn may_open(&mut self, now: Instant) -> bool {
+        let ok = self.last_open.is_none_or(|t| now.saturating_duration_since(t) >= OPEN_GAP);
+        if ok {
+            self.last_open = Some(now);
+        }
+        ok
+    }
+}
+
+pub fn page_may_ask(app: &AppHandle, origin: &str, local: bool) -> bool {
+    lock(&app.state::<AppState>().bridge.dialogs).may_ask(origin, local, Instant::now())
+}
+
+pub fn page_asked(app: &AppHandle, origin: &str, local: bool, accepted: bool) {
+    lock(&app.state::<AppState>().bridge.dialogs).asked(origin, local, accepted, Instant::now());
+}
+
+pub fn page_may_open(app: &AppHandle) -> bool {
+    lock(&app.state::<AppState>().bridge.dialogs).may_open(Instant::now())
+}
+
+/// The theme changes pages ask for: one waits (the newest wins), then it is applied at least THEME_GAP after the last.
+#[derive(Default, Debug)]
+pub struct PageTheme {
+    pending: Option<&'static str>,
+    /// A thread waits to apply `pending`.
+    waiting: bool,
+    last: Option<Instant>,
+}
+
+impl PageTheme {
+    /// Asks for `theme`: how long this caller waits before take(), or None when another caller already waits (it
+    /// applies this one).
+    pub fn ask(&mut self, theme: &'static str, now: Instant) -> Option<Duration> {
+        self.pending = Some(theme);
+        if self.waiting {
+            return None;
+        }
+        self.waiting = true;
+        Some(self.last.map_or(Duration::ZERO, |t| THEME_GAP.saturating_sub(now.saturating_duration_since(t))))
+    }
+
+    /// The theme to apply now (the newest asked for).
+    pub fn take(&mut self, now: Instant) -> Option<&'static str> {
+        self.waiting = false;
+        self.last = Some(now);
+        self.pending.take()
+    }
+}
+
+/// Counts log lines of one kind per minute.
+#[derive(Debug)]
+pub struct LogLimit {
+    since: Instant,
+    lines: u32,
+    dropped: u32,
+}
+
+impl LogLimit {
+    /// (write this line, lines dropped in the minute before to mention first).
+    pub fn allow(&mut self, now: Instant) -> (bool, u32) {
+        let mut dropped = 0;
+        if now.saturating_duration_since(self.since) >= Duration::from_secs(60) {
+            dropped = std::mem::take(&mut self.dropped);
+            (self.since, self.lines) = (now, 0);
+        }
+        self.lines += 1;
+        if self.lines > LOG_LINES {
+            self.dropped += 1;
+            return (false, dropped);
+        }
+        (true, dropped)
+    }
+}
+
+/// A shell.log line a page can cause again and again (reserved paths, blocked navigations, loaded pages): at most
+/// LOG_LINES per kind and minute (the log is only rotated at launch).
+pub fn log_limited(app: &AppHandle, kind: &'static str, msg: &str) {
+    let st = app.state::<AppState>();
+    let (write, dropped) = {
+        let mut logs = lock(&st.bridge.logs);
+        let now = Instant::now();
+        logs.entry(kind).or_insert(LogLimit { since: now, lines: 0, dropped: 0 }).allow(now)
+    };
+    if dropped > 0 {
+        config::log(app, &format!("({dropped} more \"{kind}\" lines left out)"));
+    }
+    if write {
+        config::log(app, msg);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Busy check
+// ---------------------------------------------------------------------------------------------------------
+
+/// window.__easyStudyBusy() (untrusted: only the page itself can be hurt by a wrong answer).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PageBusy {
+    pub recording: bool,
+    pub unsent_seconds: f64,
+    pub finishing: u64,
+    pub recording_uploads: u64,
+    pub uploads: u64,
+    pub answering: bool,
+}
+
+impl PageBusy {
+    pub fn parse(v: &serde_json::Value) -> Option<PageBusy> {
+        let o = v.as_object()?;
+        let num = |k: &str| o.get(k).and_then(|v| v.as_f64()).filter(|n| n.is_finite() && *n > 0.0).unwrap_or(0.0);
+        let flag = |k: &str| o.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
+        Some(PageBusy {
+            recording: flag("recording"),
+            unsent_seconds: num("unsentSeconds"),
+            finishing: num("finishing") as u64,
+            recording_uploads: num("recordingUploads") as u64,
+            uploads: num("uploads") as u64,
+            answering: flag("answering"),
+        })
+    }
+
+    /// Audio that only the page has: recording, not sent yet, being finished or uploaded.
+    pub fn holds_audio(&self) -> bool {
+        self.recording || self.unsent_seconds > 0.0 || self.finishing > 0 || self.recording_uploads > 0
+    }
+}
+
+/// GET /api/desktop/busy of this computer's server.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ServerBusy {
+    /// A live recording that is not finished (the page that records may be gone or paused).
+    pub recording: Option<LiveRecording>,
+    pub transcriptions: u64,
+    pub digests: u64,
+    pub chat_turns: u64,
+    pub model_downloads: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LiveRecording {
+    pub doc: Option<String>,
+    pub title: Option<String>,
+}
+
+impl ServerBusy {
+    pub fn parse(v: &serde_json::Value) -> Option<ServerBusy> {
+        let o = v.as_object()?;
+        let count = |k: &str| o.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+        let text = |r: &serde_json::Value, k: &str| r.get(k).and_then(|v| v.as_str()).map(|s| s.chars().take(80).collect::<String>());
+        let recording = o.get("recording").filter(|r| r.is_object()).map(|r| LiveRecording {
+            doc: text(r, "docTitle"),
+            title: text(r, "title"),
+        });
+        Some(ServerBusy {
+            recording,
+            transcriptions: count("transcriptions"),
+            digests: count("digests"),
+            chat_turns: count("chatTurns"),
+            model_downloads: count("modelDownloads"),
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum PageAnswer {
+    /// The window shows the chooser (or nothing): no page to ask.
+    NotShown,
+    /// A page that did not answer (no hook: an older remote UI; or it hung).
+    NoAnswer,
+    Busy(PageBusy),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ServerAnswer {
+    NotRunning,
+    NoAnswer,
+    Busy(ServerBusy),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Gate {
+    Go,
+    /// The user decides (the text lists what stops).
+    Warn(String),
+    /// Not now: audio could be lost.
+    Block(String),
+}
+
+const BLOCK_RECORDING: &str = "강의를 녹음하는 중이에요. 녹음을 끝낸 뒤 다시 설치해 주세요.";
+const BLOCK_UNSENT: &str = "녹음한 소리를 아직 서버로 보내는 중이에요. 다 보낸 뒤 다시 설치해 주세요.";
+
+/// Whether an install (a restart) may go on now. `page_asked`: the page started it and has asked the user about
+/// its own work (answers, uploads) already; what could lose audio blocks whatever the page says.
+pub fn decide(page: &PageAnswer, server: &ServerAnswer, page_asked: bool) -> Gate {
+    let mut warn: Vec<String> = Vec::new();
+    // The server counts the answer this page is making too (a page makes one at a time): named once, as the page's.
+    let own_answer = matches!(page, PageAnswer::Busy(p) if p.answering);
+    match page {
+        PageAnswer::Busy(p) if p.recording => return Gate::Block(BLOCK_RECORDING.into()),
+        PageAnswer::Busy(p) if p.holds_audio() => return Gate::Block(BLOCK_UNSENT.into()),
+        PageAnswer::Busy(p) if !page_asked => {
+            if p.answering {
+                warn.push("답변을 만드는 중이에요.".into());
+            }
+            if p.uploads > 0 {
+                warn.push("파일을 올리는 중이에요.".into());
+            }
+        }
+        PageAnswer::Busy(_) | PageAnswer::NotShown => {}
+        PageAnswer::NoAnswer => warn.push("이 화면이 녹음이나 다른 작업을 하는 중인지 확인하지 못했어요.".into()),
+    }
+    match server {
+        ServerAnswer::Busy(s) => {
+            // The server keeps a live recording across a restart (it can go on afterwards), and the recorder keeps
+            // unsent audio in the page: a warning, not a block (a forgotten, paused recording would block forever).
+            if let Some(r) = &s.recording {
+                warn.push(match (&r.doc, &r.title) {
+                    (Some(doc), Some(title)) => format!("‘{doc}’의 ‘{title}’ 녹음이 아직 끝나지 않았어요 (다시 시작한 뒤 이어서 할 수 있어요)."),
+                    _ => "끝나지 않은 녹음이 있어요 (다시 시작한 뒤 이어서 할 수 있어요).".into(),
+                });
+            }
+            if s.transcriptions > 0 {
+                warn.push(format!("녹음 {}개를 받아쓰는 중이에요.", s.transcriptions));
+            }
+            if s.digests > 0 {
+                warn.push("강의 정리를 만드는 중이에요.".into());
+            }
+            let others = s.chat_turns.saturating_sub(own_answer as u64);
+            if others > 0 {
+                warn.push(if own_answer {
+                    format!("다른 창에서 답변 {others}개를 만드는 중이에요.")
+                } else {
+                    format!("답변 {others}개를 만드는 중이에요.")
+                });
+            }
+            if s.model_downloads > 0 {
+                warn.push("음성 인식 모델을 내려받는 중이에요.".into());
+            }
+        }
+        ServerAnswer::NoAnswer => warn.push("이 컴퓨터의 서버가 작업 중인지 확인하지 못했어요.".into()),
+        ServerAnswer::NotRunning => {}
+    }
+    if warn.is_empty() {
+        return Gate::Go;
+    }
+    let list: Vec<String> = warn.iter().map(|w| format!("• {w}")).collect();
+    Gate::Warn(format!("{}\n\n다시 시작하면 이 작업이 멈춰요. 그래도 설치하고 다시 시작할까요?", list.join("\n")))
+}
+
+/// The main window shows a page of the allowed origin (not the chooser).
+fn shows_page(app: &AppHandle) -> bool {
+    crate::main_window(app)
+        .and_then(|w| w.url().ok())
+        .is_some_and(|u| matches!(u.scheme(), "http" | "https") && crate::is_allowed_page(app, &u))
+}
+
+/// Asks the page (eval_json: never on the main thread).
+pub fn page_answer(app: &AppHandle) -> PageAnswer {
+    if !shows_page(app) {
+        return PageAnswer::NotShown;
+    }
+    match PageBusy::parse(&crate::eval_json(app, BUSY_JS)) {
+        Some(busy) => PageAnswer::Busy(busy),
+        None => PageAnswer::NoAnswer,
+    }
+}
+
+/// Asks this computer's server over loopback (no Origin header: its API guard lets it through).
+fn server_answer(app: &AppHandle) -> ServerAnswer {
+    let Some(base) = lock(&app.state::<AppState>().server_url).clone() else { return ServerAnswer::NotRunning };
+    let Ok(url) = Url::parse(&format!("{base}/api/desktop/busy")) else { return ServerAnswer::NoAnswer };
+    let res = match crate::remote::get(&url) {
+        Ok(res) if res.status == 200 => res,
+        Ok(res) => {
+            config::log(app, &format!("busy check: the server answered HTTP {}", res.status));
+            return ServerAnswer::NoAnswer;
+        }
+        Err(e) => {
+            config::log(app, &format!("busy check: {e}"));
+            return ServerAnswer::NoAnswer;
+        }
+    };
+    let json = match (res.body.find('{'), res.body.rfind('}')) {
+        (Some(a), Some(b)) if a < b => serde_json::from_str::<serde_json::Value>(&res.body[a..=b]).ok(),
+        _ => None,
+    };
+    json.as_ref().and_then(ServerBusy::parse).map_or(ServerAnswer::NoAnswer, ServerAnswer::Busy)
+}
+
+/// decide() with the page's and the server's answers. Blocks up to ~20 s: never on the main thread.
+pub fn busy_gate(app: &AppHandle, page_asked: bool) -> Gate {
+    let page = page_answer(app);
+    let server = server_answer(app);
+    let gate = decide(&page, &server, page_asked);
+    config::log(app, &format!("busy check: {gate:?} (page {page:?}; server {server:?})"));
+    gate
+}
+
+/// Menu "설정…": the page's settings dialog opened. Worker threads.
+pub fn open_page_settings(app: &AppHandle) -> bool {
+    shows_page(app) && crate::eval_json(app, OPEN_SETTINGS_JS) == serde_json::Value::Bool(true)
+}
+
+/// The page may be left without its own prompt (after the user agreed in a dialog of the shell). Worker threads.
+pub fn allow_leave(app: &AppHandle) {
+    if shows_page(app) {
+        crate::eval_json(app, ALLOW_LEAVE_JS);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Native dialogs (a page cannot draw or click these). Blocking: worker threads only.
+// ---------------------------------------------------------------------------------------------------------
+
+fn message(app: &AppHandle, text: &str) -> tauri_plugin_dialog::MessageDialogBuilder<tauri::Wry> {
+    let mut dialog = app.dialog().message(text).title("easy-study");
+    if let Some(w) = crate::main_window(app) {
+        dialog = dialog.parent(&w);
+    }
+    dialog
+}
+
+/// Yes (`ok`) or no (`cancel`).
+pub fn confirm(app: &AppHandle, text: &str, ok: &str, cancel: &str) -> bool {
+    message(app, text)
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(ok.to_string(), cancel.to_string()))
+        .blocking_show()
+}
+
+/// A message with an OK button.
+pub fn tell(app: &AppHandle, text: &str) {
+    let _ = message(app, text).kind(MessageDialogKind::Info).buttons(MessageDialogButtons::OkCustom("확인".into())).blocking_show();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn url(s: &str) -> Url {
+        Url::parse(s).unwrap()
+    }
+
+    #[test]
+    fn navigations_are_sorted() {
+        let here = Some("http://127.0.0.1:5351");
+        let at = |s: &str| classify(&url(s), here);
+        assert_eq!(at("http://127.0.0.1:5351/__easy-study-desktop/choose"), Nav::Action(Action::Choose));
+        assert_eq!(at("http://127.0.0.1:5351/__easy-study-desktop/install-update?x=1#y"), Nav::Action(Action::InstallUpdate));
+        assert_eq!(at("http://127.0.0.1:5351/__easy-study-desktop/forget-choice"), Nav::Action(Action::ForgetChoice));
+        assert_eq!(at("http://127.0.0.1:5351/__easy-study-desktop/check-update"), Nav::Action(Action::CheckUpdate));
+        assert_eq!(at("http://127.0.0.1:5351/__easy-study-desktop/dismiss-update"), Nav::Action(Action::DismissUpdate));
+        assert_eq!(at("http://127.0.0.1:5351/__easy-study-desktop/cancel-update"), Nav::Action(Action::CancelUpdate));
+        for theme in ["system", "light", "dark"] {
+            assert_eq!(at(&format!("http://127.0.0.1:5351/__easy-study-desktop/theme/{theme}")), Nav::Action(Action::Theme(theme)));
+        }
+        // Unknown actions and theme values, and near misses of the path: never acted on.
+        for bad in ["theme/blue", "theme/", "theme", "choose/", "Choose", "install-update/now", ""] {
+            assert_eq!(at(&format!("http://127.0.0.1:5351/__easy-study-desktop/{bad}")), Nav::Reserved, "{bad}");
+        }
+        assert_eq!(at("http://127.0.0.1:5351/__easy-study-desktop"), Nav::Reserved);
+        // The prefix on another origin (a link, a subframe, another port): cancelled, never opened in the browser.
+        assert_eq!(at("http://127.0.0.1:5352/__easy-study-desktop/choose"), Nav::Reserved);
+        assert_eq!(at("https://example.com/__easy-study-desktop/install-update"), Nav::Reserved);
+        assert_eq!(classify(&url("http://127.0.0.1:5351/__easy-study-desktop/choose"), None), Nav::Reserved);
+        assert_eq!(at("tauri://localhost/__easy-study-desktop/choose"), Nav::Reserved);
+        // Everything else keeps the window's rules: the chooser, the server's pages, other sites.
+        assert_eq!(at("tauri://localhost/index.html"), Nav::Other);
+        assert_eq!(at("http://tauri.localhost/index.html"), Nav::Other);
+        assert_eq!(at("http://127.0.0.1:5351/api/docs"), Nav::Other);
+        assert_eq!(at("http://127.0.0.1:5351/x/__easy-study-desktop/choose"), Nav::Other);
+        assert_eq!(at("https://github.com/Wooangha/easy-study-releases/releases/latest"), Nav::Other);
+        assert!(is_reserved(&url("https://example.com/__easy-study-desktop/whatever")));
+        assert!(!is_reserved(&url("https://example.com/__easy-study-desktopx")));
+    }
+
+    #[test]
+    fn the_marker_is_static_and_quoted() {
+        let script = init_script("0.5.0", "macos");
+        assert_eq!(script, r#"window.__EASY_STUDY_DESKTOP__ = Object.freeze({ v: 1, version: "0.5.0", os: "macos" });"#);
+        assert!(init_script("1\"; alert(1); \"", "linux").contains(r#"version: "1\"; alert(1); \"""#));
+    }
+
+    fn page(v: serde_json::Value) -> PageAnswer {
+        PageAnswer::Busy(PageBusy::parse(&v).unwrap())
+    }
+
+    fn server(v: serde_json::Value) -> ServerAnswer {
+        ServerAnswer::Busy(ServerBusy::parse(&v).unwrap())
+    }
+
+    #[test]
+    fn busy_decisions() {
+        let idle_page = page(json!({ "recording": false, "unsentSeconds": 0, "finishing": 0, "recordingUploads": 0, "uploads": 0, "answering": false }));
+        let idle_server = server(json!({ "recording": null, "transcriptions": 0, "digests": 0, "chatTurns": 0, "modelDownloads": 0 }));
+        assert_eq!(decide(&idle_page, &idle_server, false), Gate::Go);
+        assert_eq!(decide(&PageAnswer::NotShown, &ServerAnswer::NotRunning, false), Gate::Go);
+        assert_eq!(decide(&idle_page, &ServerAnswer::NotRunning, true), Gate::Go);
+
+        // Audio only the page has: blocked, whoever asked and whatever the server says.
+        for p in [json!({ "recording": true }), json!({ "unsentSeconds": 3.5 }), json!({ "finishing": 1 }), json!({ "recordingUploads": 2 })] {
+            for asked in [false, true] {
+                assert!(matches!(decide(&page(p.clone()), &idle_server, asked), Gate::Block(_)), "{p} {asked}");
+            }
+        }
+        assert_eq!(decide(&page(json!({ "recording": true })), &ServerAnswer::NotRunning, false), Gate::Block(BLOCK_RECORDING.into()));
+
+        // The page's own work: a warning, unless the page asked the user itself.
+        let answering = page(json!({ "answering": true, "uploads": 1 }));
+        let Gate::Warn(text) = decide(&answering, &idle_server, false) else { panic!() };
+        assert!(text.contains("답변을 만드는 중") && text.contains("파일을 올리는 중"), "{text}");
+        assert_eq!(decide(&answering, &idle_server, true), Gate::Go);
+
+        // A page that does not answer (an older remote UI), or a server that does not: the user decides.
+        assert!(matches!(decide(&PageAnswer::NoAnswer, &ServerAnswer::NotRunning, true), Gate::Warn(_)));
+        assert!(matches!(decide(&PageAnswer::NotShown, &ServerAnswer::NoAnswer, false), Gate::Warn(_)));
+        assert_eq!(PageBusy::parse(&serde_json::Value::Null), None);
+        assert_eq!(PageBusy::parse(&json!("busy")), None);
+
+        // A live recording only the server knows (a closed tab, a paused one): named, a warning, not a block.
+        let live = server(json!({ "recording": { "id": "r1", "docId": "d1", "status": "paused", "docTitle": "운영체제 3주차", "title": "월요일 강의" } }));
+        let Gate::Warn(text) = decide(&PageAnswer::NotShown, &live, false) else { panic!() };
+        assert!(text.contains("‘운영체제 3주차’의 ‘월요일 강의’ 녹음이 아직 끝나지 않았어요"), "{text}");
+        let unnamed = server(json!({ "recording": { "id": "r1", "docId": "d1", "status": "recording" } }));
+        assert!(matches!(decide(&idle_page, &unnamed, true), Gate::Warn(t) if t.contains("끝나지 않은 녹음")));
+        let work = server(json!({ "transcriptions": 2, "digests": 1, "chatTurns": 1, "modelDownloads": 1 }));
+        let Gate::Warn(text) = decide(&PageAnswer::NotShown, &work, false) else { panic!() };
+        for part in ["녹음 2개를 받아쓰는", "강의 정리", "답변 1개", "음성 인식 모델"] {
+            assert!(text.contains(part), "{part}: {text}");
+        }
+        // The page's own answer is one of the server's chat turns: not warned about twice.
+        let one_turn = server(json!({ "chatTurns": 1 }));
+        let answering_only = page(json!({ "answering": true }));
+        assert_eq!(decide(&answering_only, &one_turn, true), Gate::Go);
+        let Gate::Warn(text) = decide(&answering_only, &one_turn, false) else { panic!() };
+        assert!(text.contains("답변을 만드는 중") && !text.contains("답변 1개"), "{text}");
+        let Gate::Warn(text) = decide(&answering_only, &server(json!({ "chatTurns": 3 })), true) else { panic!() };
+        assert!(text.contains("다른 창에서 답변 2개를 만드는 중이에요."), "{text}");
+        let Gate::Warn(text) = decide(&idle_page, &one_turn, true) else { panic!() };
+        assert!(text.contains("• 답변 1개를 만드는 중이에요."), "{text}");
+        // Garbage in the answers counts as nothing (only the page itself can be hurt by lying).
+        assert_eq!(PageBusy::parse(&json!({ "recording": "yes", "unsentSeconds": -4, "uploads": "x" })), Some(PageBusy::default()));
+    }
+
+    #[test]
+    fn page_dialogs_cool_down() {
+        let t0 = Instant::now();
+        let mut d = PageDialogs::default();
+        let (remote, other) = ("http://192.168.0.10:5180", "http://192.168.0.11:5180");
+        assert!(d.may_ask(remote, false, t0));
+        d.asked(remote, false, true, t0);
+        // Another dialog from any page only after the gap.
+        assert!(!d.may_ask(remote, false, t0 + Duration::from_secs(59)));
+        assert!(!d.may_ask(other, false, t0 + Duration::from_secs(30)));
+        assert!(d.may_ask(remote, false, t0 + Duration::from_secs(60)));
+        // This computer's page: a short gap only.
+        assert!(!d.may_ask("http://127.0.0.1:5351", true, t0 + Duration::from_secs(1)));
+        assert!(d.may_ask("http://127.0.0.1:5351", true, t0 + Duration::from_secs(3)));
+        // Said no once: that remote page gets no more dialogs this session; others and the local page still do.
+        d.asked(remote, false, false, t0 + Duration::from_secs(100));
+        assert!(!d.may_ask(remote, false, t0 + Duration::from_secs(10_000)));
+        assert!(d.may_ask(other, false, t0 + Duration::from_secs(10_000)));
+        d.asked("http://127.0.0.1:5351", true, false, t0 + Duration::from_secs(10_000));
+        assert!(d.may_ask("http://127.0.0.1:5351", true, t0 + Duration::from_secs(10_010)));
+        // The release page: once a minute.
+        assert!(d.may_open(t0));
+        assert!(!d.may_open(t0 + Duration::from_secs(10)));
+        assert!(d.may_open(t0 + Duration::from_secs(61)));
+    }
+
+    #[test]
+    fn page_theme_changes_are_spaced_and_the_last_wins() {
+        let t0 = Instant::now();
+        let mut t = PageTheme::default();
+        // The first one goes at once.
+        assert_eq!(t.ask("dark", t0), Some(Duration::ZERO));
+        assert_eq!(t.take(t0), Some("dark"));
+        // Right after it: waits for the rest of the gap; asks meanwhile only replace what it will apply.
+        assert_eq!(t.ask("light", t0 + Duration::from_millis(200)), Some(Duration::from_millis(800)));
+        assert_eq!(t.ask("dark", t0 + Duration::from_millis(300)), None);
+        assert_eq!(t.ask("system", t0 + Duration::from_millis(400)), None);
+        assert_eq!(t.take(t0 + Duration::from_secs(1)), Some("system"));
+        // Later on: at once again.
+        assert_eq!(t.ask("light", t0 + Duration::from_secs(5)), Some(Duration::ZERO));
+        assert_eq!(t.take(t0 + Duration::from_secs(5)), Some("light"));
+    }
+
+    #[test]
+    fn page_caused_log_lines_are_limited() {
+        let t0 = Instant::now();
+        let mut limit = LogLimit { since: t0, lines: 0, dropped: 0 };
+        let written = (0..100).filter(|_| limit.allow(t0 + Duration::from_secs(1)).0).count();
+        assert_eq!(written, LOG_LINES as usize);
+        // The next minute starts with a note on how many were left out.
+        assert_eq!(limit.allow(t0 + Duration::from_secs(61)), (true, 80));
+        assert_eq!(limit.allow(t0 + Duration::from_secs(62)), (true, 0));
+    }
+}

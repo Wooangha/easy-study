@@ -320,6 +320,8 @@ describe('microphone and origin', () => {
   test('getUserMedia errors become clear Korean messages', () => {
     const err = (name: string) => Object.assign(new Error('x'), { name });
     assert.match(micErrorMessage(err('NotAllowedError'), 'mac'), /시스템 설정 › 개인정보 보호 및 보안 › 마이크/);
+    assert.match(micErrorMessage(err('NotAllowedError'), 'mac'), /껐다가 다시 켜 주세요/);
+    assert.doesNotMatch(micErrorMessage(err('NotAllowedError'), 'windows'), /껐다가/);
     assert.match(micErrorMessage(err('NotAllowedError'), 'windows'), /데스크톱 앱이 마이크에 액세스/);
     assert.match(micErrorMessage(err('NotFoundError'), 'linux'), /PipeWire 또는 PulseAudio/);
     assert.match(micErrorMessage(err('OverconstrainedError')), /마이크를 찾지 못했어요/);

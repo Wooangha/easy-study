@@ -1,7 +1,8 @@
 // The desktop app's start page (DESIGN §19). Talks to the shell (src-tauri/src/main.rs) through Tauri's IPC,
 // which only this bundled page may use: get_state, connect_local, connect_remote, pick_library, set_library,
-// open_library. Everything it shows comes from get_state (never from the address), so a page that links here
-// cannot put text on it.
+// open_library, and for "⚙ 앱 설정" (DESIGN §24) check_update, install_update, cancel_update, set_theme,
+// set_update_check, forget_choice, open_logs. Everything it shows comes from get_state (never from the address),
+// so a page that links here cannot put text on it.
 'use strict';
 
 const invoke = (cmd, args) => window.__TAURI_INTERNALS__.invoke(cmd, args);
@@ -62,9 +63,109 @@ function renderLibrary(lib) {
       : '직접 고른 폴더예요. 같은 폴더를 npm start로 실행 중인 서버와 함께 쓸 수는 없어요.';
 }
 
+/** The theme's tokens (chooser.css): the shell also sets the app-wide theme, which drives prefers-color-scheme. */
+function applyTheme(theme) {
+  if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+  else delete document.documentElement.dataset.theme;
+}
+
+/** An update is on its way (its buttons wait). */
+const moving = (u) => u.phase === 'checking' || u.phase === 'downloading' || u.phase === 'installing';
+
+function percent(u) {
+  if (u.total) return `${Math.min(100, Math.floor((u.received / u.total) * 100))}%`;
+  return `${(u.received / 1048576).toFixed(0)} MB`;
+}
+
+/** "업데이트하지 못했어요: …", unless the shell's text says so itself (update.rs says_update_failed). */
+const errorText = (u) => (/^업데이트(가|하지) /.test(u.error ?? '') ? u.error : `업데이트하지 못했어요: ${u.error ?? ''}`);
+
+/** The update's line in "⚙ 앱 설정". */
+function updateText(u) {
+  switch (u.phase) {
+    case 'checking':
+      return '확인하는 중…';
+    case 'latest':
+      return '최신 버전이에요';
+    case 'available':
+      return `easy-study ${u.version} 버전이 나왔어요`;
+    case 'downloading':
+      return `내려받는 중… ${percent(u)}`;
+    case 'downloaded':
+      return `easy-study ${u.version} 버전을 받아 두었어요`;
+    case 'installing':
+      return '설치하는 중…';
+    case 'error':
+      return u.error ?? '업데이트하지 못했어요';
+    default:
+      return u.lastError ? `마지막 확인 실패: ${u.lastError}` : '아직 확인하지 않았어요';
+  }
+}
+
+function renderUpdate(st) {
+  const u = st.update;
+  const found = Boolean(u.version) && ['available', 'downloaded', 'error'].includes(u.phase);
+  const busy = Boolean(st.busy) || moving(u);
+  $('app-version').textContent = `버전 ${st.version}`;
+  $('update-status').textContent = updateText(u);
+  $('update-reason').hidden = !(found && u.install === 'download' && u.reason);
+  $('update-reason').textContent = u.reason ?? '';
+  $('update-progress').hidden = u.phase !== 'downloading';
+  if (u.phase === 'downloading') {
+    if (u.total) $('update-progress').value = u.received / u.total;
+    else $('update-progress').removeAttribute('value');
+  }
+  $('update-check').hidden = u.phase === 'downloading' || u.phase === 'installing';
+  $('update-check').disabled = busy;
+  $('update-install').hidden = !(found && u.install === 'inApp');
+  $('update-install').disabled = busy;
+  // Also after an update that did not take (phase error, install download: "다운로드 페이지에서 직접 설치해 주세요").
+  $('update-download').hidden = !((found || u.phase === 'error') && u.install === 'download');
+  $('update-cancel').hidden = u.phase !== 'downloading';
+  $('update-auto').checked = st.updateCheck;
+
+  // The line at the top: a found version (or what went wrong with it), whatever section is open.
+  const note = $('update-note');
+  note.hidden = !(u.version && ['available', 'downloading', 'downloaded', 'error'].includes(u.phase));
+  if (!note.hidden) {
+    note.classList.toggle('error', u.phase === 'error');
+    $('update-note-text').textContent =
+      u.phase === 'error'
+        ? errorText(u)
+        : u.phase === 'downloading'
+          ? `easy-study ${u.version} 버전을 내려받는 중… ${percent(u)}`
+          : `easy-study ${u.version} 버전이 나왔어요 (지금 ${u.current}).`;
+    const action = $('update-note-action');
+    action.hidden = u.phase === 'downloading';
+    action.disabled = busy;
+    action.textContent = u.install === 'inApp' ? (u.phase === 'error' ? '다시 시도' : '설치하고 다시 시작') : '다운로드 페이지 열기 ↗';
+  }
+}
+
+function renderSettings(st) {
+  applyTheme(st.theme);
+  for (const input of document.querySelectorAll('input[name=theme]')) input.checked = input.value === st.theme;
+  renderUpdate(st);
+  const startup =
+    st.mode === 'local'
+      ? '시작하면 ‘이 컴퓨터에서 실행’에 바로 연결해요.'
+      : st.mode === 'remote'
+        ? `시작하면 ‘${st.remoteUrl ?? ''}’에 바로 연결해요.`
+        : '시작하면 이 화면이 먼저 나와요. 바로 연결하려면 ‘다음에도 바로 연결’을 켜고 연결하세요.';
+  $('startup-text').textContent = startup;
+  $('forget-choice').hidden = st.mode === '';
+  $('previous').hidden = !st.previous;
+  $('previous').textContent = st.previous ? `방금까지 연결: ${st.previous}` : '';
+  if (st.focus === 'settings') {
+    $('settings').open = true;
+    $('settings').scrollIntoView({ block: 'nearest' });
+  }
+}
+
 async function refresh({ initial = false } = {}) {
   const st = await invoke('get_state');
   renderLibrary(st.library);
+  renderSettings(st);
   $('shortcut').textContent = st.shortcut;
   if (initial) {
     if (st.mode === 'remote' || (!st.mode && st.remoteUrl && !st.running)) setMode('remote');
@@ -80,6 +181,7 @@ async function refresh({ initial = false } = {}) {
     setBusy(false);
     if (st.error) showStatus(st.error, 'error', st.stderrTail, st.logFile);
     else if (st.running) showStatus('이 컴퓨터의 서버가 실행 중이에요. "연결"을 누르면 돌아가요.', 'info');
+    else if (initial && st.notice) showStatus(st.notice, 'info');
     else if (!initial) showStatus('');
   }
   return st;
@@ -167,6 +269,45 @@ $('library-confirm-no').addEventListener('click', () => {
 });
 $('default-library').addEventListener('click', () => useLibrary(null).catch(fail));
 $('open-library').addEventListener('click', () => invoke('open_library').catch(fail));
+
+// "⚙ 앱 설정". The shell does the work on its own threads; the page polls get_state meanwhile.
+for (const input of document.querySelectorAll('input[name=theme]')) {
+  input.addEventListener('change', () => {
+    applyTheme(input.value);
+    invoke('set_theme', { theme: input.value }).then(() => refresh(), fail);
+  });
+}
+async function updateAction(cmd) {
+  await invoke(cmd);
+  await refresh();
+}
+$('update-check').addEventListener('click', () => updateAction('check_update').catch(fail));
+$('update-install').addEventListener('click', () => updateAction('install_update').catch(fail));
+$('update-download').addEventListener('click', () => updateAction('install_update').catch(fail));
+$('update-note-action').addEventListener('click', () => updateAction('install_update').catch(fail));
+$('update-cancel').addEventListener('click', () => updateAction('cancel_update').catch(fail));
+$('update-auto').addEventListener('change', () => {
+  invoke('set_update_check', { on: $('update-auto').checked }).then(() => refresh(), fail);
+});
+$('forget-choice').addEventListener('click', async () => {
+  try {
+    await invoke('forget_choice');
+    $('remember').checked = false;
+    await refresh();
+  } catch (err) {
+    fail(err);
+  }
+});
+$('open-logs').addEventListener('click', () => invoke('open_logs').catch(fail));
+
+// The update section follows the shell: checks and installs run on its threads, maybe behind one of its dialogs.
+// Only that section is redrawn (the status line keeps what the last action said); an install's busy line takes over.
+setInterval(() => {
+  if (document.hidden || polling) return;
+  invoke('get_state')
+    .then((st) => (st.busy ? refresh() : renderSettings(st)))
+    .catch(() => {});
+}, 1000);
 
 showOptionBodies();
 refresh({ initial: true }).catch(fail);
