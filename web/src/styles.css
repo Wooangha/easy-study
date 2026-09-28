@@ -1838,19 +1838,19 @@ kbd {
   min-width: 0;
 }
 
+.doc-card-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px 6px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
 .doc-card-foot {
   padding: 0 12px 12px;
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-}
-
-.doc-card-foot .picker {
-  flex: 1 1 100%;
-  width: 100%;
-  height: 28px;
-  font-size: 12px;
-  color: var(--text-2);
 }
 
 .doc-badges {
@@ -2783,7 +2783,7 @@ kbd {
 }
 
 .doc-card-move {
-  flex: 1 1 100%;
+  flex: 1 1 auto;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -4114,7 +4114,7 @@ kbd {
   font-weight: 700;
 }
 
-.doc-card-foot .menu-btn {
+.doc-card-head .menu-btn {
   margin-left: auto;
 }
 
@@ -4519,6 +4519,180 @@ kbd {
   flex: 1 1 120px;
   min-width: 80px;
   accent-color: var(--accent);
+}
+
+/* Playback speed: a small slider with tick marks (a dragged value sticks to them) and the typed rate. The
+   slider is drawn here so the ticks line up with the thumb: a tick at fraction f sits where the thumb's center
+   is, half a thumb in from each end. Its length is what makes the steps next to a mark reachable (see
+   snapThreshold in lib/recording/rate.ts): 140px or more wherever the row has room. */
+.rec-rate {
+  flex: 1 1 200px;
+  max-width: 240px;
+  min-width: 140px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rec-rate-slider {
+  --thumb: 14px;
+  position: relative;
+  flex: 1;
+  min-width: 80px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+}
+
+.rec-rate-slider input {
+  -webkit-appearance: none;
+  appearance: none;
+  /* Above the tick marks: the thumb covers the ones it sits on. */
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  background: none;
+  cursor: pointer;
+}
+
+/* Transparent: the ring on the thumb shows the focus, the outline only in forced colors (below). */
+.rec-rate-slider input:focus-visible {
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+}
+
+.rec-rate-slider input::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(to right, var(--accent) calc(var(--fill) * 100%), var(--surface-3) 0);
+}
+
+.rec-rate-slider input::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: var(--thumb);
+  height: var(--thumb);
+  margin-top: calc((4px - var(--thumb)) / 2);
+  border: 2px solid var(--surface);
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), var(--shadow-sm);
+}
+
+.rec-rate-slider input:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 1px var(--accent), var(--ring);
+}
+
+.rec-rate-slider input::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--surface-3);
+}
+
+.rec-rate-slider input::-moz-range-progress {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+.rec-rate-slider input::-moz-range-thumb {
+  box-sizing: border-box;
+  width: var(--thumb);
+  height: var(--thumb);
+  border: 2px solid var(--surface);
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), var(--shadow-sm);
+}
+
+.rec-rate-slider input:focus-visible::-moz-range-thumb {
+  box-shadow: 0 0 0 1px var(--accent), var(--ring);
+}
+
+.rec-rate-ticks {
+  position: absolute;
+  left: calc(var(--thumb) / 2);
+  right: calc(var(--thumb) / 2);
+  top: calc(50% + 4px);
+  height: 5px;
+  pointer-events: none;
+}
+
+.rec-rate-tick {
+  position: absolute;
+  top: 0;
+  width: 2px;
+  height: 3px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: var(--border-strong);
+}
+
+.rec-rate-tick.is-one {
+  height: 5px;
+  background: var(--muted);
+}
+
+.rec-rate-num {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  padding-right: 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: 12px;
+  color: var(--muted);
+  cursor: text;
+}
+
+.rec-rate-num:hover {
+  border-color: var(--border-strong);
+}
+
+.rec-rate-num:focus-within {
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+  outline: 2px solid transparent;
+}
+
+.rec-rate-input {
+  width: calc(4ch + 7px);
+  height: 100%;
+  padding: 0 1px 0 6px;
+  border: 0;
+  background: none;
+  outline: none;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--text);
+}
+
+/* Forced colors (Windows High Contrast) drop the track's gradient and paint the thumb and the ticks as Canvas. */
+@media (forced-colors: active) {
+  .rec-rate-slider input::-webkit-slider-runnable-track {
+    background: CanvasText;
+  }
+
+  .rec-rate-slider input::-moz-range-track {
+    background: CanvasText;
+  }
+
+  .rec-rate-slider input::-webkit-slider-thumb {
+    background: Highlight;
+  }
+
+  .rec-rate-slider input::-moz-range-thumb {
+    background: Highlight;
+  }
+
+  .rec-rate-tick {
+    background: CanvasText;
+  }
 }
 
 .rec-follow {

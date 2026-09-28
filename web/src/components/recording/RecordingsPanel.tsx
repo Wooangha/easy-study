@@ -29,18 +29,18 @@ import {
 import type { MarkerAction } from '../../lib/recording/markers.ts';
 import { markerLabel } from '../../lib/recording/markers.ts';
 import { recorder } from '../../lib/recording/recorder.ts';
+import { isPlaybackRate } from '../../lib/recording/rate.ts';
 import { formatClock, pastLoadedEnd, segmentIndexAt, slideAtTime } from '../../lib/recording/timeline.ts';
 import { cancelRecordingUpload, uploadRecordingFiles } from '../../lib/recording/uploads.ts';
-import { isBoolean, isNumber, readStorage, storageKeys, writeStorage } from '../../lib/storage.ts';
+import { isBoolean, readStorage, storageKeys, writeStorage } from '../../lib/storage.ts';
 import { toast } from '../../lib/toast.ts';
 import { PopoverMenu } from '../organize/PopoverMenu.tsx';
 import { ProgressBar } from '../organize/parts.tsx';
 import { AsrNotice, AsrSettings } from './AsrSettings.tsx';
+import { PlaybackRate } from './PlaybackRate.tsx';
 import { Transcript, type TranscriptMode } from './Transcript.tsx';
 
-const RATES = [0.75, 1, 1.25, 1.5, 1.75, 2] as const;
 const isMode = (v: unknown): v is TranscriptMode => v === 'current' || v === 'all';
-const isRate = (v: unknown): v is number => isNumber(v) && (RATES as readonly number[]).includes(v);
 
 interface RecordingsPanelProps {
   doc: DocMeta;
@@ -270,7 +270,7 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
   const [time, setTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [playing, setPlaying] = useState(false);
-  const [rate, setRateState] = useState(() => readStorage(storageKeys.playbackRate, 1, isRate));
+  const [rate, setRateState] = useState(() => readStorage(storageKeys.playbackRate, 1, isPlaybackRate));
   const [audioError, setAudioError] = useState<string | null>(null);
   /**
    * Reload the audio of a live recording to reach its newest part: the live WAV has the length it had when it was
@@ -300,10 +300,15 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
   }, [live, reloadAudio]);
 
   useEffect(() => {
-    if (audioRef.current) audioRef.current.playbackRate = rate;
+    const audio = audioRef.current;
+    if (!audio) return;
+    // The default too: a (re)load resets the rate to it.
+    audio.defaultPlaybackRate = rate;
+    audio.playbackRate = rate;
   }, [rate, src]);
 
   const setRate = (r: number) => {
+    if (r === rate) return;
     setRateState(r);
     writeStorage(storageKeys.playbackRate, r);
   };
@@ -639,19 +644,7 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
               }}
               aria-label="재생 위치"
             />
-            <select
-              className="picker small"
-              value={rate}
-              onChange={(e) => setRate(Number(e.target.value))}
-              aria-label="재생 속도"
-              title="재생 속도"
-            >
-              {RATES.map((r) => (
-                <option key={r} value={r}>
-                  {r}×
-                </option>
-              ))}
-            </select>
+            <PlaybackRate rate={rate} onChange={setRate} />
             <label className="rec-follow" title="재생하는 동안 슬라이드 창이 지금 설명 중인 슬라이드로 넘어가요">
               <input type="checkbox" checked={follow} onChange={(e) => setFollow(e.target.checked)} />
               <span>슬라이드 따라가기</span>
