@@ -913,14 +913,31 @@ Crash safety: after a restart, live recordings left in 'recording'/'paused' stay
 queued/running transcriptions resume.
 
 ### Alignment
-- Live: the slide-view timeline is the prior (segment → slide the student viewed at its midpoint), then the local DP may override only with
-  strong lexical evidence (e.g. a short look-ahead by the student), markers always win.
+- Live: the slide-view timeline is the prior (segment → the lecture slide at its midpoint + 2 s: the student follows the professor's screen
+  1–4 s late), then the local DP may override it only with strong lexical evidence (e.g. a short look-ahead by the student); markers always
+  win. The lecture slide comes from the student's views, measured over runs of one slide (views of other slides adding up to < 2 s in
+  between do not split a run): the next slide after 5 s, a jump ahead after 15 s (both counted from the furthest slide the lecture had
+  reached, also straight out of a back-visit), back to a slide the lecture had already reached (the end of a back-visit) after 2 s. A look
+  back (back-visit) is the lecture's (the professor went back and the student followed) when the speech said during it supports it: ≥ 3 s
+  and a summed margin ≥ 2 of the weighted z-scores over every rival (the lecture slide, the next one, up to the slide the student returned
+  to); or does not contradict it: ≥ 6 s, ≥ 2 segments, no rival ahead in the sum (margin ≥ 0), at most 15 % of the segments clearly about
+  a rival; or after 30 s whatever was said. Otherwise it is the student's own excursion. "Does not contradict" has no tolerance below 0:
+  whisper writes a Korean lecture's English terms in Hangul, so the professor's sentences about the lecture slide score only a little
+  above the looked-at one (a tolerance growing to −1.5 per segment took 20–50 % of the student's own 15–25 s looks for the lecture's on
+  real transcripts); the price is that a short back-visit with only filler speech is often left to the 30 s rule. The DP enters a
+  back-visit its speech adopted for free (no cost of going back), so only the prior bonus decides against the text; one adopted only by
+  the 30 s rule keeps that cost, so clear speech about the lecture slide still wins while the student re-reads an old slide.
+  Each transcribed window is labelled with this prior over the last 80 segments; when it changes for segments already shown (a look
+  back became the lecture's once enough was said), a realign runs at once instead of waiting for the 60 s throttle.
 - Upload: local lexical DP (TF-IDF char n-grams + Hangul-transliteration skeleton + monotonic Viterbi with skip/back/off-slide states; spike
   code) on digest + slide text. Optional "AI 정밀 정렬": hybrid DP+LLM (haiku, rich deck, ≤150-segment chunks, independent not "refine").
 - Markers: "여기부터 p.N" from the UI are hard constraints; re-solving takes < 1 s for 60 minutes. A marker is "slide N starts here" (the
   speech before it stays below N) only when N is beyond every earlier start marker and not 3 or more slides behind the furthest slide
   the alignment without slide markers reached before it (JUMP_BACK_MARGIN); otherwise it is a jump back to an earlier slide (only that sentence is pinned). In
-  live recordings a marker also replaces the timeline prior from its sentence on while the student kept viewing the same slide.
+  live recordings it must also be beyond the timeline's furthest slide before the marker (a marker on the professor's return to a slide
+  1–2 back is a jump back, and so is one in the middle of the slide being shown), and a marker also replaces the timeline prior from its
+  sentence on while the student kept viewing the same slide. So when the student read ahead (the timeline reached p.N early), "p.N"
+  where N really starts only pins that sentence: the early lines are corrected with a marker for the earlier slide on the first of them.
 - Measured with the shipped ASR config (uploads of the synthetic L7 lecture): Korean 66–68 % of speech time on the exact slide (82 % within
   ±1), English 82 %; five correct markers → 84 % Korean.
 

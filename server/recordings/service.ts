@@ -28,7 +28,10 @@ import type {
 import { HttpError, desktopMode, libraryDir } from '../config.ts';
 import { docPaths, isNotFound, loadDocAssets, readStoredDoc, renameWithRetry, rmWithRetry } from '../library.ts';
 import type { Label } from './align/align.ts';
-import { timelinePrior } from './align/align.ts';
+import { hasSlideText, timelinePrior } from './align/align.ts';
+import { DEFAULT_EMIT, emissions } from './align/dp.ts';
+import { buildIndex, simMatrix } from './align/sim.ts';
+import type { LexIndex } from './align/sim.ts';
 import { stripMarkdown } from './align/text.ts';
 import { alignInWorker } from './align/worker.ts';
 import { acceleration, contextPrompt, detectLanguage, findFfmpeg, findWhisper, probeVersion, runWhisper } from './asr.ts';
@@ -149,6 +152,11 @@ const DETECT_CLIP_MS = 30_000;
 const DETECT_MIN_SPEECH_MS = 5_000;
 /** A question waits for the live transcription only when no more than this much audio (ms) is still to transcribe. */
 const QUESTION_BACKLOG_MS = 60_000;
+/**
+ * A live window's timeline prior looks at this many recent segments (their speech decides the back-visits); in the
+ * simulation it gave the same labels as the whole recording.
+ */
+const LIVE_CONTEXT_SEGMENTS = 80;
 
 const LANGUAGES: readonly RecordingLanguage[] = ['ko', 'en', 'auto'];
 
@@ -194,6 +202,12 @@ class Rec {
   private closed = false;
   private alignAgain = false;
   private lastAlignAt = 0;
+  /** The slide material of the last alignment (live windows' back-visit evidence). */
+  private material: string[] | null = null;
+  /** The lexical index of `material` (rebuilt only when the material changed). */
+  private lexIndex: { material: string[]; index: LexIndex } | null = null;
+  /** Live: the timeline prior each recent segment got at the last window (a change calls for a realign now). */
+  private recentPrior = new Map<number, number | null>();
   private wavInfo: { dataOffset: number; dataBytes: number } | null = null;
   /** The window being transcribed and how far whisper got in it (seconds on the recording clock). */
   private progress: { i: number; sec: number } | null = null;
@@ -680,8 +694,10 @@ class Rec {
   private async windowDone(w: AsrWindow, segments: Array<{ start: number; end: number; text: string }>, error: string | null): Promise<void> {
     if (this.progress?.i === w.i) this.progress = null;
     if (this.transcript.doneWindows.includes(w.i)) return;
-    const prior = this.meta.source === 'live' ? timelinePrior(segments, this.timeline, this.durationSec()) : segments.map(() => null);
+    const live = this.meta.source === 'live';
+    const { prior, changed } = live ? await this.livePrior(segments) : { prior: segments.map(() => null), changed: false };
     const fresh: TranscriptSegment[] = segments.map((s, k) => ({ id: this.transcript.nextId++, start: s.start, end: s.end, text: s.text, slide: prior[k] }));
+    if (live) for (const s of fresh) this.recentPrior.set(s.id, s.slide);
     this.transcript.segments.push(...fresh);
     this.transcript.segments.sort((a, b) => a.start - b.start || a.id - b.id);
     this.transcript.doneWindows.push(w.i);
@@ -699,9 +715,45 @@ class Rec {
     this.emitStatus(true);
     const finished = this.windowsLeft() === 0 && (this.meta.source === 'upload' || this.meta.finalized === true);
     if (finished) void this.track(this.realign());
-    else if (this.meta.source === 'live' && Date.now() - this.lastAlignAt >= config.liveRealignMs && this.transcript.segments.length > 0) {
+    else if (live && this.transcript.segments.length > 0 && (changed || Date.now() - this.lastAlignAt >= config.liveRealignMs)) {
+      // A back-visit adopted (or dropped) for segments already shown is relabelled now, not after liveRealignMs.
       void this.track(this.realign());
     }
+  }
+
+  /**
+   * Live: the timeline prior of a window's segments. The lecture timeline's back-visits are decided with the speech of
+   * the last LIVE_CONTEXT_SEGMENTS segments (align.ts); `changed`: the prior of a segment shown before changed since
+   * the last window (the student's look back became the lecture's once enough was said, or the other way round).
+   */
+  private async livePrior(segments: Array<{ start: number; end: number; text: string }>): Promise<{ prior: Array<number | null>; changed: boolean }> {
+    const room = LIVE_CONTEXT_SEGMENTS - segments.length;
+    const recent = room > 0 ? this.transcript.segments.slice(-room) : [];
+    const ctx = [...recent.map((s) => ({ ...s, fresh: -1 })), ...segments.map((s, k) => ({ ...s, id: -1, fresh: k }))].sort((a, b) => a.start - b.start);
+    // The deck is read once (alignOnce keeps it up to date); if it cannot be read the window is still labelled.
+    this.material ??= await deckOf(this.docId).then((deck) => deck.map(slideMaterial), () => null);
+    const material = this.material;
+    const texts = ctx.map((s) => s.text);
+    // Without any slide text there is no evidence to gate by (as in alignSegments): a look back needs BACK_SEC.
+    const evidence = material && hasSlideText(material) ? () => emissions(simMatrix(this.indexOf(material), texts), texts, DEFAULT_EMIT).E : undefined;
+    const all = timelinePrior(ctx, this.timeline, this.durationSec(), evidence);
+    const prior = segments.map((): number | null => null);
+    let changed = false;
+    const next = new Map<number, number | null>();
+    ctx.forEach((s, i) => {
+      if (s.fresh >= 0) prior[s.fresh] = all[i];
+      else {
+        if (this.recentPrior.has(s.id) && this.recentPrior.get(s.id) !== all[i]) changed = true;
+        next.set(s.id, all[i]);
+      }
+    });
+    this.recentPrior = next;
+    return { prior, changed };
+  }
+
+  private indexOf(material: string[]): LexIndex {
+    if (!this.lexIndex || !sameTexts(this.lexIndex.material, material)) this.lexIndex = { material, index: buildIndex(material) };
+    return this.lexIndex.index;
   }
 
   private contiguousDoneSec(): number {
@@ -741,12 +793,13 @@ class Rec {
     this.lastAlignAt = Date.now();
     const snapshot = this.transcript.segments.map((s) => ({ id: s.id, start: s.start, end: s.end, text: s.text }));
     if (snapshot.length === 0 || this.deleted) return;
-    const deck = await deckOf(this.docId);
+    const material = (await deckOf(this.docId)).map(slideMaterial);
+    if (!this.material || !sameTexts(this.material, material)) this.material = material;
     const llm = this.llm;
     const labels = await alignInWorker({
-      slideTexts: deck.map(slideMaterial),
+      slideTexts: material,
       segments: snapshot,
-      prior: this.meta.source === 'live' ? timelinePrior(snapshot, this.timeline, this.durationSec()) : undefined,
+      timeline: this.meta.source === 'live' ? { events: this.timeline, endSec: this.durationSec() } : undefined,
       markers: this.markers,
       llm: llm ? snapshot.map((s) => (String(s.id) in llm.labels ? llm.labels[String(s.id)] : undefined)) : undefined,
     });
@@ -954,6 +1007,8 @@ export async function deckOf(docId: string): Promise<DeckEntry[]> {
 function slideMaterial(d: DeckEntry): string {
   return `${d.title}\n${d.title}\n${stripMarkdown(d.digest)}\n${d.text}`;
 }
+
+const sameTexts = (a: string[], b: string[]) => a.length === b.length && a.every((t, i) => t === b[i]);
 
 // ---------------------------------------------------------------------------------------------------------------
 // Registry

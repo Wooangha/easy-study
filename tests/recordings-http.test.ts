@@ -28,6 +28,7 @@ import { requestBodyDeadline, startServer } from '../server/index.ts';
 import type { RunningServer, ServerOptions } from '../server/index.ts';
 import { LECTURE_RECORDINGS_NOTE } from '../server/prompts.ts';
 import type { Part, Provider, ProviderRunInput } from '../server/providers/types.ts';
+import { FOLLOW_LAG_SEC } from '../server/recordings/align/align.ts';
 import { ModelStore } from '../server/recordings/models.ts';
 import type { ModelCatalog } from '../server/recordings/models.ts';
 import { WINDOW_PRESETS } from '../server/recordings/segmenter.ts';
@@ -407,10 +408,10 @@ describe('lecture recordings over HTTP (fake whisper-cli / ffmpeg)', () => {
     }
     const transcript = await client.transcript(DOC, rec.id);
     assertEachToneOnce(transcript, tones);
-    // Slides from the viewing timeline (no lexical evidence in "tone-…").
+    // Slides from the viewing timeline (no lexical evidence in "tone-…"), read FOLLOW_LAG_SEC late.
     for (const s of transcript.segments) {
-      const mid = (s.start + s.end) / 2;
-      assert.equal(s.slide, mid < 40 ? 1 : mid < 70 ? 2 : 3, `${s.text} at ${mid}`);
+      const at = (s.start + s.end) / 2 + FOLLOW_LAG_SEC;
+      assert.equal(s.slide, at < 40 ? 1 : at < 70 ? 2 : 3, `${s.text} at ${at}`);
     }
     // whisper-cli got the forced language, VAD and JSON output; one run per window with speech, never two at once.
     const runs = (await fs.readFile(whisperLog, 'utf8')).trim().split('\n').map((l) => JSON.parse(l) as { args: string[] });
@@ -1027,6 +1028,68 @@ describe('restart recovery', () => {
       await waitFor(async () => (await client.recording(DOC, up.id)).transcriptStatus === 'ready', 30_000, 'resumed conversion');
       assert.equal((await client.recording(DOC, up.id)).durationSec, 60);
       assert.ok(await waitForTranscriptionIdle(5_000));
+    } finally {
+      await server.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Live relabelling
+// ---------------------------------------------------------------------------------------------------------------
+
+describe('live relabelling (liveRealignMs = 60 s)', () => {
+  test("a look back that becomes the lecture's after its segments were shown relabels them at once", async () => {
+    const server = await startServer({
+      port: 0,
+      log: false,
+      resumeIngests: false,
+      providerInfos: async () => infos,
+      recordings: { models: new ModelStore({ dir: () => modelsDir, catalog: catalog() }), statusThrottleMs: 20, liveRealignMs: 60_000, pingMs: 1000 },
+    });
+    const client = new Client(server.url);
+    try {
+      const rid = (await client.json<RecordingInfo>(`/docs/${DOC}/recordings`, 'POST', { language: 'ko' })).body.id;
+      const sse = openSse(`${server.url}/api/docs/${DOC}/recordings/${rid}/events`);
+      const pcm = tonesPcm(60, spacedTones(30));
+      const send = async (from: number, to: number) => {
+        for (let offset = from; offset < to; offset += 32_000) {
+          assert.equal((await client.audio(DOC, rid, offset, pcm.subarray(offset, Math.min(to, offset + 32_000)))).status, 200);
+        }
+      };
+      await client.json(`/docs/${DOC}/recordings/${rid}/slides`, 'POST', [
+        { t: 0, slide: 1 },
+        { t: 4, slide: 2 },
+      ]);
+      // The first window: its segments are shown on p.2 (and its windowDone realigns: none ran yet).
+      await send(0, 32_000 * 32);
+      // The stored transcript, not transcribedSec: that already moves with whisper's progress on the window.
+      await waitFor(async () => (await client.transcript(DOC, rid)).segments.length > 0 && (await client.recording(DOC, rid)).transcribedSec > 0, 20_000, 'first window');
+      const shownUntil = (await client.recording(DOC, rid)).transcribedSec;
+      const shown = (await client.transcript(DOC, rid)).segments;
+      const look = shown.filter((s) => (s.start + s.end) / 2 + FOLLOW_LAG_SEC >= shownUntil - 8);
+      assert.ok(look.length >= 2 && look.every((s) => s.slide === 2), JSON.stringify(shown));
+      // The student had followed the professor back to p.1 for 12 s around the end of that window (the events arrive
+      // late). The next window decides the look is the lecture's and relabels the shown segments at once: no need
+      // to wait 60 s for the periodic realign.
+      await client.json(`/docs/${DOC}/recordings/${rid}/slides`, 'POST', [
+        { t: shownUntil - 8, slide: 1 },
+        { t: shownUntil + 4, slide: 2 },
+      ]);
+      const seen = sse.frames.length;
+      const t0 = Date.now();
+      await send(32_000 * 32, pcm.length);
+      await waitFor(
+        () => sse.frames.slice(seen).some((f) => f.data.type === 'realigned' && f.data.segments.some((c) => c.id === look[0].id && c.slide === 1)),
+        20_000,
+        'relabelled look back',
+      );
+      assert.ok(Date.now() - t0 < 60_000);
+      assert.equal((await client.recording(DOC, rid)).status, 'recording');
+      await sse.close();
+      await client.json(`/docs/${DOC}/recordings/${rid}/stop`, 'POST');
+      await waitFor(async () => (await client.recording(DOC, rid)).transcriptStatus === 'ready', 30_000, 'transcription');
+      assert.equal((await client.json(`/docs/${DOC}/recordings/${rid}`, 'DELETE')).status, 204);
     } finally {
       await server.close();
     }

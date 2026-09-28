@@ -6,7 +6,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
-import { alignSegments, furthestBefore, lectureSpans, markerConstraints, priorWithMarkers, timelinePrior } from '../server/recordings/align/align.ts';
+import { FOLLOW_LAG_SEC, alignSegments, furthestBefore, lectureSpans, markerConstraints, priorWithMarkers, timelinePrior } from '../server/recordings/align/align.ts';
 import type { AlignSegment } from '../server/recordings/align/align.ts';
 import { DEFAULT_DP, emissions, viterbi } from '../server/recordings/align/dp.ts';
 import { features, skeletons, tokens } from '../server/recordings/align/text.ts';
@@ -266,6 +266,222 @@ describe('slide aligner (lexical DP, DESIGN §22)', () => {
       lectureSpans([{ t: 0, slide: 3 }, { t: 2.5, slide: 4 }], 30).map((s) => [s.slide, s.from]),
       [[3, 0], [4, 2.5]],
     );
+  });
+
+  test("live: a short look back is the lecture's when its speech does not contradict it (the professor went back)", () => {
+    // Slides 1–3 (0–50 s), a 10 s look back at p.1 (50–60 s), then p.3 again (60–75 s).
+    const events = [
+      { t: 0, slide: 1 },
+      { t: 20, slide: 2 },
+      { t: 35, slide: 3 },
+      { t: 50, slide: 1 },
+      { t: 60, slide: 3 },
+    ];
+    const lecture = (look: string[]) =>
+      [...SPEECH.slice(0, 10).map(([, text]) => text), ...look, ...SPEECH.slice(7, 10).map(([, text]) => text)].map((text, i) => ({ start: i * 5, end: i * 5 + 4.5, text }));
+    // Filler while the professor shows p.1 again: the student followed him (the weak-speech rule, ≥ 6 s).
+    const followed = lecture(['네 네 좋아요', '음 네 네']);
+    assert.deepEqual(alignSegments({ slideTexts: SLIDES, segments: followed, timeline: { events, endSec: 75 } }), [1, 1, 1, 1, 2, 2, 2, 3, 3, 3, 1, 1, 3, 3, 3]);
+    // The dwell rule alone (no speech) would need 30 s.
+    assert.deepEqual(timelinePrior(followed, events, 75).slice(10, 12), [3, 3]);
+    // The same look while the professor goes on with p.3's sentences: the student's own excursion.
+    const own = lecture([SPEECH[8][1], SPEECH[9][1]]);
+    assert.deepEqual(alignSegments({ slideTexts: SLIDES, segments: own, timeline: { events, endSec: 75 } }), [1, 1, 1, 1, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3]);
+    // Filler that leans a little towards p.3 (by -0.28 against -0.29 for p.1): no rival may be ahead, so not adopted.
+    const leaning = lecture(['네 잠깐만요 다시 볼게요', '네 잠깐만요 다시 볼게요']);
+    assert.deepEqual(alignSegments({ slideTexts: SLIDES, segments: leaning, timeline: { events, endSec: 75 } }).slice(10, 12), [3, 3]);
+  });
+
+  test("live: a look back of a few seconds whose speech is about that slide is the lecture's (lexical rule)", () => {
+    // Slides 1–4 (0–70 s), a 6 s look at p.2 (70–76 s), then p.4 again.
+    const events = [
+      { t: 0, slide: 1 },
+      { t: 20, slide: 2 },
+      { t: 35, slide: 3 },
+      { t: 55, slide: 4 },
+      { t: 70, slide: 2 },
+      { t: 76, slide: 4 },
+    ];
+    const lecture = (look: string) =>
+      [...SPEECH.slice(0, 14).map(([, text]) => text), look, SPEECH[12][1], SPEECH[13][1]].map((text, i) => ({ start: i * 5, end: i * 5 + 4.5, text }));
+    const back = alignSegments({ slideTexts: SLIDES, segments: lecture('아까 본 유한 오토마타 기억나죠 디에프에이와 엔에프에이'), timeline: { events, endSec: 85 } });
+    assert.deepEqual(back.slice(11), [4, 4, 4, 2, 4, 4]);
+    // The professor goes on about p.4 while the student glances at p.2: it stays p.4.
+    const own = alignSegments({ slideTexts: SLIDES, segments: lecture(SPEECH[11][1]), timeline: { events, endSec: 85 } });
+    assert.deepEqual(own.slice(11), [4, 4, 4, 4, 4, 4]);
+  });
+
+  test('back-visit rules on filler speech: ≥ 6 s over ≥ 2 segments, no rival ahead, no sentence clearly about the lecture slide', () => {
+    // The lecture is on p.5; the student looks at p.3 from 100 s on for `sec` seconds. `rows`: emissions (weighted
+    // z-scores) of the segments said meanwhile (midpoint + FOLLOW_LAG_SEC inside the look).
+    const row = (z: Record<number, number> = {}) => Array.from({ length: 8 }, (_, s) => z[s + 1] ?? 0);
+    let calls = 0;
+    const adopted = (sec: number, mids: number[], rows: number[][]) => {
+      const events = [
+        { t: 0, slide: 5 },
+        { t: 100, slide: 3 },
+        { t: 100 + sec, slide: 5 },
+      ];
+      const spans = lectureSpans(events, 200, { mids, E: () => (calls++, rows) });
+      return spans.find((s) => s.slide === 3)?.back ?? null;
+    };
+    assert.equal(adopted(4, [99, 101], [row(), row()]), null);
+    assert.equal(adopted(8, [99, 101.5, 104], [row(), row(), row()]), 'weak');
+    assert.equal(adopted(8, [101], [row()]), null, 'one segment is not enough');
+    // Four segments, one of them clearly about p.5 (the professor went on): not the lecture's, even though p.3 leads
+    // in the sum; without it, it is.
+    const mids = [98.5, 100.5, 102.5, 104.5];
+    assert.equal(adopted(8, mids, [row({ 3: 0.5 }), row({ 3: 0.5 }), row({ 3: 2.6, 5: 2.5 }), row({ 3: 0.5 })]), null);
+    assert.equal(adopted(8, mids, [row({ 3: 0.5 }), row({ 3: 0.5 }), row(), row({ 3: 0.5 })]), 'weak');
+    // A rival ahead in the sum, however little (weak Korean evidence of the professor going on about p.5): not adopted.
+    assert.equal(adopted(8, mids, [row({ 3: 0.5 }), row({ 5: 0.6 }), row(), row()]), null);
+    assert.equal(adopted(20, mids, [row({ 3: 0.5 }), row({ 5: 0.6 }), row(), row()]), null);
+    // Speech about p.3 itself: from 3 s on (lexical).
+    assert.equal(adopted(4, [99, 101], [row({ 3: 1.5 }), row({ 3: 1.5 })]), 'lexical');
+    // The evidence is computed at most once per call, and only for a look back with speech.
+    calls = 0;
+    assert.equal(adopted(8, [50, 150], [row(), row()]), 'weak');
+    assert.equal(calls, 0);
+    const spans = lectureSpans(
+      [
+        { t: 0, slide: 5 },
+        { t: 100, slide: 3 },
+        { t: 108, slide: 5 },
+        { t: 150, slide: 4 },
+        { t: 158, slide: 5 },
+      ],
+      200,
+      { mids: [101, 104, 151, 154], E: () => (calls++, [row(), row(), row(), row()]) },
+    );
+    assert.deepEqual(spans.map((s) => [s.slide, s.back ?? null]), [[5, null], [3, 'weak'], [5, null], [4, 'weak'], [5, null]]);
+    assert.equal(calls, 1);
+  });
+
+  test("dwell over runs: a wobble onto a neighbour does not split a view; returning to the lecture's slide takes RETURN_SEC", () => {
+    // 40 s back at p.3 with a 1 s view of p.4 in it (the centre line crossed p.4 while scrolling): one run, ≥ 30 s.
+    const wobble = [
+      { t: 0, slide: 5 },
+      { t: 100, slide: 3 },
+      { t: 120, slide: 4 },
+      { t: 121, slide: 3 },
+      { t: 140, slide: 5 },
+    ];
+    assert.deepEqual(lectureSpans(wobble, 200).map((s) => [s.slide, s.from, s.back ?? null]), [[5, 0, null], [3, 100, 'long'], [5, 140, null]]);
+    // A view of 2 s or more does split it: two looks of 20 s and 18 s are the student's.
+    const split = wobble.map((e) => (e.t === 121 ? { ...e, t: 122 } : e));
+    assert.deepEqual(lectureSpans(split, 200).map((s) => s.slide), [5]);
+    // After an adopted back-visit, 2.5 s back on p.5 count before the move on to p.6 (a jump from p.3 would need 15 s).
+    const back = [
+      { t: 0, slide: 5 },
+      { t: 100, slide: 3 },
+      { t: 140, slide: 5 },
+      { t: 142.5, slide: 6 },
+    ];
+    assert.deepEqual(lectureSpans(back, 200).map((s) => [s.slide, s.from]), [[5, 0], [3, 100], [5, 140], [6, 142.5]]);
+    // A new slide right after a back-visit is measured from the lecture's furthest slide: p.6 (passing p.4 and p.5 for
+    // 0.4 s each) is the next slide after p.5, 5 s, not a jump from p.3 (15 s).
+    const onward = [
+      { t: 0, slide: 5 },
+      { t: 100, slide: 3 },
+      { t: 110, slide: 4 },
+      { t: 110.4, slide: 5 },
+      { t: 110.8, slide: 6 },
+      { t: 122, slide: 7 },
+      { t: 134, slide: 8 },
+    ];
+    const zeros = [Array.from({ length: 8 }, () => 0), Array.from({ length: 8 }, () => 0)];
+    assert.deepEqual(
+      lectureSpans(onward, 200, { mids: [101, 105], E: () => zeros }).map((s) => [s.slide, s.from, s.back ?? null]),
+      [[5, 0, null], [3, 100, 'weak'], [6, 110.8, null], [7, 122, null], [8, 134, null]],
+    );
+  });
+
+  test('a look back of ≥ BACK_SEC that the speech contradicts is not entered for free: the DP keeps the lecture slide', () => {
+    // The professor explains p.5 (0–75 s) while the student re-reads p.2 for 35 s (20–55 s).
+    const p5 = SPEECH.filter(([s]) => s === 5).map(([, text]) => text);
+    const segs = Array.from({ length: 15 }, (_, i) => ({ start: i * 5, end: i * 5 + 4.5, text: p5[i % 3] }));
+    const events = [
+      { t: 0, slide: 5 },
+      { t: 20, slide: 2 },
+      { t: 55, slide: 5 },
+    ];
+    assert.deepEqual(lectureSpans(events, 75).map((s) => [s.slide, s.back ?? null]), [[5, null], [2, 'long'], [5, null]]);
+    assert.deepEqual(alignSegments({ slideTexts: SLIDES, segments: segs, timeline: { events, endSec: 75 } }), new Array(15).fill(5));
+  });
+
+  test('the timeline is read FOLLOW_LAG_SEC late: the student follows the lecture with a lag', () => {
+    const events = [
+      { t: 0, slide: 3 },
+      { t: 50, slide: 4 },
+    ];
+    // Midpoints 47.5 and 48.5 (the move at 50 s is 1.5 s after the second one).
+    const segs = [
+      { start: 46, end: 49, text: '' },
+      { start: 47, end: 50, text: '' },
+    ];
+    assert.equal(FOLLOW_LAG_SEC, 2);
+    assert.deepEqual(timelinePrior(segs, events, 100), [3, 4]);
+  });
+
+  test('DP: an adopted back-visit is entered for free, so going back and returning do not undo it', () => {
+    // The prior says p.3 throughout, except two segments of an adopted back-visit to p.1.
+    const E = Array.from({ length: 8 }, (_, t) => (t === 3 || t === 4 ? [3, 0, 0, 0] : [0, 0, 3, 0]));
+    const En = E.map(() => -2);
+    const params = { ...DEFAULT_DP, startOff: 0 };
+    // 2 × 3 < back 8 + ret 1: the DP alone stays on p.3.
+    assert.deepEqual(viterbi(E, En, params), [3, 3, 3, 3, 3, 3, 3, 3]);
+    const free = Int32Array.from([-1, -1, 0, 0, 0, -1, -1, -1]);
+    assert.deepEqual(viterbi(E, En, params, [], free), [3, 3, 3, 1, 1, 3, 3, 3]);
+  });
+
+  test('free entry: from the sentence before the back-visit (the student follows late), not where a marker replaced it', () => {
+    const p1 = '어휘 분석 스캐너는 문자들을 토큰으로 묶고 토큰의 패턴은 정규 표현식으로 씁니다 렉심과 토큰';
+    const segs = (texts: string[]) => texts.map((text, i) => ({ start: i * 5, end: i * 5 + 4.5, text }));
+    // The professor goes back to p.1 with the sentence at 45 s; the student follows at 50 s for 12 s.
+    const early = segs([...SPEECH.slice(0, 9).map(([, text]) => text), p1, SPEECH[2][1], SPEECH[3][1], SPEECH[9][1], SPEECH[8][1], SPEECH[7][1]]);
+    const events = [
+      { t: 0, slide: 1 },
+      { t: 20, slide: 2 },
+      { t: 35, slide: 3 },
+      { t: 50, slide: 1 },
+      { t: 62, slide: 3 },
+    ];
+    assert.deepEqual(alignSegments({ slideTexts: SLIDES, segments: early, timeline: { events, endSec: 75 } }), [1, 1, 1, 1, 2, 2, 2, 3, 3, 1, 1, 1, 3, 3, 3]);
+    // A back-visit to p.1 (70–90 s) with "여기부터 p.2" on its second sentence: from there p.1 is not entered for free.
+    const marked = segs([...SPEECH.slice(0, 14).map(([, text]) => text), SPEECH[1][1], SPEECH[2][1], p1, p1, SPEECH[12][1], SPEECH[13][1]]);
+    const timeline = {
+      events: [
+        { t: 0, slide: 1 },
+        { t: 20, slide: 2 },
+        { t: 35, slide: 3 },
+        { t: 55, slide: 4 },
+        { t: 70, slide: 1 },
+        { t: 90, slide: 4 },
+      ],
+      endSec: 100,
+    };
+    assert.deepEqual(alignSegments({ slideTexts: SLIDES, segments: marked, timeline }).slice(14), [1, 1, 1, 1, 4, 4]);
+    assert.deepEqual(alignSegments({ slideTexts: SLIDES, segments: marked, timeline, markers: [{ t: 75, slide: 2 }] }).slice(14), [1, 2, 2, 2, 4, 4]);
+  });
+
+  test("live markers: a slide not beyond the timeline's furthest slide is a jump back, not a start", () => {
+    const generic = Array.from({ length: 16 }, (_, i) => ({ start: i * 10, end: i * 10 + 9, text: '네 잠깐만요 다시 볼게요' }));
+    const events = [
+      { t: 0, slide: 2 },
+      { t: 40, slide: 3 },
+      { t: 80, slide: 4 },
+    ];
+    const prior = timelinePrior(generic, events, 160);
+    assert.deepEqual(prior, [2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4]);
+    const timeline = furthestBefore(generic, prior);
+    const front = (slide: number, t: number) => markerConstraints(generic, [{ t, slide }], SLIDES.length, undefined, timeline)[0].front;
+    assert.equal(front(3, 120), false, 'back to p.3 after the lecture reached p.4');
+    assert.equal(front(5, 120), true, 'p.5 starts here');
+    assert.equal(front(4, 100), false, 'in the middle of p.4');
+    // By the lecture's progress alone p.3 is within JUMP_BACK_MARGIN: a start, which would push p.3 and p.4 below it.
+    assert.equal(markerConstraints(generic, [{ t: 120, slide: 3 }], SLIDES.length, () => 4)[0].front, true);
+    const labels = alignSegments({ slideTexts: SLIDES, segments: generic, timeline: { events, endSec: 160 }, markers: [{ t: 120, slide: 3 }] });
+    assert.deepEqual(labels, [2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 3, 3, 3, 3]);
   });
 
   test('LLM votes are soft: they decide where the text is silent', () => {

@@ -8,6 +8,8 @@
 //  - starting on a slide other than slide 1 costs startOff.
 // Hard constraints (user markers) pin a segment to a slide (optionally "slide N starts here": the frontier is reset
 // to N there, and the segments before it, back to the previous such marker, stay below N) or to null.
+// Live recordings: where the timeline adopted a back-visit by its speech (`free`), entering that slide costs nothing
+// instead of back / backMove: only the prior bonus has to be outweighed by the lexical evidence to undo it.
 //
 // Large decks: excursions are limited to `band` slides behind the frontier (all of them for decks of up to
 // FULL_BAND_MAX_SLIDES slides), which keeps memory at T × N × (band + 2) back-pointers.
@@ -115,14 +117,18 @@ function layout(N: number, band: number): Layout {
   return { N, band, offset, lo, nullBase: size, size: size + N };
 }
 
-/** Viterbi labels (1-based slides or null) for every segment. Contradictory constraints are dropped oldest group first. */
-export function viterbi(E: number[][], En: number[], p: DpParams = DEFAULT_DP, constraints: Constraint[] = []): Label[] {
+/**
+ * Viterbi labels (1-based slides or null) for every segment. Contradictory constraints are dropped oldest group first.
+ * `free[t]`: a 0-based slide the live timeline adopted as a back-visit at segment t (-1 = none); entering it there
+ * (from the frontier, from null or from another earlier slide) costs nothing.
+ */
+export function viterbi(E: number[][], En: number[], p: DpParams = DEFAULT_DP, constraints: Constraint[] = [], free?: Int32Array): Label[] {
   const T = E.length;
   if (T === 0) return [];
   const N = E[0].length;
   if (N === 0) return new Array<Label>(T).fill(null);
   const L = layout(N, N <= FULL_BAND_MAX_SLIDES ? N - 1 : LARGE_DECK_BAND);
-  const result = solve(E, En, p, constraints, L);
+  const result = solve(E, En, p, constraints, L, free);
   if (result) return result;
   // Contradictory markers: drop the oldest group and try again.
   const groups = [...new Set(constraints.map((c) => c.group ?? c.seg))];
@@ -133,10 +139,11 @@ export function viterbi(E: number[][], En: number[], p: DpParams = DEFAULT_DP, c
     En,
     p,
     constraints.filter((c) => (c.group ?? c.seg) !== drop),
+    free,
   );
 }
 
-function solve(E: number[][], En: number[], p: DpParams, constraints: Constraint[], L: Layout): Label[] | null {
+function solve(E: number[][], En: number[], p: DpParams, constraints: Constraint[], L: Layout, free?: Int32Array): Label[] | null {
   const T = E.length;
   const { N, offset, lo, nullBase, size: S } = L;
   const pinned = new Map<number, Label>();
@@ -295,26 +302,29 @@ function solve(E: number[][], En: number[], p: DpParams, constraints: Constraint
       // excursion states (s, f), s < f
       for (let s = lo[f]; s < f; s++) {
         const st = idx(s, f);
+        // A back-visit the live timeline adopted: going there is free (only the prior bonus has to be outweighed).
+        const entry = free?.[t] === s ? 0 : p.back;
+        const move = free?.[t] === s ? 0 : p.backMove;
         let best = V[st];
         let arg = st;
-        if (frontV[f] - p.back > best) {
-          best = frontV[f] - p.back;
+        if (frontV[f] - entry > best) {
+          best = frontV[f] - entry;
           arg = idx(f, f);
         }
-        if (nulV[f] - p.back > best) {
-          best = nulV[f] - p.back;
+        if (nulV[f] - entry > best) {
+          best = nulV[f] - entry;
           arg = nullBase + f;
         }
         const other = top1[f] === s ? top2[f] : top1[f];
         if (other >= 0) {
-          const v = V[idx(other, f)] - p.backMove;
+          const v = V[idx(other, f)] - move;
           if (v > best) {
             best = v;
             arg = idx(other, f);
           }
         }
         if (s > lo[f]) {
-          const v = V[idx(s - 1, f)] - p.backMove * 0.5;
+          const v = V[idx(s - 1, f)] - move * 0.5;
           if (v > best) {
             best = v;
             arg = idx(s - 1, f);
