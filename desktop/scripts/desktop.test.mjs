@@ -11,7 +11,7 @@ import { checkBinary, elfInfo, machoInfo, peInfo } from './binaries.mjs';
 import { FFMPEG, OPUS, ffmpegBuildPlan } from './ffmpeg.mjs';
 import { RECORDING_TOOLS, placeTool } from './prepare.mjs';
 import { DESKTOP_DIR, REPO_DIR, TARGETS, externalBinOverride, hostTarget, shippedNodeVersion, targetInfo, tauriEnv, textSha256 } from './targets.mjs';
-import { WHISPER, whisperFlags } from './whisper.mjs';
+import { WHISPER, pickVcomp, whisperFlags } from './whisper.mjs';
 
 const tauriDir = path.join(DESKTOP_DIR, 'src-tauri');
 const readJson = (file) => JSON.parse(fs.readFileSync(path.join(tauriDir, file), 'utf8'));
@@ -294,7 +294,7 @@ test('the shell hands the recording tools and the models folder to the server', 
   assert.ok(!/getUserMedia\(/.test(mainRs), 'the smoke run never asks for the microphone');
 });
 
-test('whisper.cpp: the pinned release, portable flags per target, no OpenMP', () => {
+test('whisper.cpp: the pinned release, portable flags per target, OpenMP only on Windows', () => {
   assert.equal(WHISPER.version, '1.9.4');
   assert.match(WHISPER.commit, /^927cfce[0-9a-f]{33}$/);
   assert.ok(WHISPER.url.includes(WHISPER.commit));
@@ -302,7 +302,11 @@ test('whisper.cpp: the pinned release, portable flags per target, no OpenMP', ()
   for (const triple of Object.keys(TARGETS)) {
     const flags = whisperFlags(triple);
     const info = targetInfo(triple);
-    assert.ok(flags.includes('-DGGML_NATIVE=OFF') && flags.includes('-DGGML_OPENMP=OFF'), triple);
+    assert.ok(flags.includes('-DGGML_NATIVE=OFF'), triple);
+    // Windows: ggml's own thread pool never finishes with more threads than free CPUs (the VAD's fixed 4 on a 2-CPU
+    // runner); elsewhere no libgomp.
+    assert.equal(flags.includes('-DGGML_OPENMP=ON'), info.os === 'win32', triple);
+    assert.equal(flags.includes('-DGGML_OPENMP=OFF'), info.os !== 'win32', triple);
     assert.ok(flags.includes('-DWHISPER_CURL=OFF') && flags.includes('-DWHISPER_SDL2=OFF'), triple);
     const metal = triple === 'aarch64-apple-darwin';
     assert.equal(flags.includes('-DGGML_METAL=ON'), metal, triple);
@@ -319,6 +323,22 @@ test('whisper.cpp: the pinned release, portable flags per target, no OpenMP', ()
       assert.equal(flags.includes('-DGGML_AVX2=ON'), info.cpu === 'x64', triple);
     }
   }
+});
+
+test('whisper.cpp on Windows: vcomp140.dll from the newest desktop Redist of the CPU', () => {
+  const r = 'C:\\VS\\18\\Enterprise\\VC\\Redist\\MSVC\\';
+  const paths = [
+    `${r}14.29.30133\\x64\\Microsoft.VC142.OpenMP\\vcomp140.dll`,
+    `${r}14.51.36231\\onecore\\x64\\Microsoft.VC145.OpenMP\\vcomp140.dll`,
+    `${r}14.51.36231\\spectre\\x64\\Microsoft.VC145.OpenMP\\vcomp140.dll`,
+    `${r}14.51.36231\\x64\\Microsoft.VC145.OpenMP\\vcomp140.dll\r`,
+    `${r}14.44.35112\\x64\\Microsoft.VC143.OpenMP\\vcomp140.dll`,
+    `${r}14.44.35112\\arm64\\Microsoft.VC143.OpenMP\\vcomp140.dll`,
+    '',
+  ];
+  assert.equal(pickVcomp(paths, 'x64'), `${r}14.51.36231\\x64\\Microsoft.VC145.OpenMP\\vcomp140.dll`);
+  assert.equal(pickVcomp(paths, 'arm64'), `${r}14.44.35112\\arm64\\Microsoft.VC143.OpenMP\\vcomp140.dll`);
+  assert.equal(pickVcomp(paths.slice(1, 3), 'x64'), null);
 });
 
 test('ffmpeg: the minimal LGPL build of the audio spike', () => {
@@ -525,6 +545,9 @@ test('shipped programs: right CPU, only the OS libraries', () => {
     assert.throws(() => check(pe(0x8664, ['VCRUNTIME140.dll', 'KERNEL32.dll']), { os: 'win32', cpu: 'x64' }), /VCRUNTIME140/);
     assert.throws(() => check(pe(0x8664, ['api-ms-win-crt-heap-l1-1-0.dll']), { os: 'win32', cpu: 'x64' }), /api-ms-win-crt/);
     assert.throws(() => check(pe(0x8664, ['libwinpthread-1.dll']), { os: 'win32', cpu: 'x64' }), /libwinpthread/);
+    // MSVC's OpenMP runtime only when it ships next to the file (whisper-cli on Windows).
+    assert.throws(() => check(pe(0x8664, ['VCOMP140.DLL', 'KERNEL32.dll']), { os: 'win32', cpu: 'x64' }), /VCOMP140/);
+    check(pe(0x8664, ['VCOMP140.DLL', 'KERNEL32.dll']), { os: 'win32', cpu: 'x64', own: ['vcomp140.dll'] });
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

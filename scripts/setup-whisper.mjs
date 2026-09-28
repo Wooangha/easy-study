@@ -10,7 +10,8 @@
 // Needs CMake and a C/C++ compiler: macOS `xcode-select --install` + `brew install cmake`; Debian/Ubuntu
 // `sudo apt install build-essential cmake`; Arch `sudo pacman -S base-devel cmake`; Windows: Visual Studio Build Tools
 // (C++) + CMake. Flags as in the ASR spike: static, Release, Metal with the shader library embedded on Apple Silicon,
-// CPU elsewhere with OpenMP off (no libgomp needed at run time), tuned for this machine's CPU.
+// CPU elsewhere with OpenMP off (no libgomp needed at run time), tuned for this machine's CPU. Windows uses OpenMP
+// (desktop/scripts/whisper.mjs says why) and gets MSVC's vcomp140.dll next to whisper-cli.exe.
 // Works in .cache/whisper/setup/ (the desktop build's per-target folders next to it are left alone).
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -19,6 +20,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
+import { findVcomp } from '../desktop/scripts/whisper.mjs';
 
 const VERSION = '1.9.4';
 const COMMIT = '927cfce34f31707e17f2bff35c349632fb9e2c3a';
@@ -137,7 +139,7 @@ const flags = [
   '-DWHISPER_BUILD_IS_DEV=OFF',
   '-DWHISPER_CURL=OFF',
   '-DWHISPER_SDL2=OFF',
-  '-DGGML_OPENMP=OFF',
+  `-DGGML_OPENMP=${process.platform === 'win32' ? 'ON' : 'OFF'}`,
 ];
 if (process.platform === 'darwin' && process.arch === 'arm64') flags.push('-DGGML_METAL=ON', '-DGGML_METAL_EMBED_LIBRARY=ON');
 else if (process.platform === 'darwin') flags.push('-DGGML_METAL=OFF');
@@ -159,6 +161,8 @@ function findBuilt(dir) {
 }
 const built = findBuilt(build);
 if (!built) fail(`빌드는 끝났지만 ${exe} 을(를) 찾을 수 없습니다 (${build})`);
+const vcomp = process.platform === 'win32' ? findVcomp(process.arch) : null;
+if (vcomp) copyFileSync(vcomp, path.join(path.dirname(built), 'vcomp140.dll'));
 if (!versionOf(built)) fail(`${built} 이(가) 실행되지 않습니다`);
 mkdirSync(path.dirname(target), { recursive: true });
 // Replaced in one step (a running server may look for it at any time).
@@ -166,6 +170,7 @@ const tmp = `${target}.${process.pid}.tmp`;
 copyFileSync(built, tmp);
 if (process.platform !== 'win32') chmodSync(tmp, 0o755);
 renameSync(tmp, target);
+if (vcomp) copyFileSync(vcomp, path.join(path.dirname(target), 'vcomp140.dll'));
 if (existsSync(path.join(source, 'LICENSE'))) copyFileSync(path.join(source, 'LICENSE'), path.join(path.dirname(target), 'LICENSE'));
 const version = versionOf(target);
 if (!version) fail(`${target} 이(가) 실행되지 않습니다`);

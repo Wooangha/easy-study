@@ -959,6 +959,7 @@ about using lecture speech.
 - macOS: Info.plist NSMicrophoneUsageDescription (Korean + English), entitlement com.apple.security.device.audio-input (hardened runtime);
   Linux: enable media stream + permission-request handler allowing audio capture for the local server origin (and a remote origin the user
   connected to over HTTPS); Windows: PermissionRequested → allow microphone for those origins.
-- CI builds whisper-cli v1.9.4 per target (Metal on macOS; CPU elsewhere) and the minimal LGPL ffmpeg, caches them, ships them like es-node
+- CI builds whisper-cli v1.9.4 per target (Metal on macOS; CPU elsewhere; on Windows with OpenMP and MSVC's vcomp140.dll next to it,
+  since ggml's own busy-waiting thread pool hangs there when threads outnumber free CPUs) and the minimal LGPL ffmpeg, caches them, ships them like es-node
   (resources on macOS/Windows, externalBin on Linux), and passes EASY_STUDY_WHISPER / EASY_STUDY_FFMPEG to the server. Licenses in
   THIRD_PARTY_NOTICES.md (whisper.cpp MIT, ffmpeg LGPL build config + source offer, Silero VAD MIT, models MIT/OpenAI).

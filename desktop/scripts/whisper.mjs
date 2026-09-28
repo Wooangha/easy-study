@@ -12,7 +12,7 @@
 //                  as the externalBin es-whisper
 //   Windows x64    whisper-cli.exe + whisper.dll, ggml*.dll and one ggml-cpu-<level>.dll per x86-64 level (loaded at
 //                  run time for the CPU at hand, as whisper.cpp's own releases do), static C runtime (no Visual
-//                  C++ Redistributable needed)
+//                  C++ Redistributable needed), OpenMP with MSVC's vcomp140.dll shipped next to them
 // plus LICENSE (whisper.cpp, MIT). Needs cmake and the C/C++ compiler of the Rust toolchain (Xcode command line
 // tools, Visual Studio C++ Build Tools, build-essential). A Mac builds both macOS targets; Windows and Linux build
 // their own.
@@ -40,8 +40,8 @@ const COMMON = [
   '-DWHISPER_SDL2=OFF',
   // Portable: never -march=native of the build machine (the x86-64 level is set below).
   '-DGGML_NATIVE=OFF',
-  // No OpenMP: libgomp is not on every Linux (the official Linux build fails on a clean Ubuntu without it) and
-  // VCOMP140.DLL is part of the Visual C++ runtime. ggml's own thread pool is used instead.
+  // No OpenMP on macOS and Linux: libgomp is not on every Linux (the official Linux build fails on a clean Ubuntu
+  // without it); ggml's own thread pool is used instead. Windows turns it on (whisperFlags).
   '-DGGML_OPENMP=OFF',
   '-DGGML_CCACHE=OFF',
 ];
@@ -63,7 +63,10 @@ export function whisperFlags(target) {
   }
   if (info.os === 'win32') {
     return [
-      ...COMMON,
+      // OpenMP, as whisper.cpp's own Windows releases: with MSVC, ggml's own thread pool waits in a busy loop
+      // (no pause), and more threads than free CPUs never finish. The Silero VAD always uses 4 threads, so on a
+      // 2-CPU computer (GitHub's Windows runner) every transcription hung; OpenMP's threads sleep instead.
+      ...COMMON.map((f) => (f === '-DGGML_OPENMP=OFF' ? '-DGGML_OPENMP=ON' : f)),
       '-A',
       info.cpu === 'arm64' ? 'ARM64' : 'x64',
       '-DBUILD_SHARED_LIBS=ON',
@@ -79,6 +82,32 @@ export function whisperFlags(target) {
 
 export function whisperDir(target, cacheDir = ensureCacheDir()) {
   return path.join(cacheDir, 'whisper', target);
+}
+
+/**
+ * Windows: MSVC's OpenMP runtime, vcomp140.dll (Visual Studio's redistributable files, VC\Redist\MSVC\<version>\
+ * <cpu>\Microsoft.VC<toolset>.OpenMP\), from the newest Visual Studio found by vswhere. It needs only KERNEL32, so
+ * shipped next to whisper-cli.exe it spares the user the Visual C++ Redistributable.
+ */
+export function findVcomp(cpu) {
+  const vswhere = path.join(process.env['ProgramFiles(x86)'] ?? 'C:\\Program Files (x86)', 'Microsoft Visual Studio', 'Installer', 'vswhere.exe');
+  if (!fs.existsSync(vswhere)) throw new Error(`vswhere.exe가 없어요 (${vswhere}): Visual Studio (C++ 빌드 도구)를 설치하세요`);
+  const out = execFileSync(vswhere, ['-latest', '-products', '*', '-find', `VC\\Redist\\MSVC\\**\\${cpu}\\Microsoft.VC*.OpenMP\\vcomp140.dll`], { encoding: 'utf8' });
+  const found = pickVcomp(out.split(/\r?\n/), cpu);
+  if (!found) throw new Error(`vcomp140.dll (${cpu})이 Visual Studio의 VC\\Redist 폴더에 없어요`);
+  return found;
+}
+
+/** The desktop (not onecore, not spectre) vcomp140.dll of `cpu` with the highest MSVC version among `paths`. */
+export function pickVcomp(paths, cpu) {
+  const re = new RegExp(`\\\\MSVC\\\\(\\d+)\\.(\\d+)\\.(\\d+)\\\\${cpu}\\\\Microsoft\\.VC\\d+\\.OpenMP\\\\vcomp140\\.dll$`, 'i');
+  let best = null;
+  for (const p of paths.map((x) => x.trim())) {
+    const m = re.exec(p);
+    const key = m ? (Number(m[1]) * 1e5 + Number(m[2])) * 1e5 + Number(m[3]) : -1;
+    if (m && (!best || key > best.key)) best = { p, key };
+  }
+  return best?.p ?? null;
 }
 
 function stampOf(target) {
@@ -149,6 +178,10 @@ export async function buildWhisper({ target = hostTarget(), force = false, cache
   if (!built) throw new Error(`${exe} not found under ${build}`);
   const libs = info.os === 'win32' ? fs.readdirSync(path.dirname(built)).filter((f) => f.toLowerCase().endsWith('.dll')) : [];
   for (const f of [exe, ...libs]) fs.copyFileSync(path.join(path.dirname(built), f), path.join(bin, f));
+  if (info.os === 'win32') {
+    fs.copyFileSync(findVcomp(info.cpu), path.join(bin, 'vcomp140.dll'));
+    libs.push('vcomp140.dll');
+  }
   fs.copyFileSync(path.join(src, 'LICENSE'), path.join(bin, 'LICENSE'));
   if (info.os !== 'win32') fs.chmodSync(path.join(bin, exe), 0o755);
   if (info.os === 'darwin') {
@@ -159,10 +192,14 @@ export async function buildWhisper({ target = hostTarget(), force = false, cache
     run('strip', [path.join(bin, exe)]);
   }
 
+  let openmp = false;
   for (const f of [exe, ...libs]) {
     const deps = checkBinary(path.join(bin, f), { os: info.os, cpu: info.cpu, own: libs });
     if (f === exe) console.log(`   ${exe} links: ${deps.join(', ') || '(nothing: static)'}`);
+    if (deps.some((d) => /^vcomp140\.dll$/i.test(d))) openmp = true;
   }
+  // CMake quietly builds without OpenMP when it finds none.
+  if (info.os === 'win32' && !openmp) throw new Error('no DLL uses vcomp140.dll: OpenMP was not found (GGML_OPENMP)');
   if (info.os === 'win32' && info.cpu === 'x64' && !libs.some((f) => /^ggml-cpu-.+\.dll$/i.test(f))) {
     throw new Error('no ggml-cpu-*.dll was built (GGML_CPU_ALL_VARIANTS)');
   }

@@ -94,7 +94,8 @@ const ALLOWED = {
   // (Arch: gcc-libs). Not libgomp (OpenMP is off) and nothing else.
   linux: (lib) => /^(libc|libm|libpthread|libdl|librt|libgcc_s|libstdc\+\+)\.so\.\d+$|^ld-linux-(x86-64|aarch64)\.so\.\d+$/.test(lib),
   // Windows' own DLLs. Never the Visual C++ runtime (VCRUNTIME140, MSVCP140, VCOMP140, the api-ms-win-crt-*
-  // forwarders of a /MD build): a user's computer need not have it. Also no MinGW runtime DLLs.
+  // forwarders of a /MD build): a user's computer need not have it (whisper-cli ships its vcomp140.dll: `own`).
+  // Also no MinGW runtime DLLs.
   win32: (lib) => !/^(vcruntime|msvcp|vcomp|concrt|api-ms-win-crt-|libgcc|libstdc\+\+|libwinpthread|libgomp)/i.test(lib),
 };
 

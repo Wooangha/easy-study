@@ -770,6 +770,9 @@ The desktop app ships `whisper-cli` from [whisper.cpp](https://github.com/ggml-o
 `/usr/bin/es-whisper`, license in `/usr/lib/easy-study/whisper/LICENSE`). Web mode (`npm start`) builds the same
 source with `npm run setup:whisper`. `whisper-cli` also compiles in two single-file libraries of its examples,
 miniaudio (public domain or MIT-0) and stb_vorbis (public domain or MIT), which ask for no notice.
+On Windows it is built with OpenMP and ships Microsoft's OpenMP runtime `vcomp140.dll` next to it, one of the
+redistributable files of Microsoft Visual Studio (its "Distributable Code", from the `VC\Redist` folder), under the
+Visual Studio license terms.
 
 ```text
 MIT License

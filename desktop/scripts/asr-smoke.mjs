@@ -136,9 +136,11 @@ function tool(file, args, { timeout = 300_000 } = {}) {
   const t = Date.now();
   const r = spawnSync(file, args, { encoding: 'utf8', timeout, maxBuffer: 64 << 20, windowsHide: true });
   const ms = Date.now() - t;
-  if (r.error) throw new Error(`${path.basename(file)}: ${r.error.message}`);
+  // A timeout still returns what the tool wrote so far: its last lines show where it stopped.
+  const tail = () => (r.stderr || '').split('\n').slice(-15).join('\n');
+  if (r.error) throw new Error(`${path.basename(file)}: ${r.error.message} after ${ms} ms:\n${tail()}`);
   if (r.status !== 0) {
-    throw new Error(`${path.basename(file)} ${args.slice(0, 3).join(' ')}… exited with ${r.status ?? r.signal}:\n${(r.stderr || '').split('\n').slice(-15).join('\n')}`);
+    throw new Error(`${path.basename(file)} ${args.slice(0, 3).join(' ')}… exited with ${r.status ?? r.signal}:\n${tail()}`);
   }
   return { ...r, ms };
 }
