@@ -16,10 +16,11 @@
 //   and, while the lecture is being recorded, its last minutes (BuildTurnInput.lectureSpeech, resolved by chat.ts;
 //   capped again here). Priming then says in one line that recordings exist.
 // - When the conversation would exceed the provider's image budget, or the orchestrator reports that
-//   the provider lost the conversation / found it too large (BuildTurnInput.forceNewConversation), a
-//   fresh conversation is started (rollover): the deck is primed again and a text recap of the
-//   latest Q&A is included. Request sizes in bytes and tokens are enforced by the providers, which
-//   see the encoded request (they fail with ProviderError 'context_overflow', which leads here).
+//   the provider lost the conversation / found it too large (BuildTurnInput.forceNewConversation), or
+//   the session's LLM was changed and its conversation dropped (ProviderState.switched), a fresh
+//   conversation is started (rollover): the deck is primed again and a text recap of the latest Q&A
+//   is included, closed by a note saying why. Request sizes in bytes and tokens are enforced by the
+//   providers, which see the encoded request (they fail with ProviderError 'context_overflow', which leads here).
 //
 // Everything in this file is pure: no filesystem access, no clock, no randomness. Paths and texts
 // come from DocAssets; identical inputs always produce identical outputs.
@@ -191,8 +192,10 @@ export function buildTurn(input: BuildTurnInput): BuildTurnOutput {
   const cost =
     (needsPrime ? windowSlides.length : windowSlides.filter((s) => !state.recentSlides.includes(s)).length) + attachments.length;
   const overBudget = !needsPrime && state.imagesSent + cost > maxImages;
+  // The session's LLM was changed and the conversation it had dropped (ProviderState.switched).
+  const switched = state.switched === true;
   // The orchestrator forces a new conversation when the provider lost the old one or it grew too large.
-  const rollover = overBudget || forced !== null;
+  const rollover = overBudget || forced !== null || switched;
   const startsConversation = needsPrime || rollover;
 
   // Slides whose image the provider conversation already has (none in a fresh conversation).
@@ -222,9 +225,10 @@ export function buildTurn(input: BuildTurnInput): BuildTurnOutput {
     // The document has transcribed lecture recordings (DESIGN §22): one line, the speech itself comes with questions.
     if (input.lectureSpeech) out.text(prompts.LECTURE_RECORDINGS_NOTE);
     // Recap the Q&A so far whenever a conversation starts in a session that already has some
-    // (after a rollover, a recovery, or a provider state that was reset).
-    const reason: prompts.RestartReason = forced ?? (overBudget ? 'budget' : 'restart');
+    // (after a rollover, a recovery, an LLM switch, or a provider state that was reset).
+    const reason: prompts.RestartReason = forced ?? (switched ? 'provider_switch' : overBudget ? 'budget' : 'restart');
     appendRecap(out, Array.isArray(session.messages) ? session.messages : [], settings.recapTurns, reason);
+    // A fresh state: no `switched` any more, the switch's new conversation is this one.
     nextState = {
       resume: null, // filled in by the orchestrator from the provider result
       primed: true,
@@ -261,6 +265,7 @@ export function buildTurn(input: BuildTurnInput): BuildTurnOutput {
     overviewImages: startsConversation ? sheets.length : 0,
   };
   if (forced !== null) context.recoveredFrom = forced;
+  if (switched) context.switched = true;
   if (attachments.length > 0) context.attachments = attachments.length;
 
   return {
@@ -925,7 +930,7 @@ function normalizeState(raw: ProviderState | undefined | null, pageCount: number
   for (const s of Array.isArray(raw.recentSlides) ? raw.recentSlides : []) {
     if (Number.isInteger(s) && s >= 1 && s <= pageCount && !recent.includes(s)) recent.push(s);
   }
-  return {
+  const state: ProviderState = {
     resume: raw.resume && typeof raw.resume === 'object' ? cloneResume(raw.resume) : null,
     primed: raw.primed === true,
     imagesSent: Math.max(0, Math.floor(finiteOr(raw.imagesSent, 0))),
@@ -933,6 +938,8 @@ function normalizeState(raw: ProviderState | undefined | null, pageCount: number
     generation: Math.max(0, Math.floor(finiteOr(raw.generation, 0))),
     history: Array.isArray(raw.history) ? raw.history : [],
   };
+  if (raw.switched === true) state.switched = true;
+  return state;
 }
 
 function cloneResume(resume: ResumeHandle | null): ResumeHandle | null {

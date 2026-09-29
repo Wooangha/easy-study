@@ -1,9 +1,9 @@
 // Pure UI helpers (no DOM). Run: node --test web/tests/*.test.ts
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import type { Course, DocMeta } from '../../shared/types.ts';
+import type { Course, DocMeta, LlmSwitch } from '../../shared/types.ts';
 import { canOpenFiles, courseBadgeTitle, courseContextSentence, earlierLectures } from '../src/lib/courseContext.ts';
-import { describeContext, primeCardState } from '../src/lib/format.ts';
+import { describeContext, llmSwitchNotice, primeCardState, switchMarkerText, switchMarkerTitle } from '../src/lib/format.ts';
 
 const ctx = {
   primed: false,
@@ -31,6 +31,35 @@ describe('describeContext', () => {
     assert.deepEqual(
       describeContext({ ...ctx, primed: true, rollover: true }).map((c) => c.text).slice(0, 2),
       ['🔄 새 대화로 이어감', '📚 전체 슬라이드 전달'],
+    );
+  });
+
+  test("the first turn after the session's LLM was changed says so (instead of the plain rollover chip)", () => {
+    const chips = describeContext({ ...ctx, primed: true, rollover: true, switched: true });
+    assert.deepEqual(chips.map((c) => c.kind), ['switched', 'primed', 'attached', 'reused']);
+    assert.equal(chips[0].text, '🔀 바꾼 LLM으로 새 대화 시작');
+    assert.ok(chips[0].title && chips[0].title.includes('요약'));
+    // A recovery reported on top of it still wins (it says what actually happened last).
+    const lost = describeContext({ ...ctx, primed: true, rollover: true, switched: true, recoveredFrom: 'resume_invalid' });
+    assert.equal(lost[0].kind, 'recovered');
+  });
+});
+
+describe('LLM switch texts (the marker between messages and the notice)', () => {
+  const change: LlmSwitch = {
+    at: new Date(2026, 8, 23, 15, 42).toISOString(),
+    afterMessageId: 'm1',
+    from: { provider: 'claude-code', model: 'sonnet' },
+    to: { provider: 'codex', model: 'gpt-5.5', effort: 'high' },
+  };
+
+  test('name the new LLM with its model and effort', () => {
+    assert.equal(switchMarkerText(undefined, change), '🔀 여기부터 Codex · gpt-5.5 · 추론 높음');
+    assert.equal(switchMarkerText(undefined, { ...change, to: { provider: 'claude-code', model: '' } }), '🔀 여기부터 Claude Code');
+    assert.match(switchMarkerTitle(undefined, change), /15:42에 LLM을 바꿨어요: Claude Code · sonnet → Codex · gpt-5\.5 · 추론 높음\./);
+    assert.equal(
+      llmSwitchNotice('Codex · gpt-5.5'),
+      '다음 질문부터 Codex · gpt-5.5(으)로 답해요. 슬라이드와 최근 대화 요약을 다시 보내서 처음 질문은 토큰이 더 들어요.',
     );
   });
 });

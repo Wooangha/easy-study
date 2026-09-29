@@ -9,9 +9,11 @@ import type { ProviderChoice } from '../hooks/useProviderChoice.ts';
 import { PENDING_ASSISTANT_ID, type StudySession } from '../hooks/useStudySession.ts';
 import type { Chip } from '../lib/attachments.ts';
 import { canOpenFiles, courseBadgeTitle, courseContextSentence, type EarlierLectures } from '../lib/courseContext.ts';
-import { effortName, providerLabel, providerWithModel } from '../lib/format.ts';
+import { effortName, llmSwitchNotice, providerLabel, providerWithModel } from '../lib/format.ts';
+import { sessionChoice } from '../lib/providerChoice.ts';
 import { unrecordedAnswers } from '../lib/usage.ts';
 import { Composer } from './Composer.tsx';
+import { LlmSwitchDialog } from './LlmSwitchDialog.tsx';
 import { MessageList } from './MessageList.tsx';
 import { RecordingTabBadge } from './recording/LectureSpeech.tsx';
 import { UsageBar } from './UsageBar.tsx';
@@ -149,6 +151,21 @@ export function ChatPanel({
   const retryPrime = useCallback(() => void primeCurrent(targetRef.current), [primeCurrent, targetRef]);
   // A priming turn that failed or was aborted leaves the session unprimed: offer to feed the deck again.
   const onRetryPrime = session && !session.primed && !running ? retryPrime : undefined;
+
+  // "LLM 바꾸기" (DESIGN §5 "LLM switch"): the header badge opens the dialog. The notice stays until the next turn
+  // starts or another session is shown (scrollKey changes then); the message list shows where the switch happened.
+  const [switchOpen, setSwitchOpen] = useState(false);
+  const [notice, setNotice] = useState<{ key: string; text: string } | null>(null);
+  const { switchLlm, scrollKey } = study;
+  const applySwitch = useCallback(
+    async (next: ProviderChoice) => {
+      const updated = await switchLlm(next);
+      if (!updated) return false;
+      setNotice({ key: scrollKey, text: llmSwitchNotice(providerWithModel(providers, updated.provider, updated.model, updated.effort)) });
+      return true;
+    },
+    [switchLlm, scrollKey, providers],
+  );
 
   // Without a session a question creates one, which needs an available provider.
   const disabledReason = !session && !running && !choice ? (providerProblem ?? '사용 가능한 LLM이 없어요') : null;
@@ -333,19 +350,40 @@ export function ChatPanel({
             </a>
           )}
           {session && (
-            <span
+            <button
+              type="button"
               className="provider-badge"
-              title={`이 세션의 LLM: ${sessionLlmDetails(providers, session)}`}
+              disabled={running}
+              onClick={() => setSwitchOpen(true)}
+              aria-label={`LLM 바꾸기 (지금: ${sessionLlmDetails(providers, session)})`}
+              title={
+                running
+                  ? `이 세션의 LLM: ${sessionLlmDetails(providers, session)} — 답변이 끝난 뒤에 바꿀 수 있어요`
+                  : `이 세션의 LLM: ${sessionLlmDetails(providers, session)} — 클릭하면 다른 LLM으로 바꿀 수 있어요`
+              }
             >
               {providerWithModel(providers, session.provider, session.model, session.effort)}
-            </span>
+              <span className="provider-badge-caret" aria-hidden>
+                ▾
+              </span>
+            </button>
           )}
         </div>
+
+        {notice && notice.key === scrollKey && (
+          <div className="chat-notice" role="status">
+            <span>{notice.text}</span>
+            <button type="button" className="ghost-btn tiny" onClick={() => setNotice(null)} aria-label="알림 닫기">
+              ✕
+            </button>
+          </div>
+        )}
 
         <MessageList
           messages={messages}
           pageCount={doc.pageCount}
           providers={providers}
+          switches={session?.switches}
           liveAssistantId={liveAssistantId}
           liveStatus={study.liveStatus}
           stopping={study.stopping}
@@ -401,6 +439,14 @@ export function ChatPanel({
       </div>
 
       {overlay}
+      {switchOpen && session && (
+        <LlmSwitchDialog
+          onClose={() => setSwitchOpen(false)}
+          providers={providers}
+          current={sessionChoice(session)}
+          onApply={applySwitch}
+        />
+      )}
     </section>
   );
 }

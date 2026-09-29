@@ -43,6 +43,7 @@ import type {
   ProviderInfo,
   StartDigestRequest,
   StreamEvent,
+  UpdateSessionRequest,
 } from '../shared/types.ts';
 import {
   MAX_NEIGHBORS,
@@ -53,6 +54,7 @@ import {
   runTurn,
   waitForIdle,
   waitForTurn,
+  withSessionReserved,
 } from './chat.ts';
 import type { ChatDeps } from './chat.ts';
 import {
@@ -143,6 +145,7 @@ import {
   listSessions,
   recoverInterruptedSessions,
   referencedAttachmentIds,
+  switchSessionLlm,
   toSession,
   writeNotes,
 } from './sessions.ts';
@@ -753,6 +756,23 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
   api.get('/docs/:docId/sessions/:sid', async (req, res) => {
     const record = await getSession(req.params.docId, req.params.sid);
     if (!record) throw new HttpError(404, '세션을 찾을 수 없습니다');
+    res.json(toSession(record));
+  });
+
+  /**
+   * Changes the session's LLM (UpdateSessionRequest, validated like POST /sessions): its provider conversation is
+   * dropped, so the next turn starts a new one on the new LLM — the deck fed again, the latest Q&A recapped
+   * (DESIGN §5). 409 while the session is answering; the unchanged session (200) when nothing differs.
+   */
+  api.patch('/docs/:docId/sessions/:sid', async (req, res) => {
+    const { docId, sid } = req.params;
+    // Existence first, like POST /sessions: a missing session is 404 whatever the body says (and no CLI is detected for it).
+    if (!(await getSession(docId, sid))) throw new HttpError(404, '세션을 찾을 수 없습니다');
+    const body = jsonBody(req) as Partial<Record<keyof UpdateSessionRequest, unknown>>;
+    const { info, model, effort } = resolveProviderChoice(await getProviderInfos(), body.provider, body.model, body.effort);
+    const { record } = await withSessionReserved(docId, sid, () =>
+      switchSessionLlm(docId, sid, { provider: info.id, model, ...(effort ? { effort } : {}) }),
+    );
     res.json(toSession(record));
   });
 

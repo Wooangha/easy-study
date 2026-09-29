@@ -1,5 +1,5 @@
 import { EFFORT_LABELS } from '../../../shared/types.ts';
-import type { ContextInfo, MessageStatus, ProviderId, ProviderInfo } from '../../../shared/types.ts';
+import type { ContextInfo, LlmSwitch, MessageStatus, ProviderId, ProviderInfo } from '../../../shared/types.ts';
 
 const FALLBACK_PROVIDER_LABELS: Record<ProviderId, string> = {
   'claude-code': 'Claude Code',
@@ -23,6 +23,23 @@ export function providerWithModel(providers: ProviderInfo[] | undefined, id: Pro
   if (model) parts.push(model);
   if (effort) parts.push(`추론 ${effortName(providers, id, effort)}`);
   return parts.join(' · ');
+}
+
+/** "🔀 여기부터 Codex · gpt-5.5 · 추론 높음": the marker between the messages where the session's LLM changed. */
+export function switchMarkerText(providers: ProviderInfo[] | undefined, change: LlmSwitch): string {
+  return `🔀 여기부터 ${providerWithModel(providers, change.to.provider, change.to.model, change.to.effort)}`;
+}
+
+/** The marker's tooltip: when, from what to what, and that the new LLM got the slides and a recap first. */
+export function switchMarkerTitle(providers: ProviderInfo[] | undefined, change: LlmSwitch): string {
+  const from = providerWithModel(providers, change.from.provider, change.from.model, change.from.effort);
+  const to = providerWithModel(providers, change.to.provider, change.to.model, change.to.effort);
+  return `${formatTime(change.at)}에 LLM을 바꿨어요: ${from} → ${to}. 새 LLM은 슬라이드와 최근 대화 요약을 다시 받고 이어서 답해요.`;
+}
+
+/** The one-line notice shown in the chat after its LLM was changed (`name` = providerWithModel of the new one). */
+export function llmSwitchNotice(name: string): string {
+  return `다음 질문부터 ${name}(으)로 답해요. 슬라이드와 최근 대화 요약을 다시 보내서 처음 질문은 토큰이 더 들어요.`;
 }
 
 function sameDay(a: Date, b: Date): boolean {
@@ -64,6 +81,7 @@ export function pageList(slides: number[]): string {
 
 export type ContextChipKind =
   | 'recovered'
+  | 'switched'
   | 'rollover'
   | 'primed'
   | 'overview'
@@ -95,9 +113,15 @@ export function describeContext(ctx: ContextInfo | undefined): ContextChip[] {
   if (!ctx) return [];
   const out: ContextChip[] = [];
   const recovered = ctx.recoveredFrom ? RECOVERED_CHIPS[ctx.recoveredFrom] : undefined;
-  // A recovery is a forced rollover: its chip replaces the plain "new conversation" one.
+  // A recovery or an LLM switch is a forced rollover: its chip replaces the plain "new conversation" one.
   if (recovered) out.push({ kind: 'recovered', ...recovered });
-  else if (ctx.rollover) out.push({ kind: 'rollover', text: '🔄 새 대화로 이어감' });
+  else if (ctx.switched) {
+    out.push({
+      kind: 'switched',
+      text: '🔀 바꾼 LLM으로 새 대화 시작',
+      title: 'LLM을 바꿔서 새 대화를 시작하고, 슬라이드와 최근 대화 요약을 다시 전달한 뒤 답했어요.',
+    });
+  } else if (ctx.rollover) out.push({ kind: 'rollover', text: '🔄 새 대화로 이어감' });
   if (ctx.primed) out.push({ kind: 'primed', text: '📚 전체 슬라이드 전달' });
   if (ctx.overviewImages > 0) out.push({ kind: 'overview', text: `개요 이미지 ${ctx.overviewImages}장` });
   const attached = [...(ctx.attachedSlides ?? [])].sort((a, b) => a - b);

@@ -202,6 +202,27 @@ export function waitForIdle(timeoutMs: number): Promise<boolean> {
 }
 
 /**
+ * Runs `fn` with the session reserved like a running turn, for a change of the session that must not race with a
+ * turn (whose final save would undo it): the LLM switch (DESIGN §5). A turn asked for meanwhile gets 409, and this
+ * rejects with HttpError 409 while a turn of the session is running.
+ */
+export async function withSessionReserved<T>(docId: string, sessionId: string, fn: () => Promise<T>): Promise<T> {
+  const key = turnKey(docId, sessionId);
+  if (runningTurns.has(key)) throw new HttpError(409, '이 세션은 답변을 생성하고 있습니다. 답변이 끝난 뒤에 다시 시도해 주세요');
+  let markFinished = () => {};
+  const finished = new Promise<void>((resolve) => {
+    markFinished = resolve;
+  });
+  runningTurns.set(key, { controller: new AbortController(), finished });
+  try {
+    return await fn();
+  } finally {
+    runningTurns.delete(key);
+    markFinished();
+  }
+}
+
+/**
  * Runs one turn. Rejects with HttpError (404 / 400 / 409) when the turn cannot start; in that
  * case no event has been emitted and nothing was persisted.
  */

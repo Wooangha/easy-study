@@ -4,7 +4,16 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { ProviderInfo } from '../../shared/types.ts';
 import { effortName, providerWithModel } from '../src/lib/format.ts';
-import { effectiveChoice, effortOptions, parseStoredChoice, storedChoice, supportedEffort, withModel } from '../src/lib/providerChoice.ts';
+import {
+  effectiveChoice,
+  effortOptions,
+  parseStoredChoice,
+  sameChoice,
+  sessionChoice,
+  storedChoice,
+  supportedEffort,
+  withModel,
+} from '../src/lib/providerChoice.ts';
 import type { ProviderChoice } from '../src/lib/providerChoice.ts';
 
 const codex: ProviderInfo = {
@@ -100,6 +109,33 @@ describe('stored choice', () => {
     assert.deepEqual(effectiveChoice([api], null), { provider: 'openai-api', model: 'gpt-5', effort: '' });
     assert.equal(effectiveChoice([{ ...api, available: false }], stored), null);
     assert.equal(effectiveChoice(undefined, stored), null);
+  });
+});
+
+describe('the LLM switch of a session (LlmSwitchDialog)', () => {
+  test("starts from the session's LLM (an absent effort is 기본값) and applies only a different choice", () => {
+    assert.deepEqual(sessionChoice({ provider: 'codex', model: 'gpt-big' }), { provider: 'codex', model: 'gpt-big', effort: '' });
+    assert.deepEqual(sessionChoice({ provider: 'codex', model: '', effort: 'high' }), { provider: 'codex', model: '', effort: 'high' });
+    const current = sessionChoice({ provider: 'codex', model: 'gpt-big', effort: 'high' });
+    assert.equal(sameChoice(current, { provider: 'codex', model: 'gpt-big', effort: 'high' }), true);
+    assert.equal(sameChoice(current, { provider: 'codex', model: 'gpt-big', effort: '' }), false);
+    assert.equal(sameChoice(current, { provider: 'codex', model: 'gpt-small', effort: 'high' }), false);
+    assert.equal(sameChoice(current, { provider: 'claude-code', model: 'gpt-big', effort: 'high' }), false);
+    // The dialog shows the picker's rules on top: a provider that went away gives way to the first available one (so
+    // the session can be moved off it), a level the model lacks reads as 기본값.
+    const gone: ProviderInfo = { ...claude, available: false, reason: 'claude not found' };
+    assert.deepEqual(effectiveChoice([gone, codex], sessionChoice({ provider: 'claude-code', model: 'opus', effort: 'max' })), {
+      provider: 'codex',
+      model: '',
+      effort: '',
+    });
+    assert.deepEqual(effectiveChoice([claude, codex], sessionChoice({ provider: 'codex', model: 'gpt-none', effort: 'low' })), {
+      provider: 'codex',
+      model: 'gpt-none',
+      effort: '',
+    });
+    // Picking a model in the dialog keeps the level as the top bar does (storedChoice).
+    assert.deepEqual(storedChoice(current, withModel(codex, current, 'gpt-small')), { provider: 'codex', model: 'gpt-small', effort: '' });
   });
 });
 

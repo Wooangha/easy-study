@@ -4,7 +4,8 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import * as assets from '../../server/assets.ts';
 import { slideUrl, thumbUrl, VIEW_WIDTHS, viewSrcSet, viewUrl } from '../src/api.ts';
-import { CHAT_WINDOW, chatWindowStart } from '../src/lib/chatWindow.ts';
+import type { LlmSwitch } from '../../shared/types.ts';
+import { CHAT_WINDOW, chatWindowStart, switchAtWindowStart } from '../src/lib/chatWindow.ts';
 import { slideSizes } from '../src/lib/format.ts';
 
 describe('slide image URLs', () => {
@@ -49,6 +50,24 @@ describe('chat windowing', () => {
     assert.equal(chatWindowStart(list, CHAT_WINDOW * 2), 22);
     assert.equal(chatWindowStart(list, list.length), 0);
     assert.equal(chatWindowStart(list, 1000), 0);
+  });
+
+  test('the newest LLM switch hidden behind "이전 메시지 보기" heads the window', () => {
+    const list = pairs(31).map((m, i) => ({ ...m, id: `m${i}` }));
+    const sw = (afterMessageId: string | null): LlmSwitch => ({
+      at: '2026-09-29T00:00:00.000Z',
+      afterMessageId,
+      from: { provider: 'claude-code', model: '' },
+      to: { provider: 'codex', model: '' },
+    });
+    const start = chatWindowStart(list, CHAT_WINDOW); // 42: m41 is the last hidden answer
+    // A switch always follows an answer, so with enough turns on the new LLM it lands exactly on the boundary.
+    assert.equal(switchAtWindowStart([sw('m41')], list, start), 0);
+    assert.equal(switchAtWindowStart([sw('m3'), sw('m41')], list, start), 1); // only the newest hidden one
+    assert.equal(switchAtWindowStart([sw(null)], list, start), 0); // before the first message: hidden as well
+    assert.equal(switchAtWindowStart([sw('m3'), sw('m43')], list, start), 0); // m43 is rendered: that one shows in place
+    assert.equal(switchAtWindowStart([sw('m43')], list, start), -1);
+    assert.equal(switchAtWindowStart([], list, start), -1);
   });
 
   test('the window never starts with an answer whose question is hidden', () => {

@@ -7,6 +7,7 @@ import type {
   DigestStatus,
   DocMeta,
   LayoutItem,
+  LlmSwitch,
   ProviderId,
   SessionUsage,
   TokenUsage,
@@ -31,6 +32,12 @@ export interface ProviderState {
   generation: number;
   /** Turns of the current provider conversation (only kept for stateless API providers). */
   history: HistoryTurn[];
+  /**
+   * The session's LLM was changed (PATCH …/sessions/:sid) and the conversation it had was dropped: the next turn
+   * starts a new provider conversation on the new LLM as a forced rollover, whose recap says the earlier answers
+   * came from another model (prompts.RestartReason 'provider_switch'). Gone once a conversation starts.
+   */
+  switched?: true;
 }
 
 /** Persisted as library/<docId>/sessions/<sessionId>.json */
@@ -49,8 +56,10 @@ export interface SessionRecord {
   messages: ChatMessage[];
   /** Running token totals (DESIGN §23); absent in sessions without reported usage (and those made before it). */
   usage?: SessionUsage;
-  /** The subscription's usage limits as last reported in this session. */
+  /** The subscription's usage limits as last reported in this session (dropped when the provider changes). */
   limits?: UsageLimits;
+  /** Changes of the session's LLM (SessionSummary.switches); absent when it never changed. */
+  switches?: LlmSwitch[];
 }
 
 export interface ContextSettings {

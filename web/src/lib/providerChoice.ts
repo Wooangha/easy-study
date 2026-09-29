@@ -1,6 +1,6 @@
-// The LLM choice for new sessions and digests (top bar "새 세션"): provider, model and reasoning effort. Pure
-// helpers of useProviderChoice and the top bar's pickers.
-import type { EffortOption, ProviderId, ProviderInfo } from '../../../shared/types.ts';
+// The LLM choice for new sessions and digests (top bar "새 세션"), and of a session being switched to another LLM
+// (the chat header's badge): provider, model and reasoning effort. Pure helpers of useProviderChoice and the pickers.
+import type { EffortOption, ProviderId, ProviderInfo, SessionSummary } from '../../../shared/types.ts';
 
 /** Provider + model + reasoning effort used when creating new sessions (and digests). */
 export interface ProviderChoice {
@@ -69,4 +69,14 @@ export function withModel(info: ModelsAndEfforts, choice: ProviderChoice, model:
 export function storedChoice(stored: ProviderChoice | null, next: ProviderChoiceUpdate): ProviderChoice {
   const effort = next.effort ?? (stored?.provider === next.provider ? stored.effort : '');
   return { provider: next.provider, model: next.model, effort };
+}
+
+/** The LLM a session runs on, as a choice (an absent effort = 기본값 ''): where the LLM switch dialog starts. */
+export function sessionChoice(session: Pick<SessionSummary, 'provider' | 'model' | 'effort'>): ProviderChoice {
+  return { provider: session.provider, model: session.model, effort: session.effort ?? '' };
+}
+
+/** Same provider, model and effort (the switch dialog has nothing to apply then; the server answers a no-op). */
+export function sameChoice(a: ProviderChoice, b: ProviderChoice): boolean {
+  return a.provider === b.provider && a.model === b.model && a.effort === b.effort;
 }

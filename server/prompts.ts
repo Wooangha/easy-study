@@ -288,10 +288,11 @@ export const RECAP_HEADING = 'Earlier in this study session (summary of previous
 /**
  * Why a new provider conversation was started although the study session already has Q&A:
  * 'budget' = the image budget was reached (rollover), 'resume_invalid' = the provider no longer has the
- * previous conversation, 'context_overflow' = it became too large for the model, 'restart' = any other
+ * previous conversation, 'context_overflow' = it became too large for the model, 'provider_switch' = the
+ * student changed the session's LLM (the earlier answers came from another model), 'restart' = any other
  * reason (e.g. the provider state was reset).
  */
-export type RestartReason = 'budget' | 'resume_invalid' | 'context_overflow' | 'restart';
+export type RestartReason = 'budget' | 'resume_invalid' | 'context_overflow' | 'provider_switch' | 'restart';
 
 const CONTINUE_NATURALLY = 'The student sees one continuous chat — continue naturally without mentioning the restart.)';
 
@@ -306,6 +307,9 @@ const RESTART_NOTES: Record<RestartReason, string> = {
   context_overflow:
     "(The previous conversation became too long for the model's context, so it was restarted and the deck was attached " +
     `again above. ${CONTINUE_NATURALLY}`,
+  provider_switch:
+    '(The student switched this study session to you from another model: the answers recapped above were given by ' +
+    `that model, and the conversation continues here with the deck attached again above. ${CONTINUE_NATURALLY}`,
   restart: `(This study session continues in a new conversation, so the deck was attached again above. ${CONTINUE_NATURALLY}`,
 };
 

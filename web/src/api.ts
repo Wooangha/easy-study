@@ -29,6 +29,7 @@ import type {
   StreamEvent,
   UpdateCourseRequest,
   UpdateGroupRequest,
+  UpdateSessionRequest,
 } from '../../shared/types.ts';
 import { ATTACHMENT_ID_RE } from '../../shared/types.ts';
 import {
@@ -312,6 +313,13 @@ export const createSession = (docId: string, body: CreateSessionRequest) =>
   postJSON<Session>(`${docPath(docId)}/sessions`, body);
 
 export const getSession = (docId: string, sid: string) => request<Session>(sessionPath(docId, sid));
+
+/**
+ * Change the LLM of a session (DESIGN §5 "LLM switch"): the next turn starts a new provider conversation on it.
+ * 409 while the session is answering; 400 for a provider, model or effort the server refuses.
+ */
+export const updateSession = (docId: string, sid: string, body: UpdateSessionRequest) =>
+  sendJSON<Session>('PATCH', sessionPath(docId, sid), body);
 
 export const deleteSession = (docId: string, sid: string) =>
   request<void>(sessionPath(docId, sid), { method: 'DELETE' });

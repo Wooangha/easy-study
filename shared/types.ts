@@ -227,6 +227,11 @@ export interface ContextInfo {
    * ('resume_invalid') or became too large ('context_overflow'); the turn was retried automatically.
    */
   recoveredFrom?: 'resume_invalid' | 'context_overflow';
+  /**
+   * Set when this turn started a new provider conversation because the session's LLM was changed
+   * (PATCH …/sessions/:sid): a forced rollover on the new LLM, the earlier Q&A recapped.
+   */
+  switched?: true;
   /** Number of attachments (selected slide regions / images) sent with this question. */
   attachments?: number;
 }
@@ -260,10 +265,30 @@ export interface ChatMessage {
   usage?: TokenUsage;
 }
 
+/** The LLM a session runs on: the provider, its model ('' = the provider's default) and the reasoning effort. */
+export interface LlmChoice {
+  provider: ProviderId;
+  model: string;
+  /** Absent = the CLI's default. */
+  effort?: string;
+}
+
+/**
+ * A change of a session's LLM (PATCH …/sessions/:sid): the answers up to `afterMessageId` (null = none yet) were
+ * given by `from`; from `at` on the session runs on `to`, in a new provider conversation (DESIGN §5).
+ */
+export interface LlmSwitch {
+  at: string; // ISO
+  afterMessageId: string | null;
+  from: LlmChoice;
+  to: LlmChoice;
+}
+
 export interface SessionSummary {
   id: string;
   docId: string;
   title: string;
+  /** The LLM the session runs on now (changed by PATCH …/sessions/:sid; see `switches`). */
   provider: ProviderId;
   model: string;
   /** Reasoning effort (EffortOption.id); absent = the CLI's default (and sessions made before efforts existed). */
@@ -275,8 +300,13 @@ export interface SessionSummary {
   primed: boolean;
   /** Tokens of the session's turns so far (DESIGN §23); absent until a turn reported usage. */
   usage?: SessionUsage;
-  /** The subscription's usage limits as the provider last reported them in this session (subscription CLIs only). */
+  /**
+   * The subscription's usage limits as the provider last reported them in this session (subscription CLIs only;
+   * dropped when the session's provider changes).
+   */
   limits?: UsageLimits;
+  /** Changes of the session's LLM, oldest first; absent when it never changed (and in sessions saved before). */
+  switches?: LlmSwitch[];
 }
 
 export interface Session extends SessionSummary {
@@ -290,6 +320,19 @@ export interface CreateSessionRequest {
   /** One of ProviderInfo.efforts that the model supports; '' or omitted = the CLI's default. */
   effort?: string;
   title?: string;
+}
+
+/**
+ * PATCH /api/docs/:docId/sessions/:sid — change the session's LLM, validated like CreateSessionRequest. The next
+ * turn starts a new provider conversation on it (the deck fed again, the latest Q&A recapped). 409 while the
+ * session is answering; the unchanged session (200) when nothing differs.
+ */
+export interface UpdateSessionRequest {
+  provider: ProviderId;
+  /** '' or omitted = provider default. */
+  model?: string;
+  /** Same as CreateSessionRequest.effort. */
+  effort?: string;
 }
 
 export interface SendMessageRequest {

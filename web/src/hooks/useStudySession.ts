@@ -529,6 +529,42 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
     [docId, sessionId, runTurn],
   );
 
+  /**
+   * Change the LLM of the current session (PATCH, DESIGN §5 "LLM switch"): the next turn starts a new provider
+   * conversation on it. Resolves the session as the server saved it (its `switches` carry the change), or null when
+   * nothing changed: a turn is running, or the server refused.
+   */
+  const switchLlm = useCallback(
+    async (next: ProviderChoice): Promise<Session | null> => {
+      if (!docId || !sessionId) return null;
+      const forDoc = docId;
+      const sid = sessionId;
+      if (turnsRef.current.has(turnKey(forDoc, sid)) || flowActive) {
+        toast('답변이 끝난 뒤에 LLM을 바꿀 수 있어요.', 'error');
+        return null;
+      }
+      let updated: Session;
+      try {
+        updated = await api.updateSession(forDoc, sid, {
+          provider: next.provider,
+          model: next.model || undefined,
+          effort: next.effort || undefined,
+        });
+      } catch (e) {
+        toast(`LLM을 바꾸지 못했어요: ${api.errorMessage(e)}`, 'error');
+        return null;
+      }
+      // The saved session is authoritative (the change is in its `switches`), wherever the user is now.
+      setRawSession((prev) => (prev && prev.docId === forDoc && prev.id === sid ? updated : prev));
+      setSessionsState((prev) =>
+        prev && prev.docId === forDoc ? { docId: forDoc, list: upsertSummary(prev.list, toSummary(updated)) } : prev,
+      );
+      onTurnFinishedRef.current?.(forDoc); // the notes name the session's LLM
+      return updated;
+    },
+    [docId, sessionId, flowActive, onTurnFinishedRef],
+  );
+
   const liveTurn = docId && sessionId ? (turnsRef.current.get(turnKey(docId, sessionId)) ?? null) : null;
 
   /** Stop: ask the server to abort (saves the partial answer), then cut the stream if it lingers. */
@@ -627,6 +663,7 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
     ask,
     stop,
     primeCurrent,
+    switchLlm,
     deleteSession,
     refreshSessions,
   };

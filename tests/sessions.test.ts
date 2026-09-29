@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, beforeEach, describe, test } from 'node:test';
 import { SESSION_ID_RE } from '../shared/types.ts';
-import type { ChatMessage } from '../shared/types.ts';
+import type { ChatMessage, UsageLimits } from '../shared/types.ts';
 import { HttpError } from '../server/config.ts';
 import { initialProviderState } from '../server/context.ts';
 import type { SessionRecord } from '../server/internal-types.ts';
@@ -20,6 +20,7 @@ import {
   newSessionId,
   recoverInterruptedSessions,
   saveSession,
+  switchSessionLlm,
   toSession,
   toSummary,
   writeNotes,
@@ -208,6 +209,132 @@ describe('session records', () => {
   });
 });
 
+describe('LLM switch (switchSessionLlm, DESIGN §5)', () => {
+  const SWITCH_DOC = 'switch-doc-000333';
+  /** A session that has talked to its provider: something to drop on a switch. */
+  const primed = (): SessionRecord['providerState'] => ({
+    resume: { cliSessionId: 'cli-1' },
+    primed: true,
+    imagesSent: 5,
+    recentSlides: [2],
+    generation: 1,
+    history: [],
+  });
+
+  before(() => makeDoc(SWITCH_DOC, 'Paging'));
+
+  test('changes provider, model and effort, drops the provider conversation (a forced rollover next) and records the change', async () => {
+    const record = await createSession(SWITCH_DOC, { provider: 'claude-code', model: 'sonnet', effort: 'high', title: '전환' });
+    record.messages.push(...qa(2, '첫 질문', { text: '첫 답' }, [10, 0]));
+    record.providerState = primed();
+    await saveSession(record);
+
+    const { record: switched, changed } = await switchSessionLlm(SWITCH_DOC, record.id, { provider: 'codex', model: 'gpt-5.5', effort: 'xhigh' });
+    assert.equal(changed, true);
+    assert.equal(switched.provider, 'codex');
+    assert.equal(switched.model, 'gpt-5.5');
+    assert.equal(switched.effort, 'xhigh');
+    assert.deepEqual(switched.providerState, { ...initialProviderState(), generation: 1, switched: true });
+    assert.equal(switched.switches?.length, 1);
+    const change = switched.switches![0];
+    assert.deepEqual(change.from, { provider: 'claude-code', model: 'sonnet', effort: 'high' });
+    assert.deepEqual(change.to, { provider: 'codex', model: 'gpt-5.5', effort: 'xhigh' });
+    assert.equal(change.afterMessageId, record.messages.at(-1)!.id);
+    assert.ok(Date.parse(change.at) > 0);
+    const stored = await getSession(SWITCH_DOC, record.id);
+    assert.deepEqual(stored, switched);
+    assert.deepEqual(toSummary(stored!).switches, switched.switches);
+    assert.equal(toSummary(stored!).provider, 'codex');
+
+    // Back to a CLI-default effort: the field goes away. Nothing talked to Codex yet: still marked for the next turn.
+    const { record: again } = await switchSessionLlm(SWITCH_DOC, record.id, { provider: 'claude-code', model: '' });
+    assert.ok(!('effort' in again));
+    assert.equal(again.switches?.length, 2);
+    assert.deepEqual(again.switches![1].from, { provider: 'codex', model: 'gpt-5.5', effort: 'xhigh' });
+    assert.deepEqual(again.switches![1].to, { provider: 'claude-code', model: '' });
+    assert.deepEqual(again.providerState, { ...initialProviderState(), generation: 1, switched: true });
+
+    // The same LLM once more: nothing changes, nothing is written ('' effort = none).
+    const before = again.updatedAt;
+    const noop = await switchSessionLlm(SWITCH_DOC, record.id, { provider: 'claude-code', model: '', effort: '' });
+    assert.equal(noop.changed, false);
+    assert.equal(noop.record.switches?.length, 2);
+    assert.equal((await getSession(SWITCH_DOC, record.id))?.updatedAt, before);
+
+    await assert.rejects(
+      switchSessionLlm(SWITCH_DOC, '20200101-000000-0000', { provider: 'codex', model: '' }),
+      (err: unknown) => err instanceof HttpError && err.status === 404,
+    );
+  });
+
+  test('the usage limits go with the provider that reported them: kept for a model change, dropped with the provider', async () => {
+    const LIMITS: UsageLimits = { at: '2026-09-29T00:00:00.000Z', status: 'ok', windows: [{ minutes: 300, usedPercent: 42 }] };
+    const record = await createSession(SWITCH_DOC, { provider: 'claude-code', model: 'sonnet' });
+    record.limits = LIMITS;
+    await saveSession(record);
+    const { record: sameProvider } = await switchSessionLlm(SWITCH_DOC, record.id, { provider: 'claude-code', model: 'opus', effort: 'max' });
+    assert.deepEqual(sameProvider.limits, LIMITS);
+    const { record: other } = await switchSessionLlm(SWITCH_DOC, record.id, { provider: 'codex', model: '' });
+    assert.ok(!('limits' in other), "Claude's report is not Codex's");
+    assert.ok(!('limits' in toSummary((await getSession(SWITCH_DOC, record.id))!)));
+  });
+
+  test('a session that never talked to its provider keeps its state (nothing to drop); the change is still recorded', async () => {
+    const fresh = await createSession(SWITCH_DOC, { provider: 'claude-code', model: '' });
+    const { record: moved } = await switchSessionLlm(SWITCH_DOC, fresh.id, { provider: 'codex', model: '' });
+    assert.deepEqual(moved.providerState, initialProviderState());
+    assert.equal(moved.switches?.[0]?.afterMessageId, null);
+    assert.deepEqual(moved.switches?.[0]?.from, { provider: 'claude-code', model: '' });
+  });
+
+  test('sessions saved before switches existed load unchanged; malformed switches are dropped', async () => {
+    const record = await createSession(SWITCH_DOC, { provider: 'codex', model: '' });
+    const file = path.join(docPaths(SWITCH_DOC).sessionsDir, `${record.id}.json`);
+    const legacy = JSON.parse(await fs.readFile(file, 'utf8')) as Record<string, unknown>;
+    assert.ok(!('switches' in legacy), 'nothing is written for a session that never changed');
+    const read = await getSession(SWITCH_DOC, record.id);
+    assert.ok(!('switches' in read!));
+    assert.ok(!('switches' in toSummary(read!)));
+
+    const good = {
+      at: '2026-09-23T06:00:00.000Z',
+      afterMessageId: null,
+      from: { provider: 'codex', model: '' },
+      to: { provider: 'claude-code', model: 'opus', effort: 'max' },
+    };
+    const junk = [{ at: 5 }, { ...good, afterMessageId: 7 }, { ...good, to: { provider: 'x' } }, 'junk', null];
+    // A level that is not one (edited by hand) reads as the default, like SessionRecord.effort.
+    const badEffort = { ...good, to: { ...good.to, effort: '--model' } };
+    await fs.writeFile(file, JSON.stringify({ ...legacy, switches: [good, ...junk, badEffort] }));
+    const cleaned = await getSession(SWITCH_DOC, record.id);
+    assert.deepEqual(cleaned?.switches, [good, { ...good, to: { provider: 'claude-code', model: 'opus' } }]);
+    await fs.writeFile(file, JSON.stringify({ ...legacy, switches: 'nope' }));
+    assert.ok(!('switches' in (await getSession(SWITCH_DOC, record.id))!));
+  });
+
+  test("the notes name the LLM of each answer and the session's changes", async () => {
+    const record = await createSession(SWITCH_DOC, { provider: 'claude-code', model: 'sonnet', title: '바꾼 세션' });
+    record.createdAt = at(9, 0);
+    record.messages.push(...qa(4, '전환 전 질문', { text: '소넷의 답' }, [9, 1]));
+    record.providerState = primed();
+    await saveSession(record);
+    await switchSessionLlm(SWITCH_DOC, record.id, { provider: 'codex', model: 'gpt-5.5', effort: 'high' });
+    const after = (await getSession(SWITCH_DOC, record.id))!;
+    after.messages.push(...qa(4, '전환 후 질문', { text: '코덱스의 답', provider: 'codex', model: 'gpt-5.5', effort: 'high' }, [9, 5]));
+    await saveSession(after);
+    await writeNotes(SWITCH_DOC);
+
+    const own = await fs.readFile(path.join(docPaths(SWITCH_DOC).notesDir, `${record.id}.md`), 'utf8');
+    assert.match(own, /^- Provider: Claude Code \(sonnet\) → Codex \(gpt-5\.5, effort high\) · Started: 2026-09-23 09:00$/m);
+    const md = await fs.readFile(docPaths(SWITCH_DOC).studyNotes, 'utf8');
+    assert.ok(md.includes('### Q. 전환 전 질문\n> 바꾼 세션 · Claude Code (sonnet) · 2026-09-23 09:01\n\n소넷의 답\n'));
+    assert.ok(md.includes('### Q. 전환 후 질문\n> 바꾼 세션 · Codex (gpt-5.5, effort high) · 2026-09-23 09:05\n\n코덱스의 답\n'));
+    const notes = await buildNotes(SWITCH_DOC);
+    const entries = notes.slides.find((s) => s.slide === 4)!.entries.filter((e) => e.sessionId === record.id);
+    assert.deepEqual(entries.map((e) => e.provider), ['claude-code', 'codex']);
+  });
+});
+
 describe('notes', () => {
   const NOTES_DOC = 'notes-doc-def456';
   let first: SessionRecord;
@@ -343,8 +470,8 @@ describe('notes', () => {
     const md = await fs.readFile(docPaths(docId).studyNotes, 'utf8');
     assert.ok(md.includes(`### Q. ${question.slice(0, 120)}…\n`), 'the heading stays short');
     assert.ok(md.includes(`\n\n${question}\n\n답변\n`), 'the full question follows the heading');
-    // A question that fits in the heading is not repeated.
-    assert.ok(md.includes('### Q. 짧은 질문\n> 긴 질문 · Claude Code · 2026-09-23 17:05\n\n짧은 답\n'));
+    // A question that fits in the heading is not repeated (the entry names the answer's LLM: qa() answers with sonnet).
+    assert.ok(md.includes('### Q. 짧은 질문\n> 긴 질문 · Claude Code (sonnet) · 2026-09-23 17:05\n\n짧은 답\n'));
   });
 
   test('an empty document still gets a STUDY_NOTES.md', async () => {

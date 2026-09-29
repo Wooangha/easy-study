@@ -1,9 +1,17 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
-import type { Attachment, ChatMessage, MessageStatus, ProviderInfo } from '../../../shared/types.ts';
+import type { Attachment, ChatMessage, LlmSwitch, MessageStatus, ProviderInfo } from '../../../shared/types.ts';
 import { PENDING_ASSISTANT_ID, PENDING_USER_ID } from '../hooks/useStudySession.ts';
-import { CHAT_WINDOW, chatWindowStart } from '../lib/chatWindow.ts';
+import { CHAT_WINDOW, chatWindowStart, switchAtWindowStart } from '../lib/chatWindow.ts';
 import { copyText } from '../lib/clipboard.ts';
-import { describeContext, formatDuration, formatTime, primeCardState, providerWithModel } from '../lib/format.ts';
+import {
+  describeContext,
+  formatDuration,
+  formatTime,
+  primeCardState,
+  providerWithModel,
+  switchMarkerText,
+  switchMarkerTitle,
+} from '../lib/format.ts';
 import { toast } from '../lib/toast.ts';
 import { usageLine, usageTitle } from '../lib/usage.ts';
 import { AttachmentThumbs } from './Attachments.tsx';
@@ -13,6 +21,8 @@ interface MessageListProps {
   messages: ChatMessage[];
   pageCount: number;
   providers: ProviderInfo[] | undefined;
+  /** Changes of the session's LLM (SessionSummary.switches): a marker is shown where each one happened. */
+  switches?: LlmSwitch[];
   /** Id of the assistant message currently streaming in this client (or the pending placeholder). */
   liveAssistantId: string | null;
   liveStatus: string | null;
@@ -41,6 +51,7 @@ export function MessageList({
   messages,
   pageCount,
   providers,
+  switches,
   liveAssistantId,
   liveStatus,
   stopping,
@@ -122,6 +133,25 @@ export function MessageList({
   let lastPrimeAnswer: ChatMessage | undefined;
   for (const m of messages) if (m.role === 'assistant' && m.kind === 'prime') lastPrimeAnswer = m;
   const items: ReactNode[] = [];
+  // "여기부터 Codex …" after the message each LLM switch followed (null = before the first message).
+  const switchesAfter = new Map<string | null, Array<{ change: LlmSwitch; index: number }>>();
+  (switches ?? []).forEach((change, index) => {
+    const list = switchesAfter.get(change.afterMessageId) ?? [];
+    list.push({ change, index });
+    switchesAfter.set(change.afterMessageId, list);
+  });
+  const pushSwitchMarkers = (afterMessageId: string | null) => {
+    for (const { change, index } of switchesAfter.get(afterMessageId) ?? []) {
+      items.push(<SwitchMarker key={`switch-${index}`} change={change} providers={providers} />);
+    }
+  };
+  if (start === 0) pushSwitchMarkers(null);
+  else if (switches) {
+    // The switches behind "이전 메시지 보기": the newest heads the window, so it says which LLM the first visible
+    // messages came from (the older ones appear in place once the window grows).
+    const index = switchAtWindowStart(switches, messages, start);
+    if (index >= 0) items.push(<SwitchMarker key={`switch-${index}`} change={switches[index]} providers={providers} />);
+  }
   let lastUser: ChatMessage | null = null;
   for (let i = 0; i < messages.length; i++) {
     const m = messages[i];
@@ -157,6 +187,7 @@ export function MessageList({
         onRetryPrime={canRetryPrime ? onRetryPrime : undefined}
       />,
     );
+    pushSwitchMarkers(m.id);
   }
 
   return (
@@ -239,6 +270,15 @@ function UserBubble({ message: m, onGoToSlide }: MessageItemProps) {
       <AttachmentThumbs attachments={m.attachments} className="in-chat" />
       <div className="bubble">{m.text}</div>
       <ContextLine message={m} />
+    </div>
+  );
+}
+
+/** Where the session's LLM changed (DESIGN §5 "LLM switch"): the answers below it come from the new one. */
+function SwitchMarker({ change, providers }: { change: LlmSwitch; providers: ProviderInfo[] | undefined }) {
+  return (
+    <div className="msg system-card is-switch" title={switchMarkerTitle(providers, change)}>
+      <div className="system-card-title">{switchMarkerText(providers, change)}</div>
     </div>
   );
 }

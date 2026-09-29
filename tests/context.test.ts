@@ -902,6 +902,36 @@ describe('buildTurn: forceNewConversation (DESIGN §14)', () => {
     // A brand-new session has nothing to recap.
     assert.doesNotMatch(allText(turn({ session: makeSession(), slide: 3 }).parts), /Earlier in this study session/);
   });
+
+  test("a switched state (the session's LLM changed, DESIGN §5) is a forced rollover: re-prime, recap with the switch note, context.switched", () => {
+    const state: ProviderState = { ...initialProviderState(), generation: 3, switched: true };
+    const out = turn({ session: makeSession(state, qa, 'codex'), slide: 2 });
+    assert.equal(out.resume, null);
+    assert.deepEqual(out.history, []);
+    assert.deepEqual(out.context, {
+      primed: true,
+      rollover: true,
+      attachedSlides: [2],
+      reusedSlides: [],
+      overviewImages: 3,
+      switched: true,
+    });
+    // The flag is gone once the new conversation starts (a failed turn keeps the state, so the flag too).
+    assert.deepEqual(out.nextState, { resume: null, primed: true, imagesSent: 4, recentSlides: [2], generation: 4, history: [] });
+    const text = allText(out.parts);
+    assert.ok(text.includes('### Slide 9'), 'the deck is attached again');
+    assert.ok(text.includes(`${RECAP_HEADING}\n- (slide 2) Q: 질문 A / A: 답변 A\n\n${restartNote('provider_switch')}`));
+    assert.doesNotMatch(text, /reached its image limit/);
+    // Without Q&A there is nothing to recap; the turn still says it started the new LLM's conversation.
+    const fresh = turn({ session: makeSession(state, [], 'codex'), slide: 2 });
+    assert.equal(fresh.context.switched, true);
+    assert.equal(fresh.context.rollover, true);
+    assert.doesNotMatch(allText(fresh.parts), /Earlier in this study session/);
+    // Any other value of the flag is ignored.
+    const plain = turn({ session: makeSession({ ...initialProviderState(), switched: 'yes' as never }, qa), slide: 2 });
+    assert.equal('switched' in plain.context, false);
+    assert.ok(allText(plain.parts).includes(restartNote('restart')));
+  });
 });
 
 describe('buildTurn: capped priming dump (DESIGN §11, finding 3)', () => {

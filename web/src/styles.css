@@ -1023,6 +1023,7 @@ kbd {
   font-weight: 600;
 }
 
+/* The session's LLM; a button: "LLM 바꾸기" opens the switch dialog (ChatPanel.tsx, DESIGN §5 "LLM switch"). */
 .provider-badge {
   font-size: 11px;
   font-weight: 600;
@@ -1035,6 +1036,44 @@ kbd {
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 50%;
+  transition:
+    background 0.12s,
+    border-color 0.12s;
+}
+
+.provider-badge:hover:not(:disabled) {
+  background: var(--surface-3);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.provider-badge:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+
+.provider-badge-caret {
+  margin-left: 4px;
+  font-size: 9px;
+  opacity: 0.7;
+}
+
+/* One line under the chat header after the LLM was changed ("다음 질문부터 …"), until the next question. */
+.chat-notice {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  font-size: 12.5px;
+  color: var(--text-2);
+  background: var(--accent-soft);
+  border-bottom: 1px solid var(--border);
+}
+
+.chat-notice > span {
+  flex: 1;
+  min-width: 0;
 }
 
 /* ---------------------------------------------------------------- messages */
@@ -1214,6 +1253,14 @@ kbd {
   border-color: var(--warn);
   background: var(--warn-soft);
   color: var(--warn);
+}
+
+/* "🔀 여기부터 Codex …": where the session's LLM changed (MessageList.tsx). */
+.system-card.is-switch {
+  border-style: solid;
+  border-color: var(--user-border);
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .msg-assistant {
@@ -3317,6 +3364,58 @@ kbd {
 
 .primary-btn.is-danger:hover:not(:disabled) {
   background: color-mix(in srgb, var(--danger) 85%, black);
+}
+
+/* ---------------------------------------------------------------- LLM switch dialog (DESIGN §5 "LLM switch") */
+
+.llm-switch-dialog {
+  width: min(460px, calc(100vw - 32px));
+  max-height: calc(100dvh - 48px);
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-lg);
+}
+
+.llm-switch-dialog::backdrop {
+  background: var(--overlay);
+}
+
+.llm-switch-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px 20px 16px;
+  max-height: calc(100dvh - 50px);
+  overflow-y: auto;
+}
+
+.llm-switch-card p {
+  margin: 0;
+}
+
+.llm-switch-current {
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+
+/* The picker's selects stacked, each as wide as the card (also on phones). */
+.provider-picker.is-stacked {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.provider-picker.is-stacked .picker,
+.provider-picker.is-stacked .model-input {
+  width: 100%;
+  max-width: none;
+}
+
+.provider-picker.is-stacked .provider-warn {
+  align-self: flex-start;
 }
 
 /* ---------------------------------------------------------------- settings (DESIGN §24) */

@@ -1,16 +1,15 @@
-import { useState, type ReactNode } from 'react';
-import type { Course, DocMeta, LibraryLayout, ProviderId, ProviderInfo, SessionSummary } from '../../../shared/types.ts';
+import type { ReactNode } from 'react';
+import type { Course, DocMeta, LibraryLayout, ProviderInfo, SessionSummary } from '../../../shared/types.ts';
 import { notesMarkdownUrl } from '../api.ts';
 import { indexCourses } from '../hooks/useCourses.ts';
 import type { ProviderChoice, ProviderChoiceUpdate } from '../hooks/useProviderChoice.ts';
 import { confirmDialog } from '../lib/confirm.ts';
 import { formatTime, providerWithModel } from '../lib/format.ts';
 import { courseLabel, layoutEntries } from '../lib/libraryLayout.ts';
-import { effortOptions, withModel } from '../lib/providerChoice.ts';
+import { ProviderPicker } from './ProviderPicker.tsx';
 
 const UPLOAD = '__upload__';
 const NEW_SESSION = '__new__';
-const CUSTOM_MODEL = '__custom__';
 
 interface TopBarProps {
   docs: DocMeta[] | null;
@@ -190,11 +189,14 @@ export function TopBar(props: TopBarProps) {
 
       <span className="spacer" />
 
+      {/* The LLM of new sessions; the open session's is changed from the chat header (ChatPanel.tsx). */}
       <ProviderPicker
         providers={providers}
         loading={props.providersLoading}
         choice={props.choice}
         onChange={props.onChoiceChange}
+        label="새 세션"
+        title="새 세션에 사용할 LLM"
       />
 
       {ready && doc && (
@@ -230,133 +232,5 @@ export function TopBar(props: TopBarProps) {
         {props.updatePending && <span className="settings-dot" aria-hidden />}
       </button>
     </header>
-  );
-}
-
-function ProviderPicker({
-  providers,
-  loading,
-  choice,
-  onChange,
-}: {
-  providers: ProviderInfo[] | undefined;
-  loading: boolean;
-  choice: ProviderChoice | null;
-  onChange: (choice: ProviderChoiceUpdate) => void;
-}) {
-  const current = providers?.find((p) => p.id === choice?.provider);
-  const currentModel = current?.models.find((m) => m.id === (choice?.model ?? ''));
-  const [customMode, setCustomMode] = useState(false);
-  const showCustom = !!choice && (customMode || !currentModel);
-  const efforts = effortOptions(current, choice?.model ?? '');
-  const effort = efforts.find((e) => e.id === choice?.effort);
-  const unavailable = (providers ?? []).filter((p) => !p.available);
-  const unavailableTitle = unavailable.map((p) => `${p.label}: ${p.reason ?? '사용 불가'}`).join('\n');
-
-  if (!providers) {
-    return <span className="provider-picker muted small">{loading ? 'LLM 확인 중…' : 'LLM 정보 없음'}</span>;
-  }
-
-  return (
-    <div className="provider-picker" title="새 세션에 사용할 LLM">
-      <span className="provider-picker-label">새 세션</span>
-      <select
-        className="picker"
-        aria-label="LLM 선택"
-        value={choice?.provider ?? ''}
-        onChange={(e) => {
-          const p = providers.find((x) => x.id === (e.target.value as ProviderId));
-          if (!p) return;
-          setCustomMode(false);
-          onChange({ provider: p.id, model: p.defaultModel, effort: '' });
-        }}
-      >
-        {!choice && <option value="">사용 가능한 LLM 없음</option>}
-        {providers.map((p) => (
-          <option
-            key={p.id}
-            value={p.id}
-            disabled={!p.available}
-            title={p.available ? (p.version ? `버전 ${p.version}` : undefined) : p.reason}
-          >
-            {p.label}
-            {p.available ? '' : ' — 사용 불가'}
-          </option>
-        ))}
-      </select>
-      {current && choice && (
-        <>
-          <select
-            className="picker model-picker"
-            aria-label="모델 선택"
-            title={showCustom ? undefined : currentModel?.description}
-            value={showCustom ? CUSTOM_MODEL : choice.model}
-            onChange={(e) => {
-              if (e.target.value === CUSTOM_MODEL) {
-                setCustomMode(true);
-                return;
-              }
-              setCustomMode(false);
-              onChange(withModel(current, choice, e.target.value));
-            }}
-          >
-            {current.models.map((m) => (
-              <option key={m.id || '__default'} value={m.id} title={m.description}>
-                {m.label}
-              </option>
-            ))}
-            <option value={CUSTOM_MODEL}>직접 입력…</option>
-          </select>
-          {showCustom && (
-            <>
-              <input
-                className="model-input"
-                list={`models-${current.id}`}
-                placeholder="모델 이름"
-                aria-label="모델 이름 직접 입력"
-                value={choice.model}
-                onChange={(e) => onChange({ provider: current.id, model: e.target.value.trim() })}
-              />
-              <datalist id={`models-${current.id}`}>
-                {current.models
-                  .filter((m) => m.id)
-                  .map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.label}
-                    </option>
-                  ))}
-              </datalist>
-            </>
-          )}
-          {/* Reasoning effort (CLI providers): "기본값" passes nothing, so the CLI's own setting applies. */}
-          {current.efforts && current.efforts.length > 0 && (
-            <select
-              className="picker effort-picker"
-              aria-label="추론 수준"
-              title={
-                efforts.length === 0
-                  ? '이 모델은 추론 수준을 고를 수 없어요'
-                  : (effort?.description ?? '추론 수준: 기본값은 CLI 설정(또는 모델 기본값)을 따라요')
-              }
-              value={effort ? effort.id : ''}
-              disabled={efforts.length === 0}
-              onChange={(e) => onChange({ ...choice, effort: e.target.value })}
-            >
-              <option value="">추론 기본값</option>
-              {efforts.map((e) => (
-                <option key={e.id} value={e.id} title={e.description}>
-                  추론 {e.label}
-                </option>
-              ))}
-            </select>
-          )}
-        </>
-      )}
-      {unavailable.length > 0 && (
-        <span className="provider-warn" title={unavailableTitle} aria-label={`사용 불가 LLM: ${unavailableTitle}`}>
-          ⓘ
-        </span>
-      )}
-    </div>
   );
 }

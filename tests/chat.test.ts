@@ -31,6 +31,8 @@ import { createCourse, updateCourse } from '../server/courses.ts';
 import type { BuildTurnInput, BuildTurnOutput, ProviderState } from '../server/internal-types.ts';
 import { docPaths, slideFileName, textFileName } from '../server/library.ts';
 import type { StoredDocMeta } from '../server/library.ts';
+import { RECAP_HEADING, restartNote } from '../server/prompts.ts';
+import { getProvider as realProvider } from '../server/providers/index.ts';
 import { ProviderError } from '../server/providers/types.ts';
 import type { Part, Provider, ProviderRunInput, ProviderRunResult } from '../server/providers/types.ts';
 import { createSession, getSession, saveSession, toSummary } from '../server/sessions.ts';
@@ -1172,6 +1174,8 @@ describe('HTTP server', () => {
   ];
   let docId = '';
   let sessionId = '';
+  /** Turns run the real CLI adapters (with the fake CLIs of tests/fixtures) instead of `provider`. */
+  let useCliFakes = false;
 
   before(async () => {
     server = await startServer({
@@ -1179,7 +1183,9 @@ describe('HTTP server', () => {
       log: false,
       resumeIngests: false,
       providerInfos: async () => infos,
-      chatDeps: depsFor(provider),
+      chatDeps: depsFor(provider, {
+        getProvider: (id) => (useCliFakes ? realProvider(id) : id === provider.id ? provider : undefined),
+      }),
     });
     base = server.url;
   });
@@ -1191,6 +1197,8 @@ describe('HTTP server', () => {
   const api = (p: string, init?: RequestInit) => fetch(`${base}/api${p}`, init);
   const postJson = (p: string, body: unknown) =>
     api(p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const patchJson = (p: string, body: unknown) =>
+    api(p, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 
   async function expectError(res: Response, status: number): Promise<string> {
     assert.equal(res.status, status);
@@ -1474,6 +1482,168 @@ describe('HTTP server', () => {
     assert.equal(plainAsk.at(-1)?.event, 'done');
     assert.equal(provider.calls.at(-1)?.effort, '');
     assert.ok(!('effort' in (plainAsk.at(-1)?.data as Extract<StreamEvent, { type: 'done' }>).assistantMessage));
+  });
+
+  test('LLM switch (PATCH): validated like POST /sessions, 409 while answering, a no-op when unchanged, recorded otherwise', async () => {
+    const created = await postJson(`/docs/${docId}/sessions`, { provider: 'claude-code', model: 'sonnet', effort: 'high' });
+    const session = (await created.json()) as Session;
+    const patch = (body: unknown) => patchJson(`/docs/${docId}/sessions/${session.id}`, body);
+    await expectError(await patch({ provider: 'nope' }), 400);
+    await expectError(await patch({ provider: 'codex' }), 400); // unavailable
+    await expectError(await patch({ provider: 'claude-code', model: '--evil' }), 400);
+    await expectError(await patch({ provider: 'claude-code', effort: 'ultra' }), 400);
+    assert.match(await expectError(await patch({ provider: 'claude-code', model: 'haiku', effort: 'high' }), 400), /지원하지 않습니다/);
+    // A missing session is 404 before the body is looked at (Codex is unavailable here: 400 otherwise).
+    await expectError(await patchJson(`/docs/${docId}/sessions/20200101-000000-0000`, { provider: 'codex' }), 404);
+
+    // The same LLM: nothing is recorded or written.
+    const same = await patch({ provider: 'claude-code', model: 'sonnet', effort: 'high' });
+    assert.equal(same.status, 200);
+    const unchanged = (await same.json()) as Session;
+    assert.ok(!('switches' in unchanged));
+    assert.equal(unchanged.updatedAt, session.updatedAt);
+
+    // Refused while the session answers (BLOCK hangs the fake provider until aborted).
+    const running = await postJson(`/docs/${docId}/sessions/${session.id}/messages`, { text: 'BLOCK please', slide: 2 });
+    assert.equal(running.status, 200);
+    const reader = running.body!.getReader();
+    const decoder = new TextDecoder();
+    let raw = '';
+    while (!raw.includes('event: delta')) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      raw += decoder.decode(value, { stream: true });
+    }
+    await expectError(await patch({ provider: 'openai-api' }), 409);
+    assert.equal((await api(`/docs/${docId}/sessions/${session.id}/abort`, { method: 'POST' })).status, 204);
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      raw += decoder.decode(value, { stream: true });
+    }
+    assert.equal(parseSse(raw).at(-1)?.event, 'done');
+
+    // Changed: the session runs on the new LLM from the next turn on; the change is kept for the history.
+    const res = await patch({ provider: 'openai-api', model: 'gpt-5' });
+    assert.equal(res.status, 200);
+    const switched = (await res.json()) as Session;
+    assert.equal(switched.provider, 'openai-api');
+    assert.equal(switched.model, 'gpt-5');
+    assert.ok(!('effort' in switched), 'the OpenAI API has no effort levels');
+    assert.equal(switched.switches?.length, 1);
+    const change = switched.switches![0];
+    assert.deepEqual(change.from, { provider: 'claude-code', model: 'sonnet', effort: 'high' });
+    assert.deepEqual(change.to, { provider: 'openai-api', model: 'gpt-5' });
+    assert.equal(change.afterMessageId, switched.messages.at(-1)?.id, 'after the aborted turn');
+    assert.equal(switched.messages.length, 2);
+    const listed = ((await (await api(`/docs/${docId}/sessions`)).json()) as SessionSummary[]).find((s) => s.id === switched.id);
+    assert.equal(listed?.provider, 'openai-api');
+    assert.deepEqual(listed?.switches, switched.switches);
+  });
+
+  test('after a switch the next turn starts a NEW conversation on the new CLI: the deck fed again, the Q&A recapped (fake CLIs)', async () => {
+    const fixtures = path.join(repoRoot(), 'tests', 'fixtures');
+    const cliHome = await fs.mkdtemp(path.join(tmpRoot, 'cli-'));
+    const recordFile = path.join(cliHome, 'record.json');
+    const keys = ['CLAUDE_BIN', 'CODEX_BIN', 'FAKE_CLI_RECORD', 'FAKE_CLI_MODE', 'CODEX_HOME'] as const;
+    const savedEnv = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+    process.env.CLAUDE_BIN = path.join(fixtures, 'fake-claude.mjs');
+    process.env.CODEX_BIN = path.join(fixtures, 'fake-codex.mjs');
+    process.env.FAKE_CLI_RECORD = recordFile;
+    process.env.CODEX_HOME = path.join(cliHome, 'codex-home'); // never the user's ~/.codex
+    delete process.env.FAKE_CLI_MODE;
+    // Codex is offered (the fake CLI answers it) while this test runs.
+    const codexInfo = infos.find((info) => info.id === 'codex')!;
+    const codexBefore = { ...codexInfo };
+    Object.assign(codexInfo, {
+      available: true,
+      models: [{ id: 'gpt-fake-big', label: 'GPT-Fake-Big', efforts: ['low', 'high'] }],
+      efforts: [
+        { id: 'low', label: '낮음' },
+        { id: 'high', label: '높음' },
+      ],
+    });
+    delete codexInfo.reason;
+    useCliFakes = true;
+    try {
+      const recorded = async () => JSON.parse(await fs.readFile(recordFile, 'utf8')) as { argv: string[]; stdin: string };
+      const ask = async (sid: string, text: string, slide: number) => {
+        const frames = parseSse(await (await postJson(`/docs/${docId}/sessions/${sid}/messages`, { text, slide })).text());
+        assert.equal(frames.at(-1)?.event, 'done', JSON.stringify(frames.at(-1)?.data));
+        return frames.at(-1)?.data as Extract<StreamEvent, { type: 'done' }>;
+      };
+      const session = (await (await postJson(`/docs/${docId}/sessions`, { provider: 'claude-code', model: 'sonnet' })).json()) as Session;
+
+      // Two questions on Claude Code: the first primes (its own CLI session), the second resumes it.
+      const first = await ask(session.id, '첫 질문', 2);
+      assert.equal(first.assistantMessage.status, 'complete', first.assistantMessage.error ?? '');
+      assert.equal(first.assistantMessage.provider, 'claude-code');
+      assert.equal(first.assistantMessage.model, 'sonnet');
+      let record = await recorded();
+      assert.ok(record.argv.includes('--session-id') && !record.argv.includes('--resume'), record.argv.join(' '));
+      await ask(session.id, '둘째 질문', 3);
+      record = await recorded();
+      const cliSession = record.argv[record.argv.indexOf('--resume') + 1];
+      assert.ok(cliSession, 'the second question resumes the CLI session');
+
+      const res = await patchJson(`/docs/${docId}/sessions/${session.id}`, { provider: 'codex', model: 'gpt-fake-big', effort: 'high' });
+      assert.equal(res.status, 200);
+      const switched = (await res.json()) as Session;
+      assert.equal(switched.provider, 'codex');
+      assert.equal(switched.primed, false, 'the Claude Code conversation is dropped');
+      assert.equal(switched.switches?.[0]?.afterMessageId, switched.messages.at(-1)?.id);
+
+      // The next question starts a new Codex thread (never `exec resume`, never the Claude session id) with the
+      // new model and effort; it gets the whole deck again plus the recap of the two answers and why.
+      const third = await ask(session.id, '셋째 질문', 4);
+      record = await recorded();
+      assert.deepEqual(record.argv.slice(0, 2), ['exec', '--json'], record.argv.join(' '));
+      assert.ok(!record.argv.includes('resume') && !record.argv.includes(cliSession));
+      assert.equal(record.argv[record.argv.indexOf('-m') + 1], 'gpt-fake-big');
+      assert.ok(record.argv.includes('model_reasoning_effort="high"'), record.argv.join(' '));
+      assert.ok(record.stdin.includes('### Slide 9'), 'the deck is fed again');
+      assert.ok(record.stdin.includes(`${RECAP_HEADING}\n- (slide 2) Q: 첫 질문 / A: `), 'the earlier Q&A is recapped');
+      assert.ok(record.stdin.includes('- (slide 3) Q: 둘째 질문 / A: '));
+      assert.ok(record.stdin.includes(restartNote('provider_switch')));
+      assert.equal(third.assistantMessage.status, 'complete', third.assistantMessage.error ?? '');
+      assert.equal(third.assistantMessage.provider, 'codex');
+      assert.equal(third.assistantMessage.model, 'gpt-fake-big');
+      assert.equal(third.assistantMessage.effort, 'high');
+      assert.equal(third.assistantMessage.text, '최종 답변입니다.');
+      // `done` carries the whole session (a Session), its user message with the context of this turn.
+      const question = (third.session as Session).messages.at(-2)!;
+      assert.equal(question.context?.primed, true);
+      assert.equal(question.context?.rollover, true);
+      assert.equal(question.context?.switched, true);
+      assert.ok(!('recoveredFrom' in (question.context ?? {})));
+      assert.equal(third.session.primed, true);
+
+      // From then on the Codex thread is resumed like any conversation.
+      await ask(session.id, '넷째 질문', 4);
+      record = await recorded();
+      assert.deepEqual(record.argv.slice(0, 3), ['exec', 'resume', 'thread-new-1'], record.argv.join(' '));
+
+      // Reloaded: the switch and every answer's LLM are in the history; the notes name both.
+      const stored = (await (await api(`/docs/${docId}/sessions/${session.id}`)).json()) as Session;
+      assert.equal(stored.switches?.length, 1);
+      assert.deepEqual(
+        stored.messages.filter((m) => m.role === 'assistant').map((m) => m.provider),
+        ['claude-code', 'claude-code', 'codex', 'codex'],
+      );
+      const notes = await (await api(`/docs/${docId}/notes.md`)).text();
+      assert.ok(notes.includes('### Q. 둘째 질문\n> ') && /### Q. 둘째 질문\n> [^\n]* · Claude Code \(sonnet\) · /.test(notes), notes);
+      assert.match(notes, /### Q. 셋째 질문\n> [^\n]* · Codex \(gpt-fake-big, effort high\) · /);
+      const own = await fs.readFile(path.join(docPaths(docId).notesDir, `${session.id}.md`), 'utf8');
+      assert.match(own, /^- Provider: Claude Code \(sonnet\) → Codex \(gpt-fake-big, effort high\) · Started: /m);
+    } finally {
+      useCliFakes = false;
+      for (const key of Object.keys(codexInfo)) delete codexInfo[key as keyof ProviderInfo];
+      Object.assign(codexInfo, codexBefore);
+      for (const key of keys) {
+        if (savedEnv[key] === undefined) delete process.env[key];
+        else process.env[key] = savedEnv[key];
+      }
+    }
   });
 
   test('cross-site requests and foreign Host headers are refused', async () => {

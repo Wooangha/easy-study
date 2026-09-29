@@ -99,6 +99,7 @@ All JSON. Errors: HTTP 4xx/5xx with `{ "error": string }` (plus machine-readable
 | GET `/api/docs/:docId/sessions` | – | `SessionSummary[]` newest first |
 | POST `/api/docs/:docId/sessions` | `CreateSessionRequest` | `Session` (201). 400 if provider unknown/unavailable, or the effort is not one the model supports (§6). |
 | GET `/api/docs/:docId/sessions/:sid` | – | `Session` |
+| PATCH `/api/docs/:docId/sessions/:sid` | `UpdateSessionRequest` | `Session`. Changes the session's LLM (validated like POST /sessions); the next turn starts a new provider conversation on it (§5 "LLM switch"). 409 while the session is answering; the unchanged session when nothing differs. |
 | DELETE `/api/docs/:docId/sessions/:sid` | – | 204 (also removes its notes file and regenerates STUDY_NOTES.md) |
 | POST `/api/docs/:docId/sessions/:sid/prime` | `PrimeRequest` | SSE stream (see below) |
 | POST `/api/docs/:docId/sessions/:sid/messages` | `SendMessageRequest` | SSE stream |
@@ -173,7 +174,21 @@ parts += QUESTION(kind, question)
   first turn's text by the provider adapter.
 
 `ContextInfo` returned to the client describes what was sent: `primed`, `rollover`,
-`attachedSlides`, `reusedSlides`, `overviewImages`.
+`attachedSlides`, `reusedSlides`, `overviewImages` (and `recoveredFrom` §14, `switched` below).
+
+**LLM switch** (`PATCH /sessions/:sid`, `UpdateSessionRequest`): a session is created with one LLM (provider, model,
+effort) but can change it at any time between turns. `sessions.ts switchSessionLlm` (run under `chat.ts
+withSessionReserved`, so a turn cannot interleave: 409 while one runs) sets the new provider/model/effort, and when the
+session has a provider conversation (primed, or a resume handle) replaces `providerState` by the initial one with
+`switched: true` (the generation is kept): the old CLI session id / Codex thread / response chain / history is never
+resumed with the new provider. `buildTurn` treats `switched` like a forced rollover — `resume = null`, the deck primed
+again, RECAP of the latest Q&A closed by `restartNote('provider_switch')` (the earlier answers came from another
+model), `ContextInfo.rollover` and `switched` true — and its `nextState` no longer carries the flag, so a failed first
+turn keeps it for the next try. Every change is appended to `SessionRecord.switches` (`LlmSwitch`: `at`,
+`afterMessageId` = the message it follows, `from`, `to`) for the history; assistant messages already carry the LLM that
+answered them. A change of provider also drops the session's `limits` (the usage report belongs to the provider that
+made it; the new one reports its own on its first turn). The same provider, model and effort again is a no-op (200,
+nothing written). Sessions saved before have no `switches`; malformed entries are dropped on read.
 
 `appendHistory(state, parts, answerText)` (also in context.ts) returns state with the user turn and
 the assistant answer appended to `history` — used only for stateless providers (`anthropic-api`).
@@ -286,7 +301,8 @@ have no effort choice. POST /sessions and POST /digest take `effort` ('' / omitt
 passed); it must be one of the provider's levels and, for a listed model, one it supports (400 otherwise; a model typed
 in by hand may take any level). The session record keeps `effort` (absent = default, as in sessions made before) and
 every turn of the session passes it — new conversations, resumes, re-primes after a rollover or a lost conversation;
-assistant messages carry it (`ChatMessage.effort`) and the notes name it ("Claude Code (opus, effort high)"). A digest
+assistant messages carry it (`ChatMessage.effort`) and the notes name it ("Claude Code (opus, effort high)"). Provider,
+model and effort of a session can be changed later (PATCH /sessions/:sid, §5 "LLM switch"). A digest
 started by a session (DESIGN §11) or by POST /digest keeps its `effort` in digest.json for every batch and the lecture
 summary. The recordings' AI alignment (§22) takes no effort: it runs with the CLI's default (Claude Code on Haiku).
 Web: the top bar "새 세션" picker shows a compact "추론" select after the model select for providers with levels
@@ -314,6 +330,9 @@ answer markdown
 `## Slide N`, the slide image (`slides/NNN.png`), then each entry `### Q. <first line of question>`
 followed by `> <session title> · <provider> · <time>`, the full question if multi-line, and the answer.
 Prime turns are excluded from notes. Error/aborted answers are shown as `_(answer failed: …)_`.
+The provider of an entry (and `NoteEntry.provider`) is the answer's (`ChatMessage.provider/model/effort`), the
+session's when there is no answer; a session whose LLM changed (§5 "LLM switch") has a `- Provider: Claude Code
+(sonnet) → Codex (gpt-5.5, effort high)` line in its own notes file.
 
 ## 8. Web UI (`web/`)
 
@@ -332,9 +351,16 @@ Prime turns are excluded from notes. Error/aborted answers are shown as `_(answe
   Remember the scroll position (slide number) per doc in localStorage.
 - **Chat (right)**, tabs **채팅 | 노트**:
   - Chat header: current slide `p.7 / 42`, 📌 pin toggle (when pinned, the question target stays on the
-    pinned slide even when scrolling), provider badge of the session.
+    pinned slide even when scrolling), the session's LLM badge — a button (disabled while an answer streams)
+    that opens the "LLM 바꾸기" dialog (`LlmSwitchDialog.tsx`: the `ProviderPicker` shared with the top bar,
+    started from the session's LLM; "LLM 바꾸기" calls PATCH, §5 "LLM switch"). Afterwards a one-line notice
+    ("다음 질문부터 Codex · gpt-5.5(으)로 답해요. 슬라이드와 최근 대화 요약을 다시 보내서 처음 질문은 토큰이 더 들어요.")
+    stays until the next turn starts, and the message list shows a `🔀 여기부터 Codex · gpt-5.5` card where the
+    switch happened (`SessionSummary.switches`, keyed by `afterMessageId`); when the switch point is hidden behind
+    "이전 메시지 보기", the newest hidden switch heads the window instead (`chatWindow.ts switchAtWindowStart`).
   - Messages: user bubbles show a `p.N` chip (click → scroll viewer to slide N) and a tiny context
-    line (`📚 전체 슬라이드 전달`, `🖼 p.7 이미지 첨부`, `↺ p.7 이미 전달됨`, `🔄 새 대화로 이어감`).
+    line (`📚 전체 슬라이드 전달`, `🖼 p.7 이미지 첨부`, `↺ p.7 이미 전달됨`, `🔄 새 대화로 이어감`,
+    `🔀 바꾼 LLM으로 새 대화 시작` for `ContextInfo.switched`).
     Assistant messages render Markdown (GFM tables, code) with KaTeX math; while streaming show a
     blinking cursor and the latest `status` line; error/aborted states are visible. Prime messages
     render as a compact system card ("📚 전체 슬라이드 N장을 LLM에게 전달했어요") followed by the overview answer.

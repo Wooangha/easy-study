@@ -8,6 +8,8 @@ import { ATTACHMENT_ID_RE, EFFORT_ID_RE, SESSION_ID_RE } from '../shared/types.t
 import { readSessionUsage, readUsageLimits } from '../shared/usage.ts';
 import type {
   ChatMessage,
+  LlmChoice,
+  LlmSwitch,
   NoteEntry,
   NotesResponse,
   ProviderId,
@@ -168,7 +170,80 @@ async function readRecord(docId: string, sessionId: string): Promise<SessionReco
   const limits = readUsageLimits(record.limits);
   if (limits) record.limits = limits;
   else delete record.limits;
+  // Shown between the messages and in the notes: only well-formed changes are kept (absent in sessions saved before).
+  const switches = readSwitches(record.switches);
+  if (switches) record.switches = switches;
+  else delete record.switches;
   return record;
+}
+
+/** A saved LlmChoice ('' model = the provider's default; the effort only when it is a level), or null. */
+function readLlmChoice(value: unknown): LlmChoice | null {
+  const raw = value as Partial<LlmChoice> | null;
+  if (typeof raw !== 'object' || raw === null || typeof raw.provider !== 'string' || typeof raw.model !== 'string') return null;
+  const choice: LlmChoice = { provider: raw.provider, model: raw.model };
+  if (typeof raw.effort === 'string' && EFFORT_ID_RE.test(raw.effort)) choice.effort = raw.effort;
+  return choice;
+}
+
+/** The well-formed entries of a saved `switches` list; null when there are none. */
+function readSwitches(value: unknown): LlmSwitch[] | null {
+  if (!Array.isArray(value)) return null;
+  const switches: LlmSwitch[] = [];
+  for (const raw of value as Array<Partial<LlmSwitch> | null>) {
+    if (typeof raw !== 'object' || raw === null || typeof raw.at !== 'string') continue;
+    if (raw.afterMessageId !== null && typeof raw.afterMessageId !== 'string') continue;
+    const from = readLlmChoice(raw.from);
+    const to = readLlmChoice(raw.to);
+    if (from && to) switches.push({ at: raw.at, afterMessageId: raw.afterMessageId, from, to });
+  }
+  return switches.length > 0 ? switches : null;
+}
+
+/** The LLM a session runs on (SessionRecord.provider / model / effort). */
+function llmOf(record: SessionRecord): LlmChoice {
+  const choice: LlmChoice = { provider: record.provider, model: record.model };
+  if (record.effort) choice.effort = record.effort;
+  return choice;
+}
+
+function sameLlm(a: LlmChoice, b: LlmChoice): boolean {
+  return a.provider === b.provider && a.model === b.model && (a.effort ?? '') === (b.effort ?? '');
+}
+
+/**
+ * Changes the LLM the session runs on (DESIGN §5 "LLM switch"): the provider conversation it has is dropped, so the
+ * next turn starts a new one on the new LLM (the deck fed again, the latest Q&A recapped, the tutor told they came
+ * from another model), and the change is kept in `switches` for the history and the notes. `changed` is false, and
+ * nothing is written, when provider, model and effort are the ones the session already has. Throws HttpError 404.
+ * The caller keeps turns off the session meanwhile (chat.ts withSessionReserved).
+ */
+export async function switchSessionLlm(docId: string, sessionId: string, to: LlmChoice): Promise<{ record: SessionRecord; changed: boolean }> {
+  const record = await getSession(docId, sessionId);
+  if (!record) throw new HttpError(404, '세션을 찾을 수 없습니다');
+  const from = llmOf(record);
+  const next: LlmChoice = { provider: to.provider, model: to.model };
+  if (to.effort) next.effort = to.effort;
+  if (sameLlm(from, next)) return { record, changed: false };
+
+  record.provider = next.provider;
+  record.model = next.model;
+  if (next.effort) record.effort = next.effort;
+  else delete record.effort;
+  // The usage limits are the old provider's report: the new one reports its own on its first turn (the web keeps
+  // the newest report per provider, so nothing is lost).
+  if (from.provider !== next.provider) delete record.limits;
+  // A conversation the old LLM holds cannot go on with the new one: the next turn starts afresh, as a forced
+  // rollover (ProviderState.switched). A session that was never primed has nothing to drop.
+  const state = record.providerState;
+  if (state.primed || state.resume !== null) {
+    record.providerState = { ...initialProviderState(), generation: state.generation, switched: true };
+  }
+  const afterMessageId = record.messages.at(-1)?.id ?? null;
+  record.switches = [...(record.switches ?? []), { at: new Date().toISOString(), afterMessageId, from, to: next }];
+  await saveSession(record);
+  await writeNotes(docId);
+  return { record, changed: true };
 }
 
 /** The session, or null when an id is invalid or the session does not exist. */
@@ -267,6 +342,7 @@ export function toSummary(record: SessionRecord): SessionSummary {
   if (record.effort) summary.effort = record.effort;
   if (record.usage) summary.usage = record.usage;
   if (record.limits) summary.limits = record.limits;
+  if (record.switches?.length) summary.switches = record.switches;
   return summary;
 }
 
@@ -318,18 +394,34 @@ function providerLabel(provider: ProviderId, model: string, effort?: string): st
   return details.length > 0 ? `${label} (${details.join(', ')})` : label;
 }
 
+/** "Claude Code (sonnet)", or "Claude Code (sonnet) → Codex (gpt-5.5, effort high)" when the session's LLM changed. */
+function sessionProviderLine(record: SessionRecord): string {
+  const switches = record.switches ?? [];
+  const first = switches[0]?.from ?? llmOf(record);
+  return [first, ...switches.map((change) => change.to)].map((llm) => providerLabel(llm.provider, llm.model, llm.effort)).join(' → ');
+}
+
+/** What answered an entry ("Codex (gpt-5.5, effort high)"): the answer's LLM; without an answer, the session's. */
+function entryProviderLabel(entry: NoteEntry, record: SessionRecord | undefined): string {
+  const answer = entry.answer;
+  if (answer?.provider) return providerLabel(answer.provider, answer.model ?? '', answer.effort);
+  return record ? providerLabel(record.provider, record.model, record.effort) : providerLabel(entry.provider, '');
+}
+
 /** Question/answer pairs of one session in chronological order (prime turns excluded). */
 function sessionEntries(record: SessionRecord): NoteEntry[] {
   const entries: NoteEntry[] = [];
   record.messages.forEach((message, index) => {
     if (message.role !== 'user' || message.kind !== 'question') return;
     const next = record.messages[index + 1];
+    const answer = next && next.role === 'assistant' ? next : null;
     entries.push({
       sessionId: record.id,
       sessionTitle: record.title,
-      provider: record.provider,
+      // The answer names the LLM that gave it (the session's can change, see switches); without one, the session's.
+      provider: answer?.provider ?? record.provider,
       question: message,
-      answer: next && next.role === 'assistant' ? next : null,
+      answer,
     });
   });
   return entries;
@@ -381,7 +473,7 @@ function attachmentsMarkdown(question: ChatMessage, files: ReadonlyMap<string, s
 function sessionNotesMarkdown(doc: StoredDocMeta, record: SessionRecord, files: ReadonlyMap<string, string>): string {
   const lines: string[] = [
     `# ${doc.title} — ${record.title}`,
-    `- Provider: ${providerLabel(record.provider, record.model, record.effort)} · Started: ${formatDateTime(record.createdAt)}`,
+    `- Provider: ${sessionProviderLine(record)} · Started: ${formatDateTime(record.createdAt)}`,
     '',
     '---',
     '',
@@ -419,16 +511,14 @@ function groupBySlide(records: SessionRecord[]): SlideNotes[] {
 }
 
 function studyNotesMarkdown(doc: StoredDocMeta, records: SessionRecord[], slides: SlideNotes[], files: ReadonlyMap<string, string>): string {
-  const providerBySession = new Map(
-    records.map((record) => [record.id, providerLabel(record.provider, record.model, record.effort)]),
-  );
+  const recordById = new Map(records.map((record) => [record.id, record]));
   const lines: string[] = [`# ${doc.title} — study notes`, ''];
   if (slides.length === 0) lines.push('_No questions yet._', '');
   for (const { slide, entries } of slides) {
     lines.push(`## Slide ${slide}`, '', `![slide ${slide}](slides/${slideFileName(slide, doc.pageCount)})`, '');
     for (const entry of entries) {
       const question = entry.question.text.trim();
-      const provider = providerBySession.get(entry.sessionId) ?? providerLabel(entry.provider, '');
+      const provider = entryProviderLabel(entry, recordById.get(entry.sessionId));
       lines.push(
         `### Q. ${firstLine(question)}`,
         `> ${entry.sessionTitle} · ${provider} · ${formatDateTime(entry.question.createdAt)}`,
