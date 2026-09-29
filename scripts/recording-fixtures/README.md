@@ -1,13 +1,13 @@
 > Copied into the repo from the recording spike so the synthetic lecture fixtures can be regenerated (the audio itself is not committed).
-> Requires macOS (`say` voices Yuna and Samantha), ffmpeg on PATH, Python 3, and the L7 lecture in the library
-> (`library/example-parsing-deck`, read-only). Run `python3 scripts/recording-fixtures/tools/build.py --help`
+> Requires macOS (`say` voices Yuna and Samantha), ffmpeg on PATH, Python 3, and a 24-slide lecture deck in the library
+> (`EASY_STUDY_DECK`, read-only; the fixtures were written for a compilers lecture on top-down parsing). Run `python3 scripts/recording-fixtures/tools/build.py --help`
 > and write the output outside the repo (e.g. a temp dir); paths below describe that output folder.
 
-# Synthetic lecture-recording fixtures (L7 Parsing III, slides 1-24)
+# Synthetic lecture-recording fixtures (a 24-slide parsing lecture)
 
 These are test inputs for the lecture-recording spike: upload, local transcription, aligning transcript segments to slides, and replaying audio in sync with slides. Every file is synthetic. The lecturer's script was written for this fixture, and macOS `say` spoke it. Because the timeline was assembled sample by sample, the ground truth is exact: for any moment you can say which slide is being discussed, which slide is on screen, and what was said.
 
-Deck: `library/example-parsing-deck` (a compilers course Lecture 7, Top-Down). The build only reads it (`slides/NNN.png` for the videos).
+Deck: `EASY_STUDY_DECK` (a compilers lecture on top-down parsing, 24 slides). The build only reads it (`slides/NNN.png` for the videos).
 
 ## Layout
 

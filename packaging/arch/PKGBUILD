@@ -4,7 +4,7 @@
 # the deb's paths, which the app relies on (/usr/bin/easy-study, the bundled Node as /usr/bin/es-node beside it,
 # its resources in /usr/lib/easy-study/{node,server}).
 #
-# The .deb comes from the public release repository (installers only; the source is private): `makepkg -si` next
+# The .deb comes from the release repository (installers and updates; the source is Wooangha/easy-study): `makepkg -si` next
 # to this file downloads it and checks its sha256 (a .deb already next to it is used instead).
 # CI (.github/workflows/desktop.yml, job arch-x64) sets pkgver from package.json and the checksums of the build's
 # own .deb files, then builds, installs and smoke-tests the package on current Arch Linux; a release gets that
@@ -19,9 +19,8 @@ pkgrel=1
 pkgdesc='Study lecture PDFs slide by slide with an LLM tutor (Claude Code, Codex, Claude API, OpenAI API): desktop app'
 arch=('x86_64' 'aarch64')
 url='https://github.com/Wooangha/easy-study-releases'
-# The repository has no license file yet (all rights reserved). SPDX form of "custom" (namcap rejects plain
-# 'custom'); the bundled Node.js and third-party (PDFium…) notices are linked into /usr/share/licenses below.
-license=('LicenseRef-custom')
+# The bundled Node.js and third-party (PDFium…) notices are linked into /usr/share/licenses below.
+license=('MIT')
 # What the app (WebKitGTK shell, native-tls → libssl) and the bundled Node (libatomic, libstdc++) link against.
 # gcc-libs: libatomic/libgcc/libstdc++ (split out of it on current Arch, where it pulls them in).
 # gst-plugins-base/-good: WebKitGTK's microphone capture (lecture recording) and WAV/Opus playback.
@@ -53,4 +52,8 @@ package() {
   install -dm755 "$pkgdir/usr/share/licenses/$pkgname"
   ln -s "/usr/lib/$_pkgname/node/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/node-LICENSE"
   ln -s "/usr/lib/$_pkgname/server/THIRD_PARTY_NOTICES.md" "$pkgdir/usr/share/licenses/$pkgname/THIRD_PARTY_NOTICES.md"
+  # The MIT license of easy-study itself ships in the server folder from 0.5.3 on.
+  if [[ -e "$pkgdir/usr/lib/$_pkgname/server/LICENSE" ]]; then
+    ln -s "/usr/lib/$_pkgname/server/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  fi
 }

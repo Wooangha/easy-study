@@ -2,7 +2,7 @@
   "lang": "ko-mixed",
   "voice": "Yuna",
   "rate": 175,
-  "deck": "library/example-parsing-deck (a compilers course L7 Parsing III, Top-Down)",
+  "deck": "EASY_STUDY_DECK (a compilers lecture on top-down parsing, 24 slides)",
   "notes": "Korean lecture with English technical terms written (and spoken) as English words. Each utterance becomes one ground-truth segment. slide=null means off-slide tangent. kind=backref means the lecturer briefly flipped back to an earlier slide. {pause:s} inserts extra silence; {flip:n,dur:s} shows slide n in the video during silence without talking about it (skipped slide).",
   "items": [
     {

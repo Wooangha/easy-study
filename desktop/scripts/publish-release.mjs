@@ -23,7 +23,7 @@
 //   and Info.plist's version; the Windows installer's version resource (ProductVersion) is the version (the AppImages
 //   are squashfs images: they are only checked by name, CI run and digest); every signature verifies with the key the installed apps trust (the tag's, and the
 //   public latest release's), names its file and version (trusted comment file:/version:).
-// Signing: `tauri signer sign -f <key> --app-version <v>` (no password). The script passes the key's path to the
+// Signing: `tauri signer sign -f <key> --app-version <v>`. The script passes the key's path to the
 // Tauri CLI and never reads, prints or copies the key itself.
 // Publishing: a DRAFT public release gets every allowlisted asset, SHA256SUMS.txt and latest.json (last); only then
 // is it published. A published release is never changed: when a re-run finds a published asset that differs, it
@@ -285,7 +285,7 @@ async function preflight(opt) {
   if (!check(branches.length > 0, 'has a commit (README)', branches.length ? repo.default_branch : 'empty')) {
     console.log(
       `    One-time step, only with the user's consent: add the public README to ${PUBLIC_REPO} (downloads per OS,\n` +
-        '    first-open notes for macOS and Windows, "소스 코드는 비공개", the FFmpeg LGPL source note), e.g. with\n' +
+        '    first-open notes for macOS and Windows, the FFmpeg LGPL source note), e.g. with\n' +
         `    "Add a README" on https://github.com/${PUBLIC_REPO}. Then run this again.`,
     );
   }

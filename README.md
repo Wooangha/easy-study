@@ -117,7 +117,7 @@ Chrome/Edge는 **안전한 주소에서만** 설치를 허용해요.
 
 ### 설치
 
-[릴리스 페이지](https://github.com/Wooangha/easy-study-releases/releases/latest)(설치 파일만 올리는 공개 저장소예요. 소스 코드는 비공개)에서 OS에 맞는 파일을 받으세요. 0.4.2까지는 비공개 저장소의 릴리스에만 있어요. 아직 코드 서명과 공증을 하지 않은 앱이라, 처음 열 때 OS가 한 번 막아요.
+[릴리스 페이지](https://github.com/Wooangha/easy-study-releases/releases/latest)(설치 파일과 업데이트 파일을 올리는 저장소예요)에서 OS에 맞는 파일을 받으세요. 0.5.0부터 있어요. 아직 코드 서명과 공증을 하지 않은 앱이라, 처음 열 때 OS가 한 번 막아요.
 
 - **macOS 13.5 이상** (Apple silicon `easy-study_<버전>_aarch64.dmg`, Intel `easy-study_<버전>_x64.dmg`): dmg를 열고 easy-study를 ‘응용 프로그램’으로 끌어다 놓아요. 처음 열 때 “확인되지 않은 개발자” 경고가 나오면 **시스템 설정 › 개인정보 보호 및 보안**에서 ‘그래도 열기’를 누르세요. 또는 터미널에서 `xattr -dr com.apple.quarantine /Applications/easy-study.app`.
   처음 [강의를 녹음](#강의-녹음)할 때 macOS가 마이크를 써도 되는지 한 번 물어요. 서명하지 않은 앱이라 새 버전으로 바꾸면 다시 물을 수 있어요. 켜져 있는데도 녹음이 안 되면 **시스템 설정 › 개인정보 보호 및 보안 › 마이크**에서 easy-study를 껐다가 다시 켜세요.
@@ -143,7 +143,7 @@ Chrome/Edge는 **안전한 주소에서만** 설치를 허용해요.
 
 `easy-study-bin` 패키지는 릴리스의 .deb(CI가 빌드하고 시험한 바로 그 파일)를 풀어서 만들어요(`packaging/arch/PKGBUILD`). 파일 위치는 deb와 같고(`/usr/bin/easy-study`, `/usr/lib/easy-study/`), WebKitGTK 같은 라이브러리는 Arch 패키지를 써서 보안 업데이트도 그대로 받아요. 앱 안에서는 업데이트되지 않으니, 새 버전이 나오면 아래처럼 다시 설치하세요.
 
-릴리스에는 CI가 만들고 시험한 x86_64 패키지와 그 PKGBUILD가 들어 있어요. 받아서 바로 설치하세요 (예: `<버전>` = `0.5.0`). 0.4.2까지는 비공개 저장소의 릴리스라 `gh release download v<버전> --repo Wooangha/easy-study`로 받아요.
+릴리스에는 CI가 만들고 시험한 x86_64 패키지와 그 PKGBUILD가 들어 있어요. 받아서 바로 설치하세요 (예: `<버전>` = `0.5.0`).
 
 ```bash
 curl -LO https://github.com/Wooangha/easy-study-releases/releases/download/v<버전>/easy-study-bin-<버전>-1-x86_64.pkg.tar.zst
@@ -498,6 +498,8 @@ tests/             node:test 테스트
 ```
 
 ## 라이선스
+
+easy-study의 코드는 [MIT 라이선스](LICENSE)예요.
 
 PDF 엔진으로 PDFium(BSD-3-Clause / Apache-2.0, `@embedpdf/pdfium` 패키지는 MIT)을 함께 배포해요. PDFium과 그 안에 들어 있는 라이브러리(FreeType, OpenJPEG, Little CMS, libjpeg-turbo, libpng, zlib, AGG)의 라이선스 전문은 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)에 있어요.
 데스크톱 앱은 강의 녹음용으로 whisper.cpp(MIT)와 FFmpeg(LGPL 2.1 이상, libopus는 BSD-3-Clause)도 함께 배포해요. FFmpeg는 GPL 부분 없이 빌드하고, 빌드 설정과 소스를 받는 법, 처음 쓸 때 받는 모델(Whisper, Silero VAD: MIT)의 라이선스도 같은 파일에 있어요.

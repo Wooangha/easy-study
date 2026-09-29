@@ -2,7 +2,7 @@
   "lang": "en",
   "voice": "Samantha",
   "rate": 150,
-  "deck": "library/example-parsing-deck (a compilers course L7 Parsing III, Top-Down)",
+  "deck": "EASY_STUDY_DECK (a compilers lecture on top-down parsing, 24 slides)",
   "notes": "English lecture, same structure as ko-mixed (same tangent position, same back-reference 17->10->17, same skipped slide 11, same pauses). Each utterance becomes one ground-truth segment.",
   "items": [
     {

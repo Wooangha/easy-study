@@ -3,7 +3,7 @@
 For every change point tc: frame round(tc*10)-1 must match the previous slide and frame round(tc*10) the new one
 (best PSNR among the two candidate slide PNGs). usage: check_video.py <ground_truth.json> <video>"""
 import json, os, re, shutil, subprocess, sys, tempfile
-DECK = "<repo>/library/example-parsing-deck/slides"
+DECK = os.path.join(os.environ.get("EASY_STUDY_DECK") or os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), "library", "example-parsing-deck"), "slides")  # the deck build.py used
 gt = json.load(open(sys.argv[1])); video = sys.argv[2]; tl = gt["shownTimeline"]
 want = {}
 for i in range(1, len(tl)):

@@ -429,7 +429,9 @@ session's when there is no answer; a session whose LLM changed (§5 "LLM switch"
     page to be left for 1 s: App.tsx's beforeunload guard (answers, uploads, recordings) asks `leaveAllowed()` first,
     because WebView2 runs beforeunload even for a navigation the shell cancels. The server answers the prefix with 204
     in every mode, so an action that is not intercepted leaves the page where it is.
-  - Hooks App.tsx installs for the shell (in browsers too, unused there): `__easyStudyBusy()` → `{recording,
+  - Hooks for the shell (in browsers too, unused there): `__easyStudyAskedAction(name)` → whether this page's own
+    `desktopAction(name)` ran within the last 5 s (installed by main.tsx before anything renders; each ask answers once,
+    the shell acts only on a yes, §24); the rest installed by App.tsx: `__easyStudyBusy()` → `{recording,
     unsentSeconds, finishing, recordingUploads, uploads, answering}` read live from the recorder, the recording uploads
     and the app's state (`recording` is any recorder phase but idle, paused included); `__easyStudyOpenSettings(section?)`
     → true (under the login screen the dialog opens after the login); `__easyStudyAllowLeave()` → true, allowing 3 s for
@@ -977,8 +979,18 @@ Shell (Rust, src/main.rs):
   SIGINT/SIGHUP handler that calls app.exit(0); on exit close stdin and wait briefly; strip AppImage variables from the child env
   and from the login shell's;
 - windows: main window created in code; chooser at the bundled `ui/` (IPC allowed only there); the server page (local or remote) gets no
-  IPC; on_new_window: same-origin → in-app window, other → system browser (tauri-plugin-opener); drag-drop handler disabled so the
-  page's own PDF drop upload works; downloads are refused (the web client has none); remote URL validated (http on
+  IPC; links: a `target=_blank` link or `window.open` to the server's own origin opens an in-app window (`new_window`, labels page-N,
+  no IPC), anything else goes to the system browser (`open_externally`: http(s)/mailto through tauri-plugin-opener's `open_url`
+  from Rust, other schemes blocked and logged). WebKit asks the navigation handler first for a `_blank` link (its new-window
+  policy check; wry passes the URL only), so `allow_main_navigation` is what sends other sites to the browser for links, and
+  `new_window` for `window.open`. Checked with real clicks on macOS only (0.5.3); on Windows and Linux the engines raise only
+  the new-window event for such links (WebView2 `NewWindowRequested`, WebKitGTK `create` — read in wry's source, not run
+  here), and `new_window` logs every window it makes (`new window page-N: <url>`, rate-limited), so a link that seems to do
+  nothing there shows in shell.log. The opener plugin is built with
+  `open_js_links_on_click(false)` (asserted by desktop.test.mjs): its default init script catches every click on a `_blank`
+  link to http(s)/mailto/tel in every page, cancels it and calls `plugin:opener|open_url` over IPC, which no page may use —
+  so from 0.2.0 to 0.5.2 the banner's "변경 사항 ↗", notes.md/digest.md and links in answers did nothing (no shell.log line
+  either); drag-drop handler disabled so the page's own PDF drop upload works; downloads are refused (the web client has none); remote URL validated (http on
   LAN/.local/IP, https only with a certificate the OS trusts — probe before navigating and explain failures); "다음에도 바로 연결"
   remembers the choice; a menu item / shortcut to return to the chooser;
 - smoke hooks for CI (`EASY_STUDY_DESKTOP_SMOKE=1|chooser|chooser-local|chooser-remote`, README): never handed over to a running
@@ -1334,13 +1346,22 @@ chooser included). The web half (settings dialog, theme, banner, hooks) is in §
   share/off, share/reveal (native confirm, then the code is pushed for ~60 s), share/reset-code. `bridge::classify` runs first in
   `allow_main_navigation`: a known action on the allowed http(s) origin is done on its own thread and the navigation
   cancelled; the prefix anywhere else (another origin or scheme, an unknown action) is cancelled and never opened in the
-  browser; the query is ignored. `new_window` and the page-N windows refuse the prefix without acting (answers open links
-  with target=_blank). The server answers the prefix with 204 in every mode, so a navigation that gets through changes
-  nothing. `theme/*` and `forget-choice` do nothing when the value is unchanged; a page's `theme/*` is applied at most
+  browser; the query is ignored. `new_window` and the page-N windows refuse the prefix without acting. On macOS a
+  `target=_blank` link to it in the main window reaches `allow_main_navigation` first (WebKit's new-window policy check,
+  URL only, §19), indistinguishable from the page's own navigation, so `on_action` first asks the page whether its own
+  code asked: `desktopAction` notes the action and `__easyStudyAskedAction(name)` (installed by main.tsx, unit-tested)
+  answers once per ask. `false` — the page has the hook and did not ask, i.e. a link was followed — is refused and logged
+  (`page-unasked`); `null` — a web client without the hook (a remote server before 0.5.3) — gets a native confirm for
+  choose, forget-choice and cancel-update (PageDialogs-limited; the others are reversible, rate-limited or ask anyway).
+  The web client's Markdown (lib/markdownOptions.ts `urlTransform`, unit-tested) also drops the href of every link to
+  this origin's reserved path and components/Markdown.tsx shows its text (`md-dead-link`, component-tested): an answer,
+  a note or a 정리본 never asks the shell for an action (the page's own controls do, through `desktopAction`). The server
+  answers the prefix with 204 in every mode, so a navigation that gets through changes nothing. `theme/*` and `forget-choice` do nothing when the value is unchanged; a page's `theme/*` is applied at most
   once a second (the newest one asked for wins), so a page toggling in a loop cannot rewrite desktop.json or flip every
   window each time.
 - **Hooks the shell calls** (eval, worker threads only: `eval_json` needs the main thread to answer and must never run
-  on it): `__easyStudyBusy()`, `__easyStudyOpenSettings()` (only `true` counts as handled; otherwise the chooser opens
+  on it): `__easyStudyAskedAction(name)` (before every page action; the name is one of Action's own, JSON-quoted),
+  `__easyStudyBusy()`, `__easyStudyOpenSettings()` (only `true` counts as handled; otherwise the chooser opens
   with its 앱 설정), `__easyStudyAllowLeave()` (before show_chooser, reload and the install navigation, only after the
   user agreed in a native dialog, so beforeunload never asks twice).
 - **What a page can start** (PageDialogs, unit-tested): a remote page's dialogs at most one per 60 s, and after the user
@@ -1349,7 +1370,8 @@ chooser included). The web half (settings dialog, theme, banner, hooks) is in §
   own banner works after one 취소. The check happens once, when the action arrives: one flow can show its confirm and
   its busy dialog. A page opens the release page at most once a minute, and its `install-update` with nothing found
   counts as a manual check (at most one request to GitHub every 30 s). Log lines a page can cause (reserved paths,
-  blocked navigations, page loads, actions, "already on its way", failed checks, theme changes) are limited to 20 per
+  blocked navigations, page loads, actions, unasked actions, new windows, "already on its way", failed checks, theme
+  changes) are limited to 20 per
   kind and minute (shell.log is rotated at launch only).
 
 ### Busy gate (bridge::decide, unit-tested)
@@ -1450,7 +1472,7 @@ the chooser, where no page is asked, still installs). Menu "연결 대상 바꾸
   folder `easy-study.app/`, no `._` files, no xattrs, no hard links (tar-rs would resolve them against the working
   folder), Info.plist version = package.json. The Windows installer and the AppImages are the updater artifacts as they
   are. CI never signs for the updater and has no key; every action is pinned by commit SHA (tag in a comment).
-- The public repository `Wooangha/easy-study-releases` holds installers only (the source stays private): the 5 updater
+- The public repository `Wooangha/easy-study-releases` holds the installers and updates (the source is in `Wooangha/easy-study`): the 5 updater
   artifacts, dmg/deb/rpm, the Arch package and its PKGBUILD (whose sources point there), the FFmpeg source (LGPL), and
   SHA256SUMS.txt and latest.json made by the script. latest.json has exactly the keys darwin-aarch64, darwin-x86_64,
   windows-x86_64, windows-x86_64-nsis, linux-x86_64-appimage, linux-aarch64-appimage (never a bare linux-<arch>, which
@@ -1468,7 +1490,7 @@ the chooser, where no page is asked, still installs). Menu "연결 대상 바꾸
   without auth, then publishes the private draft. A published public release is never changed or deleted: a difference
   on a re-run aborts with "cut a new patch version". So a GitHub compromise alone no longer gets code signed (the
   security review's "denial only" holds only with these checks); a compromise of the key does.
-- One key, no password, no recovery key (lead's decision). Losing `~/.tauri/easy-study-updater.key` means no release can
+- One key, no recovery key (lead's decision). Losing `~/.tauri/easy-study-updater.key` means no release can
   ever be installed in-app again: every 0.5.0+ install trusts only it, and a new key needs a manual reinstall by every
   user. A leak lets whoever can also write the public repo ship code to every install. Keep the offline backup current.
 - `update-e2e.mjs` (config / pack / sign / serve) tests the flow with a throwaway key, a separate identifier

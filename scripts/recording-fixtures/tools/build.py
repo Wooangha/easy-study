@@ -12,7 +12,7 @@ Pipeline (stdlib Python + macOS `say` + ffmpeg):
 
 Usage: python3 tools/build.py [ko-mixed|en|long|smoke|all]
 Env: FIXTURES_OUT (output folder, default <tmp>/easy-study-fixtures),
-     EASY_STUDY_DECK (the L7 lecture folder, default <repo>/library/example-parsing-deck)
+     EASY_STUDY_DECK (the lecture folder, default <repo>/library/example-parsing-deck)
 """
 import array, hashlib, json, math, os, random, shutil, subprocess, sys, tempfile, wave
 

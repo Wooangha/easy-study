@@ -17,7 +17,7 @@ export function packServer({ repo = REPO_DIR, out, os = process.platform, cpu = 
   }
   fs.rmSync(out, { recursive: true, force: true });
   fs.mkdirSync(path.join(out, 'web'), { recursive: true });
-  for (const f of ['package.json', 'package-lock.json', 'THIRD_PARTY_NOTICES.md']) {
+  for (const f of ['package.json', 'package-lock.json', 'LICENSE', 'THIRD_PARTY_NOTICES.md']) {
     if (fs.existsSync(path.join(repo, f))) fs.copyFileSync(path.join(repo, f), path.join(out, f));
   }
   fs.cpSync(path.join(repo, 'dist-server'), path.join(out, 'dist-server'), { recursive: true });
