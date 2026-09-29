@@ -189,9 +189,15 @@ pub fn go_to(app: &AppHandle, url: &str) {
 }
 
 /// Back to the chooser (it reads everything it shows from get_state).
+/// The chooser's address when no chooser page has loaded yet (the shell's own page, DESIGN §19).
+#[cfg(windows)]
+const CHOOSER_URL: &str = "http://tauri.localhost/";
+#[cfg(not(windows))]
+const CHOOSER_URL: &str = "tauri://localhost/";
+
 pub fn show_chooser(app: &AppHandle) {
     let st = app.state::<AppState>();
-    let chooser = lock(&st.chooser_url).clone();
+    let chooser = lock(&st.chooser_url).clone().or_else(|| Url::parse(CHOOSER_URL).ok());
     // (Not the chooser itself: on Windows it is served over http from tauri.localhost.)
     let shown = main_window(app).and_then(|w| w.url().ok()).filter(|u| matches!(u.scheme(), "http" | "https") && !is_chooser(app, u));
     if let Some(shown) = shown {
@@ -1313,6 +1319,16 @@ fn main() {
                         // Without the query: an engine may report the login link (the code in its query) here.
                         bridge::log_limited(&h_load, "page", &format!("page loaded {}", without_query(payload.url())));
                         if is_chooser(&h_load, payload.url()) {
+                            // The address show_chooser() goes back to. WebView2 reports about:blank until the first
+                            // page has loaded, so it is taken from the load, not from the window at creation
+                            // (0.6.1 went back to about:blank on Windows: a black window).
+                            {
+                                let st = h_load.state::<AppState>();
+                                let mut chooser_url = lock(&st.chooser_url);
+                                if chooser_url.is_none() {
+                                    *chooser_url = Some(payload.url().clone());
+                                }
+                            }
                             smoke_chooser_loaded(&h_load);
                         } else {
                             page_loaded(&h_load, payload.url());
@@ -1321,7 +1337,7 @@ fn main() {
                     }
                 })
                 .build()?;
-            *lock(&h.state::<AppState>().chooser_url) = window.url().ok();
+            *lock(&h.state::<AppState>().chooser_url) = window.url().ok().filter(|u| is_chooser(&h, u));
             media::install(&h, &window); // the lecture recorder's microphone (DESIGN §22)
 
             let smoke_url = std::env::var("EASY_STUDY_DESKTOP_SMOKE_URL").ok().filter(|u| smoke == Smoke::Direct && !u.is_empty());
