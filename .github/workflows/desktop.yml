@@ -8,6 +8,10 @@
 # and the AppImages serve the updater as they are. Nothing is signed for the updater here and no updater key is ever
 # in CI: desktop/scripts/publish-release.mjs checks the draft, signs on the maintainer's Mac and publishes to
 # Wooangha/easy-study-releases with latest.json. Actions are pinned by commit (the tag in the comment).
+# Caches (Rust target dirs, whisper-cli, ffmpeg) are per git ref: a run restores its own ref's caches or main's, so
+# a `v*` tag run is only warm when main was built after the last change (`gh workflow run desktop.yml --ref main`
+# after merging, before tagging). Only main's runs save the large Rust caches: branch and tag runs would only fill
+# the repository's 10 GB cache quota with copies nobody restores (and evict main's).
 # (A secret that is not configured arrives as an empty variable; desktop/scripts/build.mjs drops empty APPLE_*
 # variables, which the Tauri CLI would otherwise take as the signing identity "" and as notarization credentials.)
 name: desktop
@@ -156,6 +160,7 @@ jobs:
         with:
           workspaces: desktop/src-tauri -> target
           key: ${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Linux build dependencies (v2.tauri.app/start/prerequisites; xdg-utils for the AppImage, squashfs-tools for appimage.mjs) + Xvfb, espeak-ng (ASR check)
         if: runner.os == 'Linux'
