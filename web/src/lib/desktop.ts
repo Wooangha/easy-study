@@ -9,8 +9,11 @@
 //            ignored. `share` (다른 기기에서 접속 허용) comes only to the page of this computer's own server.
 //   actions  a navigation to <origin>/__easy-study-desktop/<action>: the shell cancels it and acts (no parameters,
 //            the query is ignored). The server answers the prefix with 204, so one that gets through changes nothing.
-//   hooks    functions the shell calls with eval (App.tsx installs them): __easyStudyBusy, __easyStudyOpenSettings,
-//            __easyStudyAllowLeave.
+//            Only desktopAction() navigates there: it notes the action first, and the shell asks the page through
+//            __easyStudyAskedAction(name) before acting — a link to that path (in an answer, say) is not the page
+//            asking (on macOS a target=_blank link reaches the shell like a navigation, DESIGN §19).
+//   hooks    functions the shell calls with eval: __easyStudyAskedAction (main.tsx installs it, before anything
+//            renders), __easyStudyBusy, __easyStudyOpenSettings, __easyStudyAllowLeave (App.tsx).
 //
 // Pure helpers and a tiny store; no React state of the app and no recorder (they are passed in), so the tests can run
 // it in Node.
@@ -123,8 +126,10 @@ export const NOT_BUSY: PageBusy = { recording: false, unsentSeconds: 0, finishin
 export type SettingsSection = 'display' | 'study' | 'recording' | 'desktop' | 'about';
 export const SETTINGS_SECTIONS: readonly SettingsSection[] = ['display', 'study', 'recording', 'desktop', 'about'];
 
-/** Functions the shell calls on the page (installed by App.tsx while the app is shown). */
+/** Functions the shell calls on the page (main.tsx installs __easyStudyAskedAction, App.tsx the others while the app is shown). */
 export interface PageHooks {
+  /** Whether the page's own code asked for this action just now (takeAskedAction): the shell acts only then. */
+  __easyStudyAskedAction: (action: unknown) => boolean;
   __easyStudyBusy: () => PageBusy;
   __easyStudyOpenSettings: (section?: unknown) => boolean;
   __easyStudyAllowLeave: () => boolean;
@@ -398,10 +403,30 @@ export function leaveAllowed(now = Date.now()): boolean {
   return now < leaveAllowedUntil;
 }
 
+/** How long the shell has to ask about an action (it asks right after cancelling the navigation). */
+const ASKED_ACTION_MS = 5_000;
+/** Actions asked for and not yet checked by the shell (a few: a page never asks for more at once). */
+const ASKED_ACTION_MAX = 8;
+let askedActions: Array<{ action: DesktopActionName; at: number }> = [];
+
+/**
+ * `window.__easyStudyAskedAction(name)`: whether this page's own code asked for `name` (desktopAction) within the
+ * last ASKED_ACTION_MS; each ask answers once. A navigation to the reserved path that nobody asked for — a link to
+ * it in an answer — is refused by the shell (DESIGN §24).
+ */
+export function takeAskedAction(action: unknown, now = Date.now()): boolean {
+  askedActions = askedActions.filter((a) => now - a.at <= ASKED_ACTION_MS);
+  const i = askedActions.findIndex((a) => a.action === action);
+  if (i === -1) return false;
+  askedActions.splice(i, 1);
+  return true;
+}
+
 /** Asks the shell to do `action` (inside the app only; see the top of this file). */
 export function desktopAction(action: DesktopActionName, location: Pick<Location, 'origin' | 'assign'> = window.location): void {
   const url = desktopActionUrl(location.origin, action);
   allowLeave(ACTION_LEAVE_MS);
+  askedActions = [...askedActions.slice(-(ASKED_ACTION_MAX - 1)), { action, at: Date.now() }];
   location.assign(url);
 }
 

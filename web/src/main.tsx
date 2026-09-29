@@ -2,10 +2,16 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { AuthGate } from './AuthGate.tsx';
 import { takeLoginLinkParam } from './lib/auth.ts';
+import { exposePageHook, takeAskedAction } from './lib/desktop.ts';
 import './styles.css';
 
 const root = document.getElementById('root');
 if (!root) throw new Error('#root element missing');
+
+// The desktop shell acts on `<origin>/__easy-study-desktop/<action>` only when this page asked for it (lib/desktop.ts
+// desktopAction): installed before anything renders, so the login screen's actions count and a link to that path never
+// does.
+exposePageHook('__easyStudyAskedAction', takeAskedAction);
 
 // A login link (/login?code=…) that did not work redirects to /?login=failed or /?login=limited
 // (DESIGN §16): remember it for the login screen and clean the address bar.

@@ -34,6 +34,7 @@ import rehypeHighlight from 'rehype-highlight';
 import rehypeKatex from 'rehype-katex';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
+import { DESKTOP_ACTION_PREFIX } from './desktop.ts';
 
 /** Origin used to resolve relative image URLs outside a browser (tests). */
 const FALLBACK_ORIGIN = 'http://easy-study.invalid';
@@ -106,9 +107,27 @@ export function rehypeBlockRemoteImages() {
   return (tree: Root) => visit(tree);
 }
 
-/** Like react-markdown's default, but image sources must pass isAllowedImageSrc (and may be data: URLs). */
+/**
+ * A link to the desktop shell's reserved path on this origin (`/__easy-study-desktop/<action>`, lib/desktop.ts): a
+ * click on it would ask the shell for an action (DESIGN §24), so Markdown never gets to link there.
+ */
+export function isReservedLink(href: string, origin: string = currentOrigin()): boolean {
+  let url: URL;
+  try {
+    url = new URL(href.trim(), `${origin}/`);
+  } catch {
+    return false;
+  }
+  return url.origin === origin && (url.pathname.startsWith(DESKTOP_ACTION_PREFIX) || url.pathname === DESKTOP_ACTION_PREFIX.slice(0, -1));
+}
+
+/**
+ * Like react-markdown's default, but image sources must pass isAllowedImageSrc (and may be data: URLs), and a link
+ * to the shell's reserved path is dropped (an empty href; components/Markdown.tsx renders it as plain text).
+ */
 export const urlTransform: NonNullable<Options['urlTransform']> = (url, key, node) => {
   if (key === 'src' && node.tagName === 'img') return isAllowedImageSrc(url) ? url.trim() : '';
+  if (key === 'href' && isReservedLink(url)) return '';
   return defaultUrlTransform(url);
 };
 

@@ -26,6 +26,7 @@ import {
   settingsSection,
   shareBlockReason,
   shareWarning,
+  takeAskedAction,
   TOASTED_UPDATE_ITEM,
   firstUpdatedToast,
   updateErrorText,
@@ -236,6 +237,30 @@ describe('actions: a navigation to the reserved path of the page’s own origin'
     assert.deepEqual(assigned, ['http://127.0.0.1:5351/__easy-study-desktop/forget-choice']);
     assert.equal(leaveAllowed(now + 500), true);
     assert.equal(leaveAllowed(now + 5_000), false);
+  });
+
+  test('the shell learns through __easyStudyAskedAction whether the page asked for an action (a link to the path did not)', () => {
+    const noop = { origin: 'http://127.0.0.1:5351', assign: () => {} };
+    const now = Date.now();
+    // Nothing asked: a navigation to the reserved path that nobody asked for (a link in an answer).
+    assert.equal(takeAskedAction('choose', now), false);
+    // Asked: answered once, in any order, and only for that action.
+    desktopAction('theme/dark', noop);
+    desktopAction('dismiss-update', noop);
+    assert.equal(takeAskedAction('choose', now), false);
+    assert.equal(takeAskedAction('dismiss-update', now), true);
+    assert.equal(takeAskedAction('dismiss-update', now), false);
+    assert.equal(takeAskedAction('theme/dark', now), true);
+    assert.equal(takeAskedAction('theme/dark', now), false);
+    // Not a string, or too late (the shell asks within a second): no.
+    desktopAction('check-update', noop);
+    assert.equal(takeAskedAction({ toString: () => 'check-update' }, now), false);
+    assert.equal(takeAskedAction('check-update', now + 6_000), false);
+    // The list stays short: only the newest asks are kept.
+    for (let i = 0; i < 20; i++) desktopAction('theme/light', noop);
+    desktopAction('forget-choice', noop);
+    assert.equal(takeAskedAction('forget-choice', now), true);
+    assert.equal([...Array(20)].filter(() => takeAskedAction('theme/light', now)).length, 7);
   });
 
   test('allowLeave (the shell’s hook) extends, never shortens', () => {

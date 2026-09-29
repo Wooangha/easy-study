@@ -794,6 +794,14 @@ test('updater: tauri.conf.json compiles in the release key, the public endpoint 
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(tauriDir, 'capabilities', 'chooser.json'), 'utf8')).permissions, []);
 });
 
+test('links: the opener plugin injects no click script (it would swallow every target=_blank click into denied IPC)', () => {
+  // tauri-plugin-opener's default init script catches clicks on <a target="_blank"> to http(s)/mailto/tel, cancels
+  // them and calls plugin:opener|open_url over IPC, which no page may use: the banner's release page, notes.md and
+  // links in answers did nothing. The shell handles the clicks itself (allow_main_navigation / new_window).
+  assert.match(mainRs, /tauri_plugin_opener::Builder::new\(\)\s*\.open_js_links_on_click\(false\)\s*\.build\(\)/);
+  assert.doesNotMatch(mainRs, /tauri_plugin_opener::init\(\)/);
+});
+
 test('updater: the page marker is main-frame only, static, and gives pages no IPC', () => {
   const src = fs.readdirSync(path.join(tauriDir, 'src')).filter((f) => f.endsWith('.rs')).map((f) => fs.readFileSync(path.join(tauriDir, 'src', f), 'utf8')).join('\n');
   const script = /pub const INIT_SCRIPT: &str =\s*"((?:[^"\\]|\\.)*)";/.exec(src)?.[1];

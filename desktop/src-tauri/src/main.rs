@@ -234,6 +234,11 @@ fn open_externally(app: &AppHandle, url: &Url) {
 
 /// The main window stays on the chooser or the chosen server; anything else goes to the system browser. A page's
 /// action (bridge.rs: `<origin>/__easy-study-desktop/<action>`) is done on a thread and the navigation cancelled.
+/// Also asked first (macOS) for a link with target=_blank (WebKit's new-window policy; wry gives only the URL, so such
+/// a click cannot be told from a navigation of the window itself): another site goes to the browser here and no
+/// window is made; the server's own pages go on to new_window; a link to the reserved path is refused by
+/// bridge::on_action, which first asks the page whether its own code asked for the action (the web client's Markdown
+/// drops such hrefs as well, web/src/lib/markdownOptions.ts).
 /// Runs on the UI thread: nothing here may block.
 fn allow_main_navigation(app: &AppHandle, url: &Url) -> bool {
     let allowed = lock(&app.state::<AppState>().allowed_origin).clone();
@@ -257,8 +262,9 @@ fn allow_main_navigation(app: &AppHandle, url: &Url) -> bool {
     false
 }
 
-/// target=_blank links and window.open (notes.md, digest.md, links in answers): the server's own pages open
-/// in an app window (same cookies, no IPC: its label matches no capability); other sites in the browser.
+/// target=_blank links (after allow_main_navigation let them through) and window.open (notes.md, digest.md, links
+/// in answers): the server's own pages open in an app window (same cookies, no IPC: its label matches no
+/// capability); other sites in the browser.
 fn new_window(app: &AppHandle, url: Url, features: NewWindowFeatures) -> NewWindowResponse<Wry> {
     // The reserved path never acts from a new window (links in answers open with target=_blank).
     if bridge::is_reserved(&url) {
@@ -272,7 +278,7 @@ fn new_window(app: &AppHandle, url: Url, features: NewWindowFeatures) -> NewWind
     static N: AtomicU32 = AtomicU32::new(0);
     let label = format!("page-{}", N.fetch_add(1, SeqCst));
     let (h_nav, h_new) = (app.clone(), app.clone());
-    let built = WebviewWindowBuilder::new(app, label, WebviewUrl::External("about:blank".parse().unwrap()))
+    let built = WebviewWindowBuilder::new(app, &label, WebviewUrl::External("about:blank".parse().unwrap()))
         .window_features(features)
         .title("easy-study")
         .disable_drag_drop_handler()
@@ -289,7 +295,11 @@ fn new_window(app: &AppHandle, url: Url, features: NewWindowFeatures) -> NewWind
         })
         .build();
     match built {
-        Ok(window) => NewWindowResponse::Create { window },
+        Ok(window) => {
+            // (A link that seems to do nothing on Windows/Linux, where this path had no real-click check, shows here.)
+            bridge::log_limited(app, "new-window", &format!("new window {label}: {url}"));
+            NewWindowResponse::Create { window }
+        }
         Err(e) => {
             config::log(app, &format!("new window failed: {e}"));
             NewWindowResponse::Deny
@@ -1214,7 +1224,12 @@ fn main() {
         }));
     }
     let app = builder
-        .plugin(tauri_plugin_opener::init())
+        // Without the plugin's click script: it would catch every click on an <a target="_blank"> to http(s), mailto
+        // or tel (the update banner's release page, notes.md, links in answers), cancel it and call
+        // `plugin:opener|open_url` over IPC, which no page may use (capabilities/chooser.json) — so nothing happened.
+        // The clicks reach WebKit instead: allow_main_navigation sends other sites to the browser and new_window
+        // opens the server's own pages in app windows.
+        .plugin(tauri_plugin_opener::Builder::new().open_js_links_on_click(false).build())
         .plugin(tauri_plugin_dialog::init())
         // Driven from Rust only (update.rs): its JS commands stay denied, no capability grants them.
         .plugin(tauri_plugin_updater::Builder::new().build())

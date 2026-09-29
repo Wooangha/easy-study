@@ -3,13 +3,18 @@
 //
 // KaTeX renders HTML only (no MathML); every formula carries its TeX source as aria-label.
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { registerHooks } from 'node:module';
 import { describe, test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import ReactMarkdown from 'react-markdown';
+import { transformSync } from 'rolldown/experimental';
 import {
   highlightLanguages,
   isAllowedImageSrc,
+  isReservedLink,
   rehypePlugins,
   remarkPlugins,
   urlTransform,
@@ -20,6 +25,26 @@ function render(markdown: string): string {
   return renderToStaticMarkup(
     createElement(ReactMarkdown, { remarkPlugins, rehypePlugins, urlTransform }, normalizeMathDelimiters(markdown)),
   );
+}
+
+// The Markdown component itself (JSX and a stylesheet import, which Node's type stripping does not take): its .tsx
+// is transpiled on load (oxc, through Vite's bundler rolldown) and stylesheets are empty modules.
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    return specifier.endsWith('.css') ? { url: 'data:text/javascript,', shortCircuit: true } : nextResolve(specifier, context);
+  },
+  load(url, context, nextLoad) {
+    if (!url.endsWith('.tsx')) return nextLoad(url, context);
+    const { code, errors } = transformSync(fileURLToPath(url), fs.readFileSync(new URL(url), 'utf8'), { jsx: { runtime: 'automatic' } });
+    if (errors.length > 0) throw new Error(`${url}: ${errors.map((e) => e.message).join('; ')}`);
+    return { format: 'module', source: code, shortCircuit: true };
+  },
+});
+const { Markdown } = await import('../src/components/Markdown.tsx');
+
+/** The component as the app renders it. */
+function renderComponent(markdown: string): string {
+  return renderToStaticMarkup(createElement(Markdown, { text: markdown }));
 }
 
 function unescapeHtml(text: string): string {
@@ -231,6 +256,43 @@ describe('images in LLM Markdown', () => {
   test('ordinary links still work (they need a click)', () => {
     assert.match(render('[문서](https://example.com/doc)'), /<a href="https:\/\/example.com\/doc">문서<\/a>/);
     assert.doesNotMatch(render('[x](javascript:alert(1))'), /javascript:/);
+  });
+
+  test('links to the desktop shell\'s reserved path are dropped (an answer never asks the shell for an action)', () => {
+    // Relative and absolute forms of this origin's /__easy-study-desktop/<action> (DESIGN §24) lose their href;
+    // components/Markdown.tsx then renders the text without a link.
+    for (const href of [
+      '/__easy-study-desktop/install-update',
+      '__easy-study-desktop/choose',
+      '/__easy-study-desktop/',
+      '/__easy-study-desktop',
+      '/api/../__easy-study-desktop/theme/dark',
+      'http://easy-study.invalid/__easy-study-desktop/check-update?x=1',
+    ]) {
+      const html = render(`[설치](${href})`);
+      assert.match(html, /<a href="">설치<\/a>/, href);
+      assert.equal(isReservedLink(href, 'http://easy-study.invalid'), true, href);
+    }
+    // Another origin's, or a longer name: an ordinary link.
+    assert.match(render('[x](http://other.invalid/__easy-study-desktop/choose)'), /<a href="http:\/\/other.invalid\/__easy-study-desktop\/choose">/);
+    assert.match(render('[x](/__easy-study-desktop-2/choose)'), /<a href="\/__easy-study-desktop-2\/choose">/);
+    assert.equal(isReservedLink('/__easy-study-desktop/choose', 'http://127.0.0.1:5350'), true);
+    assert.equal(isReservedLink('http://127.0.0.1:5350/__easy-study-desktop/choose', 'http://127.0.0.1:5351'), false);
+    assert.equal(isReservedLink('/docs', 'http://127.0.0.1:5350'), false);
+    assert.equal(isReservedLink('not a url \u0000', 'http://127.0.0.1:5350'), false);
+  });
+
+  test('the component opens links in a new tab and shows a dropped one as text, never as <a href="">', () => {
+    assert.match(
+      renderComponent('[문서](https://example.com/doc)'),
+      /<a href="https:\/\/example\.com\/doc" target="_blank" rel="noreferrer noopener">문서<\/a>/,
+    );
+    // An <a href=""> would be a live link to the page itself (in the app: a new window of it).
+    for (const md of ['[설치](/__easy-study-desktop/install-update)', '[x](javascript:alert(1))']) {
+      const html = renderComponent(md);
+      assert.match(html, /<span class="md-dead-link">(설치|x)<\/span>/, md);
+      assert.doesNotMatch(html, /<a\b/, md);
+    }
   });
 
   test('KaTeX cannot be used to load images or add links', () => {

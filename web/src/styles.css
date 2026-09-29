@@ -1798,6 +1798,12 @@ kbd {
   color: var(--accent);
 }
 
+/* A link Markdown may not have (lib/markdownOptions.ts: the desktop shell's reserved path, javascript:): its text. */
+.md .md-dead-link {
+  text-decoration: underline dotted;
+  cursor: default;
+}
+
 .md .katex {
   font-size: 1.07em;
 }

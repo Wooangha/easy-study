@@ -40,6 +40,16 @@ pub const OPEN_SETTINGS_JS: &str =
 pub const ALLOW_LEAVE_JS: &str =
     "JSON.stringify(typeof window.__easyStudyAllowLeave === 'function' ? window.__easyStudyAllowLeave() : null)";
 
+/// Whether the page's own code asked for this action just now (true; web/src/lib/desktop.ts desktopAction), or nobody
+/// did (false: a link to the reserved path was followed); null: a page without the hook (a web client before 0.5.3).
+/// __ACTION__ is replaced with the JSON string of one of Action's own names (asked_action_js), never a page's text.
+pub const ASKED_ACTION_JS: &str =
+    "JSON.stringify(typeof window.__easyStudyAskedAction === 'function' ? window.__easyStudyAskedAction(__ACTION__) === true : null)";
+
+pub fn asked_action_js(action: Action) -> String {
+    ASKED_ACTION_JS.replace("__ACTION__", &serde_json::Value::String(action.name().to_string()).to_string())
+}
+
 /// A page's own dialogs: at most one every REMOTE_GAP from another computer's page (one every LOCAL_GAP from this
 /// computer's), and none from another computer's page after the user said no to one of its dialogs.
 const REMOTE_GAP: Duration = Duration::from_secs(60);
@@ -104,6 +114,58 @@ impl Action {
             _ => return None,
         })
     }
+
+    /// The name in the URL (parse's inverse).
+    fn name(self) -> &'static str {
+        match self {
+            Action::Choose => "choose",
+            Action::ForgetChoice => "forget-choice",
+            Action::CheckUpdate => "check-update",
+            Action::InstallUpdate => "install-update",
+            Action::DismissUpdate => "dismiss-update",
+            Action::CancelUpdate => "cancel-update",
+            Action::Theme("light") => "theme/light",
+            Action::Theme("dark") => "theme/dark",
+            Action::Theme(_) => "theme/system",
+            Action::Share(true) => "share/on",
+            Action::Share(false) => "share/off",
+            Action::ShareReveal => "share/reveal",
+            Action::ShareResetCode => "share/reset-code",
+        }
+    }
+}
+
+/// What the page says about an action that arrived (page_asked_for).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Asked {
+    /// Its own code asked (desktopAction).
+    Yes,
+    /// It has the hook and did not ask: a link to the reserved path was followed.
+    No,
+    /// No hook: an older web client (a remote server before 0.5.3).
+    NoHook,
+}
+
+/// Asks the page (eval_json: never on the main thread) whether its own code asked for `action`. On macOS a
+/// `target=_blank` link to the reserved path reaches the navigation handler like the page's own navigation (§19), and
+/// a link in an answer must never act.
+fn page_asked_for(app: &AppHandle, action: Action) -> Asked {
+    match crate::eval_json(app, &asked_action_js(action)) {
+        serde_json::Value::Bool(true) => Asked::Yes,
+        serde_json::Value::Null => Asked::NoHook,
+        _ => Asked::No,
+    }
+}
+
+/// From a page without the hook, the actions that change something by themselves get a dialog (text, yes, no); the
+/// others are reversible or rate-limited (theme/*, dismiss-update, check-update) or ask anyway (install-update, share/*).
+fn unasked_confirm(action: Action) -> Option<(&'static str, &'static str, &'static str)> {
+    Some(match action {
+        Action::Choose => ("서버 선택 화면으로 돌아갈까요?\n\n지금 보고 있는 페이지가 요청했어요.", "돌아가기", "취소"),
+        Action::ForgetChoice => ("다음 실행부터 서버 선택 화면을 먼저 보여 줄까요?\n\n지금 보고 있는 페이지가 요청했어요.", "그렇게 하기", "취소"),
+        Action::CancelUpdate => ("새 버전 내려받기를 취소할까요?\n\n지금 보고 있는 페이지가 요청했어요.", "내려받기 취소", "계속 받기"),
+        _ => return None,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,9 +208,27 @@ pub fn is_local(app: &AppHandle, origin: &str) -> bool {
     local_origin(app).as_deref() == Some(origin)
 }
 
-/// A page action (on its own thread: dialogs and checks block).
+/// A page action (on its own thread: dialogs and checks block). First the page says whether it asked for it.
 pub fn on_action(app: &AppHandle, action: Action, origin: String) {
     let local = is_local(app, &origin);
+    match page_asked_for(app, action) {
+        Asked::Yes => {}
+        Asked::No => {
+            return log_limited(app, "page-unasked", &format!("{action:?} from {origin} ignored: the page did not ask for it (a link to the reserved path?)"));
+        }
+        Asked::NoHook => {
+            if let Some((text, yes, no)) = unasked_confirm(action) {
+                if !page_may_ask(app, &origin, local) {
+                    return log_limited(app, "page-unasked", &format!("{action:?} from {origin} (no __easyStudyAskedAction) ignored: asked too recently, or refused"));
+                }
+                let ok = confirm(app, text, yes, no);
+                page_asked(app, &origin, local, ok);
+                if !ok {
+                    return log_limited(app, "page-unasked", &format!("{action:?} from {origin} (no __easyStudyAskedAction): the user said no"));
+                }
+            }
+        }
+    }
     match action {
         // Like the menu. The page asked about its own work before (it is the only one that can lose anything).
         Action::Choose => crate::show_chooser(app),
@@ -819,6 +899,40 @@ mod tests {
         assert_eq!(at("https://github.com/Wooangha/easy-study-releases/releases/latest"), Nav::Other);
         assert!(is_reserved(&url("https://example.com/__easy-study-desktop/whatever")));
         assert!(!is_reserved(&url("https://example.com/__easy-study-desktopx")));
+    }
+
+    #[test]
+    fn action_names_round_trip_and_the_page_is_asked_with_them() {
+        let all = [
+            Action::Choose,
+            Action::ForgetChoice,
+            Action::CheckUpdate,
+            Action::InstallUpdate,
+            Action::DismissUpdate,
+            Action::CancelUpdate,
+            Action::Theme("system"),
+            Action::Theme("light"),
+            Action::Theme("dark"),
+            Action::Share(true),
+            Action::Share(false),
+            Action::ShareReveal,
+            Action::ShareResetCode,
+        ];
+        for a in all {
+            assert_eq!(Action::parse(a.name()), Some(a), "{a:?}");
+            assert_eq!(classify(&url(&format!("http://127.0.0.1:5351{PREFIX}{}", a.name())), Some("http://127.0.0.1:5351")), Nav::Action(a));
+        }
+        assert_eq!(
+            asked_action_js(Action::Theme("dark")),
+            "JSON.stringify(typeof window.__easyStudyAskedAction === 'function' ? window.__easyStudyAskedAction(\"theme/dark\") === true : null)"
+        );
+        // A page without the hook: only the actions that change something by themselves get a dialog.
+        for a in [Action::Choose, Action::ForgetChoice, Action::CancelUpdate] {
+            assert!(unasked_confirm(a).is_some(), "{a:?}");
+        }
+        for a in [Action::CheckUpdate, Action::InstallUpdate, Action::DismissUpdate, Action::Theme("dark"), Action::Share(true), Action::ShareReveal, Action::ShareResetCode] {
+            assert!(unasked_confirm(a).is_none(), "{a:?}");
+        }
     }
 
     #[test]
