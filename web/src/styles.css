@@ -6891,7 +6891,27 @@ kbd {
   gap: 6px;
 }
 
-/* Question markers: a 💬 pill at the top-right corner of where a question's region was; a tip on hover. */
+/* Question markers: the asked-about region, faint (stronger while its pill is hovered or its tip open), and a 💬
+   pill at the region's top-right corner; a tip on hover. A marker that follows a drawn item shows no region. */
+.qa-marker-region {
+  position: absolute;
+  z-index: 3;
+  box-sizing: border-box;
+  border: 1px dashed color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  pointer-events: none;
+  transition:
+    background 0.12s,
+    border-color 0.12s;
+}
+
+.qa-marker-region.is-lit {
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--accent) 80%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
 .qa-marker-wrap {
   position: absolute;
   z-index: 4;

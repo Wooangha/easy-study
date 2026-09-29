@@ -2168,7 +2168,9 @@ Deleting a session removes its markers; asking again adds one; the only persiste
 every device agrees. Cost: a linear pass over the notes once per notes refresh, memoised per document.
 
 **Rendering (QuestionMarkers.tsx inside the layer).** A small pill `💬` (or `💬 3`) at the anchor's top-right corner, kept inside the
-image, `pointer-events: auto`. Hover/focus → tooltip (`.qa-marker-tip`, floated in `<body>` through `Floating` like the link picker —
+image, `pointer-events: auto`; a marker anchored to a region (not to a drawn item) also draws that region faintly (`.qa-marker-region`,
+dashed accent border and a 7 % tint, `pointer-events: none`; solid and 14 % while the pill is hovered or the tip open), so the
+asked-about part is visible without hovering. Hover/focus → tooltip (`.qa-marker-tip`, floated in `<body>` through `Floating` like the link picker —
 the slide box clips its overflow, so a 240 px tip on a marker near the image's left or top edge would be cut; it stays while the
 pointer is on it, closes on Esc, a click elsewhere or a scroll) with the question's first line and time; on touch a first tap
 shows it and a second jumps. Click → `onOpenQa(sessionId, messageId)`. The tooltip's × ('이 표시 지우기'; also right-click/long-press)

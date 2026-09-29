@@ -1,5 +1,6 @@
 // 질문 표시 (DESIGN §25): a small 💬 pill at the top-right corner of where a question's region attachment was, kept
-// inside the image. Hover / focus shows the question's first line and time (several questions on one spot: the
+// inside the image, and — for a marker anchored to a region rather than to an item that is still drawn — the region
+// itself, faint, so one sees which part was asked about (stronger while the tip is open or the pill hovered). Hover / focus shows the question's first line and time (several questions on one spot: the
 // list); a click jumps to that Q&A; on touch the first tap shows the tip and the second jumps. The tip is floated in
 // <body> (Floating, like a memo's link picker): the slide box clips its overflow, so a tip hung on a marker near the
 // image's left or top edge would be cut. The tip's × (also a right-click) hides the marker — the Q&A itself stays.
@@ -72,8 +73,18 @@ function Marker({ slide, marker }: { slide: number; marker: QuestionMarker }) {
 
   const hide = () => actions.hideMarkers(slide, marker.questions.map((q) => q.key));
 
+  const [hovered, setHovered] = useState(false);
+  const lit = open || hovered;
   return (
-    <div className={open ? 'qa-marker-wrap is-open' : 'qa-marker-wrap'} style={style} data-annot="marker">
+    <>
+      {!marker.itemId && (
+        <div
+          className={lit ? 'qa-marker-region is-lit' : 'qa-marker-region'}
+          style={{ left: `${r.x * 100}%`, top: `${r.y * 100}%`, width: `${r.w * 100}%`, height: `${r.h * 100}%` }}
+          aria-hidden
+        />
+      )}
+      <div className={open ? 'qa-marker-wrap is-open' : 'qa-marker-wrap'} style={style} data-annot="marker">
       <button
         ref={setPill}
         type="button"
@@ -92,9 +103,11 @@ function Marker({ slide, marker }: { slide: number; marker: QuestionMarker }) {
         }}
         onPointerDown={(e) => e.stopPropagation()}
         onPointerEnter={(e) => {
+          setHovered(true);
           if (e.pointerType !== 'touch') show();
         }}
         onPointerLeave={(e) => {
+          setHovered(false);
           if (e.pointerType !== 'touch') hideSoon();
         }}
         onFocus={show}
@@ -158,5 +171,6 @@ function Marker({ slide, marker }: { slide: number; marker: QuestionMarker }) {
         </Floating>
       )}
     </div>
+    </>
   );
 }
