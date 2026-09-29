@@ -309,7 +309,7 @@ async function preflight(opt) {
     ctx.notesText = text;
     check(text.trim().length > 0, `--notes ${opt.notes}`, text ? `${text.length} chars` : 'missing or empty');
     // The private draft's generated notes list private commit titles and link the private repo: never copied.
-    check(!/github\.com\/Wooangha\/easy-study(?!-releases)\b|Full Changelog/i.test(text), 'no private links or generated changelog');
+    check(!/Full Changelog|\/compare\/v[\d.]+\.\.\.v[\d.]+/i.test(text), 'no generated changelog (CI\'s draft notes)');
     ctx.notes = notesSummary(text);
     console.log(`    latest.json notes (${[...ctx.notes].length} chars):\n${ctx.notes.replace(/^/gm, '      ')}`);
   } else {
