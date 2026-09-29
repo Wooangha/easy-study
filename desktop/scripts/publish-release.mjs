@@ -109,8 +109,12 @@ function git(...args) {
 }
 
 /** `gh api` (GET unless `method`); null for a 404 when `allow404`. */
-function api(endpoint, { paginate = false, method, allow404 = false } = {}) {
-  const r = run('gh', ['api', ...(method ? ['--method', method] : []), ...(paginate ? ['--paginate', '--slurp'] : []), endpoint]);
+function api(endpoint, { paginate = false, method, body, allow404 = false } = {}) {
+  const r = run(
+    'gh',
+    ['api', ...(method ? ['--method', method] : []), ...(paginate ? ['--paginate', '--slurp'] : []), ...(body ? ['--input', '-'] : []), endpoint],
+    body ? { input: JSON.stringify(body) } : {},
+  );
   if (r.status !== 0) {
     if (allow404 && /HTTP 404/.test(r.stderr)) return null;
     throw new Error(`gh api ${endpoint}: ${r.stderr.trim()}`);
@@ -373,8 +377,9 @@ async function settledAssets(repo, id) {
 
 /** The public draft must still be the draft `id` (never touch a published release). */
 function assertPublicDraft(tag, id) {
-  const r = releaseByTag(PUBLIC_REPO, tag);
-  if (!r || r.id !== id || !r.draft) throw new Error(`the public release ${tag} is no longer the draft ${id}: nothing more is changed; run again`);
+  // By id: the list endpoint lags behind a just-created draft.
+  const r = api(`repos/${PUBLIC_REPO}/releases/${id}`, { allow404: true });
+  if (!r || r.tag_name !== tag || !r.draft) throw new Error(`the public release ${tag} is no longer the draft ${id}: nothing more is changed; run again`);
 }
 
 async function publishDraft(opt, ctx, state, save) {
@@ -452,8 +457,11 @@ async function publishDraft(opt, ctx, state, save) {
   const notesFile = path.resolve(opt.notes);
   let pub = releaseByTag(PUBLIC_REPO, tag);
   if (!pub) {
-    gh(['release', 'create', tag, '--repo', PUBLIC_REPO, '--draft', '--target', 'main', '--title', `easy-study ${tag}`, '--notes-file', notesFile]);
-    pub = releaseByTag(PUBLIC_REPO, tag);
+    // The created release comes back directly (the list endpoint does not show it right away).
+    pub = api(`repos/${PUBLIC_REPO}/releases`, {
+      method: 'POST',
+      body: { tag_name: tag, target_commitish: 'main', name: `easy-study ${tag}`, body: ctx.notesText, draft: true, prerelease: false },
+    });
     console.log(`  created draft ${pub.id}`);
   } else if (pub.body !== ctx.notesText) {
     assertPublicDraft(tag, pub.id);
