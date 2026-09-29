@@ -1,5 +1,6 @@
 // The annotation toolbar (DESIGN §25) in the viewer's toolbar: the default state 선택·첨부 (no drawing tool: a drag
-// on empty area attaches that region to the next question, a click on an item selects it) and the drawing tools
+// on empty area attaches that region to the next question, a click on an item selects it), 범위 선택 (a drag on
+// empty area selects every item it crosses; Shift+click adds / removes one) and the drawing tools
 // (형광펜 · 텍스트 형광 · 사각형 · 동그라미 · 텍스트 · 메모 — clicking the active one turns it off again), the four
 // colors, and the ⋯ 필기 menu (필기 보기/숨기기, 표시 있는 슬라이드만, a tag filter, 질문 표시 보기, 그때 필기 재생). On a
 // narrow pane the tools and colors fold into one button showing the active tool and color, so the toolbar keeps one row.
@@ -20,6 +21,7 @@ export const NO_FILTER: SlideFilter = { onlyAnnotated: false, tag: null };
 
 export const TOOL_LABELS: Record<AnnotationTool, string> = {
   select: '선택·첨부',
+  marquee: '범위 선택',
   highlight: '형광펜',
   textHighlight: '텍스트 형광',
   rect: '사각형',
@@ -32,6 +34,7 @@ const OFF_HINT = '(다시 누르거나 Esc로 끔)';
 
 const TOOL_TITLES: Record<AnnotationTool, string> = {
   select: '선택·첨부: 필기를 클릭해 옮기거나 지우고, 빈 곳을 끌면 그 영역을 질문에 첨부해요',
+  marquee: `범위 선택: 빈 곳에서 끌어 여러 필기를 한꺼번에 골라요 · Shift+클릭으로 더하고 빼요 ${OFF_HINT}`,
   highlight: `형광펜: 글줄 위에서 끌면 그 줄에 맞춰 칠해요 ${OFF_HINT}`,
   textHighlight: `텍스트 형광: 글자 위에서 끌면 단어에 맞춰 칠하고, 칠한 글 위를 다시 끌면 범위가 바뀌어요 ${OFF_HINT}`,
   rect: `사각형: 끌어서 그려요 ${OFF_HINT}`,
@@ -43,6 +46,7 @@ const TOOL_TITLES: Record<AnnotationTool, string> = {
 /** The one-line hint of the viewer's toolbar for the state (hidden on narrow panes; the titles say the same). */
 export function toolHint(tool: AnnotationTool): string {
   if (tool === 'select') return 'j/k · ↑/↓ · 빈 곳을 끌면 영역 첨부';
+  if (tool === 'marquee') return '범위 선택: 빈 곳에서 끌어 여러 개 고르기 · Shift+클릭 더하기·빼기 · Esc';
   return `${TOOL_LABELS[tool]}: 빈 곳에서 ${CLICK_TOOLS.has(tool) ? '클릭' : '끌기'} · 필기는 클릭해 옮기기 · Esc`;
 }
 

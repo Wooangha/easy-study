@@ -12,7 +12,7 @@ import {
   type Ref,
 } from 'react';
 import { createPortal } from 'react-dom';
-import type { AnnotationItem, AnnotationOp, DocMeta, MarkerKey, NotesResponse, Patchable, RegionRect, SlideAnnotations } from '../../../shared/types.ts';
+import type { AnnotationItem, AnnotationOp, DocMeta, MarkerKey, MemoItem, NotesResponse, Patchable, RegionRect, SlideAnnotations } from '../../../shared/types.ts';
 import { viewSrcSet, viewUrl } from '../api.ts';
 import { useAnnotations } from '../hooks/useAnnotations.ts';
 import { useLoginEpoch } from '../hooks/useAuth.ts';
@@ -21,8 +21,7 @@ import { useTextLayout } from '../hooks/useTextLayout.ts';
 import {
   itemBounds,
   memoAt,
-  moveRect,
-  movePoint,
+  moveItems,
   newAnnotationId,
   newHighlight,
   newMemo,
@@ -39,7 +38,7 @@ import {
   type Handle,
   unionRects,
 } from '../lib/annotations/geometry.ts';
-import { hitTestItems, outlineOnly, pressPlan, slopFor, type PressTarget } from '../lib/annotations/gesture.ts';
+import { hitTestItems, marqueeSelect, outlineOnly, pressPlan, slopFor, toggleId, unionIds, type PressTarget } from '../lib/annotations/gesture.ts';
 import { deriveMarkers, questionsOnItem, type QuestionMarker } from '../lib/annotations/markers.ts';
 import { useAnnotColor, useAnnotLayer, useQuestionMarkers, useReplayAnnotations } from '../lib/annotations/settings.ts';
 import { reanchorTextHighlight, textHighlightFromDrag } from '../lib/annotations/textSelect.ts';
@@ -100,17 +99,18 @@ interface Flash {
   seq: number;
 }
 
-/** The selected annotation item and where its menu goes. */
+/** The selected annotation items of one slide (one, or several after a marquee / Shift+click); the menu places itself. */
 interface ItemSelection {
   slide: number;
-  id: string;
-  placement: MenuPlacement;
+  /** In z-order, at least one. */
+  ids: readonly string[];
 }
 
 /**
- * A pointer pressed on a slide (lib/annotations/gesture.ts pressPlan): on an item it selects and moves it, on a
- * handle it resizes, on empty area it draws with the active tool (DESIGN §25) or, without a tool, becomes a region
- * selection (§21). A text highlight under 텍스트 형광 is re-dragged: a draw that replaces that item's words.
+ * A pointer pressed on a slide (lib/annotations/gesture.ts pressPlan): on an item it selects and moves it (every
+ * selected item, when it is part of a group), on a handle it resizes, on empty area it draws with the active tool
+ * (DESIGN §25), drags a marquee with 범위 선택, or, without a tool, becomes a region selection (§21). A text highlight
+ * under 텍스트 형광 is re-dragged: a draw that replaces that item's words.
  */
 interface Gesture {
   pointerId: number;
@@ -124,13 +124,19 @@ interface Gesture {
   startClient: Point;
   active: boolean;
   timer: number;
-  mode: 'region' | 'draw' | 'move' | 'resize';
+  mode: 'region' | 'draw' | 'move' | 'resize' | 'marquee';
   tool: AnnotationTool;
   /** move / resize: the item and its geometry at the press; draw (텍스트 형광): the text highlight being re-dragged. */
   itemId?: string;
   item?: AnnotationItem;
+  /** move: every item moved together (the pressed one, or the whole selection it belongs to). */
+  items?: AnnotationItem[];
   handle?: Handle;
   wasSelected?: boolean;
+  /** marquee: the selection to add to (Shift+drag), else empty. */
+  base?: readonly string[];
+  /** marquee: the memo cards as drawn (memoBoxesOf), by id. */
+  memoBoxes?: Record<string, RegionRect>;
 }
 
 /** Actions of the floating menu (stable: SlideItem is memoized). */
@@ -153,6 +159,22 @@ function frameOf(box: HTMLElement, rect: Box): Frame {
   const img = box.querySelector('img');
   const imageAspect = img && img.naturalWidth > 0 && img.naturalHeight > 0 ? img.naturalWidth / img.naturalHeight : null;
   return rect.height > 0 ? imageFrame(rect.width / rect.height, imageAspect) : FULL_FRAME;
+}
+
+/**
+ * The memo cards of a slide as drawn (a card is clamped inside the slide by CSS, so it is not where its anchor
+ * says), as fractions of the image: what a marquee crosses. Measured once at the press — cards do not move during
+ * a marquee.
+ */
+function memoBoxesOf(box: HTMLElement): Record<string, RegionRect> {
+  const out: Record<string, RegionRect> = {};
+  const layer = box.querySelector<HTMLElement>('.annot-layer')?.getBoundingClientRect();
+  if (!layer || layer.width <= 0 || layer.height <= 0) return out;
+  for (const el of box.querySelectorAll<HTMLElement>('[data-annot="memo"][data-id]')) {
+    const r = el.getBoundingClientRect();
+    out[el.dataset.id!] = { x: (r.left - layer.left) / layer.width, y: (r.top - layer.top) / layer.height, w: r.width / layer.width, h: r.height / layer.height };
+  }
+  return out;
 }
 
 /** The index in `list` (ascending slides) of `slide`, or of the nearest slide shown. */
@@ -201,6 +223,8 @@ interface SlideViewerProps {
   askDisabledReason: string | null;
   /** 📎 첨부 of an annotation item (DESIGN §25): a chip for the next question. */
   onAttachItem?: (slide: number, item: AnnotationItem) => void;
+  /** 📎 첨부 of several selected items at once (the free slots counted once, one toast). */
+  onAttachItems?: (slide: number, items: AnnotationItem[]) => void;
   /** A question marker was clicked: show that Q&A. */
   onOpenQa?: (sessionId: string, messageId: string) => void;
   /** A memo's 🎙 chip: play that moment in the 녹음 tab. */
@@ -251,6 +275,7 @@ export function SlideViewer({
   onAskRegion,
   askDisabledReason,
   onAttachItem,
+  onAttachItems,
   onOpenQa,
   onPlayRecording,
   onOpenDoc,
@@ -307,6 +332,9 @@ export function SlideViewer({
   const [editing, setEditing] = useState<{ slide: number; id: string } | null>(null);
   const [draft, setDraft] = useState<{ slide: number; draft: Draft } | null>(null);
   const [dragPreview, setDragPreview] = useState<{ slide: number; drag: DragPreview } | null>(null);
+  // The `sizes` of the slide images and the track's width (`--track-w`, which sizes typed text): measured below.
+  const [sizes, setSizes] = useState<string | null>(null);
+  const [trackWidth, setTrackWidth] = useState(0);
   const [sheet, setSheet] = useState<{ slide: number; id: string } | null>(null);
   const sheetRef = useLatest(sheet);
   const [viewerWidth, setViewerWidth] = useState(1000);
@@ -425,6 +453,7 @@ export function SlideViewer({
   const onAttachRegionRef = useLatest(onAttachRegion);
   const onAskRegionRef = useLatest(onAskRegion);
   const onAttachItemRef = useLatest(onAttachItem);
+  const onAttachItemsRef = useLatest(onAttachItems);
   const onOpenQaRef = useLatest(onOpenQa);
   const onPlayRecordingRef = useLatest(onPlayRecording);
   const onOpenDocRef = useLatest(onOpenDoc);
@@ -492,24 +521,19 @@ export function SlideViewer({
     [loadLayout, storeRef, mutate],
   );
 
-  /**
-   * The floating menu of an item goes where the viewer shows room for it (like a region's). A memo's card hangs
-   * below its anchor, so its menu goes above the anchor when there is room.
-   */
-  const placementFor = useCallback(
-    (slide: number, item: AnnotationItem): MenuPlacement => {
-      const el = slideEls.current[nearestIndex(shownRef.current, slide)];
-      const box = el?.querySelector<HTMLElement>('.slide-box');
-      if (!box) return 'below';
-      const br = box.getBoundingClientRect();
-      const inBox = rectInBox(itemBounds(item), frameOf(box, br));
-      const top = br.top + inBox.y * br.height;
-      const view = scrollerRef.current?.getBoundingClientRect() ?? br;
-      // (The centred menu of a narrow pane wraps to two rows.)
-      if (item.type === 'memo' && top - view.top >= (compactMemos ? 96 : 48)) return 'above';
-      return menuPlacement({ top, bottom: top + inBox.h * br.height }, { top: view.top, bottom: view.bottom });
+  /** Select these items (in z-order; nothing when none of them exists). The item menu places itself from their boxes. */
+  const selectItems = useCallback(
+    (slide: number, ids: readonly string[]) => {
+      const known = itemsOf(slide);
+      const order = known.filter((it) => ids.includes(it.id)).map((it) => it.id);
+      if (order.length === 0) {
+        setItemSelection(null);
+        return;
+      }
+      setSelection(null);
+      setItemSelection({ slide, ids: order });
     },
-    [shownRef, compactMemos],
+    [itemsOf, setItemSelection, setSelection],
   );
 
   const selectItem = useCallback(
@@ -518,39 +542,74 @@ export function SlideViewer({
         setItemSelection(null);
         return;
       }
-      const item = itemOf(slide, id);
-      if (!item) return;
-      setSelection(null);
-      setItemSelection({ slide, id, placement: placementFor(slide, item) });
+      if (itemOf(slide, id)) selectItems(slide, [id]);
     },
-    [itemOf, placementFor, setItemSelection, setSelection],
+    [itemOf, selectItems, setItemSelection],
   );
 
-  const removeItem = useCallback(
-    async (slide: number, id: string) => {
-      const item = itemOf(slide, id);
-      if (!item) return;
-      if (item.type === 'memo' && item.text.trim() !== '') {
-        const ok = await confirmDialog({ title: '메모를 지울까요?', message: firstLine(item.text, 80), confirmLabel: '삭제', danger: true });
+  /** Shift+click: the item joins the selection of its slide, or leaves it (a selection on another slide starts over). */
+  const toggleSelect = useCallback(
+    (slide: number, id: string) => {
+      const current = itemSelectionRef.current;
+      selectItems(slide, toggleId(current?.slide === slide ? current.ids : [], id));
+    },
+    [selectItems],
+  );
+
+  /** Delete items together (one write, one undo step); a memo with text asks first (once for the group). */
+  const removeItems = useCallback(
+    async (slide: number, ids: readonly string[]) => {
+      const items = itemsOf(slide).filter((it) => ids.includes(it.id));
+      if (items.length === 0) return;
+      const memos = items.filter((it): it is MemoItem => it.type === 'memo' && it.text.trim() !== '');
+      if (memos.length > 0) {
+        const one = items.length === 1;
+        const ok = await confirmDialog({
+          title: one ? '메모를 지울까요?' : `필기 ${items.length}개를 지울까요?`,
+          message: one ? firstLine(memos[0].text, 80) : `글이 있는 메모 ${memos.length}개가 함께 지워져요`,
+          confirmLabel: '삭제',
+          danger: true,
+        });
         if (!ok) return;
       }
-      if (itemSelectionRef.current?.id === id) setItemSelection(null);
-      setEditing((e) => (e?.id === id ? null : e));
-      setSheet((s) => (s?.id === id ? null : s));
-      mutate(slide, [{ op: 'remove', id }]);
+      const gone = new Set(items.map((it) => it.id));
+      const current = itemSelectionRef.current;
+      if (current?.slide === slide && current.ids.some((id) => gone.has(id))) {
+        const left = current.ids.filter((id) => !gone.has(id));
+        setItemSelection(left.length > 0 ? { slide, ids: left } : null);
+      }
+      setEditing((e) => (e && gone.has(e.id) ? null : e));
+      setSheet((s) => (s && gone.has(s.id) ? null : s));
+      mutate(
+        slide,
+        items.map((it) => ({ op: 'remove', id: it.id })),
+      );
     },
-    [itemOf, mutate, setItemSelection],
+    [itemsOf, mutate, setItemSelection],
   );
 
   const actions = useMemo<LayerActions>(
     () => ({
       select: selectItem,
+      toggleSelect,
       edit: (slide, id) => setEditing(id ? { slide, id } : null),
-      update: (slide, id, patch: Patchable<AnnotationItem>) => void mutate(slide, [{ op: 'update', id, patch }]),
-      remove: (slide, id) => void removeItem(slide, id),
+      update: (slide, id, patch: Patchable<AnnotationItem>, options) => void mutate(slide, [{ op: 'update', id, patch }], options),
+      updateMany: (slide, ids, patch: Patchable<AnnotationItem>) =>
+        void mutate(
+          slide,
+          ids.map((id) => ({ op: 'update', id, patch })),
+        ),
+      remove: (slide, id) => void removeItems(slide, [id]),
+      removeMany: (slide, ids) => void removeItems(slide, ids),
       attach: (slide, id) => {
         const item = itemOf(slide, id);
         if (item) onAttachItemRef.current?.(slide, item);
+      },
+      attachMany: (slide, ids) => {
+        const items = itemsOf(slide).filter((it) => ids.includes(it.id));
+        if (items.length === 0) return;
+        if (onAttachItemsRef.current) onAttachItemsRef.current(slide, items);
+        else for (const item of items) onAttachItemRef.current?.(slide, item);
       },
       hideMarkers: (slide, keys: MarkerKey[]) => void mutate(slide, keys.map((key) => ({ op: 'hideMarker', key }))),
       openQa: (sessionId, messageId) => onOpenQaRef.current?.(sessionId, messageId),
@@ -563,12 +622,12 @@ export function SlideViewer({
         setSheet({ slide, id });
       },
     }),
-    [selectItem, mutate, removeItem, itemOf, onAttachItemRef, onOpenQaRef, onOpenNotesRef, scrollToSlide, onOpenDocRef, onPlayRecordingRef],
+    [selectItem, toggleSelect, mutate, removeItems, itemOf, itemsOf, onAttachItemRef, onAttachItemsRef, onOpenQaRef, onOpenNotesRef, scrollToSlide, onOpenDocRef, onPlayRecordingRef],
   );
 
   const env = useMemo<LayerEnv>(
-    () => ({ docId: doc.id, actions, docs, focusedSlide: focused, pageCount, tags: summary?.tags ?? NO_TAGS, compact: compactMemos }),
-    [doc.id, actions, docs, focused, pageCount, summary, compactMemos],
+    () => ({ docId: doc.id, actions, docs, focusedSlide: focused, pageCount, tags: summary?.tags ?? NO_TAGS, compact: compactMemos, trackWidth }),
+    [doc.id, actions, docs, focused, pageCount, summary, compactMemos, trackWidth],
   );
 
   /** Finish a drawing gesture: the item the drag (or click) makes, added and selected. */
@@ -659,25 +718,30 @@ export function SlideViewer({
     const activeTool = layerShown ? toolRef.current : 'select';
     // What was pressed: a handle or a marker by the DOM; otherwise the slide's items are hit-tested (the SVG's own
     // target is not enough — a big rectangle drawn later covers a small highlight — and thin bands get some slack;
-    // with a tool an unselected rect / ellipse counts on its outline only, so a box's inside stays drawable).
-    // Memo cards handle their own presses (they stop propagation) and never get here.
+    // an unselected rect / ellipse counts on its outline only, so a box's inside passes through to what is under it).
+    // Memo cards handle their own presses (they stop propagation) and get here only as part of a group selection,
+    // when a press on the card (not on a control inside it) moves the whole group.
     const kind = annot?.dataset.annot;
     const handle = annot?.dataset.handle as Handle | undefined;
     const pressed: PressTarget = kind === 'marker' ? { kind: 'marker' } : kind === 'handle' && handle ? { kind: 'handle', handle } : { kind: 'other' };
-    const selectedId = itemSelectionRef.current?.slide === slide ? itemSelectionRef.current.id : null;
+    const selectedIds = itemSelectionRef.current?.slide === slide ? itemSelectionRef.current.ids : null;
+    if (kind === 'memo') {
+      const control = target.closest('button, a, input, select, textarea, .tag-input');
+      if (control && control !== annot) return;
+    }
     const item =
-      pressed.kind === 'handle'
+      pressed.kind === 'handle' || kind === 'memo'
         ? annot?.dataset.id
           ? itemOf(slide, annot.dataset.id)
           : null
         : layerShown
           ? hitTestItems(itemsOf(slide), start, slopFor(framePixels(rect, frame), touch), {
               visible: (it) => replayVisible(it, replayRef.current),
-              outline: outlineOnly(activeTool, selectedId),
+              outline: outlineOnly(selectedIds),
             })
           : null;
-    const wasSelected = item !== null && selectedId === item.id;
-    const plan = pressPlan({ tool: activeTool, target: pressed, item, selected: wasSelected, touch });
+    const wasSelected = item !== null && (selectedIds?.includes(item.id) ?? false);
+    const plan = pressPlan({ tool: activeTool, target: pressed, item, selected: wasSelected, touch, shift: e.shiftKey });
     if (plan.kind === 'ignore') return;
     const g: Gesture = {
       pointerId: e.pointerId,
@@ -703,15 +767,33 @@ export function SlideViewer({
         capture(e);
         e.preventDefault();
         return;
-      case 'select':
-        // An existing item, with any tool: select it; a drag moves it (its handles resize it) right away.
+      case 'select': {
+        // An existing item, with any tool: select it; a drag moves it (its handles resize it) right away — and,
+        // when it belongs to a group selection, moves every selected item with it.
         if (!wasSelected) selectItem(slide, plan.item.id);
         if (!plan.move) return;
+        const group = wasSelected && selectedIds && selectedIds.length > 1 ? itemsOf(slide).filter((it) => selectedIds.includes(it.id) && it.type !== 'textHighlight') : [plan.item];
         g.mode = 'move';
         g.itemId = plan.item.id;
         g.item = plan.item;
+        g.items = group;
         g.wasSelected = wasSelected;
         gestureRef.current = g;
+        return;
+      }
+      case 'toggle':
+        // Shift+click: in or out of the selection; nothing is moved.
+        toggleSelect(slide, plan.item.id);
+        return;
+      case 'marquee':
+        // 범위 선택 on empty area: a drag selects what it crosses (Shift: on top of the selection).
+        g.mode = 'marquee';
+        g.base = plan.add && selectedIds ? selectedIds : [];
+        g.memoBoxes = memoBoxesOf(box);
+        gestureRef.current = g;
+        if (!plan.add && itemSelectionRef.current) setItemSelection(null);
+        capture(e);
+        if (plan.immediate) g.active = true;
         return;
       case 'draw':
         // Empty area with a tool: touch draws at once (the slide box takes no touch scrolling then).
@@ -775,7 +857,7 @@ export function SlideViewer({
     const g = gestureRef.current;
     if (!g || e.pointerId !== g.pointerId) return;
     const client = { x: e.clientX, y: e.clientY };
-    if (g.mode === 'draw' || g.mode === 'move' || g.mode === 'resize') {
+    if (g.mode === 'draw' || g.mode === 'move' || g.mode === 'resize' || g.mode === 'marquee') {
       if (!g.active) {
         if (!movedBeyond(g.startClient, client, DRAG_THRESHOLD_PX)) return;
         g.active = true;
@@ -794,14 +876,20 @@ export function SlideViewer({
           setDraft({ slide: g.slide, draft: previewOf(g, point) });
           return;
         }
+        if (g.mode === 'marquee') {
+          // The dashed rectangle, and the items it crosses selected as it goes.
+          const rect = rectFromPoints(g.start, point, 0);
+          setDraft({ slide: g.slide, draft: { tool: 'marquee', rect } });
+          selectItems(g.slide, unionIds(g.base ?? [], marqueeSelect(itemsOf(g.slide), rect, { visible: (it) => replayVisible(it, replayRef.current), boxOf: (it) => g.memoBoxes?.[it.id] })));
+          return;
+        }
         const item = g.item!;
         const dx = (client.x - g.startClient.x) / size.width;
         const dy = (client.y - g.startClient.y) / size.height;
         if (g.mode === 'move') {
-          if (item.type === 'memo') setDragPreview({ slide: g.slide, drag: { id: item.id, at: movePoint(item.at, dx, dy) } });
-          else if ('rect' in item) setDragPreview({ slide: g.slide, drag: { id: item.id, rect: moveRect(item.rect, dx, dy) } });
+          setDragPreview({ slide: g.slide, drag: moveItems(g.items ?? [item], dx, dy) });
         } else if ('rect' in item && g.handle) {
-          setDragPreview({ slide: g.slide, drag: { id: item.id, rect: resizeRect(item.rect, g.handle, dx, dy) } });
+          setDragPreview({ slide: g.slide, drag: { [item.id]: { rect: resizeRect(item.rect, g.handle, dx, dy) } } });
         }
       });
       return;
@@ -845,25 +933,37 @@ export function SlideViewer({
       void finishDraw(g, point, g.active && moved);
       return;
     }
+    if (g.mode === 'marquee') {
+      setDraft(null);
+      if (!g.active || !moved) {
+        // A click: the selection is cleared (or kept, with Shift).
+        if (!g.base?.length) setItemSelection(null);
+        return;
+      }
+      const rect = rectFromPoints(g.start, point, 0);
+      selectItems(g.slide, unionIds(g.base ?? [], marqueeSelect(itemsOf(g.slide), rect, { visible: (it) => replayVisible(it, replayRef.current), boxOf: (it) => g.memoBoxes?.[it.id] })));
+      return;
+    }
     if (g.mode === 'move' || g.mode === 'resize') {
       setDragPreview(null);
       const item = g.item!;
       if (!g.active || !moved) {
-        // A click on an already selected text box opens it for editing.
-        if (g.mode === 'move' && g.wasSelected && item.type === 'text') setEditing({ slide: g.slide, id: item.id });
+        // A click on an already selected text box (alone) opens it for editing.
+        if (g.mode === 'move' && g.wasSelected && item.type === 'text' && itemSelectionRef.current?.ids.length === 1) setEditing({ slide: g.slide, id: item.id });
         return;
       }
       const dx = (e.clientX - g.startClient.x) / size.width;
       const dy = (e.clientY - g.startClient.y) / size.height;
       if (g.mode === 'move') {
-        if (item.type === 'memo') mutate(g.slide, [{ op: 'update', id: item.id, patch: { at: movePoint(item.at, dx, dy) } }]);
-        else if ('rect' in item) mutate(g.slide, [{ op: 'update', id: item.id, patch: { rect: moveRect(item.rect, dx, dy) } }]);
+        // Every moved item in one write (one undo step for the group), by one common delta (the group stops at an edge as one).
+        const moves = moveItems(g.items ?? [item], dx, dy);
+        mutate(
+          g.slide,
+          Object.entries(moves).map(([id, m]) => ({ op: 'update', id, patch: m.at ? { at: m.at } : { rect: m.rect! } })),
+        );
       } else if ('rect' in item && g.handle) {
         mutate(g.slide, [{ op: 'update', id: item.id, patch: { rect: resizeRect(item.rect, g.handle, dx, dy) } }]);
       }
-      // The menu follows the item.
-      const after = itemOf(g.slide, item.id);
-      if (after) setItemSelection({ slide: g.slide, id: item.id, placement: placementFor(g.slide, after) });
       return;
     }
     if (!g.active) return; // a plain click / tap
@@ -1077,13 +1177,15 @@ export function SlideViewer({
 
   // The browser picks a WebP rendition (srcset) from the width a slide really has on screen: the viewer's
   // width times the zoom, which is the track's width. Measured before the first paint, so no image is
-  // requested at a wrong size.
-  const [sizes, setSizes] = useState<string | null>(null);
+  // requested at a wrong size. The same width (`--track-w`) gives the layers their rendered slide height, which
+  // sizes typed text (a text size is a fraction of the slide height).
   useLayoutEffect(() => {
     const track = trackRef.current;
     if (!track) return;
     const measure = () => {
-      const next = slideSizes(track.getBoundingClientRect().width);
+      const width = track.getBoundingClientRect().width;
+      setTrackWidth(Math.round(width));
+      const next = slideSizes(width);
       if (next) setSizes(next);
     };
     measure();
@@ -1126,7 +1228,7 @@ export function SlideViewer({
     [storeRef, scrollToSlide, setItemSelection],
   );
   const undoRedoRef = useLatest(undoRedo);
-  const removeItemRef = useLatest(removeItem);
+  const removeItemsRef = useLatest(removeItems);
 
   // Keyboard navigation (ignored while typing). j/k work anywhere else. The scroll keys belong to what the
   // student last clicked: in the chat, 정리본 or notes pane they scroll that pane natively instead of
@@ -1154,7 +1256,7 @@ export function SlideViewer({
       if ((e.key === 'Delete' || e.key === 'Backspace') && itemSelectionRef.current) {
         e.preventDefault();
         const s = itemSelectionRef.current;
-        void removeItemRef.current(s.slide, s.id);
+        void removeItemsRef.current(s.slide, s.ids);
         return;
       }
       if (SCROLL_KEYS.has(e.key)) {
@@ -1199,7 +1301,7 @@ export function SlideViewer({
       document.removeEventListener('pointerdown', onPointerDown, true);
       window.removeEventListener('keydown', onKey);
     };
-  }, [scrollToSlide, shownRef, undoRedoRef, removeItemRef]);
+  }, [scrollToSlide, shownRef, undoRedoRef, removeItemsRef]);
 
   const zoomIndex = ZOOM_LEVELS.indexOf(zoom);
   const stepZoom = (dir: 1 | -1) =>
@@ -1211,11 +1313,15 @@ export function SlideViewer({
     () => deriveMarkers(notes, (s) => snapshot.slides.get(s), markersShown && layerShown),
     [notes, snapshot.slides, markersShown, layerShown],
   );
-  const selectedItem = itemSelection ? (snapshot.slides.get(itemSelection.slide)?.items.find((it) => it.id === itemSelection.id) ?? null) : null;
-  // The selected item vanished (deleted elsewhere, undone): no menu for it.
+  // Selected items that vanished (deleted elsewhere, undone) leave the selection; none left → no menu.
+  const selectedIdsKey = itemSelection ? itemSelection.ids.join(',') : '';
   useEffect(() => {
-    if (itemSelection && !selectedItem) setItemSelection(null);
-  }, [itemSelection, selectedItem, setItemSelection]);
+    if (!itemSelection) return;
+    const items = snapshot.slides.get(itemSelection.slide)?.items ?? [];
+    const left = itemSelection.ids.filter((id) => items.some((it) => it.id === id));
+    if (left.length !== itemSelection.ids.length) setItemSelection(left.length > 0 ? { slide: itemSelection.slide, ids: left } : null);
+    // Keyed by the ids and the slide documents.
+  }, [selectedIdsKey, snapshot.slides, setItemSelection]);
   const sheetItem = sheet ? (snapshot.slides.get(sheet.slide)?.items.find((it) => it.id === sheet.id) ?? null) : null;
 
   const slides = [];
@@ -1241,8 +1347,7 @@ export function SlideViewer({
         askDisabledReason={selection?.slide === n ? askDisabledReason : null}
         annotations={annotations}
         markers={annotations ? (markers.get(n) ?? null) : null}
-        selectedId={itemSelection?.slide === n ? itemSelection.id : null}
-        itemPlacement={itemSelection?.slide === n ? itemSelection.placement : null}
+        selectedIds={itemSelection?.slide === n ? itemSelection.ids : null}
         editingId={editing?.slide === n ? editing.id : null}
         draft={draft?.slide === n ? draft.draft : null}
         drag={dragPreview?.slide === n ? dragPreview.drag : null}
@@ -1310,7 +1415,7 @@ export function SlideViewer({
           {/* After the tools, taking the leftover width: the buttons never move when the hint changes with the state. */}
           <span
             className="viewer-hint"
-            title="키보드: j/k 또는 ↑/↓ 로 슬라이드 이동 · 도구 없이 빈 곳을 끌면 그 영역을 질문에 첨부해요 · 필기는 어느 도구에서든 클릭해서 옮기거나 지워요 · ⌘Z/Ctrl+Z 되돌리기"
+            title="키보드: j/k 또는 ↑/↓ 로 슬라이드 이동 · 도구 없이 빈 곳을 끌면 그 영역을 질문에 첨부해요 · 필기는 어느 도구에서든 클릭해서 옮기거나 지워요 (Shift+클릭으로 여러 개, 범위 선택 도구로 끌어서 여러 개) · ⌘Z/Ctrl+Z 되돌리기"
           >
             {toolHint(layerShown ? tool : 'select')}
           </span>
@@ -1358,7 +1463,7 @@ export function SlideViewer({
           <div
             className="slides-track"
             ref={trackRef}
-            style={{ '--zoom': zoom, '--aspect': aspect } as CSSProperties}
+            style={{ '--zoom': zoom, '--aspect': aspect, '--track-w': trackWidth > 0 ? trackWidth : undefined } as CSSProperties}
           >
             {slides}
             {filtering && shown.length === 0 && (
@@ -1421,8 +1526,8 @@ interface SlideItemProps {
   /** The slide's annotations (null: not loaded, or the layer hidden). */
   annotations: SlideAnnotations | null;
   markers: readonly QuestionMarker[] | null;
-  selectedId: string | null;
-  itemPlacement: MenuPlacement | null;
+  /** The selected items of this slide (null: the selection is elsewhere). */
+  selectedIds: readonly string[] | null;
   editingId: string | null;
   draft: Draft | null;
   drag: DragPreview | null;
@@ -1450,8 +1555,7 @@ const SlideItem = memo(function SlideItem({
   askDisabledReason,
   annotations,
   markers,
-  selectedId,
-  itemPlacement,
+  selectedIds,
   editingId,
   draft,
   drag,
@@ -1472,8 +1576,8 @@ const SlideItem = memo(function SlideItem({
   const frame = imageFrame(aspect, imageAspect);
   const setRef = useCallback((el: HTMLDivElement | null) => register(index, el), [register, index]);
   const cls = ['slide', focused && 'is-focused', pinned && 'is-pinned'].filter(Boolean).join(' ');
-  const selectedItem = selectedId && annotations ? (annotations.items.find((it) => it.id === selectedId) ?? null) : null;
-  const questions = selectedItem ? questionsOnItem(markers ?? undefined, selectedItem.id) : 0;
+  const selectedItems = selectedIds && annotations ? annotations.items.filter((it) => selectedIds.includes(it.id)) : [];
+  const questions = selectedItems.length === 1 ? questionsOnItem(markers ?? undefined, selectedItems[0].id) : 0;
   return (
     <div ref={setRef} className={cls} data-slide={slide} aria-current={focused ? 'true' : undefined}>
       <div className="slide-box" style={{ aspectRatio: aspect }}>
@@ -1508,7 +1612,7 @@ const SlideItem = memo(function SlideItem({
             frame={frame}
             doc={annotations}
             markers={markers}
-            selectedId={selectedId}
+            selectedIds={selectedIds}
             editingId={editingId}
             draft={draft}
             drag={drag}
@@ -1545,9 +1649,7 @@ const SlideItem = memo(function SlideItem({
           askDisabledReason={askDisabledReason}
         />
       )}
-      {selectedItem && itemPlacement && !drag && !draft && (
-        <ItemMenu slide={slide} item={selectedItem} boxRect={rectInBox(itemBounds(selectedItem), frame)} placement={itemPlacement} questions={questions} />
-      )}
+      {selectedItems.length > 0 && !drag && !draft && <ItemMenu slide={slide} items={selectedItems} questions={questions} />}
     </div>
   );
 });

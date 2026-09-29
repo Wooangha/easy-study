@@ -29,9 +29,16 @@ import {
 } from '../../../../shared/types.ts';
 import { roundRect, type Point } from '../attachments.ts';
 
-export type AnnotationTool = 'select' | 'highlight' | 'textHighlight' | 'rect' | 'ellipse' | 'text' | 'memo';
+/**
+ * 'select' is the default state (no tool: a drag on empty area attaches that region; a click selects an item);
+ * 'marquee' is the 범위 선택 tool (a drag on empty area selects every item it crosses); the rest draw.
+ */
+export type AnnotationTool = 'select' | 'marquee' | 'highlight' | 'textHighlight' | 'rect' | 'ellipse' | 'text' | 'memo';
 
-export const ANNOTATION_TOOLS: readonly AnnotationTool[] = ['select', 'highlight', 'textHighlight', 'rect', 'ellipse', 'text', 'memo'];
+export const ANNOTATION_TOOLS: readonly AnnotationTool[] = ['select', 'marquee', 'highlight', 'textHighlight', 'rect', 'ellipse', 'text', 'memo'];
+
+/** The tools that make an item from a drag / click (not the default state, not 범위 선택). */
+export type DrawingTool = Exclude<AnnotationTool, 'select' | 'marquee'>;
 
 /** Tools that place something with a click (no drag needed). */
 export const CLICK_TOOLS: ReadonlySet<AnnotationTool> = new Set(['text', 'memo']);
@@ -86,8 +93,8 @@ export const PATCHABLE_FIELDS: Record<AnnotationItem['type'], readonly string[]>
   textHighlight: ['color', 'rects', 'chars', 'engine', 'text', 'updatedAt'],
   rect: ['color', 'rect', 'updatedAt'],
   ellipse: ['color', 'rect', 'updatedAt'],
-  text: ['color', 'rect', 'text', 'updatedAt'],
-  memo: ['color', 'at', 'text', 'tags', 'collapsed', 'tutor', 'links', 'updatedAt'],
+  text: ['color', 'rect', 'text', 'size', 'font', 'bold', 'updatedAt'],
+  memo: ['color', 'at', 'text', 'tags', 'collapsed', 'tutor', 'links', 'size', 'updatedAt'],
 };
 
 export const sameMarkerKey = (a: MarkerKey, b: MarkerKey): boolean =>
@@ -107,7 +114,7 @@ function shallowEqual(a: unknown, b: unknown): boolean {
  * Applies ops in order on a copy of `doc`; returns the same object when nothing changed. The rev is not touched
  * (the server's answer or its event carries the new one). An `add` of an existing id and an `update` / `remove` of a
  * missing id change nothing (the server answers 409 / 409 / 200 for those; a rebase after a 409 drops them first,
- * see rebaseOps).
+ * see rebaseOps). A field patched to `null` is removed (an optional field back to its default).
  */
 export function applyOps(doc: SlideAnnotations, ops: readonly AnnotationOp[]): SlideAnnotations {
   let items = doc.items;
@@ -126,7 +133,14 @@ export function applyOps(doc: SlideAnnotations, ops: readonly AnnotationOp[]): S
         let changed = false;
         const next: Record<string, unknown> = { ...item };
         for (const [key, value] of Object.entries(op.patch as Record<string, unknown>)) {
-          if (!allowed.includes(key) || value === undefined || shallowEqual((item as unknown as Record<string, unknown>)[key], value)) continue;
+          if (!allowed.includes(key) || value === undefined) continue;
+          if (value === null) {
+            if (!(key in next)) continue;
+            delete next[key];
+            changed = true;
+            continue;
+          }
+          if (shallowEqual((item as unknown as Record<string, unknown>)[key], value)) continue;
           next[key] = value;
           changed = true;
         }
@@ -238,9 +252,55 @@ export function moveRect(rect: RegionRect, dx: number, dy: number): RegionRect {
   return round4Rect({ x, y, w: rect.w, h: rect.h });
 }
 
-/** A memo anchor moved by (dx, dy), kept on the image (a little inside so the card's corner stays visible). */
+/** How far a memo's anchor may go (movePoint): a little inside the image so the card's corner stays visible. */
+export const MEMO_ANCHOR_MAX = 0.98;
+
+/** A memo anchor moved by (dx, dy), kept on the image (MEMO_ANCHOR_MAX). */
 export function movePoint(at: Point, dx: number, dy: number): Point {
-  return roundPoint({ x: Math.min(at.x + dx, 0.98), y: Math.min(at.y + dy, 0.98) });
+  return roundPoint({ x: Math.min(at.x + dx, MEMO_ANCHOR_MAX), y: Math.min(at.y + dy, MEMO_ANCHOR_MAX) });
+}
+
+/** What a move of several items writes: a memo's anchor, or the rect of everything else (a text highlight is never moved). */
+export type ItemMove = { rect?: RegionRect; at?: Point };
+
+/**
+ * The move of (dx, dy) cut down so that EVERY item stays inside the image — one common delta, so a group keeps its
+ * layout and stops as a whole when its first item reaches an edge (items clamped one by one would pile up there,
+ * and the pile would be what a release commits). Text highlights (never moved) do not count; a single item gets
+ * the same delta `moveRect` / `movePoint` would clamp to.
+ */
+export function groupDelta(items: readonly AnnotationItem[], dx: number, dy: number): { dx: number; dy: number } {
+  let minDx = -Infinity;
+  let maxDx = Infinity;
+  let minDy = -Infinity;
+  let maxDy = Infinity;
+  for (const item of items) {
+    if (item.type === 'memo') {
+      minDx = Math.max(minDx, -item.at.x);
+      maxDx = Math.min(maxDx, MEMO_ANCHOR_MAX - item.at.x);
+      minDy = Math.max(minDy, -item.at.y);
+      maxDy = Math.min(maxDy, MEMO_ANCHOR_MAX - item.at.y);
+    } else if (item.type !== 'textHighlight') {
+      minDx = Math.max(minDx, -item.rect.x);
+      maxDx = Math.min(maxDx, 1 - item.rect.x - item.rect.w);
+      minDy = Math.max(minDy, -item.rect.y);
+      maxDy = Math.min(maxDy, 1 - item.rect.y - item.rect.h);
+    }
+  }
+  // An item already past an edge (a stored rect wider than the image) leaves no room on that axis: it stays put.
+  const clampTo = (v: number, lo: number, hi: number) => (lo > hi ? 0 : round4(Math.min(Math.max(v, lo), hi)));
+  return { dx: clampTo(dx, minDx, maxDx), dy: clampTo(dy, minDy, maxDy) };
+}
+
+/** The items moved together by (dx, dy) of the image (`groupDelta`: the group stops at an edge as one), by id. */
+export function moveItems(items: readonly AnnotationItem[], dx: number, dy: number): Record<string, ItemMove> {
+  const d = groupDelta(items, dx, dy);
+  const out: Record<string, ItemMove> = {};
+  for (const item of items) {
+    if (item.type === 'memo') out[item.id] = { at: movePoint(item.at, d.dx, d.dy) };
+    else if (item.type !== 'textHighlight') out[item.id] = { rect: moveRect(item.rect, d.dx, d.dy) };
+  }
+  return out;
 }
 
 export type Handle = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';

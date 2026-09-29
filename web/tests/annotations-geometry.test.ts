@@ -20,11 +20,14 @@ import {
   bandHandles,
   canAddItems,
   emptySlideAnnotations,
+  groupDelta,
   itemBounds,
   lineAt,
   memoAt,
   memoPreview,
+  moveItems,
   moveRect,
+  MEMO_ANCHOR_MAX,
   newAnnotationId,
   newMemo,
   newShape,
@@ -123,6 +126,25 @@ describe('applyOps (the same semantics as the server)', () => {
   });
 });
 
+describe('applyOps: the text look (0.6.2)', () => {
+  const NOW = '2026-09-29T10:00:00.000Z';
+  const text = { id: 'an-000000000009', type: 'text' as const, color: 'yellow' as const, createdAt: NOW, updatedAt: NOW, rect: { x: 0.1, y: 0.1, w: 0.2, h: 0.1 }, text: '가' };
+  const rect: RectItem = { id: 'an-000000000008', type: 'rect', color: 'yellow', createdAt: NOW, updatedAt: NOW, rect: { x: 0.1, y: 0.1, w: 0.2, h: 0.1 } };
+  test('size / font / bold are patchable on a text box (size on a memo), never on a shape; null removes the field', () => {
+    let d: SlideAnnotations = { ...emptySlideAnnotations(1), items: [text, rect] };
+    d = applyOps(d, [{ op: 'update', id: text.id, patch: { size: 0.05, font: 'serif', bold: true } }]);
+    const t = d.items[0];
+    assert.ok(t.type === 'text');
+    if (t.type === 'text') assert.deepEqual([t.size, t.font, t.bold], [0.05, 'serif', true]);
+    const same = applyOps(d, [{ op: 'update', id: rect.id, patch: { size: 0.05 } as never }]);
+    assert.equal(same, d, 'a rect ignores the text fields');
+    d = applyOps(d, [{ op: 'update', id: text.id, patch: { size: null, bold: null } }]);
+    const back = d.items[0];
+    if (back.type === 'text') assert.deepEqual([('size' in back), ('bold' in back), back.font], [false, false, 'serif']);
+    assert.equal(applyOps(d, [{ op: 'update', id: text.id, patch: { size: null } }]), d, 'removing an absent field changes nothing');
+  });
+});
+
 describe('rebaseOps (after a 409: the server’s document + our ops)', () => {
   test('drops an add whose id exists there, and an update / remove whose id is gone', () => {
     const current = doc([rect('an-000000000001'), rect('an-000000000003')]);
@@ -178,6 +200,31 @@ describe('bounds and drags', () => {
     assert.deepEqual(resizeRect(r, 'n', 0, -1), { x: 0.2, y: 0, w: 0.2, h: 0.4 });
     assert.deepEqual(bandHandles({ x: 0, y: 0, w: 0.5, h: 0.03 }), ['w', 'e']);
     assert.deepEqual(bandHandles({ x: 0, y: 0, w: 0.03, h: 0.5 }), ['n', 's']);
+  });
+
+  test('a group moves by one common delta: it keeps its layout and stops as a whole when its first item reaches an edge', () => {
+    const seed = { id: 'an-000000000001', color: 'yellow' as const, createdAt: NOW };
+    const right = newShape({ ...seed, id: 'an-000000000001' }, 'rect', { x: 0.7, y: 0.2, w: 0.2, h: 0.1 });
+    const left = newShape({ ...seed, id: 'an-000000000002' }, 'rect', { x: 0.2, y: 0.5, w: 0.2, h: 0.1 });
+    const m = newMemo({ ...seed, id: 'an-000000000003' }, { x: 0.5, y: 0.9 });
+    const words = { ...newShape({ ...seed, id: 'an-000000000004' }, 'rect', { x: 0, y: 0, w: 1, h: 1 }), type: 'textHighlight' as const, rects: [{ x: 0, y: 0, w: 0.01, h: 0.01 }], chars: [0, 1] as [number, number], engine: 'e', text: 't' };
+    // Dragged right by 0.4: the right rect can only go 0.1 → everything goes 0.1 (the left rect does not run on to 0.6).
+    assert.deepEqual(groupDelta([right, left, m], 0.4, 0), { dx: 0.1, dy: 0 });
+    const moved = moveItems([right, left, m], 0.4, 0);
+    assert.deepEqual(moved[right.id].rect, { x: 0.8, y: 0.2, w: 0.2, h: 0.1 });
+    assert.deepEqual(moved[left.id].rect, { x: 0.3, y: 0.5, w: 0.2, h: 0.1 });
+    assert.deepEqual(moved[m.id].at, { x: 0.6, y: 0.9 });
+    // Down by 0.5: the memo's anchor stops at MEMO_ANCHOR_MAX (0.98) → 0.08 for all.
+    assert.deepEqual(groupDelta([right, left, m], 0, 0.5), { dx: 0, dy: Math.round((MEMO_ANCHOR_MAX - 0.9) * 1e4) / 1e4 });
+    // Up-left past the edges: the left rect's x and the right rect's y bind.
+    assert.deepEqual(groupDelta([right, left, m], -1, -1), { dx: -0.2, dy: -0.2 });
+    // A single item gets what moveRect / movePoint clamp to; a text highlight is never moved and does not bind the others.
+    assert.deepEqual(moveItems([right], 0.5, -1)[right.id].rect, moveRect(right.rect, 0.5, -1));
+    assert.deepEqual(Object.keys(moveItems([left, words], 0.5, 0)), [left.id]);
+    assert.deepEqual(groupDelta([left, words], 0.9, 0), { dx: 0.6, dy: 0 });
+    // Nothing movable, or an item already wider than the image: no move on that axis.
+    assert.deepEqual(groupDelta([], 0.3, 0.3), { dx: 0.3, dy: 0.3 });
+    assert.deepEqual(groupDelta([newShape(seed, 'rect', { x: 0, y: 0.1, w: 1.2, h: 0.1 })], 0.3, 0.3), { dx: 0, dy: 0.3 });
   });
 });
 

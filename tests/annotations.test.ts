@@ -7,7 +7,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, afterEach, before, describe, test } from 'node:test';
-import { MAX_ANNOTATION_ITEMS, MAX_HIDDEN_MARKERS, MAX_MEMO_TAGS, MAX_SLIDE_ANNOTATION_BYTES } from '../shared/types.ts';
+import { MAX_ANNOTATION_ITEMS, MAX_HIDDEN_MARKERS, MAX_MEMO_TAGS, MAX_SLIDE_ANNOTATION_BYTES, MAX_TEXT_SIZE_PT, MIN_TEXT_SIZE_PT, SLIDE_PT_HEIGHT } from '../shared/types.ts';
 import type { AnnotationEvent, AnnotationItem, AnnotationOp, MarkerKey, MemoItem, SlideAnnotations } from '../shared/types.ts';
 import {
   ANNOTATIONS_TOO_LARGE,
@@ -176,6 +176,11 @@ describe('validation (400 with a snippet)', () => {
     ['rect with NaN', rectItem({ rect: { x: 0.1, y: 0.1, w: Number.NaN, h: 0.1 } }), /rect/],
     ['text box without text', { ...rectItem(), type: 'text' }, /text/],
     ['text too long', { ...rectItem(), type: 'text', text: 'a'.repeat(2001) }, /너무 깁니다/],
+    ['text box with a size that is not a number', { ...rectItem(), type: 'text', text: 'a', size: 'big' }, /글자 크기/],
+    ['text box with an infinite size', { ...rectItem(), type: 'text', text: 'a', size: Number.POSITIVE_INFINITY }, /글자 크기/],
+    ['text box with an unknown font', { ...rectItem(), type: 'text', text: 'a', font: 'comic' }, /글꼴/],
+    ['text box with a bold that is not a boolean', { ...rectItem(), type: 'text', text: 'a', bold: 'yes' }, /bold/],
+    ['memo with a size that is not a number', memoItem({ size: '12pt' }), /글자 크기/],
     ['memo without a position', memoItem({ at: { x: 'a' } }), /at/],
     ['memo with too many tags', memoItem({ tags: Array.from({ length: MAX_MEMO_TAGS + 1 }, (_, i) => `t${i}`) }), /태그는 메모마다/],
     ['memo with a long tag', memoItem({ tags: ['a'.repeat(31)] }), /태그가 너무/],
@@ -248,6 +253,59 @@ describe('validation (400 with a snippet)', () => {
     assert.equal(normalizeTag('##'), '');
     assert.equal(normalizeTag('#a\u0001b\u007f\u202ec\u200f'), 'abc');
     assert.equal(normalizeTag('\u0000\u202a'), '');
+  });
+
+  test('text size / font / bold (0.6.2): absent stays absent, a size is capped to 8–72 pt of a 540 pt slide and rounded, a rect never carries them', async () => {
+    const min = MIN_TEXT_SIZE_PT / SLIDE_PT_HEIGHT;
+    const max = MAX_TEXT_SIZE_PT / SLIDE_PT_HEIGHT;
+    const doc = await patch(DOC, 4, 0, [
+      add({ ...rectItem(), type: 'text', text: '기본' }),
+      add({ ...rectItem(), type: 'text', text: '큰', size: 5, font: 'serif', bold: true }),
+      add({ ...rectItem(), type: 'text', text: '작은', size: 0.0001, font: 'mono', bold: false }),
+      add({ ...rectItem(), type: 'text', text: '24pt', size: 24 / SLIDE_PT_HEIGHT, font: 'sans', bold: null }),
+      add(memoItem({ size: 1 })),
+      add(memoItem({ size: 12.345678 / SLIDE_PT_HEIGHT })),
+      add(rectItem({ size: 0.05, font: 'serif', bold: true })),
+    ]);
+    const [plain, big, small, mid, memoBig, memoMid, rect] = doc.items as [AnnotationItem, AnnotationItem, AnnotationItem, AnnotationItem, MemoItem, MemoItem, AnnotationItem];
+    assert.ok(plain.type === 'text' && !('size' in plain) && !('font' in plain) && !('bold' in plain), 'nothing is added to an item without the fields');
+    assert.ok(big.type === 'text');
+    if (big.type === 'text') assert.deepEqual([big.size, big.font, big.bold], [Math.round(max * 1e4) / 1e4, 'serif', true]);
+    if (small.type === 'text') assert.deepEqual([small.size, small.font, small.bold], [Math.round(min * 1e4) / 1e4, 'mono', false]);
+    if (mid.type === 'text') assert.deepEqual([mid.size, mid.font, 'bold' in mid], [Math.round((24 / SLIDE_PT_HEIGHT) * 1e4) / 1e4, 'sans', false]);
+    assert.equal(memoBig.size, Math.round(max * 1e4) / 1e4);
+    assert.equal(memoMid.size, Math.round((12.345678 / SLIDE_PT_HEIGHT) * 1e4) / 1e4);
+    assert.ok(!('size' in rect) && !('font' in rect) && !('bold' in rect), 'a rect keeps its whitelist');
+    // An update takes the fields for a text box and a memo only.
+    const updated = await patch(DOC, 4, doc.rev, [
+      { op: 'update', id: plain.id, patch: { size: 0.05, font: 'mono', bold: true } },
+      { op: 'update', id: memoMid.id, patch: { size: 0.04 } },
+    ]);
+    const after = updated.items.find((it) => it.id === plain.id);
+    if (after?.type === 'text') assert.deepEqual([after.size, after.font, after.bold], [0.05, 'mono', true]);
+    assert.equal((updated.items.find((it) => it.id === memoMid.id) as MemoItem).size, 0.04);
+    await expectHttp(patch(DOC, 4, updated.rev, [{ op: 'update', id: rect.id, patch: { size: 0.05 } }]), 400, /이 필기에 없는 항목입니다: size/);
+    await expectHttp(patch(DOC, 4, updated.rev, [{ op: 'update', id: memoMid.id, patch: { font: 'serif' } }]), 400, /이 필기에 없는 항목입니다: font/);
+    await expectHttp(patch(DOC, 4, updated.rev, [{ op: 'update', id: plain.id, patch: { font: 'wingdings' } }]), 400, /글꼴/);
+    // null removes an optional field (the undo of setting it), and the applied op echoes null to the other clients.
+    const target = fakeTarget();
+    const unsubscribe = await subscribeAnnotations(DOC, target, 'other-client-1');
+    const removed = await patch(DOC, 4, updated.rev, [{ op: 'update', id: plain.id, patch: { size: null, bold: null } }], 'writer-client-1');
+    const cleared = removed.items.find((it) => it.id === plain.id);
+    assert.ok(cleared?.type === 'text' && !('size' in cleared) && !('bold' in cleared) && cleared.font === 'mono');
+    const event = target.events().find((e) => e.type === 'slide');
+    assert.ok(event && event.type === 'slide');
+    if (event && event.type === 'slide') {
+      const op = event.ops[0];
+      assert.ok(op.op === 'update');
+      if (op.op === 'update') assert.deepEqual({ ...op.patch, updatedAt: undefined }, { size: null, bold: null, updatedAt: undefined });
+    }
+    unsubscribe();
+    await expectHttp(patch(DOC, 4, removed.rev, [{ op: 'update', id: plain.id, patch: { color: null } }]), 400, /필기 색/);
+    // An old file (no fields) reads back unchanged: the stored document is what was written.
+    const stored = await readSlideAnnotations(DOC, 4);
+    assert.equal(stored.rev, removed.rev);
+    assert.ok(stored.items.some((it) => it.type === 'text' && !('size' in it)));
   });
 });
 

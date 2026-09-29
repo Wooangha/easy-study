@@ -11,6 +11,7 @@
 // until a later write succeeds. Undo/redo is one global stack per document (history.ts).
 import {
   MAX_ANNOTATION_ITEMS,
+  MAX_ANNOTATION_OPS,
   type AnnotationEvent,
   type AnnotationOp,
   type AnnotationSummary,
@@ -370,8 +371,10 @@ export class DocAnnotations {
       this.deps.timers.clearTimeout(w.retryTimer);
       w.retryTimer = null;
     }
-    const ops = w.pending;
-    w.pending = [];
+    // At most MAX_ANNOTATION_OPS per PATCH (the server's cap); the rest goes out in the next one, in order, so a group
+    // action on more items than that (one mutation, one undo entry) is written in several requests.
+    const ops = w.pending.slice(0, MAX_ANNOTATION_OPS);
+    w.pending = w.pending.slice(MAX_ANNOTATION_OPS);
     const baseRev = this.snapshot.slides.get(slide)?.rev ?? 0;
     w.inflight = { ops, baseRev };
     this.deps

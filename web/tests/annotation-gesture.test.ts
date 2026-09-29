@@ -1,8 +1,9 @@
 // What a press on a slide does (DESIGN §25, lib/annotations/gesture.ts): hit-testing the items under the pointer
 // (the smallest wins, slack for thin bands, ellipses by their shape, text highlights by their line rects, memos never,
-// replay-hidden items never; with a drawing tool an unselected rect / ellipse on its outline ring only) and the press
-// plan — items first with any tool, a text highlight re-dragged under its own tool, handles, markers, drawing only on
-// empty area, the region gesture in the default state. Run: node --test web/tests/*.test.ts
+// replay-hidden items never; an unselected rect / ellipse on its outline ring only, in every state), the marquee of
+// 범위 선택 and Shift toggling, and the press plan — items first with any tool, a text highlight re-dragged under its
+// own tool, handles, markers, drawing only on empty area, the region gesture in the default state.
+// Run: node --test web/tests/*.test.ts
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { AnnotationItem, EllipseItem, HighlightItem, MemoItem, RectItem, TextHighlightItem, TextItem } from '../../shared/types.ts';
@@ -14,9 +15,14 @@ import {
   hitTestItems,
   itemArea,
   itemHit,
+  itemIntersects,
+  marqueeSelect,
   outlineOnly,
   pressPlan,
+  rectsIntersect,
   slopFor,
+  toggleId,
+  unionIds,
 } from '../src/lib/annotations/gesture.ts';
 
 const NOW = '2026-09-29T10:00:00.000Z';
@@ -118,11 +124,14 @@ describe('itemHit / itemArea', () => {
 
 describe('outlineOnly', () => {
   const r = rect('an-r', 0.2, 0.2, 0.3, 0.2);
-  test('with a drawing tool an unselected shape is ring-only; the selected one, and everything in the default state, is not', () => {
-    assert.equal(outlineOnly('highlight', null)(r), true);
-    assert.equal(outlineOnly('rect', 'an-other')(r), true);
-    assert.equal(outlineOnly('rect', 'an-r')(r), false);
-    assert.equal(outlineOnly('select', null)(r), false);
+  test('an unselected shape is ring-only in every state (no tool, 범위 선택, a drawing tool); only a selected one is not', () => {
+    assert.equal(outlineOnly(null)(r), true);
+    assert.equal(outlineOnly([])(r), true);
+    assert.equal(outlineOnly(['an-other'])(r), true);
+    assert.equal(outlineOnly(['an-r'])(r), false);
+    assert.equal(outlineOnly(['an-other', 'an-r'])(r), false);
+    // The rule is the same whatever the tool: the function takes only the selection.
+    assert.equal(outlineOnly.length, 1);
   });
 });
 
@@ -161,14 +170,81 @@ describe('hitTestItems', () => {
     assert.equal(hitTestItems([big, small], { x: 0.4, y: 0.41 }, none, { visible })?.id, 'an-big');
   });
 
-  test('a box around a paragraph, 형광펜 in hand: a press inside the box is empty area, on its edge the box, on a band inside it the band', () => {
+  test('a box around a paragraph, in every state: a press inside the box is empty area (it passes through), on its edge the box, on a band inside it the band', () => {
     const inside = { x: 0.5, y: 0.6 };
-    assert.equal(hitTestItems([big, small], inside, slop, { outline: outlineOnly('highlight', null) }), null);
-    assert.equal(hitTestItems([big, small], { x: 0.05, y: 0.6 }, slop, { outline: outlineOnly('highlight', null) })?.id, 'an-big');
-    assert.equal(hitTestItems([big, small], { x: 0.4, y: 0.41 }, slop, { outline: outlineOnly('highlight', null) })?.id, 'an-small');
-    // Selected, the box is grabbed by its body again; in the default state it always is.
-    assert.equal(hitTestItems([big, small], inside, slop, { outline: outlineOnly('highlight', 'an-big') })?.id, 'an-big');
-    assert.equal(hitTestItems([big, small], inside, slop, { outline: outlineOnly('select', null) })?.id, 'an-big');
+    for (const selected of [null, [], ['an-small']]) {
+      assert.equal(hitTestItems([big, small], inside, slop, { outline: outlineOnly(selected) }), null);
+      assert.equal(hitTestItems([big, small], { x: 0.05, y: 0.6 }, slop, { outline: outlineOnly(selected) })?.id, 'an-big');
+      assert.equal(hitTestItems([big, small], { x: 0.4, y: 0.41 }, slop, { outline: outlineOnly(selected) })?.id, 'an-small');
+    }
+    // Selected (alone or in a group), the box is grabbed by its body again.
+    assert.equal(hitTestItems([big, small], inside, slop, { outline: outlineOnly(['an-big']) })?.id, 'an-big');
+    assert.equal(hitTestItems([big, small], inside, slop, { outline: outlineOnly(['an-small', 'an-big']) })?.id, 'an-big');
+    // An ellipse the same way: its centre is empty, its arc is the item.
+    const ring = ellipse('an-ring', 0.2, 0.2, 0.4, 0.4);
+    assert.equal(hitTestItems([ring], { x: 0.4, y: 0.4 }, slop, { outline: outlineOnly(null) }), null);
+    assert.equal(hitTestItems([ring], { x: 0.4, y: 0.2 }, slop, { outline: outlineOnly(null) })?.id, 'an-ring');
+  });
+});
+
+describe('marquee (범위 선택)', () => {
+  const big = rect('an-big', 0.05, 0.05, 0.9, 0.9);
+  const small = band('an-small', 0.3, 0.4, 0.2, 0.028);
+  const e = ellipse('an-e', 0.6, 0.6, 0.2, 0.2);
+  const t = textHl('an-t', [
+    { x: 0.1, y: 0.1, w: 0.5, h: 0.03 },
+    { x: 0.1, y: 0.2, w: 0.3, h: 0.03 },
+  ]);
+  const m = memo('an-m', 0.8, 0.1);
+
+  test('rects intersect when they overlap; touching edges do not count', () => {
+    assert.equal(rectsIntersect({ x: 0, y: 0, w: 0.5, h: 0.5 }, { x: 0.4, y: 0.4, w: 0.2, h: 0.2 }), true);
+    assert.equal(rectsIntersect({ x: 0, y: 0, w: 0.5, h: 0.5 }, { x: 0.5, y: 0, w: 0.2, h: 0.2 }), false);
+    assert.equal(rectsIntersect({ x: 0, y: 0, w: 0.5, h: 0.5 }, { x: 0.6, y: 0.6, w: 0.2, h: 0.2 }), false);
+  });
+
+  test('an item is crossed by its rect (a text highlight by any line rect, a memo by the box around its anchor)', () => {
+    assert.equal(itemIntersects(small, { x: 0.45, y: 0.3, w: 0.1, h: 0.2 }), true);
+    assert.equal(itemIntersects(small, { x: 0.45, y: 0.5, w: 0.1, h: 0.2 }), false);
+    assert.equal(itemIntersects(e, { x: 0.75, y: 0.75, w: 0.1, h: 0.1 }), true); // the bounding box counts
+    assert.equal(itemIntersects(t, { x: 0.2, y: 0.15, w: 0.05, h: 0.03 }), false); // the gap between the lines
+    assert.equal(itemIntersects(t, { x: 0.2, y: 0.2, w: 0.05, h: 0.02 }), true);
+    assert.equal(itemIntersects(m, { x: 0.85, y: 0.12, w: 0.05, h: 0.05 }), true); // inside the 12 % × 8 % anchor box
+    assert.equal(itemIntersects(m, { x: 0.5, y: 0.5, w: 0.1, h: 0.1 }), false);
+  });
+
+  test('marqueeSelect: every item the rectangle crosses, in z-order; replay-hidden items skipped; empty for none', () => {
+    const items = [big, small, e, t, m];
+    assert.deepEqual(marqueeSelect(items, { x: 0.25, y: 0.35, w: 0.5, h: 0.4 }), ['an-big', 'an-small', 'an-e']);
+    assert.deepEqual(marqueeSelect(items, { x: 0.25, y: 0.35, w: 0.5, h: 0.4 }, { visible: (it) => it.id !== 'an-small' }), ['an-big', 'an-e']);
+    assert.deepEqual(marqueeSelect([small, e], { x: 0, y: 0, w: 0.01, h: 0.01 }), []);
+    // A rectangle drawn over the whole slide takes everything, the memo included.
+    assert.deepEqual(marqueeSelect(items, { x: 0, y: 0, w: 1, h: 1 }), ['an-big', 'an-small', 'an-e', 'an-t', 'an-m']);
+  });
+
+  test('a memo is crossed by its card as drawn when the viewer measured it (clamped inside the slide, far bigger than the anchor box), else by the anchor box', () => {
+    // A memo anchored at (0.8, 0.9): CSS draws its 24 % × ~30 % card clamped to the slide's bottom-right corner.
+    const corner = memo('an-c', 0.8, 0.9);
+    const card = { x: 0.76, y: 0.7, w: 0.24, h: 0.3 };
+    const lowerHalf = { x: 0.78, y: 0.88, w: 0.1, h: 0.1 };
+    assert.equal(itemIntersects(corner, lowerHalf, card), true);
+    assert.equal(itemIntersects(corner, lowerHalf), true, 'the anchor box happens to be there too');
+    const upperHalf = { x: 0.78, y: 0.72, w: 0.1, h: 0.05 }; // over the drawn card, above the anchor box (0.8–0.92 × 0.9–0.98 clamped)
+    assert.equal(itemIntersects(corner, upperHalf, card), true);
+    assert.equal(itemIntersects(corner, upperHalf), false);
+    assert.deepEqual(marqueeSelect([big, corner], upperHalf, { boxOf: (it) => (it.id === 'an-c' ? card : null) }), ['an-big', 'an-c']);
+    assert.deepEqual(marqueeSelect([big, corner], upperHalf), ['an-big']);
+    // A measurement that is missing (null / undefined) falls back to the anchor box; other items ignore boxOf.
+    assert.deepEqual(marqueeSelect([small, corner], { x: 0.85, y: 0.92, w: 0.05, h: 0.05 }, { boxOf: () => undefined }), ['an-c']);
+    assert.deepEqual(marqueeSelect([small], { x: 0.45, y: 0.3, w: 0.1, h: 0.2 }, { boxOf: () => ({ x: 0, y: 0, w: 0.01, h: 0.01 }) }), [], 'a text highlight / shape is still hit by its own geometry — boxOf is for memos; a box given is used as given');
+  });
+
+  test('Shift+click toggles one id; Shift+drag adds without duplicates, keeping the order first seen', () => {
+    assert.deepEqual(toggleId([], 'a'), ['a']);
+    assert.deepEqual(toggleId(['a', 'b'], 'a'), ['b']);
+    assert.deepEqual(toggleId(['a'], 'b'), ['a', 'b']);
+    assert.deepEqual(unionIds(['a', 'b'], ['b', 'c']), ['a', 'b', 'c']);
+    assert.deepEqual(unionIds([], ['x']), ['x']);
   });
 });
 
@@ -178,9 +254,31 @@ describe('pressPlan', () => {
   const m = memo('an-m', 0.5, 0.5);
   const other = { kind: 'other' } as const;
 
-  test('the default state (no tool): empty area is the region (첨부) gesture, an item is selected and moved', () => {
+  test('the default state (no tool): empty area is the region (첨부) gesture (Shift or not), an item is selected and moved', () => {
     assert.deepEqual(pressPlan({ tool: 'select', target: other, item: null, selected: false, touch: false }), { kind: 'region' });
+    assert.deepEqual(pressPlan({ tool: 'select', target: other, item: null, selected: false, touch: false, shift: true }), { kind: 'region' });
     assert.deepEqual(pressPlan({ tool: 'select', target: other, item: r, selected: false, touch: false }), { kind: 'select', item: r, move: true });
+    // Part of a selection already: selected again (the viewer then moves the whole group from here).
+    assert.deepEqual(pressPlan({ tool: 'select', target: other, item: r, selected: true, touch: false }), { kind: 'select', item: r, move: true });
+  });
+
+  test('범위 선택: empty area drags a marquee (Shift adds to the selection; live at once on touch), an item is selected like with any tool', () => {
+    assert.deepEqual(pressPlan({ tool: 'marquee', target: other, item: null, selected: false, touch: false }), { kind: 'marquee', add: false, immediate: false });
+    assert.deepEqual(pressPlan({ tool: 'marquee', target: other, item: null, selected: false, touch: false, shift: true }), { kind: 'marquee', add: true, immediate: false });
+    assert.deepEqual(pressPlan({ tool: 'marquee', target: other, item: null, selected: false, touch: true }), { kind: 'marquee', add: false, immediate: true });
+    assert.deepEqual(pressPlan({ tool: 'marquee', target: other, item: r, selected: false, touch: false }), { kind: 'select', item: r, move: true });
+  });
+
+  test('Shift+click on an item toggles it in and out of the selection, in every state, and never moves it', () => {
+    for (const tool of ['select', 'marquee', 'highlight', 'textHighlight', 'rect', 'memo'] as const) {
+      assert.deepEqual(pressPlan({ tool, target: other, item: r, selected: false, touch: false, shift: true }), { kind: 'toggle', item: r });
+      assert.deepEqual(pressPlan({ tool, target: other, item: r, selected: true, touch: false, shift: true }), { kind: 'toggle', item: r });
+    }
+    // A text highlight too (Shift beats the re-drag of 텍스트 형광), and on touch.
+    assert.deepEqual(pressPlan({ tool: 'textHighlight', target: other, item: t, selected: false, touch: false, shift: true }), { kind: 'toggle', item: t });
+    assert.deepEqual(pressPlan({ tool: 'rect', target: other, item: r, selected: false, touch: true, shift: true }), { kind: 'toggle', item: r });
+    // Shift on empty area with a drawing tool still draws.
+    assert.deepEqual(pressPlan({ tool: 'rect', target: other, item: null, selected: false, touch: false, shift: true }), { kind: 'draw', tool: 'rect', immediate: false });
   });
 
   test('with ANY drawing tool an item under the press is selected (and movable), never drawn over', () => {

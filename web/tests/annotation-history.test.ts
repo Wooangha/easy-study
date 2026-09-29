@@ -1,10 +1,12 @@
-// Undo / redo of slide annotations (DESIGN §25): one global stack in edit order, inverse ops from the pre-state,
-// coalesced text edits, the cap, pruning. Run: node --test web/tests/*.test.ts
+// Undo / redo of slide annotations (DESIGN §25): one global stack in edit order, inverse ops from the pre-state, a
+// group action (several ops) as one entry, coalesced text / size edits, the cap, pruning.
+// Run: node --test web/tests/*.test.ts
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { MemoItem, RectItem, SlideAnnotations } from '../../shared/types.ts';
 import { applyOps, emptySlideAnnotations } from '../src/lib/annotations/geometry.ts';
 import {
+  COALESCED_FIELDS,
   MAX_HISTORY,
   TEXT_COALESCE_MS,
   emptyHistory,
@@ -118,6 +120,85 @@ describe('the global stack', () => {
     // Another item's text, or another field: not coalesced.
     h = recordEntry(h, 2, d, [{ op: 'update', id: 'an-000000000001', patch: { color: 'blue' } }], 4600);
     assert.equal(h.undo.length, 3);
+  });
+
+  test('a group action (moving, recoloring or deleting several selected items) is one entry: ⌘Z undoes it whole', () => {
+    const a = rect('an-000000000001', 0.1);
+    const b = rect('an-000000000002', 0.3);
+    const m = memo('an-000000000003', '메모');
+    let h = emptyHistory();
+    let d = doc([a, b, m]);
+    // A group move: three updates in one mutation.
+    const move = [
+      { op: 'update' as const, id: a.id, patch: { rect: { ...a.rect, x: 0.2 } } },
+      { op: 'update' as const, id: b.id, patch: { rect: { ...b.rect, x: 0.4 } } },
+      { op: 'update' as const, id: m.id, patch: { at: { x: 0.6, y: 0.5 } } },
+    ];
+    h = recordEntry(h, 2, d, move, 1000);
+    d = applyOps(d, move);
+    assert.equal(h.undo.length, 1);
+    assert.equal(h.undo[0].fieldOf, undefined, 'not coalesced with anything');
+    // A group color, then a group delete: one entry each.
+    const color = [a, b, m].map((it) => ({ op: 'update' as const, id: it.id, patch: { color: 'blue' as const } }));
+    h = recordEntry(h, 2, d, color, 2000);
+    d = applyOps(d, color);
+    const remove = [a, b, m].map((it) => ({ op: 'remove' as const, id: it.id }));
+    h = recordEntry(h, 2, d, remove, 3000);
+    d = applyOps(d, remove);
+    assert.equal(h.undo.length, 3);
+    assert.deepEqual(d.items, []);
+    // Undo the delete: all three are back, blue and moved; undo the color: yellow / pink again; undo the move: back where they were.
+    const u1 = popUndo(h)!;
+    d = applyOps(d, u1.entry.undo);
+    assert.deepEqual(
+      d.items.map((it) => it.id),
+      [a.id, b.id, m.id],
+    );
+    assert.ok(d.items.every((it) => it.color === 'blue'));
+    const u2 = popUndo(u1.history)!;
+    d = applyOps(d, u2.entry.undo);
+    assert.deepEqual(
+      d.items.map((it) => it.color),
+      ['yellow', 'yellow', 'pink'],
+    );
+    const u3 = popUndo(u2.history)!;
+    d = applyOps(d, u3.entry.undo);
+    const without = (items: SlideAnnotations['items']) => items.map(({ updatedAt: _u, ...rest }) => rest);
+    assert.deepEqual(without(d.items), without([a, b, m]));
+    assert.equal(popUndo(u3.history), null);
+    // Redo the move: all three move again in one step.
+    const r1 = popRedo(u3.history)!;
+    d = applyOps(d, r1.entry.redo);
+    assert.deepEqual(
+      d.items.map((it) => ('rect' in it ? it.rect.x : it.type === 'memo' ? it.at.x : -1)),
+      [0.2, 0.4, 0.6],
+    );
+  });
+
+  test('consecutive size edits of one item (the slider) coalesce like text; another field, or text after size, does not', () => {
+    assert.deepEqual([...COALESCED_FIELDS].sort(), ['size', 'text']);
+    let h = emptyHistory();
+    let d = doc([{ ...rect('an-000000000001'), type: 'text', text: '가' } as SlideAnnotations['items'][number]]);
+    const set = (patch: Record<string, unknown>, at: number) => {
+      const ops = [{ op: 'update' as const, id: 'an-000000000001', patch: patch as never }];
+      h = recordEntry(h, 2, d, ops, at);
+      d = applyOps(d, ops);
+    };
+    set({ size: 0.03 }, 1000);
+    set({ size: 0.04 }, 1300);
+    set({ size: 0.05 }, 1900);
+    assert.equal(h.undo.length, 1);
+    assert.equal(h.undo[0].fieldOf, 'an-000000000001/size');
+    // The box had no size before: the undo removes the field (null), which applyOps understands.
+    assert.deepEqual(h.undo[0].undo, [{ op: 'update', id: 'an-000000000001', patch: { size: null } }]);
+    assert.deepEqual(h.undo[0].redo, [{ op: 'update', id: 'an-000000000001', patch: { size: 0.05 } }]);
+    const back = applyOps(d, h.undo[0].undo);
+    assert.ok(!('size' in back.items[0]), 'undone: no size again');
+    set({ text: '가나' }, 2000); // another field: a new entry
+    assert.equal(h.undo.length, 2);
+    set({ bold: true }, 2100); // bold never coalesces
+    set({ bold: false }, 2200);
+    assert.equal(h.undo.length, 4);
   });
 
   test('the cap keeps the newest MAX_HISTORY entries', () => {

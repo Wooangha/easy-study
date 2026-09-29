@@ -2,10 +2,13 @@
 // to a pill, free text (debounced 600 ms, committed at once on blur / ⌘Enter / when the card goes away), tags with autocomplete, links to a
 // slide, another lecture or a recording moment (chips that navigate), and the eye toggle of "튜터에게 보이기". On a
 // narrow pane or a touch screen the memo stays a pill and expands in the bottom sheet (`mode: 'sheet'`). Its text
-// is rendered as plain text only.
+// is rendered as plain text only, in the memo's own text size when one is set (a fraction of the slide height, like
+// a text box; UI-sized 13 px otherwise). As part of a group selection (`group`) the card does not drag itself: the
+// press goes through to the viewer, which moves every selected item together.
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import type { MemoItem, MemoLink } from '../../../../shared/types.ts';
 import { capText, memoPreview, movePoint, withLink } from '../../lib/annotations/geometry.ts';
+import { memoFontSize, memoSheetFontSize } from '../../lib/annotations/text.ts';
 import { movedBeyond, type Point } from '../../lib/attachments.ts';
 import { formatClock } from '../../lib/recording/timeline.ts';
 import { usePlayhead } from '../../lib/recording/playhead.ts';
@@ -30,10 +33,12 @@ interface MemoCardProps {
   editing: boolean;
   /** 'inline' on the slide (positioned, draggable); 'sheet' in the bottom sheet (the editor only). */
   mode: 'inline' | 'sheet';
+  /** Part of a multi-selection: presses on the card go to the viewer (a drag moves the whole group). */
+  group?: boolean;
 }
 
-export function MemoCard({ slide, item, selected, editing, mode }: MemoCardProps) {
-  const { actions, compact, docs, docId, tags: lectureTags } = useLayerEnv();
+export function MemoCard({ slide, item, selected, editing, mode, group = false }: MemoCardProps) {
+  const { actions, compact, docs, docId, tags: lectureTags, trackWidth } = useLayerEnv();
   const inline = mode === 'inline';
   // Narrow panes / touch: the inline card is always the pill; the sheet is the editor.
   const collapsed = inline && (item.collapsed || compact);
@@ -50,7 +55,7 @@ export function MemoCard({ slide, item, selected, editing, mode }: MemoCardProps
     if (commit && d.moved && dragAt) actions.update(slide, item.id, { at: dragAt });
   };
   const onHeaderPointerDown = (e: ReactPointerEvent<HTMLElement>) => {
-    if (!inline || !e.isPrimary || (e.pointerType === 'mouse' && e.button !== 0)) return;
+    if (!inline || group || !e.isPrimary || (e.pointerType === 'mouse' && e.button !== 0)) return;
     const target = e.target as Element;
     // A control inside the header (⋯, ▾) keeps its click; the collapsed pill is itself a button and does drag.
     const control = target.closest('button, input, select, textarea, a');
@@ -125,12 +130,16 @@ export function MemoCard({ slide, item, selected, editing, mode }: MemoCardProps
     },
     [flush],
   );
+  // The textarea fits its text: measured again when the text, the card's state or the rendered font changes — the
+  // memo's own size is a fraction of the slide height, so the zoom / the pane (`trackWidth`, the viewer's `--track-w`
+  // that the font is computed from; a layout effect, so it runs once the new width is in the DOM) change it too.
+  const fontSize = inline ? memoFontSize(item) : memoSheetFontSize(item);
   useLayoutEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = 'auto';
     el.style.height = `${Math.min(el.scrollHeight, MAX_TEXTAREA_PX)}px`;
-  }, [text, collapsed]);
+  }, [text, collapsed, fontSize, trackWidth]);
   useEffect(() => {
     if (editing && !collapsed) textareaRef.current?.focus({ preventScroll: true });
   }, [editing, collapsed]);
@@ -191,6 +200,22 @@ export function MemoCard({ slide, item, selected, editing, mode }: MemoCardProps
     },
   ];
 
+  /**
+   * The press that selects the card (and starts its drag): Shift adds it to / takes it out of the selection instead;
+   * in a group the press is left to the viewer (no stopPropagation), which moves every selected item together.
+   */
+  const onCardPointerDown = (e: ReactPointerEvent<HTMLElement>): boolean => {
+    if (group && !e.shiftKey) return false;
+    e.stopPropagation();
+    if (e.shiftKey) {
+      actions.toggleSelect(slide, item.id);
+      return false;
+    }
+    if (!selected) actions.select(slide, item.id);
+    return true;
+  };
+  const textStyle: CSSProperties | undefined = fontSize ? { fontSize } : undefined;
+
   const at = dragAt ?? item.at;
   // Kept inside the slide box (which clips its overflow): a card near the right or bottom edge moves in.
   const style: CSSProperties | undefined = inline
@@ -212,9 +237,7 @@ export function MemoCard({ slide, item, selected, editing, mode }: MemoCardProps
         data-annot="memo"
         data-id={item.id}
         onPointerDown={(e) => {
-          e.stopPropagation();
-          actions.select(slide, item.id);
-          onHeaderPointerDown(e);
+          if (onCardPointerDown(e)) onHeaderPointerDown(e);
         }}
         onPointerMove={onHeaderPointerMove}
         onPointerUp={onHeaderPointerUp}
@@ -240,10 +263,7 @@ export function MemoCard({ slide, item, selected, editing, mode }: MemoCardProps
       style={style}
       data-annot="memo"
       data-id={item.id}
-      onPointerDown={(e) => {
-        e.stopPropagation();
-        if (!selected) actions.select(slide, item.id);
-      }}
+      onPointerDown={onCardPointerDown}
       onKeyDown={(e) => e.stopPropagation()}
     >
       <div
@@ -271,6 +291,7 @@ export function MemoCard({ slide, item, selected, editing, mode }: MemoCardProps
       <textarea
         ref={textareaRef}
         className="memo-text"
+        style={textStyle}
         value={text}
         placeholder="메모…"
         aria-label="메모 내용"

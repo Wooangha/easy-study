@@ -4,7 +4,7 @@
 // store, the loading window, the own-client echo. Run: node --test web/tests/*.test.ts
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import type { AnnotationEvent, AnnotationOp, AnnotationSummary, RectItem, SlideAnnotations } from '../../shared/types.ts';
+import { MAX_ANNOTATION_OPS, type AnnotationEvent, type AnnotationOp, type AnnotationSummary, type RectItem, type SlideAnnotations } from '../../shared/types.ts';
 import { ApiError } from '../src/api.ts';
 import { applyOps, emptySlideAnnotations } from '../src/lib/annotations/geometry.ts';
 import {
@@ -179,6 +179,44 @@ describe('DocAnnotations: optimistic writes', () => {
     await tick();
     assert.equal(t.patches.length, 2);
     assert.equal(t.slide(3)?.rev, 2);
+    t.unsubscribe();
+  });
+
+  test('a group action on more items than the server takes per PATCH goes out in several PATCHes, in order, as one undo step', async () => {
+    const items = Array.from({ length: 150 }, (_, i) => rect(`an-${String(i).padStart(12, '0')}`));
+    const t = setup({ slides: { 3: doc(3, 1, items) } });
+    await store_loaded(t, 3);
+    // 범위 선택 over all 150, 🗑 삭제: one mutation of 150 removes.
+    assert.equal(t.store.mutate(3, items.map((it) => ({ op: 'remove' as const, id: it.id }))), true);
+    assert.equal(t.slide(3)?.items.length, 0, 'applied at once');
+    assert.equal(t.store.snapshot.history.undo.length, 1, 'one undo entry');
+    assert.equal(t.patches.length, 1);
+    assert.equal(t.last().ops.length, MAX_ANNOTATION_OPS);
+    assert.deepEqual(t.last().ops.map((o) => (o.op === 'remove' ? o.id : '')), items.slice(0, MAX_ANNOTATION_OPS).map((it) => it.id));
+    t.last().answer.resolve(doc(3, 2, items.slice(MAX_ANNOTATION_OPS)));
+    await tick();
+    assert.equal(t.patches.length, 2, 'the rest follows with the returned rev');
+    assert.equal(t.last().baseRev, 2);
+    assert.equal(t.last().ops.length, 50);
+    assert.deepEqual(t.last().ops.map((o) => (o.op === 'remove' ? o.id : '')), items.slice(MAX_ANNOTATION_OPS).map((it) => it.id));
+    t.last().answer.resolve(doc(3, 3, []));
+    await tick();
+    assert.equal(t.patches.length, 2);
+    assert.equal(t.slide(3)?.rev, 3);
+    // ⌘Z: the 150 re-adds, in z-order, again in two PATCHes.
+    assert.deepEqual(t.store.undo(), { slide: 3, itemId: items[0].id });
+    assert.equal(t.slide(3)?.items.length, 150);
+    assert.deepEqual(t.slide(3)?.items.map((it) => it.id), items.map((it) => it.id), 'the original order');
+    assert.equal(t.patches.length, 3);
+    assert.equal(t.last().ops.length, MAX_ANNOTATION_OPS);
+    t.last().answer.resolve(doc(3, 4, items.slice(0, MAX_ANNOTATION_OPS)));
+    await tick();
+    assert.equal(t.patches.length, 4);
+    assert.equal(t.last().ops.length, 50);
+    t.last().answer.resolve(doc(3, 5, items));
+    await tick();
+    assert.equal(t.slide(3)?.rev, 5);
+    assert.equal(t.slide(3)?.items.length, 150);
     t.unsubscribe();
   });
 

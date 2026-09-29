@@ -6169,11 +6169,14 @@ kbd {
   color: var(--rec);
 }
 
-/* The layer over the slide image: nothing of its own takes the pointer; its items do. */
+/* The layer over the slide image: nothing of its own takes the pointer; its items do. Its rendered height in px
+   (`--slide-h`: the track's width, the deck's aspect ratio and this page's letterbox frame) sizes typed text — a
+   text size is stored as a fraction of the slide height, so it scales with the zoom. */
 .annot-layer {
   position: absolute;
   overflow: visible;
   pointer-events: none;
+  --slide-h: calc(var(--track-w, 1000) / var(--aspect, 1.7778) * var(--frame-h, 1));
 }
 
 .annot-svg {
@@ -6197,8 +6200,8 @@ kbd {
   stroke: none;
 }
 
-/* A transparent fill (not none): in the default state a tap inside the shape selects it, a 3 px stroke alone is no
-   touch target. */
+/* A transparent fill (not none): a selected shape is grabbed by its body (moved), and a 3 px stroke alone is no
+   touch target for that. */
 .annot-shape.kind-rect,
 .annot-shape.kind-ellipse {
   fill: transparent;
@@ -6207,10 +6210,11 @@ kbd {
   vector-effect: non-scaling-stroke;
 }
 
-/* With a drawing tool an unselected outline shape is hit on its ring only (gesture.ts outlineOnly), so its inside
-   shows the tool's crosshair and only the stroke the pointer. */
-.viewer.is-annot-tool .annot-shape.kind-rect:not(.is-selected),
-.viewer.is-annot-tool .annot-shape.kind-ellipse:not(.is-selected) {
+/* An unselected outline shape is hit on its ring only, in every state (gesture.ts outlineOnly): its inside passes
+   the pointer through to what is under it (another item, the slide's words, the region drag), so only the stroke
+   takes the pointer. */
+.annot-shape.kind-rect:not(.is-selected),
+.annot-shape.kind-ellipse:not(.is-selected) {
   pointer-events: visibleStroke;
 }
 
@@ -6247,7 +6251,15 @@ kbd {
   mix-blend-mode: multiply;
 }
 
-/* Text boxes: their font scales with the slide (the viewer is a size container: cqw). */
+/* The marquee of 범위 선택. */
+.annot-draft-shape.is-marquee {
+  fill: rgba(75, 107, 245, 0.07);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+}
+
+/* Text boxes: their font scales with the slide — the box's size (a fraction of the slide height, text.ts) against
+   the layer's rendered height —, in the box's font and weight; at least the stored height, growing with the text. */
 .annot-text {
   position: absolute;
   box-sizing: border-box;
@@ -6257,7 +6269,9 @@ kbd {
   border-radius: 3px;
   background: color-mix(in srgb, var(--annot-color) 22%, transparent);
   color: #1c2230;
-  font-size: calc(1.7cqw * var(--zoom, 1));
+  font-family: var(--annot-font, inherit);
+  font-size: calc(var(--annot-size, 0.0296) * var(--slide-h, 600) * 1px);
+  font-weight: var(--annot-weight, 400);
   line-height: 1.25;
   cursor: pointer;
   pointer-events: auto;
@@ -6372,9 +6386,93 @@ kbd {
   text-align: center;
 }
 
-/* The floating menu of a selected item (the region menu's look). */
+/* The floating menu of the selected item(s) (the region menu's look), placed in px by itself (menu.ts) from the
+   items' boxes as drawn — never through the region menu's translate —, wrapping when the pane is narrow. */
+.annot-item-menu {
+  flex-wrap: wrap;
+  white-space: normal;
+}
+
+.annot-item-menu.is-above,
+.annot-item-menu.is-inside {
+  transform: none;
+  animation: toast-in 0.12s ease-out;
+}
+
 .annot-item-menu .annot-color-dots {
   padding: 0 6px;
+}
+
+.annot-menu-count {
+  padding: 0 4px 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* The text look of a text box (size · font · bold) or a memo's text size: inline on a wide pane, a popover (`가 16`)
+   on a narrow one. */
+.annot-style {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 4px;
+}
+
+.annot-style.is-pop {
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0;
+}
+
+.annot-size {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.annot-size-input {
+  width: 54px;
+  height: 28px;
+  padding: 0 2px 0 6px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.annot-size-range {
+  width: 76px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.annot-font-select {
+  height: 28px;
+  padding: 0 4px;
+  font-size: 12px;
+}
+
+.annot-bold-btn {
+  width: 30px;
+  padding: 0;
+  font-family: var(--font);
+  font-weight: 800;
+}
+
+.annot-bold-btn.is-active,
+.annot-style-btn.is-open {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.annot-style-pop {
+  z-index: 62;
+  box-sizing: border-box;
+  padding: 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
 }
 
 .region-menu-btn.is-danger {
@@ -7021,20 +7119,6 @@ kbd {
   display: flex;
   flex-direction: column;
   gap: 6px;
-}
-
-/* A narrow slide: the item menu is centred under / over the item and wraps. */
-.annot-item-menu.is-centered {
-  flex-wrap: wrap;
-  justify-content: center;
-  max-width: calc(100% - 8px);
-  white-space: normal;
-  transform: translateX(-50%);
-}
-
-.annot-item-menu.is-centered.is-above,
-.annot-item-menu.is-centered.is-inside {
-  transform: translate(-50%, -100%);
 }
 
 /* A phone: the toolbar keeps one row (page jump · tools · ⋯ · zoom). */

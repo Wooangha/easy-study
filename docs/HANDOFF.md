@@ -255,6 +255,21 @@ Status (2026-09-29):
   rect / ellipse is hit on its outline ring only (`outlineOnly`, `slop.ring`) so a box's inside stays drawable; 텍스트 형광 on a text
   highlight re-drags it (`redraw` → `update` of its words); `--surface-raised` for the active 선택·첨부 segment (dark mode);
   constant accessible names + `aria-pressed` on the eye toggles, `role="img"` hidden markers. Not committed.
+- 0.6.2 (working tree, round 3 of the user's feedback; DESIGN §25 "As shipped (0.6.2 — round 3)"): the item menu places itself from
+  the items' boxes as drawn (lib/annotations/menu.ts `placeItemMenu`; a memo dragged to the slide's bottom edge gets its menu above,
+  never covered); the 범위 선택 tool (`'marquee'`: a drag on empty area selects what it crosses, Shift+click / Shift+drag add and
+  remove, one menu / one PATCH / one undo step per group action, a drag on any selected item moves the group); text boxes gain
+  `size` (8–72 "pt on the slide", a fraction of the slide height — `SLIDE_PT_HEIGHT` 540 — scaled with the zoom through the layer's
+  `--slide-h`), `font` (기본 / 명조 / 고정폭) and `bold`, memos `size` (lib/annotations/text.ts; optional, capped and validated on the
+  server, `null` in a patch removes one, old files load unchanged); an unselected rect / ellipse is hit on its ring only in EVERY
+  state. `npm test` 1153/1153 + the new web suites (annotation-menu, annotation-text), `desktop:test` 43/43; headless-Chrome E2E
+  (a CDP script, temp library, fake CLIs, port 5209) per the DESIGN paragraph. README "필기와 메모" updated. Review fixes (DESIGN
+  §25 "Review fixes (0.6.2 — round 3)"): the memo textarea refits on a size change / zoom, a group moves by one common delta
+  (`groupDelta` / `moveItems`), the marquee meets a memo by its card as drawn (`memoBoxesOf`), the store sends ≤ 100 ops per PATCH
+  (a big group action in several, one undo entry), group 📎 첨부 counts the free slots once (`annotationAttachPlan`, one toast), a
+  memo's size field starts at its rendered size (`memoSizePt(item, shown)`), a text box's stored height includes its padding and
+  border; `npm test` 1160/1160, `desktop:test` 43/43, a second headless-Chrome scenario (port 5211) 24/24 and the round-3 one
+  re-run 33/34 (the memo field's start value changed on purpose). Not committed.
 - Next: commit + release notes; a real-device pass on a phone-sized remote client; later ideas
   from the request: freehand pen, PDF export, exam mode.
 

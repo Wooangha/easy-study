@@ -25,13 +25,23 @@ export function EyeIcon({ off = false, className = 'eye-icon' }: { off?: boolean
   );
 }
 
-/** The glyph of a tool button: the arrow of 선택·첨부, a marker over a line, a highlighted A, the shapes, T, a note. */
+/**
+ * The glyph of a tool button: the arrow of 선택·첨부, a dashed box with a small arrow for 범위 선택, a marker over a
+ * line, a highlighted A, the shapes, T, a note.
+ */
 export function ToolIcon({ tool, className = 'tool-icon' }: { tool: AnnotationTool; className?: string }) {
   switch (tool) {
     case 'select':
       return (
         <Icon className={className}>
           <path d="M3.5 2.5 13 8.8 8.9 9.6l2.3 3.7-1.9 1.1-2.3-3.7-3.5 2.6Z" {...STROKE} />
+        </Icon>
+      );
+    case 'marquee':
+      return (
+        <Icon className={className}>
+          <rect x="2" y="2" width="10" height="8" rx="1" {...STROKE} strokeDasharray="2.2 1.6" />
+          <path d="M8.5 8.5 14 12.2l-2.4.5 1.3 2.2-1.2.7-1.3-2.2-1.9 1.6Z" {...STROKE} />
         </Icon>
       );
     case 'highlight':

@@ -2,14 +2,18 @@
 // recent edit wherever it is — the focused slide is "the one crossing the centre line" while the last edit is often
 // on a neighbour). Each entry holds the inverse ops of a mutation, computed from the document before it (the
 // inverse of add = remove, of update = update with the previous fields, of remove = add of the removed item, of
-// hideMarker = unhideMarker), and the ops to redo it. Consecutive text edits of one item within a short time are one
-// entry (a debounced flush is not an undo step each). At most MAX_HISTORY entries.
+// hideMarker = unhideMarker), and the ops to redo it. A group action (moving, recoloring or deleting several selected
+// items) is one mutation of several ops, so one entry: ⌘Z undoes it whole. Consecutive edits of one item's text (or
+// its size, from the slider) within a short time are one entry (a debounced flush or a slider step is not an undo
+// step each). At most MAX_HISTORY entries.
 import type { AnnotationItem, AnnotationOp, Patchable, SlideAnnotations } from '../../../../shared/types.ts';
 import { applyOps, sameMarkerKey } from './geometry.ts';
 
 export const MAX_HISTORY = 50;
-/** Text edits of the same item closer than this are coalesced. */
+/** Text (or size) edits of the same item closer than this are coalesced. */
 export const TEXT_COALESCE_MS = 2000;
+/** The fields whose consecutive edits of one item coalesce: typed text, and the size slider / number field. */
+export const COALESCED_FIELDS: ReadonlySet<string> = new Set(['text', 'size']);
 
 export interface HistoryEntry {
   slide: number;
@@ -17,8 +21,8 @@ export interface HistoryEntry {
   redo: AnnotationOp[];
   /** When it was recorded (coalescing). */
   at: number;
-  /** The item whose text this entry edits (coalescing), if it is only that. */
-  textOf?: string;
+  /** `${id}/${field}` when the entry edits only that one field of that one item (coalescing). */
+  fieldOf?: string;
 }
 
 export interface History {
@@ -38,9 +42,10 @@ function inverseOf(doc: SlideAnnotations, op: AnnotationOp): AnnotationOp | null
       if (!item) return null;
       const previous: Record<string, unknown> = {};
       const record = item as unknown as Record<string, unknown>;
-      for (const key of Object.keys(op.patch)) {
-        if (key === 'updatedAt' || !(key in record)) continue;
-        previous[key] = record[key];
+      for (const [key, value] of Object.entries(op.patch as Record<string, unknown>)) {
+        if (key === 'updatedAt' || value === undefined) continue;
+        // A field the item did not have (a text box's first size): the inverse removes it again (null).
+        previous[key] = key in record ? record[key] : null;
       }
       if (Object.keys(previous).length === 0) return null;
       return { op: 'update', id: op.id, patch: previous as Patchable<AnnotationItem> };
@@ -56,7 +61,10 @@ function inverseOf(doc: SlideAnnotations, op: AnnotationOp): AnnotationOp | null
   }
 }
 
-/** The ops that undo `ops` applied on `doc`, in the order to apply them (the last op is undone first). */
+/**
+ * The ops that undo `ops` applied on `doc`, in the order to apply them (the last op is undone first) — except that a
+ * run of re-adds keeps the items' original order: undoing a group delete puts them back in their z-order.
+ */
 export function inverseOps(doc: SlideAnnotations, ops: readonly AnnotationOp[]): AnnotationOp[] {
   const out: AnnotationOp[] = [];
   let current = doc;
@@ -65,31 +73,41 @@ export function inverseOps(doc: SlideAnnotations, ops: readonly AnnotationOp[]):
     if (inverse) out.unshift(inverse);
     current = applyOps(current, [op]);
   }
+  for (let i = 0; i < out.length; ) {
+    if (out[i].op !== 'add') {
+      i++;
+      continue;
+    }
+    let j = i;
+    while (j < out.length && out[j].op === 'add') j++;
+    out.splice(i, j - i, ...out.slice(i, j).reverse());
+    i = j;
+  }
   return out;
 }
 
-/** The id whose text (only) these ops change, or null. */
-function textEditOf(ops: readonly AnnotationOp[]): string | null {
+/** `${id}/${field}` when these ops change only one coalescing field of one item, else null. */
+function fieldEditOf(ops: readonly AnnotationOp[]): string | null {
   if (ops.length !== 1 || ops[0].op !== 'update') return null;
   const keys = Object.keys(ops[0].patch).filter((k) => k !== 'updatedAt');
-  return keys.length === 1 && keys[0] === 'text' ? ops[0].id : null;
+  return keys.length === 1 && COALESCED_FIELDS.has(keys[0]) ? `${ops[0].id}/${keys[0]}` : null;
 }
 
 /**
  * Records a mutation (`ops` about to be applied on `doc`, the document before it) at `now`; clears the redo stack.
- * Nothing is recorded when the ops change nothing. A text edit of the item the previous entry edited (within
- * TEXT_COALESCE_MS) merges into it: the undo keeps the older text, the redo takes the newer.
+ * Nothing is recorded when the ops change nothing. A text (or size) edit of the item and field the previous entry
+ * edited (within TEXT_COALESCE_MS) merges into it: the undo keeps the older value, the redo takes the newer.
  */
 export function recordEntry(history: History, slide: number, doc: SlideAnnotations, ops: readonly AnnotationOp[], now: number): History {
   const undo = inverseOps(doc, ops);
   if (undo.length === 0) return history;
-  const textOf = textEditOf(ops) ?? undefined;
+  const fieldOf = fieldEditOf(ops) ?? undefined;
   const last = history.undo[history.undo.length - 1];
-  if (textOf && last && last.slide === slide && last.textOf === textOf && now - last.at <= TEXT_COALESCE_MS) {
+  if (fieldOf && last && last.slide === slide && last.fieldOf === fieldOf && now - last.at <= TEXT_COALESCE_MS) {
     const merged: HistoryEntry = { ...last, redo: [...ops], at: now };
     return { undo: [...history.undo.slice(0, -1), merged], redo: [] };
   }
-  const entry: HistoryEntry = { slide, undo, redo: [...ops], at: now, ...(textOf ? { textOf } : {}) };
+  const entry: HistoryEntry = { slide, undo, redo: [...ops], at: now, ...(fieldOf ? { fieldOf } : {}) };
   const stack = [...history.undo, entry];
   return { undo: stack.length > MAX_HISTORY ? stack.slice(stack.length - MAX_HISTORY) : stack, redo: [] };
 }

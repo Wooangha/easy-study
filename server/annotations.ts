@@ -24,9 +24,13 @@ import {
   MAX_SLIDE_ANNOTATION_BYTES,
   MAX_TAG_CHARS,
   MAX_TEXT_HIGHLIGHT_RECTS,
+  MAX_TEXT_SIZE_PT,
   MESSAGE_ID_RE,
+  MIN_TEXT_SIZE_PT,
   RECORDING_ID_RE,
   SESSION_ID_RE,
+  SLIDE_PT_HEIGHT,
+  TEXT_FONTS,
 } from '../shared/types.ts';
 import type {
   AnnotationColor,
@@ -42,6 +46,7 @@ import type {
   RecordedAt,
   RegionRect,
   SlideAnnotations,
+  TextFont,
 } from '../shared/types.ts';
 import { HttpError } from './config.ts';
 import { MAX_MEMO_CHARS, MAX_TUTOR_MEMOS, truncateText } from './context.ts';
@@ -74,8 +79,8 @@ const PATCHABLE_FIELDS: Readonly<Record<AnnotationItem['type'], readonly string[
   rect: ['color', 'rect'],
   ellipse: ['color', 'rect'],
   textHighlight: ['color', 'rects', 'chars', 'engine', 'text'],
-  text: ['color', 'rect', 'text'],
-  memo: ['color', 'at', 'text', 'tags', 'collapsed', 'tutor', 'links'],
+  text: ['color', 'rect', 'text', 'size', 'font', 'bold'],
+  memo: ['color', 'at', 'text', 'tags', 'collapsed', 'tutor', 'links', 'size'],
 };
 const ITEM_TYPES: ReadonlySet<string> = new Set(Object.keys(PATCHABLE_FIELDS));
 
@@ -268,6 +273,38 @@ function normalizeBoolean(raw: unknown, fallback: boolean, what: string, context
   return raw;
 }
 
+/** The smallest / largest stored text size (fractions of the slide height, TextItem.size). */
+const MIN_TEXT_SIZE = MIN_TEXT_SIZE_PT / SLIDE_PT_HEIGHT;
+const MAX_TEXT_SIZE = MAX_TEXT_SIZE_PT / SLIDE_PT_HEIGHT;
+
+/**
+ * A text size (a fraction of the slide height): absent stays absent (the default), a number is capped to
+ * MIN_TEXT_SIZE_PT … MAX_TEXT_SIZE_PT (4 decimals), anything else is 400.
+ */
+function normalizeSize(raw: unknown, context: unknown): number | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (!isFiniteNumber(raw)) throw bad('글자 크기(size)가 올바르지 않습니다', context);
+  return coord(Math.min(MAX_TEXT_SIZE, Math.max(MIN_TEXT_SIZE, raw)));
+}
+
+function normalizeFont(raw: unknown, context: unknown): TextFont | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== 'string' || !TEXT_FONTS.includes(raw as TextFont)) throw bad('글꼴(font)이 올바르지 않습니다', context);
+  return raw as TextFont;
+}
+
+function optionalBoolean(raw: unknown, what: string, context: unknown): boolean | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  return normalizeBoolean(raw, false, what, context);
+}
+
+/** The optional fields of a type as stored: absent ones are left out of the item (old files stay as they are). */
+function defined<T extends Record<string, unknown>>(fields: T): { [K in keyof T]?: NonNullable<T[K]> } {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(fields)) if (value !== undefined) out[key] = value;
+  return out as { [K in keyof T]?: NonNullable<T[K]> };
+}
+
 /**
  * An item as the store keeps it: every field checked and whitelisted for its type (unknown fields dropped, like
  * attachments), coordinates clamped and rounded, texts capped. `createdAt` and `updatedAt` are kept when they are
@@ -293,7 +330,13 @@ export function normalizeItem(raw: unknown, pageCount: number, now: string): Ann
     case 'ellipse':
       return { ...base, type: raw.type, rect: normalizeRect(raw.rect, raw) };
     case 'text':
-      return { ...base, type: 'text', rect: normalizeRect(raw.rect, raw), text: normalizeText(raw.text, raw) };
+      return {
+        ...base,
+        type: 'text',
+        rect: normalizeRect(raw.rect, raw),
+        text: normalizeText(raw.text, raw),
+        ...defined({ size: normalizeSize(raw.size, raw), font: normalizeFont(raw.font, raw), bold: optionalBoolean(raw.bold, 'bold', raw) }),
+      };
     case 'textHighlight': {
       if (!Array.isArray(raw.rects) || raw.rects.length === 0) throw bad('텍스트 형광의 위치(rects)가 올바르지 않습니다', raw);
       if (raw.rects.length > MAX_TEXT_HIGHLIGHT_RECTS) throw bad(`텍스트 형광이 너무 큽니다 (최대 ${MAX_TEXT_HIGHLIGHT_RECTS}줄)`, raw);
@@ -321,6 +364,7 @@ export function normalizeItem(raw: unknown, pageCount: number, now: string): Ann
         collapsed: normalizeBoolean(raw.collapsed, false, 'collapsed', raw),
         tutor: normalizeBoolean(raw.tutor, true, 'tutor', raw),
         links: normalizeLinks(raw.links, pageCount, raw),
+        ...defined({ size: normalizeSize(raw.size, raw) }),
       };
     default:
       throw bad('알 수 없는 필기 종류입니다', raw);
@@ -592,9 +636,10 @@ async function buildPatch(docId: string, current: SlideAnnotations, body: Record
         if (previous.recordedAt) next.recordedAt = previous.recordedAt;
         else delete next.recordedAt;
         items[index] = next;
-        // The accepted patch as stored (normalised), so every client applies the same values.
+        // The accepted patch as stored (normalised), so every client applies the same values; a field removed by
+        // the patch (an optional one set to null) is echoed as null so every client removes it too.
         const patch: Record<string, unknown> = { updatedAt: now };
-        for (const key of Object.keys(changes)) patch[key] = (next as unknown as Record<string, unknown>)[key];
+        for (const key of Object.keys(changes)) patch[key] = key in next ? (next as unknown as Record<string, unknown>)[key] : null;
         applied.push({ op: 'update', id: previous.id, patch: patch as Extract<AnnotationOp, { op: 'update' }>['patch'] });
         break;
       }

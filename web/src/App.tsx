@@ -191,6 +191,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
     addFiles,
     addRegion,
     addAnnotation,
+    addAnnotations,
     take: takeAttachments,
     restore: restoreAttachments,
     settle: settleAttachments,
@@ -252,6 +253,14 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
       void addAnnotation(slide, item);
     },
     [addAnnotation],
+  );
+  /** 📎 첨부 of a group selection: the chat tab once, the free slots counted once. */
+  const attachItems = useCallback(
+    (slide: number, items: AnnotationItem[]) => {
+      setTab('chat');
+      void addAnnotations(slide, items);
+    },
+    [addAnnotations],
   );
   const openNotesFor = useCallback(
     (slide: number) => {
@@ -690,6 +699,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
               onAskRegion={onAskRegion}
               askDisabledReason={askDisabledReason}
               onAttachItem={attachItem}
+              onAttachItems={attachItems}
               onOpenQa={openQa}
               onPlayRecording={playRecording}
               onOpenDoc={openDoc}

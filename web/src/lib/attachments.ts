@@ -469,6 +469,20 @@ export function chipsReducer(state: ChipState, action: ChipAction): ChipState {
 
 export const freeSlots = (items: readonly Chip[]) => Math.max(0, MAX_ATTACHMENTS - items.length);
 
+/** Whether a chip is the 📎 첨부 of this annotation item (its region carries the item, or the chip's key does while it uploads). */
+export const chipOfItem = (chip: Chip, itemId: string): boolean => chip.attachment?.annotation?.id === itemId || chip.key.endsWith(`:${itemId}`);
+
+/**
+ * 📎 첨부 of several selected items at once (DESIGN §25, a group selection): the items to attach — those not in
+ * the composer already, as many as there are free slots —, how many were refused for lack of room and how many
+ * were skipped as attached already; one toast for each count, not one per item.
+ */
+export function annotationAttachPlan<T extends { id: string }>(chips: readonly Chip[], items: readonly T[]): { take: T[]; refused: number; attached: number } {
+  const fresh = items.filter((item) => !chips.some((c) => chipOfItem(c, item.id)));
+  const take = fresh.slice(0, freeSlots(chips));
+  return { take, refused: fresh.length - take.length, attached: items.length - fresh.length };
+}
+
 export const isUploading = (items: readonly Chip[]) => items.some((c) => c.status === 'uploading');
 
 /** The chips of a question that was not accepted, without those whose attachment the server no longer has. */

@@ -784,11 +784,33 @@ export interface EllipseItem extends AnnotationBase {
   type: 'ellipse';
   rect: RegionRect;
 }
+/** The font of a text box: the app's sans, a Korean-capable serif (명조), or the app's monospace. */
+export type TextFont = 'sans' | 'serif' | 'mono';
+export const TEXT_FONTS: readonly TextFont[] = ['sans', 'serif', 'mono'];
+/**
+ * "pt on the slide": a text size is stored as a fraction of the slide image's height (so it scales with the zoom
+ * and looks the same on every device), shown to the user in points of a slide that is SLIDE_PT_HEIGHT pt tall (a
+ * 16:9 deck's 7.5 in): size = pt / SLIDE_PT_HEIGHT. Clamped to MIN_TEXT_SIZE_PT … MAX_TEXT_SIZE_PT (as fractions) on
+ * the server; 4 decimals.
+ */
+export const SLIDE_PT_HEIGHT = 540;
+export const MIN_TEXT_SIZE_PT = 8;
+export const MAX_TEXT_SIZE_PT = 72;
+/** The size of a text box without `size` (files written before 0.6.2). */
+export const DEFAULT_TEXT_SIZE_PT = 16;
+/** The text size of a memo without `size` (renders UI-sized, 13 px, as before 0.6.2). */
+export const DEFAULT_MEMO_TEXT_SIZE_PT = 12;
 /** 텍스트 상자: typed text drawn on the slide (≤ MAX_ANNOTATION_TEXT_CHARS); rect.h is the last laid-out height. */
 export interface TextItem extends AnnotationBase {
   type: 'text';
   rect: RegionRect;
   text: string;
+  /** Font size as a fraction of the slide height (see SLIDE_PT_HEIGHT); absent = DEFAULT_TEXT_SIZE_PT. */
+  size?: number;
+  /** Absent = 'sans'. */
+  font?: TextFont;
+  /** Absent = false. */
+  bold?: boolean;
 }
 /**
  * Where a memo links to (never a URL). Clicking navigates: a slide of this lecture, a slide of another lecture (its
@@ -815,6 +837,8 @@ export interface MemoItem extends AnnotationBase {
   tutor: boolean;
   /** ≤ MAX_MEMO_LINKS. A memo created during a live recording gets `{ kind: 'recording', rid, t }` (its 🎙 chip). */
   links: MemoLink[];
+  /** Text size as a fraction of the slide height (the units of TextItem.size); absent = the UI-sized 13 px of 0.6.1. */
+  size?: number;
 }
 export type AnnotationItem = HighlightItem | TextHighlightItem | RectItem | EllipseItem | TextItem | MemoItem;
 
@@ -881,9 +905,11 @@ export interface PutSlideAnnotationsRequest {
  * (creation-only). `updatedAt` is accepted so the server's applied op (AnnotationEvent 'slide') can carry its stamp;
  * a client-sent value is replaced. Distributive over the union: `{ rect }` is valid for a rect item, `{ tags }` for a
  * memo; the server applies only the fields of that item's type (patchableFields[type]) and rejects a key of another
- * type (400).
+ * type (400). An optional field (`size`, `font`, `bold`) set to `null` is removed — back to its default; the undo of
+ * setting it — and the applied op echoes `null` so every client removes it too.
  */
-export type Patchable<T> = T extends AnnotationItem ? Partial<Omit<T, 'id' | 'type' | 'createdAt' | 'recordedAt'>> : never;
+export type Patchable<T> = T extends AnnotationItem ? PatchFields<Omit<T, 'id' | 'type' | 'createdAt' | 'recordedAt'>> : never;
+type PatchFields<F> = { [K in keyof F]?: F[K] | (undefined extends F[K] ? null : never) };
 /** PATCH …/annotations/:slide — ops applied in order on the current document; undo/redo replay inverse ops. */
 export type AnnotationOp =
   /** Duplicate id → 409 with `current`. */

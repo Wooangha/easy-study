@@ -7,9 +7,11 @@ import { MAX_ATTACHMENT_BYTES, type AnnotationItem, type Attachment, type Region
 import * as api from '../api.ts';
 import { itemBounds } from '../lib/annotations/geometry.ts';
 import {
+  annotationAttachPlan,
   attachErrorMessage,
   attachmentLabel,
   attachmentTitle,
+  chipOfItem,
   chipsReducer,
   classifyFiles,
   formatMegabytes,
@@ -41,6 +43,11 @@ export interface AttachmentsApi {
    * (`Attachment.annotation`), as a chip like any region — sent with the next question, nothing now.
    */
   addAnnotation: (slide: number, item: AnnotationItem) => Promise<Attachment | null>;
+  /**
+   * 📎 첨부 of several selected items at once: the free slots are counted once (`annotationAttachPlan`) — one toast
+   * for the items that did not fit, one for those attached already — and a chip is made for each of the rest.
+   */
+  addAnnotations: (slide: number, items: readonly AnnotationItem[]) => Promise<Array<Attachment | null>>;
   /** Remove a chip (and the unused attachment on the server). */
   remove: (key: string) => void;
   /** Takes the ready chips out of the composer for sending (see restore). */
@@ -189,7 +196,7 @@ export function useAttachments(docId: string | null): AttachmentsApi {
         return null;
       }
       // The same item twice would be two chips of one region: the first one stands.
-      if (item && current().some((c) => c.attachment?.annotation?.id === item.id || c.key.endsWith(`:${item.id}`))) {
+      if (item && current().some((c) => chipOfItem(c, item.id))) {
         toast('이미 입력창에 첨부되어 있어요', 'info', 2500);
         return null;
       }
@@ -232,6 +239,17 @@ export function useAttachments(docId: string | null): AttachmentsApi {
   const addRegion = useCallback((slide: number, rect: RegionRect) => addRegionOf(slide, rect, null), [addRegionOf]);
 
   const addAnnotation = useCallback((slide: number, item: AnnotationItem) => addRegionOf(slide, itemBounds(item), item), [addRegionOf]);
+
+  const addAnnotations = useCallback(
+    (slide: number, items: readonly AnnotationItem[]): Promise<Array<Attachment | null>> => {
+      const { take, refused, attached } = annotationAttachPlan(current(), items);
+      if (refused > 0) toast(limitMessage(refused), 'error');
+      else if (attached > 0) toast(attached === items.length ? '이미 입력창에 첨부되어 있어요' : `${attached}개는 이미 첨부되어 있어요`, 'info', 2500);
+      // Each one passes addRegionOf's own checks (the plan left room for all of them, none is attached yet).
+      return Promise.all(take.map((item) => addRegionOf(slide, itemBounds(item), item)));
+    },
+    [addRegionOf],
+  );
 
   const remove = useCallback(
     (key: string) => {
@@ -281,7 +299,7 @@ export function useAttachments(docId: string | null): AttachmentsApi {
   const items = stateRef.current.docId === docId ? stateRef.current.items : NO_CHIPS;
   const uploading = isUploading(items);
   return useMemo(
-    () => ({ docId, items, uploading, addFiles, addRegion, addAnnotation, remove, take, restore, settle, count }),
-    [docId, items, uploading, addFiles, addRegion, addAnnotation, remove, take, restore, settle, count],
+    () => ({ docId, items, uploading, addFiles, addRegion, addAnnotation, addAnnotations, remove, take, restore, settle, count }),
+    [docId, items, uploading, addFiles, addRegion, addAnnotation, addAnnotations, remove, take, restore, settle, count],
   );
 }

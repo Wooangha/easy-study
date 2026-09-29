@@ -1539,7 +1539,9 @@ MAX_MEMO_LINKS (8), MAX_TEXT_HIGHLIGHT_RECTS (200), MAX_ANNOTATION_OPS (100), MA
 MESSAGE_ID_RE, ANNOTATION_CLIENT_HEADER, ANNOTATION_CLIENT_ID_RE, PutSlideAnnotationsRequest, Patchable, AnnotationOp,
 PatchSlideAnnotationsRequest, SlideAnnotationsConflict, MemoSummary, MAX_MEMO_SUMMARY_CHARS (400), AnnotationSummary,
 AnnotationTagsResponse, LayoutBox, SlideTextLayout, TextLayoutMissingResponse, AnnotationEvent, AnnotationDeviceSettings, plus
-`CreateRegionRequest.annotationId`, `Attachment.annotation` (AttachmentAnnotation), `SendMessageRequest.memos`, `ContextInfo.memos`.
+`CreateRegionRequest.annotationId`, `Attachment.annotation` (AttachmentAnnotation), `SendMessageRequest.memos`, `ContextInfo.memos`;
+0.6.2: TextFont, TEXT_FONTS, SLIDE_PT_HEIGHT (540), MIN_TEXT_SIZE_PT (8), MAX_TEXT_SIZE_PT (72), DEFAULT_TEXT_SIZE_PT (16),
+DEFAULT_MEMO_TEXT_SIZE_PT (12), `TextItem.size / font / bold`, `MemoItem.size`.
 server/internal-types.ts: StudentMemo, `BuildTurnInput.studentMemos`, `BuildTurnInput.attachments[].annotation`, SessionChange.
 
 ### Data model
@@ -1553,7 +1555,11 @@ server/internal-types.ts: StudentMemo, `BuildTurnInput.studentMemos`, `BuildTurn
 - **Items** (`AnnotationItem`, z-order = array order): `highlight` (형광펜: one straight band, snapped to a text line), `textHighlight`
   (텍스트 형광: one rect per line fitted to the words, anchored to the PDFium char range `chars` of the page's text layer plus the layout's
   `engine` it was taken from, and the highlighted `text`), `rect`, `ellipse` (inscribed in `rect`), `text` (텍스트 상자, typed text;
-  `rect.h` = the last laid-out height), `memo` (스티커 메모: `at` anchor, `text`, `tags`, `collapsed`, `tutor` 👁, `links`). Every item:
+  `rect.h` = the last laid-out height; 0.6.2: optional `size` — the font size as a **fraction of the slide image's height**,
+  shown to the user as "pt on the slide" of a SLIDE_PT_HEIGHT = 540 pt tall slide (a 16:9 deck's 7.5 in), 8–72 pt, so it scales
+  with the zoom and looks the same on every device; absent = 16 pt, the size of 0.6.1 —, optional `font` ('sans' the app font /
+  'serif' 명조 / 'mono'; absent = sans) and optional `bold`), `memo` (스티커 메모: `at` anchor, `text`, `tags`, `collapsed`,
+  `tutor` 👁, `links`; 0.6.2: optional `size` in the same units — absent = the UI-sized 13 px of 0.6.1). Every item:
   `id` (`an-` + 12 hex, minted by the client with `crypto.getRandomValues` so an optimistic item keeps its id), `color`, `createdAt`
   (the client's, kept when it is a valid ISO string), `updatedAt` (always the server's clock), optional `recordedAt` (creation-only,
   see "Recording timeline"). Memo/text/tag content is **plain text**: rendered as React text only, never through the Markdown renderer
@@ -1570,7 +1576,7 @@ server/internal-types.ts: StudentMemo, `BuildTurnInput.studentMemos`, `BuildTurn
   so assets.ts `inlinePathFor` is unaffected. Backups = copying the folder. Notes (STUDY_NOTES.md) and the digest do not include
   annotations (decided: no).
 - **Limits and sizes.** ≤ 200 items and ≤ 500 hidden markers per slide, texts ≤ 2000 chars, ≤ 10 tags × 30 chars, ≤ 8 links, ≤ 200
-  rects per text highlight, ≤ 100 ops per PATCH, and `MAX_SLIDE_ANNOTATION_BYTES` = 256 KB for the JSON of the stored slide document
+  rects per text highlight, ≤ 100 ops per PATCH (the client splits a bigger group action into several PATCHes, in order), and `MAX_SLIDE_ANNOTATION_BYTES` = 256 KB for the JSON of the stored slide document
   after a write (→ 400 '이 슬라이드의 필기가 너무 많아요 (일부를 지워 주세요)'). The byte cap is the effective one (200 items × 2000 chars
   would be ~400 KB of text alone): it keeps every slide doc, every PATCH response and a client's ≤ 24 held slides small, and the router's
   `express.json({ limit: '2mb' })` is ample for any legal PUT.
@@ -1578,8 +1584,11 @@ server/internal-types.ts: StudentMemo, `BuildTurnInput.studentMemos`, `BuildTurn
   `/^[A-Za-z0-9-]{1,64}$/`) and the attachment id (ATTACHMENT_ID_RE). ISO strings; `recordedAt.t` in seconds on the recording clock
   (round3). `Patchable<T>` is distributive over the item union (a plain `Omit` of the union would keep only the common keys): `{ rect }`
   type-checks for a rect item, `{ tags }` for a memo; the server applies only `patchableFields[type]` (highlight/rect/ellipse: color,
-  rect; textHighlight: color, rects, chars, engine, text; text: color, rect, text; memo: color, at, text, tags, collapsed, tutor, links)
-  and rejects a key of another type with 400; `updatedAt` in a patch is replaced by the server's clock, `recordedAt` is never patched.
+  rect; textHighlight: color, rects, chars, engine, text; text: color, rect, text, size, font, bold; memo: color, at, text, tags,
+  collapsed, tutor, links, size) and rejects a key of another type with 400; `updatedAt` in a patch is replaced by the server's clock,
+  `recordedAt` is never patched. An optional field (`size`, `font`, `bold`) patched to **`null` is removed** (back to its default —
+  the undo of setting it on an item that had none); the applied op echoes `null`, so every client removes it too (`applyOps` deletes
+  the key); `null` on a required field is 400 like any bad value.
 - **Item ↔ question link (📎 첨부), no duplicated state.** `CreateRegionRequest.annotationId` → attachments.ts reads the item through
   `readSlideAnnotations` and stores `Attachment.annotation = { id, type, text? }` (the memo's / text box's / text highlight's text,
   ≤ 2000 chars), whitelisted by `normalizeAttachment` and stored on the user message with the attachment like every attachment is
@@ -1601,7 +1610,10 @@ server/internal-types.ts: StudentMemo, `BuildTurnInput.studentMemos`, `BuildTurn
   다시 시도해 주세요', { current })` → PATCH: apply ops in order on a copy (`add` refuses a duplicate id → 409 with current; `update`
   merges only `patchableFields[type]` and a missing id → 409 with current; `remove` is a no-op for a missing id; hide/unhide
   de-duplicate keys) → `normalizeItem` whitelist per type (rect(s) clamped, 4 decimals, w,h > 0; `textHighlight.chars` integers
-  0 ≤ start < end, `engine` a non-empty string ≤ 32 chars, rects ≤ 200; texts ≤ 2000; tags normalised and ≤ 10 × 30 chars; links ≤ 8 and
+  0 ≤ start < end, `engine` a non-empty string ≤ 32 chars, rects ≤ 200; texts ≤ 2000; 0.6.2: `size` absent stays absent, a
+  number is **capped** to 8/540 … 72/540 and rounded to 4 decimals, anything else 400 '글자 크기(size)가 올바르지 않습니다';
+  `font` ∈ TEXT_FONTS else 400 '글꼴(font)…'; `bold` a boolean else 400; `null` = absent for the three — a text box / memo written
+  before 0.6.2 has none of them and reads back unchanged; tags normalised and ≤ 10 × 30 chars; links ≤ 8 and
   validated — slide 1..pageCount, DOC_ID_RE, RECORDING_ID_RE + finite t ≥ 0 round3; `recordedAt` format only (the recording may be
   deleted later); color ∈ ANNOTATION_COLORS; ids unique and ANNOTATION_ID_RE; ≤ 200 items; ≤ 100 ops; hiddenMarkers ≤ 500 valid keys) —
   a bad item/op → 400 in Korean with a ≤ 100-char JSON snippet (the `putMarkers` style) → the JSON of the result ≤
@@ -1705,13 +1717,15 @@ layouts), tests/annotation-attachments.test.ts (regions with `annotationId`, the
 ### Web
 
 **Files.** New: web/src/lib/annotations/{geometry.ts, textSelect.ts, history.ts, markers.ts, store.ts, layoutCache.ts, settings.ts,
-memoList.ts (the pure filters of the 메모 tab), gesture.ts (0.6.1: hit-testing and the press plan, pure)}; web/src/hooks/{useAnnotations.ts,
+memoList.ts (the pure filters of the 메모 tab), gesture.ts (0.6.1: hit-testing and the press plan, pure), menu.ts (0.6.2: where the
+item menu goes, pure), text.ts (0.6.2: the "pt on the slide" units, fonts, the CSS variables of typed text, pure)}; web/src/hooks/{useAnnotations.ts,
 useTextLayout.ts}; web/src/components/annotations/{AnnotationLayer.tsx, AnnotationTools.tsx, ItemMenu.tsx, MemoCard.tsx, TagInput.tsx,
 LinkPicker.tsx, QuestionMarkers.tsx, context.ts (the layer's actions/env context), Floating.tsx (a fixed portal in <body> for the link
 picker and the tag suggestions — `.slide-box` clips overflow), icons.tsx (0.6.1: the inline SVG glyphs of the tools and the eye)}; web/src/components/MemoListPanel.tsx; web/src/lib/recording/playhead.ts. Changed: SlideViewer.tsx, App.tsx, ChatPanel.tsx, MessageList.tsx, Composer.tsx, SettingsDialog.tsx,
 recording/RecordingsPanel.tsx, api.ts, lib/storage.ts, lib/attachments.ts, hooks/useAttachments.ts, hooks/useStudySession.ts,
 lib/recording/events.ts (parser injectable), lib/recording/recorder.ts (public `clock()`), lib/format.ts, lib/chatWindow.ts,
-styles.css. `AnnotationTool = 'select' | 'highlight' | 'textHighlight' | 'rect' | 'ellipse' | 'text' | 'memo'` lives in geometry.ts.
+styles.css. `AnnotationTool = 'select' | 'marquee' | 'highlight' | 'textHighlight' | 'rect' | 'ellipse' | 'text' | 'memo'` lives in
+geometry.ts ('select' = the default no-tool state; 'marquee' = 범위 선택, 0.6.2; `DrawingTool` = the rest).
 
 **Store (lib/annotations/store.ts — the feeds.ts pattern).** One `DocAnnotations` per open document, ref-counted with a 5 s linger; it
 holds `summary: AnnotationSummary | null`, `slides: Map<slide, SlideAnnotations>` filled on demand (a slide's `AnnotationLayer` asks for
@@ -1721,7 +1735,9 @@ for every slide), one pending write per slide, a client id (`crypto.getRandomVal
 `?client=`), and the SSE client (`RecordingEventsClient` from lib/recording/events.ts with an injected `parseAnnotationEvent` — a
 small refactor: `options.parse`; reconnect → refetch the summary and every loaded slide whose rev differs). `mutate(slide, ops, {
 undoable })`: optimistic apply with the pure `applyOps(doc, ops)` (geometry.ts, the same semantics as the server) → `PATCH { baseRev,
-ops }` coalesced (one in flight per slide; ops arriving meanwhile go out in the next request with the returned rev) → 200 replaces the
+ops }` coalesced (one in flight per slide; ops arriving meanwhile go out in the next request with the returned rev; at most
+MAX_ANNOTATION_OPS = 100 ops per request — a group action on more items than that, up to the 200 a slide holds, is one mutation and
+one undo entry but goes out in several PATCHes, in order) → 200 replaces the
 slide doc (the server's normalised form) → **409 rebases**: take `current`, re-apply the pending ops with `applyOps` (drop an `add`
 whose id now exists and an `update`/`remove` whose id is gone), retry once with `current.rev`; only a second 409 replaces the doc,
 drops the pending ops, prunes that slide's undo entries and toasts '다른 곳에서 필기가 바뀌어서 다시 불러왔어요' — a memo text the
@@ -1734,9 +1750,12 @@ write is in flight for that slide, else (a gap, or an event skipped during a fli
 `useSlideAnnotations(docId, slide, wanted)` wrap it with `useSyncExternalStore`.
 
 **Undo/redo (lib/annotations/history.ts, pure).** One global stack per document of `{ slide, undo: AnnotationOp[], redo: AnnotationOp[]
-}` in edit order, derived from each mutation and its pre-state (inverse of add = remove; of update = update with the previous fields;
-of remove = add of the removed item; of hideMarker = unhideMarker), ≤ 50 entries, consecutive `update`s of the same item's `text`
-within 2 s coalesced into one entry (a debounced text flush is not an undo step each). ⌘Z undoes the most recent entry wherever it is
+}` in edit order, derived from each mutation and its pre-state (inverse of add = remove; of update = update with the previous fields —
+`null` for a field the item did not have, so setting a text box's first `size` is undone by removing it —; of remove = add of the
+removed item, a run of re-adds in the items' original z-order; of hideMarker = unhideMarker), ≤ 50 entries; a **group action is one
+mutation of several ops and so one entry** (⌘Z moves / recolors / restores the whole group in one step); consecutive `update`s of
+the same item's `text` — or its `size` (the slider / number field; `COALESCED_FIELDS`) — within 2 s coalesced into one entry (a
+debounced text flush or a slider step is not an undo step each). ⌘Z undoes the most recent entry wherever it is
 (the focus is "the slide crossing the centre line" while the last edit is often on a neighbour) and scrolls/flashes that slide if it is
 off-screen (`showRegion`); a 409 replace prunes the entries of that slide only; entries whose ids vanished are pruned when applied.
 SlideViewer's window keydown handler (which today returns early on modifier keys) handles ⌘Z / Ctrl+Z → undo and ⌘⇧Z / Ctrl+Y → redo,
@@ -1751,55 +1770,96 @@ loaded or a tool is active):**
   `var(--annot-<color>)`, `fill-opacity: .45`, `mix-blend-mode: multiply` so slide text stays legible), rect/ellipse outlines
   (`stroke-width: 2.5; vector-effect: non-scaling-stroke; fill: transparent; pointer-events: all` — a 2.5 px stroke alone is not a
   touch target), each with `data-id` (click selects in 선택 mode).
-- Text boxes: `<div class="annot-text" style={percentStyle(rect)}>` with `font-size: calc(1.7cqw * var(--zoom))` (`.viewer-scroll` is a
-  size container, so the text scales with the slide); editing swaps in a `<textarea>` in the same box (`user-select: text`); blur / Esc /
-  ⌘Enter commits.
-- Memos: `<MemoCard>` at `percentStyle({ x: at.x, y: at.y })`, UI-sized (width 24 %, min 160 px, max 320 px, 13 px font), dragged by
+- Text boxes: `<div class="annot-text">` at the rect's left/top/width with **`min-height`** = the stored height (it grows with its
+  text: a box laid out at another size never clips) and, 0.6.2, the CSS variables of text.ts `textBoxVars(item)` — `font-size:
+  calc(var(--annot-size) * var(--slide-h) * 1px)` where `--slide-h` (on `.annot-layer`) = `var(--track-w) / var(--aspect) *
+  var(--frame-h)`: the slides track's measured width in px (SlideViewer sets `--track-w` next to `--zoom` / `--aspect` from the
+  `sizes` measurement), the deck's aspect ratio and this page's letterbox frame height — i.e. the layer's rendered height, so a size
+  stored as a fraction of the slide height scales with the zoom without a per-layer observer (no container query on the layer: a
+  size container is a stacking context and would stop the highlights' `mix-blend-mode: multiply` from blending with the image) —,
+  `font-family: var(--annot-font)` and `font-weight: var(--annot-weight)`; editing swaps in a `<textarea>` in the same box
+  (`user-select: text`, the explicit height); blur / Esc / ⌘Enter commits and writes the laid-out height back into `rect.h`
+  (`laidOutHeight`: the content's scrollHeight plus the box's own padding and border — the box as drawn, so the stored height is
+  the visible box and its bottom handles sit on its bottom edge). When
+  the box's size / font / bold changes (here or from another device) the shown body is measured and `rect.h` is re-laid out as a
+  follow-up `update` with `undoable: false` (not on mount: two devices with different fonts must not keep rewriting each other's
+  height).
+- Memos: `<MemoCard>` at `percentStyle({ x: at.x, y: at.y })`, UI-sized (width 24 %, min 160 px, max 320 px, 13 px font — or, 0.6.2,
+  the memo's own `size` against `--slide-h` inline and in CSS points in the bottom sheet; the textarea is fitted to its text again
+  whenever the text, the rendered font — the size — or the zoom / the pane changes: `LayerEnv.trackWidth`, the viewer's `--track-w`
+  the font is computed from, in a layout effect so it measures once the new width is in the DOM — a ResizeObserver on the layer
+  fires before React has written the new `--track-w`, with the old font), dragged by
   its header (pointer capture; `e.stopPropagation()` on pointerdown so the scroller's region gesture never starts — the scroller's
   `onPointerDown` also skips `target.closest('.annot-layer [data-annot]')`), collapsed = a pill with the first 24 chars and a tag count.
+  Shift+pointerdown on a card toggles it in / out of the selection (`actions.toggleSelect`) instead of dragging. As part of a
+  **group selection** (`group` prop) the card neither stops propagation nor drags itself: the press reaches the scroller, which
+  resolves the memo from `data-annot="memo"` / `data-id` (a press on a control inside the card — button, input, textarea, the tag
+  input — is left alone) and moves every selected item together.
   On coarse pointers or narrow panes (the media query below) memos render collapsed by default and expand as a bottom sheet
   (`.memo-sheet`) instead of inline — a 160 px card covers half of a ~340 px-wide slide.
-- Selection handles (HTML, `percentStyle`) for the selected item: 8 for rect/ellipse/text, 2 (left/right — top/bottom for a 'v'
-  line) for a highlight, none for a text highlight (re-drag it with 텍스트 형광 to change its words — `redraw` below); dragging the
-  body moves it; every drag is one PATCH on pointer-up. Items, handles and markers keep their pointer events **whatever tool is
+- Selection handles (HTML, `percentStyle`) for a **single** selected item: 8 for rect/ellipse/text, 2 (left/right — top/bottom for a
+  'v' line) for a highlight, none for a text highlight (re-drag it with 텍스트 형광 to change its words — `redraw` below) and none for
+  a group; dragging the body moves it (a group: every selected item, `DragPreview` is a record by id); every drag is one PATCH on
+  pointer-up. Items, handles and markers keep their pointer events **whatever tool is
   active** (0.6.1: the `.viewer.is-annot-tool … { pointer-events: none }` rule of 0.6.0 is gone), so a selected item is moved /
-  resized without leaving the drawing tool; a selected shape / text box shows `cursor: move`. One exception: while a drawing tool
-  is active an **unselected** rect / ellipse gets `pointer-events: visibleStroke`, so its transparent inside shows the tool's
-  crosshair (the hit-test below counts only its ring then) and only the stroke the pointer.
-- `<QuestionMarkers>` (see "질문 표시"). A draft (shape being drawn) renders as a dashed preview from local state. While replaying
-  (`replay` prop) an item is shown only when `replayVisible(item, replay)` (below).
+  resized without leaving the drawing tool; a selected shape / text box shows `cursor: move`. An **unselected** rect / ellipse has
+  `pointer-events: visibleStroke` in every state (0.6.2; 0.6.1 had it only under a drawing tool), so its transparent inside passes
+  the pointer through to what is under it (the hit-test below counts only its ring) and only the stroke takes it.
+- `<QuestionMarkers>` (see "질문 표시"). A draft (shape being drawn, or the marquee of 범위 선택 — `.annot-draft-shape.is-marquee`)
+  renders as a dashed preview from local state. While replaying (`replay` prop) an item is shown only when `replayVisible(item,
+  replay)` (below). The layer's `selectedIds` (several after a marquee / Shift+click) mark every selected item `.is-selected`.
 
 **Tools and gestures (SlideViewer.tsx; the rules in lib/annotations/gesture.ts, pure).** State `tool: AnnotationTool` (`'select'` =
-**no drawing tool: the default 선택·첨부 state**; not persisted; Esc — or a click on the active tool's own button — returns to it) and
-`color` (persisted `storageKeys.annotColor`, default yellow). Every press on a slide goes through `pressPlan({ tool, target, item,
-selected, touch })` (0.6.1, after the user's first use — "a drag attaches only when no tool is picked", "a highlight just drawn should
+**no drawing tool: the default 선택·첨부 state**; `'marquee'` = the 범위 선택 tool, 0.6.2; not persisted; Esc — or a click on the active
+tool's own button — returns to the default) and
+`color` (persisted `storageKeys.annotColor`, default yellow). The item selection is `{ slide, ids }` (one id, or several after a
+marquee / Shift+click, in z-order). Every press on a slide goes through `pressPlan({ tool, target, item,
+selected, touch, shift })` (0.6.1, after the user's first use — "a drag attaches only when no tool is picked", "a highlight just drawn should
 be movable at once without picking the selection tool"): a question marker is left to its own button (`ignore`); a selection handle
 (known from the DOM, `data-annot="handle"`) resizes its item (`resize`; never a memo or a text highlight); otherwise the slide's items
 are **hit-tested** by `hitTestItems(items, point, slop, { visible, outline })` — the SVG's own event target is not enough, a big
 rectangle drawn later covers a small highlight — with `slopFor(size, touch)` = HIT_SLOP_PX 4 px (TOUCH_HIT_SLOP_PX 10 px) of slack per
 axis for thin bands and 3 px outlines; a rect / band / text box by its rect, an ellipse by its shape, a text highlight by its line
 rects (not the gap between lines), items hidden by 그때 필기 재생 skipped, memos never (they are HTML cards that stop propagation and
-select themselves). **The inside of an outline shape is empty area for a drawing tool**: `outline` = `outlineOnly(tool, selectedId)`
-makes an *unselected* rect / ellipse count on its ring only (`slop.ring` = the slack + half the SHAPE_STROKE_PX 3 px stroke either
-side of the edge; a shape thinner than the ring is all ring) while a tool is active, so a 형광펜 stroke, a 텍스트 상자 / 메모 click or
-another shape can start inside a box drawn around a paragraph; once selected (it is moved by its body), and always in the default
-state (the 0.6.0 select behaviour — a tap inside the box selects it and 📎 첨부 is one click away; a region drag inside a box starts
-outside it), the inside counts. Among several hits the one covering the least of the image wins (`itemArea`), among equals the
-topmost — and an item under the press is **selected with ANY tool active** (`select`, `move: true`: a drag from there moves it; a
-text highlight is never moved, and on touch an unselected item is only selected first so a finger can still scroll) — except a text
+select themselves; a memo reaches the scroller only as part of a group, by its `data-id`). **The inside of an unselected outline
+shape is empty area in every state** (0.6.2; 0.6.1 had this only under a drawing tool): `outline` = `outlineOnly(selectedIds)` makes
+an *unselected* rect / ellipse count on its ring only (`slop.ring` = the slack + half the SHAPE_STROKE_PX 3 px stroke either side of
+the edge; a shape thinner than the ring is all ring), so a 형광펜 stroke, a 텍스트 상자 / 메모 click, another shape, a text-highlight
+word under it or the default state's region drag all go through a box drawn around a paragraph — the box is selected on its ring
+(± the slack); once selected (alone or in a group) its inside counts again (it is moved by its body). Among several hits the one
+covering the least of the image wins (`itemArea`), among equals the
+topmost — and an item under the press is **selected with ANY tool active** (`select`, `move: true`: a drag from there moves it — and,
+when it is already part of a group selection, every selected item with it; a
+text highlight is never moved, and on touch an unselected item is only selected first so a finger can still scroll); with **Shift**
+the item is `toggle`d in / out of the selection instead (any state, never moved); — except a text
 highlight under 텍스트 형광, which is **re-dragged** (`redraw`, `immediate` on touch): the gesture is a draw whose release
 `update`s that item's `rects / chars / engine / text` (its id, color and history stay; a click only selects it; no layout → a toast
-and the item is left alone); on empty area a drawing tool gives `draw`
+and the item is left alone); on empty area 범위 선택 gives `marquee` (`add` with Shift; `immediate` on touch): the drag draws a dashed
+rectangle and selects, as it goes, every item it crosses (`marqueeSelect` — bounds intersection, a text highlight by any line rect, a
+memo by its **card as drawn**: the viewer measures the slide's memo cards once at the press (`memoBoxesOf`: the clamped card as
+fractions of the image — cards do not move during a marquee) and hands them to `marqueeSelect` as `boxOf` (the anchor box only
+when nothing was measured), in z-order; Shift+drag `unionIds` them onto the selection; a click clears it unless Shift), a
+drawing tool gives `draw`
 (`immediate` for the click tools 텍스트 / 메모 and on touch; a mouse activates after ≥ DRAG_THRESHOLD_PX 6 px) — the slide box takes no
-touch scrolling then (`.viewer.is-annot-tool .slide-box { touch-action: none; cursor: crosshair }`) — and, without a tool, `region`:
-the §21 gesture (a mouse drag; touch after a long press). A draw gesture captures the pointer, previews rAF-throttled, and on
+touch scrolling then (`.viewer.is-annot-tool .slide-box { touch-action: none; cursor: crosshair }`, 범위 선택 included) — and, without a
+tool, `region`: the §21 gesture (a mouse drag; touch after a long press; Shift changes nothing). A draw gesture captures the pointer, previews rAF-throttled, and on
 pointer-up — only when it activated AND the pointer moved ≥ MIN_DRAG_PX (a press that jitters a few pixels is a click: the drag tools
 ignore it, the click tools place) — builds the item in geometry.ts — `highlightFromDrag(from, to, layout)`,
 `textHighlightFromDrag(from, to, layout)`, `rectFromPoints`, `textBoxFromDrag` (a click gives a default 18 % × 6 % box),
 `memoAt(point)` (a click places it) — then `store.mutate(slide, [{ op: 'add', item }])`, stamping `recordedAt` with
 `recordedAtFor(snapshot, clock, docId)` when a live recording of this lecture runs (recording section); the new item is selected (its
 handles and menu show while the tool stays active, so it is moved / resized right away), and text/memo items open for editing at once.
-A press on empty area clears the selection (with or without a tool). Picking another tool clears it too. 형광펜 snapping (`snapBand`): when a
+A press on empty area clears the selection (with or without a tool). Picking another tool clears it too. **Group actions** (0.6.2):
+with several items selected, a drag on any of them moves all of them (geometry.ts `moveItems`: memos by `at`, the rest by `rect`,
+by ONE common delta — `groupDelta` cuts the drag down so that every item stays inside the image, so the group keeps its layout and
+stops as a whole when its first item reaches an edge, instead of piling up there item by item; text highlights stay), the menu's
+color applies to all (`actions.updateMany`), 🗑 삭제 / Delete removes all (`removeItems`: one confirmation naming the count when a
+memo with text is among them), 📎 첨부 attaches them at once (`actions.attachMany` → `onAttachItems` → `useAttachments.
+addAnnotations`: `annotationAttachPlan` counts the composer's free slots once and skips items attached already — one toast for what
+did not fit (`limitMessage(refused)`), one for what was there, the chat tab opened once) — every group action is **one mutation of N
+ops**: one undo entry, one PATCH (`PatchSlideAnnotationsRequest.ops[]`; more than MAX_ANNOTATION_OPS ops go out in several, in
+order). Selected items that vanish
+(deleted elsewhere, undone) leave the selection; none left → no menu. 형광펜 snapping (`snapBand`): when a
 layout line contains `from` (or lies within half a line height across its `dir`), the band takes that line's extent along the minor
 axis (y/h for 'h', x/w for 'v') and the drag's extent along the major axis clamped to the line's range padded 0.5 %; otherwise a band
 of `HIGHLIGHT_BAND_H` centred on `from`; minimum length 1 %. 텍스트 형광 (textSelect.ts): nearest word to `from` and to `to` in reading
@@ -1816,7 +1876,27 @@ layout (404 pending) the tool falls back to a plain band and toasts '이 슬라�
 dropped with the store. Delete: select → Delete/Backspace (when not typing) or the item menu's 🗑 삭제 (a memo with text asks
 `confirmDialog({ title: '메모를 지울까요?' })`); no eraser tool.
 
-**Item menu (ItemMenu.tsx, rendered in `.slide` outside `.slide-box` like `RegionMenu`, placed with `menuPlacement`):** four color dots
+**Item menu (ItemMenu.tsx, rendered in `.slide` outside `.slide-box` like `RegionMenu`; 0.6.2: it places itself).** The menu
+measures, in a layout effect (and again when its items' elements, the slide box — zoom — or the menu itself change size, through
+a ResizeObserver), the selected items' elements as drawn (`[data-annot="item"|"memo"][data-id]` inside the slide box — a memo card
+is clamped inside the slide by CSS, so its anchor is not where the card is; the union for a group), the slide box, the scroller's
+visible rect and its own size at the width the pane allows (`menuMaxWidth` = the visible part of the slide, the menu wraps —
+`flex-wrap`), all in px of the `.slide` element, and asks the pure `placeItemMenu` (lib/annotations/menu.ts): **below** the items
+(MENU_GAP_PX 8) when the menu fits there inside both the slide box and the visible viewer, else **above** when it fits there (a memo
+card clamped to the slide's bottom edge gets its menu above it, not in the gap below the slide), then below / above by the visible
+viewer alone (a zoomed-out slide: the menu hangs over the slide's edge as the region menu does), else — a memo, `outside` — the
+side with more room (never over the card) or, for a shape taller than the view, inside its bottom edge as before; sideways from
+the items' left edge, kept inside the visible part of the slide. Positioned in px (`left/top`; the region menu's `translateY(-100%)` is off for it), hidden until placed;
+never derived from the pointer or from `itemBounds`. Contents: a `N개` count for a group · four color dots (the active one = the
+common color; a click applies to every selected item) · for a single text box the **text look** (0.6.2): a number field 8–72 (`type=
+"number"`, the browser's ▲▼; a typed number applies as soon as it is valid, blur / Enter clamps) with a small `range` slider, in
+"pt on the slide" (text.ts `ptToSize` / `sizeToPt`), a `<select>` 기본 / 명조 / 고정폭 and a **B** toggle — inline on a wide pane, on a
+compact one (`compact`) behind a `가 16` button that opens them in a `Floating` popover (`.annot-style-pop`, closes on a press outside,
+Esc or a scroll) · for a single memo the same number field + slider (its text size; for a memo without one — its text renders
+UI-sized, 13 px — the field starts at the points that 13 px amount to where the text is shown, `memoSizePt(item, shown)`: against
+the slide's rendered height inline (the menu measures the layer; 13 px of a 400-px slide = 18 pt), 10 pt in the bottom sheet, which
+renders CSS points — so the first ▲ step grows the text a little rather than shrinking it, and the value follows the zoom until a
+size is set)
 · **📎 첨부** (title '이 필기를 질문에 첨부해요 (입력창 위에 표시돼요)') · 🗑 삭제 · for memos the eye of 튜터에게 보이기 (`EyeIcon`
 in a `.region-menu-btn.is-icon`, crossed and muted `.is-off` while hidden; titles '튜터에게 보이기 — 질문할 때 이 메모도 함께 가요
 (클릭하면 숨김)' / '튜터에게 숨김 — 이 메모는 튜터가 보지 않아요 (클릭하면 보이기)') and 접기/펴기 · '이 필기로 물어본 질문 N개' when
@@ -1829,7 +1909,9 @@ chip, and removing it deletes the unused attachment as today.
 
 **Toolbar (AnnotationTools.tsx in `.viewer-toolbar`, right after the page jump).** Segmented `.annot-tools`: ↖ **선택·첨부** (the
 default state; `.is-default` — a quiet raised segment when active, while a drawing tool's active state takes the accent, so "is
-something being drawn?" is visible at a glance) · 형광펜 · 텍스트 형광 · 사각형 · 동그라미 · 텍스트 · 메모 — inline SVG glyphs
+something being drawn?" is visible at a glance) · **범위 선택** (0.6.2: a dashed box with a small arrow; the accent like a drawing
+tool, since a drag then selects instead of attaching; hint '범위 선택: 빈 곳에서 끌어 여러 개 고르기 · Shift+클릭 더하기·빼기 · Esc') ·
+형광펜 · 텍스트 형광 · 사각형 · 동그라미 · 텍스트 · 메모 — inline SVG glyphs
 (icons.tsx `ToolIcon`: 16 px, currentColor, the stroke of the app's other icons; emoji did not take the active button's contrast
 color) — clicking the active tool's button turns it off (back to 선택·첨부); then the four color dots, then a ⋯ **필기**
 `PopoverMenu`: 필기 보기/숨기기
@@ -1943,17 +2025,89 @@ be re-dragged from on top of itself → `redraw`; (c) the active default segment
 (d) the eye toggles' accessible name changed with the state while `aria-pressed` also carried it, and the hidden markers were
 `aria-label`s on plain spans → constant names, `role="img"`, the pill's label suffix.
 
-**Tests.** web/tests/annotations-geometry.test.ts (`applyOps`, `snapBand` on 'h' and 'v' lines, `rectFromPoints`, `itemBounds`,
+**As shipped (0.6.2 — round 3 of the user's feedback).** (1) "메모를 아래 끝으로 끌면 메뉴가 메모를 가린다": the item menu had been
+placed from `itemBounds` (a memo's anchor box) while the card itself is clamped inside the slide by CSS → the menu now measures
+the items' elements as drawn and places itself (menu.ts above; a memo card is never covered). (2) 범위 선택 (`'marquee'`): a drag on
+empty area selects what it crosses, Shift+click / Shift+drag add and remove, one menu for the group (color / 📎 첨부 / 🗑 삭제 act on
+all), a drag on any selected item moves the group, Delete removes it, ⌘Z undoes each group action as one step — one PATCH of N
+ops each. The default state keeps the region drag; drawing tools keep drawing; an item is still picked with any tool. (3) Text
+boxes: a numeric size (8–72 "pt on the slide", stored as a fraction of the slide height — `SLIDE_PT_HEIGHT` 540 — so the zoom
+scales it; a number field with the browser's ▲▼ and a small slider), a font (기본 / 명조 / 고정폭) and bold; memos the numeric text
+size in the same units; the fields are optional (old files load unchanged, the server caps and validates them, `null` removes
+one), the box's height is re-laid out when its look changes, and the controls sit in the item menu (a `가 16` popover on a
+narrow pane). (4) An unselected rect / ellipse is hit on its ring only in every state (`outlineOnly` no longer looks at the tool;
+`pointer-events: visibleStroke` always): a press inside passes through to a band, a word or the region drag; the edge selects. The
+text box default (16 pt of a 540 pt slide = 1.67 % of a 16:9 slide's width) matches the 0.6.1 `1.7cqw` size on 16:9 decks and is
+~30 % larger on 4:3 ones (their boxes grow to fit: `min-height`). Checked on 2026-09-29 in headless Chrome (a copied 38-page 4:3
+lecture in a temp library, fake CLIs, port 5209, a CDP script with real pointer / key input; the desktop app's browser pane at a
+1280-px emulated width mapped clicks off-target and was only used to open the document): a memo placed, then dragged to the
+slide's bottom edge → the card clipped at the edge, the menu `is-above` with its bottom above the card's top and inside the slide
+sideways; its number field (at 12 then; since the review fixes below it starts at the rendered size, 13 pt on that slide) → 20
+typed → `size` 0.037 stored and the textarea at 19.6 px (= 20/540 × the 530-px slide);
+rect + ellipse + 형광펜 drawn, 범위 선택 dragged over them → the three selected, "3개" in the menu, a drag on the rect moved all
+three by −0.1, the blue dot recolored all three, ⌘Z → yellow again in one step (positions kept), ⌘Z → positions back in one step,
+the rev +1 per undo (one PATCH each); Shift+click inside the selected ellipse → 2 selected, Shift+click on its ring → 3 again; a
+text box "크기 테스트 Size" at 15.7 px (16/540 × 530) → 24 typed → `size` 0.0444, 23.5 px, its height 0.049 → 0.112, at the next
+zoom level (the slide 530 → 662 px tall) 29.4 px; 명조 + B → the serif stack and weight 700 stored and rendered; a band across
+the title and a box around it: no tool — a click inside the box on the band selected the band, a drag inside the box on empty
+area opened the region menu (📎 첨부 · 💬 이 부분 설명해줘), a click on the box's edge selected the box; 범위 선택 — a click inside the
+box selected nothing, a click on the band inside it selected the band; the unselected rect's computed `pointer-events` =
+`visiblestroke`; dark mode with the box selected (the menu below it on the dark surface); at 360 × 740 the folded tool button,
+the wrapped two-row item menu inside the pane with the `가 24 B` button → the popover (size · slider · 명조 · B) inside the pane,
+the memo pill's menu (가 20 · 펴기) above the pill, the sheet's text at 20 pt.
+
+**Review fixes (0.6.2 — round 3).** (a) The memo textarea's auto-height ran only on the text: a size change or a zoom step left it
+at the height of the old font (clipped, a scrollbar) → fitted again on the rendered font and on `trackWidth` (above). (b) A
+group drag clamped every item on its own, so a group dragged past an edge was compressed and the compressed layout committed → one
+common delta (`groupDelta` / `moveItems`). (c) A marquee met a memo by the 12 % × 8 % box around its anchor while the card is drawn
+elsewhere (clamped) and far bigger → the cards are measured at the press (`memoBoxesOf`) and the marquee meets the card as drawn.
+(d) A group action of more than 100 ops (a slide holds 200 items) went out in one PATCH and was refused → the store sends ≤ 100 ops
+per PATCH, in order, still one undo entry. (e) Group 📎 첨부 toasted per item past the free slots / attached already, and opened the
+chat tab per item → `annotationAttachPlan`, one toast, the tab once. (f) A memo without a size showed 12 in the field while rendering
+13 px, so the first ▲ step shrank the text on any slide under 540 px tall → the field starts at the points the rendered 13 px amount
+to (`memoSizePt(item, shown)`). (g) The laid-out height stored the content only while the box adds padding and a border, so the
+bottom handles floated inside the box → `laidOutHeight` adds the box's padding and border. Checked on 2026-09-30 in headless
+Chrome (the same CDP driver, a fresh copy of the 4:3 lecture in a temp library, fake CLIs, port 5211; slide 2): a memo with three
+lines at the UI size (field 13 = 13 px of the 530-px slide, textarea 81 px, no inner scroll) → 24 typed → 23.5 px and the textarea
+173 px, scrollHeight = clientHeight; zoomed in → 29.4 px and 214 px, still fitting; zoomed back → 173 px again; a rect at x 0.7 and
+a band at x 0.2 marquee-selected, the rect dragged right by 0.4 of the width → the rect at the edge (0.7999) and the band moved by
+the same 0.0999, not 0.4; the memo dragged to the bottom-right corner (anchor y 0.96, the card drawn from y 0.68) → a marquee
+across the card's upper part (y 0.70–0.76, outside the anchor box) selected it; a text box committed → the drawn box 65.2 px =
+the stored `rect.h` × the layer, the `s` handle's centre on its bottom edge, and again after 30 pt (h 0.123 → 0.289, 153.4 px
+drawn vs 153.2 stored); a marquee over the whole slide → 4 selected (the memo by its card) → 📎 첨부 → 4 chips and no toast, again
+→ still 4 chips and exactly one '이미 입력창에 첨부되어 있어요', then 8 selected with 4 attached and 2 slots free → 6 chips and
+exactly one '… (2개는 첨부하지 않았어요)'; 120 highlights PUT on the slide → 범위 선택 over all (120개) → 🗑 삭제 → 0 items on the
+server, rev +2 (two PATCHes), no error toast → ⌘Z → the 120 back in their order, rev +2; a fresh memo's field at 13 on the wide
+pane and `가 10` in the 360-px pill menu (the sheet's CSS points); dark mode with a group menu placed. The round-3 scenario re-run on
+the same server: 33/34, the one difference being that memo field's start value (12 → the rendered 13).
+
+**Tests.** web/tests/annotations-geometry.test.ts (`applyOps` — incl. 0.6.2: size / font / bold on a text box, ignored on a rect,
+`null` removes —, `snapBand` on 'h' and 'v' lines, `rectFromPoints`, `itemBounds`, `groupDelta` / `moveItems` (one common delta, the
+group stops at an edge as one; a single item as `moveRect` / `movePoint`; text highlights never bind),
 `recordedAtFor`, `replayVisible`), annotation-gesture.test.ts (0.6.1: `slopFor` with the ring, `itemHit` / `itemArea` — rects, ellipses
 by shape, text-highlight line rects, memos never, the `outline` ring of a rect / ellipse (inside empty, edge ± 5.5 px hit, a thin shape
-all ring; bands / text boxes / text highlights unaffected) —, `outlineOnly`, `hitTestItems` — the smallest wins whatever the z-order,
-ties → topmost, the slack, replay-hidden skipped, a box around a paragraph with 형광펜 in hand: inside → null, edge → the box, a band
-inside → the band, selected or default state → the box —, `pressPlan` — the default state's empty press is `region`, an item is
-selected with every tool, handles / markers, click tools and touch immediate, a text highlight is never moved and is `redraw`n under
-텍스트 형광 only, a touched unselected item is not moved), annotations-store.test.ts (fake fetch/EventSource like recording-events.test.ts: optimistic ops,
-coalescing, ops events, a rev gap → refetch, the 409 rebase then the second-409 replace, own-client echo ignored), textSelect.test.ts
-(word order along `dir`, re-anchoring by `text` on an engine change), annotation-history.test.ts (the global stack, coalesced text
-edits, pruning), annotation-markers.test.ts, annotation-chips.test.ts.
+all ring; bands / text boxes / text highlights unaffected) —, `outlineOnly` (0.6.2: ring-only in every state, only a selected shape
+is not), `hitTestItems` — the smallest wins whatever the z-order,
+ties → topmost, the slack, replay-hidden skipped, a box around a paragraph in every state: inside → null, edge → the box, a band
+inside → the band, selected (alone or in a group) → the box, an ellipse's centre empty / arc hit —, the marquee (`rectsIntersect`,
+`itemIntersects` per type, `marqueeSelect` in z-order with replay-hidden skipped, a memo by its measured card — `boxOf` — else its
+anchor box, `toggleId`, `unionIds`), `pressPlan` — the default
+state's empty press is `region` (Shift or not), an item is
+selected with every tool, 범위 선택 → `marquee` (`add` with Shift, immediate on touch), Shift+click → `toggle` in every state and
+never a move, handles / markers, click tools and touch immediate, a text highlight is never moved and is `redraw`n under
+텍스트 형광 only, a touched unselected item is not moved), annotation-menu.test.ts (0.6.2 `placeItemMenu`: below with room, a memo
+card clamped to the bottom edge → above and never overlapped, a shape taller than the view → inside, a memo → the side with more
+room, the visible view decides, sideways clamping on a zoomed-in slide and a pane narrower than the menu, `menuMaxWidth`, `unionPx`
+/ `overlapsPx`), annotation-text.test.ts (0.6.2: pt ↔ size round trips for 8–72, clamps, defaults, fonts, `textBoxVars`, the memo's
+inline / sheet font sizes, `memoSizePt` where the memo is shown), annotations-store.test.ts (fake fetch/EventSource like
+recording-events.test.ts: optimistic ops, coalescing, a 150-op group action in two PATCHes of ≤ 100 with one undo entry (and its undo
+the same way), ops events, a rev gap → refetch, the 409 rebase then the second-409 replace, own-client echo ignored), textSelect.test.ts
+(word order along `dir`, re-anchoring by `text` on an engine change), annotation-history.test.ts (the global stack, a group action
+as one entry undone / redone whole with the z-order kept, coalesced text and size edits with the `null` inverse of a first size,
+pruning), annotation-markers.test.ts, annotation-chips.test.ts (incl. `annotationAttachPlan`: the free slots counted once, items
+attached already skipped and counted apart). tests/annotations.test.ts adds (0.6.2) the 400s of a bad size /
+font / bold, the size cap and rounding, absent fields staying absent, a rect's whitelist, the update path per type, `null` removing
+a field and being echoed in the `slide` event, `null` on a required field → 400.
 
 ### "학생의 메모" in the tutor context
 
