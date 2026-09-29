@@ -13,7 +13,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import type { WrappedPdfiumModule } from '@embedpdf/pdfium';
-import type { RegionRect } from '../shared/types.ts';
+import type { LayoutBox, RegionRect, SlideTextLayout } from '../shared/types.ts';
 
 const FPDF_ANNOT = 0x01;
 /** RGBx instead of BGRx: sharp takes the bitmap as raw 4-channel pixels. */
@@ -46,9 +46,19 @@ const ANNOT_NOT_SHOWN = 0x01 | 0x02 | 0x20;
 const TEXT_VALUE_FIELDS: ReadonlySet<number> = new Set([4, 5, 6]);
 /**
  * Long edge (device units) of the virtual device a selected region is mapped from (FPDF_DeviceToPage takes
- * integer device coordinates): fine enough that rounding moves a corner by less than 0.01 pt on a slide.
+ * integer device coordinates) and the text layout is mapped to (FPDF_PageToDevice gives integers back): fine
+ * enough that rounding moves a corner by less than 0.01 pt on a slide.
  */
 const REGION_DEVICE_EDGE = 100_000;
+/** Characters of a page the text layout looks at (DESIGN §25): bounded memory for a pathological page. */
+const MAX_LAYOUT_CHARS = 50_000;
+/** Decimals of a layout box (normalised to the image). */
+const LAYOUT_DECIMALS = 1e4;
+/** Roles of a text page's characters in the layout walk (see textLayout). */
+const ROLE_SKIP = 0;
+const ROLE_GLYPH = 1;
+const ROLE_BLANK = 2;
+const ROLE_LINE_END = 3;
 
 export interface RenderedPage {
   /** RGBx pixels, row after row (stride = width * 4). */
@@ -77,6 +87,16 @@ export interface PdfPage {
    * (cleanPageText). '' when the page has no text there (DESIGN §21).
    */
   textInRegion(rect: RegionRect): string;
+  /**
+   * The word boxes of the page's text layer (DESIGN §25 "Text layout", for 텍스트 형광 and 형광펜 snapping): lines in
+   * content order, split where text() ends a line (a generated break that lineBreakJoint does not join, or a real
+   * one), words split at blanks and around CJK code points, every box normalised to the rendered image (0..1,
+   * origin top-left, /Rotate applied: the inverse of textInRegion's mapping). A line's `dir` is the image axis its
+   * words advance along: 'v' when /Rotate or the glyphs' own angle turned it. Each word carries the PDFium char
+   * index range [start, end) the client anchors a 텍스트 형광 to. Blanks, code point 0 and diagonal glyphs add no
+   * box; at most MAX_LAYOUT_CHARS characters are looked at.
+   */
+  textLayout(): SlideTextLayout['lines'];
   close(): void;
 }
 
@@ -194,6 +214,79 @@ function isBlank(codePoint: number | undefined): boolean {
   return codePoint === 0x20 || codePoint === 0x0d || codePoint === 0x0a || codePoint === 0x09 || codePoint === 0;
 }
 
+/**
+ * Han, Hiragana and Katakana (with their compatibility, extension and half-width blocks): scripts written without
+ * spaces, where every code point is a word of the text layout (DESIGN §25) so a drag can select less than a line.
+ */
+export function isCjkBreakPoint(codePoint: number): boolean {
+  return (
+    (codePoint >= 0x2e80 && codePoint <= 0x2fdf) || // CJK / Kangxi radicals
+    (codePoint >= 0x3005 && codePoint <= 0x3007) || // 々 〆 〇
+    (codePoint >= 0x3040 && codePoint <= 0x30ff) || // Hiragana, Katakana
+    (codePoint >= 0x3400 && codePoint <= 0x4dbf) || // CJK extension A
+    (codePoint >= 0x4e00 && codePoint <= 0x9fff) || // CJK unified
+    (codePoint >= 0xf900 && codePoint <= 0xfaff) || // CJK compatibility
+    (codePoint >= 0xff66 && codePoint <= 0xff9f) || // half-width Katakana
+    (codePoint >= 0x20000 && codePoint <= 0x3134f) // CJK extensions B–G
+  );
+}
+
+/** A precomposed Hangul syllable (a word of its own in a line written without spaces). */
+export function isHangulSyllable(codePoint: number): boolean {
+  return codePoint >= 0xac00 && codePoint <= 0xd7a3;
+}
+
+/** A box on the rendered image: 0..1 from the top-left. */
+interface ImageBox {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
+/**
+ * The image axis a glyph's line advances along, from its angle (FPDFText_GetCharAngle, radians, counter-clockwise
+ * in user space) and the page's /Rotate (quarter turns clockwise): the glyph reads upright on the image when the
+ * two cancel out ('h'), sideways when they leave a quarter turn ('v'); null for a diagonal glyph (more than
+ * UPRIGHT_ANGLE from every axis), which gets no box.
+ */
+export function lineDirection(charAngle: number, rotation: number): 'h' | 'v' | null {
+  if (!Number.isFinite(charAngle)) return null;
+  const turn = Math.PI / 2;
+  const effective = (((charAngle - rotation * turn) % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+  const quarter = Math.round(effective / turn);
+  if (Math.abs(effective - quarter * turn) > UPRIGHT_ANGLE) return null;
+  return quarter % 2 === 0 ? 'h' : 'v';
+}
+
+function roundLayout(value: number): number {
+  return Math.round(Math.min(Math.max(value, 0), 1) * LAYOUT_DECIMALS) / LAYOUT_DECIMALS;
+}
+
+/** A LayoutBox from image extents, at least one unit (1e-4) a side so a thin glyph never becomes an empty box. */
+function layoutBox(x0: number, y0: number, x1: number, y1: number): LayoutBox {
+  const x = roundLayout(x0);
+  const y = roundLayout(y0);
+  const w = Math.max(1 / LAYOUT_DECIMALS, roundLayout(x1) - x);
+  const h = Math.max(1 / LAYOUT_DECIMALS, roundLayout(y1) - y);
+  return [x, y, roundLayout(w), roundLayout(h)];
+}
+
+/** The smallest LayoutBox holding every box of `boxes` (at least one). */
+function unionBoxes(boxes: LayoutBox[]): LayoutBox {
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  for (const [x, y, w, h] of boxes) {
+    x0 = Math.min(x0, x);
+    y0 = Math.min(y0, y);
+    x1 = Math.max(x1, x + w);
+    y1 = Math.max(y1, y + h);
+  }
+  return layoutBox(x0, y0, x1, y1);
+}
+
 // ---------------------------------------------------------------------------
 // Fallback font for non-embedded CJK fonts
 // ---------------------------------------------------------------------------
@@ -247,6 +340,8 @@ function readFirstFont(files: string[]): Buffer | null {
 
 /** The fallback font files looked for in vain when a page asked for a CJK font (null: none asked, or found). */
 let missingFallbackFont: string[] | null = null;
+/** The MAX_LAYOUT_CHARS cap was logged (once per process). */
+let warnedLayoutCap = false;
 
 /**
  * Why text of this process's PDFs was not drawn, or null: a page used a CJK font that is not embedded, and none of
@@ -483,14 +578,18 @@ export async function openPdf(file: string): Promise<PdfDocument> {
     return lineBreakJoint(boxBefore, boxAfter, isBlank(codes[i - 1]) || isBlank(codes[i + 2]));
   };
 
+  /** The virtual device (REGION_DEVICE_EDGE on the long side) regions are mapped from and the layout is mapped to. */
+  const deviceSize = (width: number, height: number) => {
+    const scale = REGION_DEVICE_EDGE / Math.max(width, height, 1e-6);
+    return { deviceW: Math.max(1, Math.round(width * scale)), deviceH: Math.max(1, Math.round(height * scale)) };
+  };
+
   /**
    * The region (normalised to the rendered page) in page coordinates (points, y upwards): its corners mapped with
    * FPDF_DeviceToPage, which applies /Rotate and the crop box origin the way rendering does.
    */
   const regionToPage = (page: number, width: number, height: number, rect: RegionRect) => {
-    const scale = REGION_DEVICE_EDGE / Math.max(width, height, 1e-6);
-    const deviceW = Math.max(1, Math.round(width * scale));
-    const deviceH = Math.max(1, Math.round(height * scale));
+    const { deviceW, deviceH } = deviceSize(width, height);
     const clamp = (value: number) => Math.min(Math.max(Number.isFinite(value) ? value : 0, 0), 1);
     const x0 = clamp(rect.x);
     const y0 = clamp(rect.y);
@@ -509,6 +608,157 @@ export async function openPdf(file: string): Promise<PdfDocument> {
       ys.push(P.getValue(doublesPtr + 8, 'double'));
     }
     return { left: Math.min(...xs), right: Math.max(...xs), bottom: Math.min(...ys), top: Math.max(...ys) };
+  };
+
+  /**
+   * A box in page coordinates (points, y upwards) as the axis-aligned box it covers on the rendered image (0..1,
+   * origin top-left): its corners mapped with FPDF_PageToDevice on the virtual device (the inverse of regionToPage;
+   * /Rotate and the crop box origin match the render). Null when PDFium cannot map it.
+   */
+  const pageBoxToImage = (page: number, deviceW: number, deviceH: number, box: CharBox): ImageBox | null => {
+    let x0 = Infinity;
+    let y0 = Infinity;
+    let x1 = -Infinity;
+    let y1 = -Infinity;
+    for (const [x, y] of [
+      [box.left, box.bottom],
+      [box.right, box.bottom],
+      [box.left, box.top],
+      [box.right, box.top],
+    ]) {
+      if (!m.FPDF_PageToDevice(page, 0, 0, deviceW, deviceH, 0, x, y, doublesPtr, doublesPtr + 4)) return null;
+      const dx = P.getValue(doublesPtr, 'i32') / deviceW;
+      const dy = P.getValue(doublesPtr + 4, 'i32') / deviceH;
+      x0 = Math.min(x0, dx);
+      y0 = Math.min(y0, dy);
+      x1 = Math.max(x1, dx);
+      y1 = Math.max(y1, dy);
+    }
+    if (![x0, y0, x1, y1].every(Number.isFinite)) return null;
+    return { x0, y0, x1, y1 };
+  };
+
+  /** Tight box (FPDFText_GetCharBox: the glyph's bounds) of character `i`, or null. */
+  const tightBox = (textPage: number, i: number): CharBox | null => {
+    if (!m.FPDFText_GetCharBox(textPage, i, doublesPtr, doublesPtr + 8, doublesPtr + 16, doublesPtr + 24)) return null;
+    const [left, right, bottom, top] = [0, 8, 16, 24].map((offset) => P.getValue(doublesPtr + offset, 'double'));
+    return { left, right, bottom, top };
+  };
+
+  /** Loose box (font ascent to descent, a page-space rect whatever the glyph's angle) of character `i`, or null. */
+  const looseBoxAnyAngle = (textPage: number, i: number): CharBox | null => {
+    if (!m.FPDFText_GetLooseCharBox(textPage, i, rectPtr)) return null;
+    const [left, top, right, bottom] = [0, 4, 8, 12].map((offset) => P.getValue(rectPtr + offset, 'float'));
+    return { left, right, bottom, top };
+  };
+
+  /**
+   * The role of every character of a text page for the layout walk: a glyph, a blank (word break), a line end, or
+   * nothing (code point 0, the "\n" of a "\r\n"). A generated "\r\n" is a line end only when lineBreakJoint keeps
+   * it (the rule text() uses): joined with ' ' it is a word break, joined with '' nothing at all.
+   */
+  const charRoles = (textPage: number, codes: number[]): Uint8Array => {
+    const roles = new Uint8Array(codes.length);
+    for (let i = 0; i < codes.length; i++) {
+      const codePoint = codes[i];
+      if (!codePoint) continue;
+      if (codePoint === 0x0d && codes[i + 1] === 0x0a && m.FPDFText_IsGenerated(textPage, i) === 1) {
+        const joint = joinAt(textPage, codes, i);
+        roles[i] = joint === null ? ROLE_LINE_END : joint === '' ? ROLE_SKIP : ROLE_BLANK;
+        i++;
+        continue;
+      }
+      if (codePoint === 0x0d || codePoint === 0x0a) {
+        roles[i] = ROLE_LINE_END;
+        if (codePoint === 0x0d && codes[i + 1] === 0x0a) i++;
+        continue;
+      }
+      roles[i] = isBlank(codePoint) ? ROLE_BLANK : ROLE_GLYPH;
+    }
+    return roles;
+  };
+
+  interface LayoutWord {
+    r: LayoutBox;
+    t: string;
+    c: [number, number];
+  }
+
+  /** A word being built: its text and char range, and the extents of its glyph boxes along and across the line. */
+  interface WordAccumulator {
+    start: number;
+    end: number;
+    text: string;
+    dir: 'h' | 'v' | null;
+    along: [number, number];
+    across: [number, number];
+  }
+
+  /** The words of one line of the text page (content order): the layout walk of textLayout. */
+  const lineWords = (
+    page: number,
+    textPage: number,
+    codes: number[],
+    roles: Uint8Array,
+    from: number,
+    to: number,
+    rotation: number,
+    deviceW: number,
+    deviceH: number,
+  ): { words: LayoutWord[]; dir: 'h' | 'v' } | null => {
+    let spaced = false;
+    let hangul = false;
+    for (let i = from; i < to; i++) {
+      if (roles[i] === ROLE_BLANK) spaced = true;
+      else if (roles[i] === ROLE_GLYPH && isHangulSyllable(codes[i])) hangul = true;
+    }
+    // Hangul syllables are words of their own only in a line written without spaces (Korean normally has them).
+    const splitHangul = hangul && !spaced;
+    const words: LayoutWord[] = [];
+    let lineDir: 'h' | 'v' | null = null;
+    let word: WordAccumulator | null = null;
+    const finish = () => {
+      if (word && word.dir !== null) {
+        const [a0, a1] = word.along;
+        const [c0, c1] = word.across;
+        const r = word.dir === 'h' ? layoutBox(a0, c0, a1, c1) : layoutBox(c0, a0, c1, a1);
+        words.push({ r, t: word.text, c: [word.start, word.end] });
+        lineDir ??= word.dir;
+      }
+      word = null;
+    };
+    for (let i = from; i < to; i++) {
+      const role = roles[i];
+      if (role === ROLE_SKIP) continue;
+      if (role === ROLE_BLANK) {
+        finish();
+        continue;
+      }
+      const codePoint = codes[i];
+      const breakAround = isCjkBreakPoint(codePoint) || (splitHangul && isHangulSyllable(codePoint));
+      if (breakAround) finish();
+      let char = codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : '\ufffd';
+      if (codePoint >= SYMBOL_PUA_FIRST && codePoint <= SYMBOL_PUA_LAST) char = symbolPuaToUnicode(codePoint, fontName(textPage, i)) ?? char;
+      if (!word) word = { start: i, end: i + 1, text: '', dir: null, along: [Infinity, -Infinity], across: [Infinity, -Infinity] };
+      word.text += char;
+      word.end = i + 1;
+      const dir = lineDirection(m.FPDFText_GetCharAngle(textPage, i), rotation);
+      const tight = dir && tightBox(textPage, i);
+      const tightImage = tight && pageBoxToImage(page, deviceW, deviceH, tight);
+      if (dir && tightImage) {
+        const loose = looseBoxAnyAngle(textPage, i);
+        const looseImage = (loose && pageBoxToImage(page, deviceW, deviceH, loose)) ?? tightImage;
+        word.dir ??= dir;
+        // Along the line the glyph's own bounds; across it the font's ascent to descent (one band per line).
+        const along = word.dir === 'h' ? [tightImage.x0, tightImage.x1] : [tightImage.y0, tightImage.y1];
+        const across = word.dir === 'h' ? [looseImage.y0, looseImage.y1] : [looseImage.x0, looseImage.x1];
+        word.along = [Math.min(word.along[0], along[0]), Math.max(word.along[1], along[1])];
+        word.across = [Math.min(word.across[0], across[0]), Math.max(word.across[1], across[1])];
+      }
+      if (breakAround) finish();
+    }
+    finish();
+    return words.length > 0 && lineDir !== null ? { words, dir: lineDir } : null;
   };
 
   /** Symbol-font PUA code points of the characters whose box meets `area`, mapped to their real characters. */
@@ -622,6 +872,33 @@ export async function openPdf(file: string): Promise<PdfDocument> {
             out += remap.get(codePoint) ?? char;
           }
           return cleanPageText(out);
+        } finally {
+          m.FPDFText_ClosePage(textPage);
+        }
+      },
+      textLayout() {
+        const textPage = m.FPDFText_LoadPage(page);
+        if (!textPage) return [];
+        try {
+          const total = Math.max(0, m.FPDFText_CountChars(textPage));
+          const count = Math.min(total, MAX_LAYOUT_CHARS);
+          if (total > count && !warnedLayoutCap) {
+            warnedLayoutCap = true;
+            console.warn(`[pdf] page ${n} has ${total} characters: the text layout keeps the first ${MAX_LAYOUT_CHARS}`);
+          }
+          const codes = Array.from({ length: count }, (_, i) => m.FPDFText_GetUnicode(textPage, i));
+          const roles = charRoles(textPage, codes);
+          const rotation = m.FPDFPage_GetRotation(page);
+          const { deviceW, deviceH } = deviceSize(width, height);
+          const lines: SlideTextLayout['lines'] = [];
+          let from = 0;
+          for (let i = 0; i <= count; i++) {
+            if (i < count && roles[i] !== ROLE_LINE_END) continue;
+            const line = lineWords(page, textPage, codes, roles, from, i, rotation, deviceW, deviceH);
+            if (line) lines.push({ r: unionBoxes(line.words.map((word) => word.r)), dir: line.dir, words: line.words });
+            from = i + 1;
+          }
+          return lines;
         } finally {
           m.FPDFText_ClosePage(textPage);
         }

@@ -36,7 +36,7 @@ import {
 } from '../server/imageWorker.ts';
 import type { AttachmentJob, AttachmentWorkerResult, UploadImageType } from '../server/imageWorker.ts';
 import { pngHeaderOnly, svgBehindAvifHeader } from './imageFixtures.ts';
-import { TEXT_ENGINE, TEXT_ENGINE_FILE } from '../server/pageNames.ts';
+import { TEXT_ENGINE, TEXT_ENGINE_FILE, layoutFileName, textFileName } from '../server/pageNames.ts';
 import { fallbackFontFiles } from '../server/pdf.ts';
 import { GARBAGE_PDF, cjkPdf, deckPdf, encryptedPdf, symbolFontPdf } from './pdfFixtures.ts';
 
@@ -253,8 +253,14 @@ describe('PDF worker', () => {
     assert.deepEqual([meta.width, meta.height, meta.channels], [1600, 900, 3]);
     const first = await fs.readFile(path.join(docDir, 'text', '001.txt'), 'utf8');
     assert.match(first, /^Lecture 5: CPU Scheduling/); // non-embedded Helvetica: PDFium's built-in substitute
-    // Every text file, then the marker of the engine that wrote them (DESIGN §17).
-    assert.deepEqual((await fs.readdir(path.join(docDir, 'text'))).sort(), [TEXT_ENGINE_FILE, ...Array.from({ length: 9 }, (_, i) => `00${i + 1}.txt`)]);
+    // Every text file with its layout (the word boxes, DESIGN §25), then the marker of the engine that wrote them (DESIGN §17).
+    assert.deepEqual(
+      (await fs.readdir(path.join(docDir, 'text'))).sort(),
+      [TEXT_ENGINE_FILE, ...Array.from({ length: 9 }, (_, i) => [layoutFileName(i + 1, 9), textFileName(i + 1, 9)]).flat()],
+    );
+    const layout = JSON.parse(await fs.readFile(path.join(docDir, 'text', layoutFileName(1, 9)), 'utf8')) as { version: number; engine: string; lines: unknown[] };
+    assert.deepEqual([layout.version, layout.engine], [1, TEXT_ENGINE]);
+    assert.ok(layout.lines.length > 0, 'the first slide has text lines');
     assert.equal(await fs.readFile(path.join(docDir, 'text', TEXT_ENGINE_FILE), 'utf8'), `${TEXT_ENGINE}\n`);
     assert.ok(!(await fs.readdir(path.join(docDir, 'slides'))).some((name) => name.endsWith('.tmp')));
   });
@@ -369,7 +375,11 @@ describe('PDF worker', () => {
     assert.equal(await fs.readFile(path.join(docDir, 'text', '001.txt'), 'utf8'), 'Sets: α β ∪ ∈ ∅ →\n\uf0a7 done');
     assert.equal(await fs.readFile(path.join(docDir, 'text', '002.txt'), 'utf8'), 'kept');
     assert.equal(await fs.readFile(path.join(docDir, 'text', TEXT_ENGINE_FILE), 'utf8'), `${TEXT_ENGINE}\n`);
-    assert.deepEqual((await fs.readdir(path.join(docDir, 'text'))).sort(), [TEXT_ENGINE_FILE, '001.txt', '002.txt']);
+    assert.deepEqual((await fs.readdir(path.join(docDir, 'text'))).sort(), [TEXT_ENGINE_FILE, '001.layout.json', '001.txt', '002.txt']);
+    // The layout of the page PDFium has (DESIGN §25); the page it does not have gets none.
+    const layout = JSON.parse(await fs.readFile(path.join(docDir, 'text', '001.layout.json'), 'utf8')) as { engine: string; lines: Array<{ words: Array<{ t: string }> }> };
+    assert.equal(layout.engine, TEXT_ENGINE);
+    assert.deepEqual(layout.lines.map((line) => line.words.map((word) => word.t)), [['Sets:', 'α β ∪ ∈ ∅ →'], ['\uf0a7', 'done']]);
     assert.equal(await fs.readFile(path.join(docDir, 'slides', '001.png'), 'utf8'), 'old rendering', 'no slide is rendered');
     assert.deepEqual((await fs.readdir(docDir)).sort(), ['slides', 'source.pdf', 'text']);
   });

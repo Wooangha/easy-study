@@ -22,6 +22,8 @@ import {
   MODEL_ID_RE,
   SESSION_ID_RE,
 } from '../shared/types.ts';
+import { closeAnnotationStreams, forgetDocAnnotations } from './annotations.ts';
+import { createAnnotationsRouter } from './annotationsRoutes.ts';
 import { VIEW_WIDTHS, thumbPath, viewPath } from './assets.ts';
 import type { ViewWidth } from './assets.ts';
 import {
@@ -293,6 +295,13 @@ function rawImageBody(): express.RequestHandler {
       next((err as { type?: string } | undefined)?.type === 'entity.too.large' ? tooLarge() : err);
     });
   };
+}
+
+/** SendMessageRequest.memos (DESIGN §25): absent, or a boolean. */
+function parseMemos(value: unknown): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'boolean') throw new HttpError(400, 'memos는 true/false여야 합니다');
+  return value;
 }
 
 /** SendMessageRequest.neighbors / PrimeRequest.neighbors: absent, or an integer 0..3. */
@@ -635,9 +644,10 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
       if (isDigestRunning(docId)) return '정리본을 만드는 중에는 지울 수 없습니다. 정리본 만들기를 먼저 중단해 주세요';
       if (hasRunningTurns(docId)) return '답변을 생성하는 중에는 지울 수 없습니다. 답변이 끝난 뒤에 다시 시도해 주세요';
       // From here on the document is gone for every request: attachment images still being made are not wanted,
-      // and its recordings stop (live audio, transcription, conversion, AI alignment).
+      // its recordings stop (live audio, transcription, conversion, AI alignment) and its annotation streams end.
       stopAttachmentJobs(docId);
       forgetDocRecordings(docId);
+      forgetDocAnnotations(docId);
       return null;
     });
     try {
@@ -793,8 +803,9 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
     if (kind === 'question' && typeof body.text !== 'string') throw new HttpError(400, '질문을 입력해 주세요');
     const text = kind === 'question' ? String(body.text) : '';
     const neighbors = parseNeighbors(body.neighbors);
-    // Priming turns take no attachments (DESIGN §21).
+    // Priming turns take no attachments (DESIGN §21) and no memos (DESIGN §25).
     const attachments = kind === 'question' ? parseAttachmentIds(body.attachments) : undefined;
+    const memos = kind === 'question' ? parseMemos(body.memos) : undefined;
 
     // Abort the turn when the client goes away mid-stream. This must watch the *response*:
     // req 'close' fires as soon as the request body has been consumed.
@@ -806,7 +817,7 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
     const sse = lazySse(res);
     try {
       await runTurn(
-        { docId, sessionId, kind, text, slide, neighbors, attachments, signal: disconnect.signal, onEvent: (event) => sse.send(event) },
+        { docId, sessionId, kind, text, slide, neighbors, attachments, memos, signal: disconnect.signal, onEvent: (event) => sse.send(event) },
         chatDeps,
       );
     } catch (err) {
@@ -941,6 +952,10 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
       cliSlot: chatDeps.cliSlot,
     }),
   );
+
+  // --- slide annotations (DESIGN §25) --------------------------------------------------------------------------
+
+  api.use(createAnnotationsRouter());
 
   api.use((_req, _res, next) => next(new HttpError(404, 'API 경로를 찾을 수 없습니다')));
   api.use(apiErrorHandler);
@@ -1278,7 +1293,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
       abortAllDigests();
       stopAttachmentJobs();
       // Let aborted turns and digest jobs persist their partial results; stop the image workers.
-      await Promise.all([waitForIdle(4_000), waitForDigestsIdle(4_000), stopImageWork(), sweeper?.stop(), stopRecordingWork()]);
+      await Promise.all([waitForIdle(4_000), waitForDigestsIdle(4_000), stopImageWork(), sweeper?.stop(), stopRecordingWork(), closeAnnotationStreams()]);
       await closeVite?.();
       await new Promise<void>((resolve) => {
         server.close(() => resolve());

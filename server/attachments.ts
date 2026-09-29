@@ -5,6 +5,10 @@
 // Storage: library/<docId>/attachments/<id>.jpg|png (the image, made by the image worker: sharp and PDFium never run
 // in this process) + <id>.json (the Attachment, written after the image, so metadata always has its image).
 //
+// A region may be made from a 필기 (DESIGN §25, CreateRegionRequest.annotationId): the item's id, type and text are
+// snapshotted into Attachment.annotation when the attachment is made (nothing is written into the annotation store),
+// so the tutor gets the note's words and the question markers can link the item to the Q&A.
+//
 // Lifetime: an attachment no message refers to is deleted after 24 h (sweepAttachments: at startup and hourly);
 // deleting a session deletes the attachments only its messages referred to; deleting a document deletes its
 // folder. Attachments of a running turn are pinned (in memory) so neither can take them away under it; the checks
@@ -12,8 +16,9 @@
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { ATTACHMENT_ID_RE, MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES } from '../shared/types.ts';
-import type { Attachment, RegionRect } from '../shared/types.ts';
+import { ANNOTATION_ID_RE, ATTACHMENT_ID_RE, MAX_ANNOTATION_TEXT_CHARS, MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES } from '../shared/types.ts';
+import type { AnnotationItem, Attachment, AttachmentAnnotation, RegionRect } from '../shared/types.ts';
+import { readSlideAnnotations } from './annotations.ts';
 import { ATTACHMENTS_DIR, ATTACHMENT_IMAGE_EXTS } from './assets.ts';
 import { HttpError } from './config.ts';
 import { isImageWorkerStopped, runAttachmentWorker } from './imageWorker.ts';
@@ -44,7 +49,11 @@ const MAX_NAME_CHARS = 120;
 const RECT_EPSILON = 1e-6;
 
 const NOT_FOUND = '첨부를 찾을 수 없습니다';
+/** 400 of POST …/regions when `annotationId` names no item of that slide (DESIGN §25). */
+export const ANNOTATION_NOT_FOUND = '그 필기를 찾을 수 없습니다';
 const SHUTTING_DOWN = '서버를 종료하는 중입니다';
+/** Item types a region can be made from (Attachment.annotation.type). */
+const ANNOTATION_TYPES: ReadonlySet<string> = new Set<AnnotationItem['type']>(['highlight', 'textHighlight', 'rect', 'ellipse', 'text', 'memo']);
 const UNSUPPORTED_IMAGE = '지원하지 않는 이미지 형식입니다 (PNG, JPEG, WebP, GIF만 올릴 수 있습니다)';
 /** 413 for an image whose resolution the worker refuses (imageWorker.ts uploadRefusal): not a damaged file. */
 export const IMAGE_TOO_LARGE_PIXELS = '이미지 해상도가 너무 커서 처리할 수 없습니다. 스크린샷이나 더 작은 이미지로 올려 주세요';
@@ -139,6 +148,16 @@ function isRect(value: unknown): value is RegionRect {
   return [rect.x, rect.y, rect.w, rect.h].every((n) => typeof n === 'number' && Number.isFinite(n));
 }
 
+/** Attachment.annotation as stored (id, type and a capped text), or null when it is not well formed. */
+function normalizeAnnotation(value: unknown): AttachmentAnnotation | null {
+  const raw = value as Partial<AttachmentAnnotation> | null;
+  if (typeof raw !== 'object' || raw === null) return null;
+  if (typeof raw.id !== 'string' || !ANNOTATION_ID_RE.test(raw.id) || typeof raw.type !== 'string' || !ANNOTATION_TYPES.has(raw.type)) return null;
+  const annotation: AttachmentAnnotation = { id: raw.id, type: raw.type };
+  if (typeof raw.text === 'string' && raw.text) annotation.text = raw.text.slice(0, MAX_ANNOTATION_TEXT_CHARS);
+  return annotation;
+}
+
 /** The stored Attachment, checked (the file name is authoritative for the id); null when missing or malformed. */
 function normalizeAttachment(value: unknown, id: string): Attachment | null {
   const raw = value as Partial<Attachment> | null;
@@ -151,6 +170,8 @@ function normalizeAttachment(value: unknown, id: string): Attachment | null {
     attachment.slide = raw.slide;
     attachment.rect = { x: raw.rect.x, y: raw.rect.y, w: raw.rect.w, h: raw.rect.h };
     attachment.text = typeof raw.text === 'string' ? raw.text : '';
+    const annotation = normalizeAnnotation(raw.annotation);
+    if (annotation) attachment.annotation = annotation;
   } else if (typeof raw.name === 'string' && raw.name) {
     attachment.name = raw.name;
   }
@@ -321,9 +342,9 @@ async function saveAttachment(docId: string, attachment: Attachment): Promise<At
   }
 }
 
-/** A CreateRegionRequest, validated against the document (HttpError 400). */
-export function parseRegionRequest(body: unknown, pageCount: number): { slide: number; rect: RegionRect } {
-  const request = (typeof body === 'object' && body !== null ? body : {}) as { slide?: unknown; rect?: unknown };
+/** A CreateRegionRequest, validated against the document (HttpError 400); `annotationId` when the body names a 필기. */
+export function parseRegionRequest(body: unknown, pageCount: number): { slide: number; rect: RegionRect; annotationId?: string } {
+  const request = (typeof body === 'object' && body !== null ? body : {}) as { slide?: unknown; rect?: unknown; annotationId?: unknown };
   const slide = request.slide;
   if (typeof slide !== 'number' || !Number.isInteger(slide) || slide < 1 || slide > pageCount) {
     throw new HttpError(400, `슬라이드 번호가 올바르지 않습니다 (1–${pageCount})`);
@@ -340,12 +361,29 @@ export function parseRegionRequest(body: unknown, pageCount: number): { slide: n
   const y0 = round(y);
   const rect = { x: x0, y: y0, w: round(round(x + w) - x0), h: round(round(y + h) - y0) };
   if (!(rect.w > 0 && rect.h > 0)) throw new HttpError(400, '선택 영역은 슬라이드 안(0–1)에 있고 넓이가 있어야 합니다');
-  return { slide, rect };
+  const annotationId = request.annotationId;
+  if (annotationId === undefined || annotationId === null) return { slide, rect };
+  if (typeof annotationId !== 'string' || !ANNOTATION_ID_RE.test(annotationId)) throw new HttpError(400, ANNOTATION_NOT_FOUND);
+  return { slide, rect, annotationId };
+}
+
+/**
+ * The snapshot of a 필기 a region is made from (DESIGN §25): its id and type, and the memo's / text box's text or
+ * the highlighted words when it has any. 400 when the slide has no such item.
+ */
+async function annotationSnapshot(docId: string, slide: number, annotationId: string): Promise<AttachmentAnnotation> {
+  const item = (await readSlideAnnotations(docId, slide)).items.find((candidate) => candidate.id === annotationId);
+  if (!item) throw new HttpError(400, ANNOTATION_NOT_FOUND);
+  const annotation: AttachmentAnnotation = { id: item.id, type: item.type };
+  const text = item.type === 'memo' || item.type === 'text' || item.type === 'textHighlight' ? item.text.trim() : '';
+  if (text) annotation.text = text.slice(0, MAX_ANNOTATION_TEXT_CHARS);
+  return annotation;
 }
 
 /**
  * POST /api/docs/:docId/regions: crops the region (padded) from the full-resolution slide and reads the PDF's
- * text inside it, in the image worker. 404 unknown document, 409 not converted (yet), 400 bad slide / rect.
+ * text inside it, in the image worker. 404 unknown document, 409 not converted (yet), 400 bad slide / rect, or an
+ * `annotationId` that names no 필기 of the slide (its snapshot is taken before the image is made).
  */
 export async function createRegionAttachment(docId: string, body: unknown, now: Date = new Date()): Promise<Attachment> {
   const doc = await readStoredDoc(docId);
@@ -356,7 +394,8 @@ export async function createRegionAttachment(docId: string, body: unknown, now: 
       doc.status === 'error' ? `문서 처리에 실패했습니다: ${doc.error ?? '알 수 없는 오류'}` : '문서를 아직 처리하는 중입니다',
     );
   }
-  const { slide, rect } = parseRegionRequest(body, doc.pageCount);
+  const { slide, rect, annotationId } = parseRegionRequest(body, doc.pageCount);
+  const annotation = annotationId ? await annotationSnapshot(docId, slide, annotationId) : null;
   await ensureAttachmentsDir(docId);
   const id = newAttachmentId();
   const job: AttachmentJob = { kind: 'region', docDir: docPaths(docId).dir, id, slide, slideFile: slideFileName(slide, doc.pageCount), rect };
@@ -371,6 +410,7 @@ export async function createRegionAttachment(docId: string, body: unknown, now: 
     width: result.width,
     height: result.height,
     text: result.text ?? '',
+    ...(annotation ? { annotation } : {}),
     createdAt: now.toISOString(),
   });
 }

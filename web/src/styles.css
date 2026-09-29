@@ -63,6 +63,12 @@
   --hl-addition-bg: #f0fff4;
   --hl-deletion: #b31d28;
   --hl-deletion-bg: #ffeef0;
+
+  /* Slide annotations (DESIGN §25): the four colors of highlights, shapes, text boxes and memos. */
+  --annot-yellow: #ffd23f;
+  --annot-green: #5fd68a;
+  --annot-pink: #ff7fb0;
+  --annot-blue: #6fb0ff;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -110,6 +116,10 @@
     --hl-addition-bg: #033a16;
     --hl-deletion: #ffdcd7;
     --hl-deletion-bg: #67060c;
+    --annot-yellow: #e0b52f;
+    --annot-green: #4dbb77;
+    --annot-pink: #e86a9c;
+    --annot-blue: #5a98e6;
   }
 }
 
@@ -158,6 +168,10 @@
   --hl-addition-bg: #033a16;
   --hl-deletion: #ffdcd7;
   --hl-deletion-bg: #67060c;
+  --annot-yellow: #e0b52f;
+  --annot-green: #4dbb77;
+  --annot-pink: #e86a9c;
+  --annot-blue: #5a98e6;
 }
 
 /* A forced theme decides the native parts too (form controls, scrollbars, the canvas). */
@@ -5903,5 +5917,1089 @@ kbd {
   *::after {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
+  }
+}
+
+/* ---------------------------------------------------------------- slide annotations (DESIGN §25) */
+
+/* The color of an item, as a token its parts read (highlight fill, shape stroke, memo tint, list bar). */
+.annot-shape.is-yellow,
+.annot-text.is-yellow,
+.memo-card.is-yellow,
+.memo-row.is-yellow {
+  --annot-color: var(--annot-yellow);
+}
+
+.annot-shape.is-green,
+.annot-text.is-green,
+.memo-card.is-green,
+.memo-row.is-green {
+  --annot-color: var(--annot-green);
+}
+
+.annot-shape.is-pink,
+.annot-text.is-pink,
+.memo-card.is-pink,
+.memo-row.is-pink {
+  --annot-color: var(--annot-pink);
+}
+
+.annot-shape.is-blue,
+.annot-text.is-blue,
+.memo-card.is-blue,
+.memo-row.is-blue {
+  --annot-color: var(--annot-blue);
+}
+
+/* Toolbar: the tools (icons; the names are in their tooltips), the color dots, the ⋯ 필기 menu. */
+.annot-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.annot-tools.is-vertical {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  padding: 0;
+  border: 0;
+  background: none;
+}
+
+.annot-tool {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 24px;
+  min-width: 28px;
+  padding: 0 5px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.annot-tools.is-vertical .annot-tool {
+  height: 30px;
+  justify-content: flex-start;
+  padding: 0 10px;
+}
+
+.annot-tool:hover:not(:disabled) {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.annot-tool.is-active {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.annot-tool:disabled {
+  opacity: 0.4;
+}
+
+.annot-tool-icon {
+  display: inline-block;
+  width: 16px;
+  text-align: center;
+  font-weight: 700;
+}
+
+.annot-tool-label {
+  font-size: 13px;
+}
+
+.annot-color-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.annot-dot {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: 50%;
+  background: var(--annot-yellow);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.14);
+  cursor: pointer;
+}
+
+.annot-dot.is-green {
+  background: var(--annot-green);
+}
+
+.annot-dot.is-pink {
+  background: var(--annot-pink);
+}
+
+.annot-dot.is-blue {
+  background: var(--annot-blue);
+}
+
+.annot-dot.is-active {
+  border-color: var(--text);
+}
+
+.annot-dot.is-mini {
+  width: 10px;
+  height: 10px;
+  margin-left: 2px;
+  border-width: 1px;
+}
+
+.annot-dot:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.annot-menu-btn,
+.annot-tools-compact {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.annot-menu-btn:hover,
+.annot-tools-compact:hover,
+.annot-pop-btn.is-open {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.annot-menu-btn.is-active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.annot-pop-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.annot-pop {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 200px;
+  max-width: calc(100vw - 24px);
+  padding: 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+  animation: toast-in 0.12s ease-out;
+}
+
+.annot-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.annot-menu-row input[type='checkbox'] {
+  accent-color: var(--accent);
+}
+
+.annot-menu-row .picker {
+  flex: 1;
+  min-width: 0;
+}
+
+.annot-menu-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.annot-pop-dots {
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.annot-shown-count,
+.annot-replay-badge {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.annot-replay-badge {
+  color: var(--rec);
+}
+
+/* The layer over the slide image: nothing of its own takes the pointer; its items do. */
+.annot-layer {
+  position: absolute;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.annot-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.annot-shape {
+  pointer-events: all;
+  cursor: pointer;
+}
+
+.annot-shape.kind-highlight,
+.annot-shape.kind-text-highlight {
+  fill: var(--annot-color);
+  fill-opacity: 0.45;
+  mix-blend-mode: multiply;
+  stroke: none;
+}
+
+/* A transparent fill (not none): a tap inside the shape selects it, a 2.5 px stroke alone is no touch target. */
+.annot-shape.kind-rect,
+.annot-shape.kind-ellipse {
+  fill: transparent;
+  stroke: var(--annot-color);
+  stroke-width: 3;
+  vector-effect: non-scaling-stroke;
+}
+
+.annot-shape.is-selected {
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-dasharray: 6 4;
+  vector-effect: non-scaling-stroke;
+}
+
+.annot-shape.kind-rect.is-selected,
+.annot-shape.kind-ellipse.is-selected {
+  stroke-width: 3;
+}
+
+.annot-draft-shape {
+  fill: rgba(75, 107, 245, 0.12);
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-dasharray: 6 4;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+
+.annot-draft-shape.is-band {
+  fill: rgba(255, 210, 63, 0.45);
+  stroke: none;
+  mix-blend-mode: multiply;
+}
+
+/* Text boxes: their font scales with the slide (the viewer is a size container: cqw). */
+.annot-text {
+  position: absolute;
+  box-sizing: border-box;
+  overflow: hidden;
+  padding: 0.3cqw;
+  border: 1px solid color-mix(in srgb, var(--annot-color) 70%, transparent);
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--annot-color) 22%, transparent);
+  color: #1c2230;
+  font-size: calc(1.7cqw * var(--zoom, 1));
+  line-height: 1.25;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.annot-text.is-selected {
+  outline: 2px dashed var(--accent);
+  outline-offset: 1px;
+}
+
+.annot-text.is-editing {
+  overflow: visible;
+  cursor: text;
+}
+
+.annot-text.annot-draft {
+  border: 2px dashed var(--accent);
+  background: rgba(75, 107, 245, 0.08);
+  pointer-events: none;
+}
+
+.annot-text-body {
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: none;
+}
+
+.annot-text-empty {
+  color: var(--muted);
+}
+
+.annot-text-input {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: inherit;
+  resize: none;
+  outline: none;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* Selection handles of a rect / ellipse / text box (8) and of a highlight band (2). */
+.annot-handle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  margin: -5px 0 0 -5px;
+  border: 1.5px solid var(--accent-contrast);
+  border-radius: 2px;
+  background: var(--accent);
+  box-shadow: var(--shadow-sm);
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.annot-handle.is-n,
+.annot-handle.is-s {
+  cursor: ns-resize;
+}
+
+.annot-handle.is-e,
+.annot-handle.is-w {
+  cursor: ew-resize;
+}
+
+.annot-handle.is-nw,
+.annot-handle.is-se {
+  cursor: nwse-resize;
+}
+
+.annot-handle.is-ne,
+.annot-handle.is-sw {
+  cursor: nesw-resize;
+}
+
+/* A drawing tool is active: the slide draws instead of scrolling (touch) or selecting; items let the press through. */
+.viewer.is-annot-tool .slide-box {
+  touch-action: none;
+  cursor: crosshair;
+}
+
+.viewer.is-annot-tool .annot-shape,
+.viewer.is-annot-tool .annot-text,
+.viewer.is-annot-tool .annot-handle,
+.viewer.is-annot-tool .qa-marker-wrap {
+  pointer-events: none;
+}
+
+.annot-unsaved {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  padding: 1px 8px;
+  border: 1px solid var(--danger);
+  border-radius: 999px;
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.annot-filter-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 40px 12px;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+/* The floating menu of a selected item (the region menu's look). */
+.annot-item-menu .annot-color-dots {
+  padding: 0 6px;
+}
+
+.region-menu-btn.is-danger {
+  color: var(--danger);
+}
+
+.region-menu-btn.is-off {
+  opacity: 0.6;
+}
+
+/* Sticky memos: UI-sized cards, draggable by the header; a pill when collapsed. */
+.memo-card {
+  position: absolute;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  box-sizing: border-box;
+  width: 24%;
+  min-width: 160px;
+  max-width: 320px;
+  padding: 0 0 6px;
+  border: 1px solid color-mix(in srgb, var(--annot-color) 70%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--annot-color) 28%, var(--surface));
+  box-shadow: var(--shadow);
+  color: var(--text);
+  font-size: 13px;
+  text-align: left;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+  pointer-events: auto;
+}
+
+.memo-card.is-selected {
+  box-shadow:
+    var(--shadow-lg),
+    0 0 0 2px var(--accent);
+}
+
+.memo-card.is-dragging {
+  opacity: 0.9;
+  cursor: grabbing;
+}
+
+.memo-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 26px;
+  padding: 4px 4px 0 8px;
+  cursor: grab;
+}
+
+.memo-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--annot-color);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.14);
+}
+
+.memo-toggle {
+  padding: 0 2px;
+  border: 0;
+  background: none;
+  color: var(--text-2);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.memo-head-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.memo-head-hidden,
+.memo-pill-hidden {
+  font-size: 11px;
+}
+
+.memo-head .menu-btn {
+  width: 24px;
+  height: 24px;
+}
+
+.memo-text {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 38px;
+  margin: 0;
+  padding: 4px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  resize: none;
+  outline: none;
+  cursor: text;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.memo-text::placeholder {
+  color: var(--muted);
+}
+
+.memo-card .tag-input {
+  margin: 0 6px;
+}
+
+.memo-links {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+}
+
+.memo-link {
+  display: inline-flex;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  font-size: 11px;
+}
+
+.memo-link-go {
+  max-width: 180px;
+  overflow: hidden;
+  padding: 1px 6px;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.memo-link-go:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+
+.memo-link-x {
+  padding: 0 5px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.memo-link-add {
+  position: relative;
+  display: inline-flex;
+}
+
+.memo-foot {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px 0 8px;
+}
+
+.memo-eye {
+  padding: 1px 6px;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.memo-eye.is-on {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.memo-card.is-collapsed {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  width: auto;
+  min-width: 0;
+  max-width: 200px;
+  overflow: hidden;
+  padding: 2px 10px 2px 6px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.memo-pill-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.memo-pill-tags {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+/* The bottom sheet of a memo (narrow panes, touch): the editor alone. */
+.memo-card.is-sheet {
+  position: static;
+  width: auto;
+  min-width: 0;
+  max-width: none;
+  box-shadow: none;
+  touch-action: auto;
+}
+
+.memo-sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  background: var(--overlay);
+}
+
+.memo-sheet {
+  width: min(560px, 100%);
+  max-height: 80dvh;
+  overflow: auto;
+  padding: 8px 10px 14px;
+  border-radius: 14px 14px 0 0;
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+  animation: toast-in 0.15s ease-out;
+}
+
+.memo-sheet-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 2px 6px;
+}
+
+/* Tags: chips and the input with its suggestions. */
+.memo-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.memo-tag-x {
+  padding: 0 0 0 2px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.tag-input {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  min-height: 22px;
+  padding: 2px 4px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: text;
+}
+
+.tag-input.is-focused {
+  border-color: var(--border);
+  background: var(--surface);
+}
+
+.tag-input-field {
+  flex: 1;
+  min-width: 60px;
+  padding: 1px 2px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.tag-suggestions {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 7;
+  min-width: 140px;
+  max-height: 160px;
+  margin: 2px 0 0;
+  padding: 4px;
+  overflow: auto;
+  list-style: none;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.tag-suggestion {
+  padding: 4px 8px;
+  border-radius: 5px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.tag-suggestion.is-active,
+.tag-suggestion:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* The link picker of a memo. */
+.link-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 260px;
+  padding: 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+  font-size: 12px;
+  cursor: default;
+}
+
+.link-picker-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.link-picker-row .picker {
+  flex: 1;
+  min-width: 80px;
+}
+
+.link-picker-row .page-jump-input {
+  width: 44px;
+  height: 24px;
+}
+
+.link-picker-p {
+  color: var(--muted);
+}
+
+.link-picker-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+/* Question markers: a 💬 pill at the top-right corner of where a question's region was; a tip on hover. */
+.qa-marker-wrap {
+  position: absolute;
+  z-index: 4;
+  transform: translate(-100%, -100%);
+  pointer-events: auto;
+}
+
+.qa-marker {
+  padding: 1px 7px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+}
+
+.qa-marker:hover {
+  background: var(--accent-strong);
+}
+
+.qa-marker-wrap.is-open .qa-marker {
+  background: var(--accent-strong);
+}
+
+/* The tip is floated in <body> (Floating sets its position and width): the slide box would clip it. */
+.qa-marker-tip {
+  z-index: 62;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  box-sizing: border-box;
+  padding: 6px;
+  overflow: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+  text-align: left;
+  cursor: default;
+}
+
+.qa-marker-q {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.qa-marker-q:hover {
+  background: var(--surface-2);
+}
+
+.qa-marker-q-text {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qa-marker-q-time {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.qa-marker-more {
+  padding: 0 8px;
+  font-size: 11px;
+}
+
+.qa-marker-tip-foot {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 2px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+
+/* A message the chat jumped to (a question marker). */
+.msg.is-target {
+  outline: 2px solid var(--warn);
+  outline-offset: 4px;
+  border-radius: 10px;
+}
+
+/* The 메모 tab. */
+.memo-search {
+  flex: 1;
+  min-width: 120px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.memo-tag-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.filter-chip.is-quiet {
+  border-color: var(--border);
+  background: var(--surface-2);
+  color: var(--text-2);
+}
+
+.memo-tag-count {
+  font-weight: 500;
+  opacity: 0.8;
+}
+
+.memo-row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  padding: 8px 8px 8px 0;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.memo-row:hover,
+.memo-row:focus-visible {
+  background: var(--surface-2);
+  outline: none;
+}
+
+.memo-row-bar {
+  flex: none;
+  width: 4px;
+  border-radius: 0 3px 3px 0;
+  background: var(--annot-color);
+}
+
+.memo-row-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.memo-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.memo-row-line {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.memo-row-line.is-second {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.memo-row-tags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+/* The composer's "📝 메모 N개 포함". */
+.speech-chip.memo-chip {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+@media (max-width: 800px), (max-height: 640px) {
+  .memo-card {
+    min-width: 140px;
+  }
+
+  .viewer-hint {
+    display: none;
+  }
+}
+
+@media (pointer: coarse) {
+  .annot-handle {
+    width: 18px;
+    height: 18px;
+    margin: -9px 0 0 -9px;
+  }
+}
+
+/* The floated panels of a memo card (the link picker, the tag suggestions) are positioned inline in <body>. */
+.tag-suggestions-wrap {
+  z-index: 62;
+}
+
+.tag-suggestions-wrap .tag-suggestions {
+  position: static;
+  margin: 0;
+}
+
+.link-picker {
+  z-index: 62;
+  box-sizing: border-box;
+}
+
+.link-picker form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* A narrow slide: the item menu is centred under / over the item and wraps. */
+.annot-item-menu.is-centered {
+  flex-wrap: wrap;
+  justify-content: center;
+  max-width: calc(100% - 8px);
+  white-space: normal;
+  transform: translateX(-50%);
+}
+
+.annot-item-menu.is-centered.is-above,
+.annot-item-menu.is-centered.is-inside {
+  transform: translate(-50%, -100%);
+}
+
+/* A phone: the toolbar keeps one row (page jump · tools · ⋯ · ✂ 영역 · zoom). */
+@media (max-width: 480px) {
+  .viewer-toolbar {
+    gap: 6px;
+    padding: 6px 8px;
+  }
+
+  .annot-menu-text {
+    display: none;
+  }
+
+  .zoom-label {
+    min-width: 40px;
   }
 }

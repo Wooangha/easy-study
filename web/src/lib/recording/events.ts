@@ -39,11 +39,14 @@ const realTimers: Timers = {
 
 export type ConnectionState = 'connecting' | 'open' | 'retrying' | 'stopped';
 
-export interface EventsClientOptions {
+/** The event names of a recording stream (the annotation stream of DESIGN §25 injects its own). */
+const RECORDING_EVENT_NAMES = ['status', 'segment', 'realigned', 'ping', 'message'];
+
+export interface EventsClientOptions<E extends { type: string } = RecordingEvent> {
   /** URL of the stream, resuming after `since` (the last segment id received), or from the start (null). */
   url: (since: number | null) => string;
   create: EventSourceFactory;
-  onEvent: (event: RecordingEvent) => void;
+  onEvent: (event: E) => void;
   onState?: (state: ConnectionState) => void;
   /** The server closed the stream (non-200 answer): e.g. check whether the login ended. */
   onClosedByServer?: () => void;
@@ -54,6 +57,12 @@ export interface EventsClientOptions {
   reconnectMaxMs?: number;
   /** Segment id to resume after (segments already held). */
   since?: number | null;
+  /**
+   * Turns a frame into an event (null = dropped) and the names of the frames to listen for: the recording
+   * protocol by default; the annotation stream (DESIGN §25) gives its own.
+   */
+  parse?: (eventName: string, data: string) => E | null;
+  eventNames?: readonly string[];
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object';
@@ -110,9 +119,16 @@ export function parseRecordingEvent(eventName: string, data: string): RecordingE
   }
 }
 
+/** A segment event (whatever the stream): de-duplicated by its id, which is also the resume point. */
+function segmentIdOf(event: { type: string }): number | null {
+  if (event.type !== 'segment') return null;
+  const seg = (event as { segment?: unknown }).segment;
+  return isObject(seg) && typeof seg.id === 'number' ? seg.id : null;
+}
+
 /** One SSE subscription with manual reconnect, a watchdog and de-duplicated segments. */
-export class RecordingEventsClient {
-  private readonly o: EventsClientOptions;
+export class RecordingEventsClient<E extends { type: string } = RecordingEvent> {
+  private readonly o: EventsClientOptions<E>;
   private readonly timers: Timers;
   private es: EventSourceLike | null = null;
   private watchdog: unknown = null;
@@ -125,7 +141,7 @@ export class RecordingEventsClient {
   /** Diagnostics (tests). */
   readonly stats = { opens: 0, closedByServer: 0, watchdogFires: 0, reconnects: 0, duplicates: 0 };
 
-  constructor(options: EventsClientOptions) {
+  constructor(options: EventsClientOptions<E>) {
     this.o = options;
     this.timers = options.timers ?? realTimers;
     this.lastSegmentId = options.since ?? null;
@@ -172,21 +188,23 @@ export class RecordingEventsClient {
     this.setState(this.stats.opens === 0 && this.stats.reconnects === 0 ? 'connecting' : 'retrying');
     const es = this.o.create(this.o.url(this.lastSegmentId));
     this.es = es;
+    const parse = this.o.parse ?? (parseRecordingEvent as (eventName: string, data: string) => E | null);
     const onFrame = (name: string) => (ev: MessageEvent) => {
       if (this.es !== es) return;
       this.pet();
-      const event = parseRecordingEvent(name, typeof ev.data === 'string' ? ev.data : '');
+      const event = parse(name, typeof ev.data === 'string' ? ev.data : '');
       if (!event) return;
-      if (event.type === 'segment') {
-        if (this.lastSegmentId !== null && event.segment.id <= this.lastSegmentId) {
+      const segmentId = segmentIdOf(event);
+      if (segmentId !== null) {
+        if (this.lastSegmentId !== null && segmentId <= this.lastSegmentId) {
           this.stats.duplicates++;
           return;
         }
-        this.lastSegmentId = event.segment.id;
+        this.lastSegmentId = segmentId;
       }
       this.o.onEvent(event);
     };
-    for (const name of ['status', 'segment', 'realigned', 'ping', 'message']) es.addEventListener(name, onFrame(name));
+    for (const name of this.o.eventNames ?? RECORDING_EVENT_NAMES) es.addEventListener(name, onFrame(name));
     es.onopen = () => {
       if (this.es !== es) return;
       this.stats.opens++;

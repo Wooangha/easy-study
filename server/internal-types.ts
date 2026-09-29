@@ -1,5 +1,6 @@
 // Server-internal contracts shared by sessions.ts, context.ts and chat.ts.
 import type {
+  AttachmentAnnotation,
   ChatMessage,
   ContextInfo,
   CourseGroup,
@@ -131,6 +132,27 @@ export interface DocAssets {
   course: CourseContext | null;
 }
 
+/** One memo of the student as the tutor context takes it (BuildTurnInput.studentMemos). */
+export interface StudentMemo {
+  /** 1-based slide the memo is stuck on. */
+  slide: number;
+  /** Whitespace squeezed, capped (context.ts MAX_MEMO_CHARS). */
+  text: string;
+  /** The memo's tags, when it has any (shown as "[tags: …]" before the text). */
+  tags?: string[];
+}
+
+/**
+ * A session of a document changed in a way the notes (question markers, DESIGN §25) care about: a turn finished
+ * (`updatedAt` = the saved session's) or the session was deleted (`updatedAt: null`). sessions.ts emits it to
+ * onSessionsChanged listeners; annotations.ts forwards it to the document's SSE hub as AnnotationEvent 'qa'.
+ */
+export interface SessionChange {
+  docId: string;
+  sessionId: string;
+  updatedAt: string | null;
+}
+
 export interface BuildTurnInput {
   doc: DocAssets;
   /** Session *before* this turn (messages do not yet include the new user message). */
@@ -149,9 +171,16 @@ export interface BuildTurnInput {
   forceNewConversation?: 'resume_invalid' | 'context_overflow';
   /**
    * Attachments of this question, in the order the student added them (resolved by chat.ts from the ids):
-   * the stored image path (inline-ready JPEG/PNG), a label, and for regions the text inside the selection.
+   * the stored image path (inline-ready JPEG/PNG), a label, for regions the text inside the selection, and for a
+   * region made from a 필기 (Attachment.annotation, DESIGN §25) the item's type and its text.
    */
-  attachments?: Array<{ kind: 'region' | 'image'; path: string; label: string; text?: string }>;
+  attachments?: Array<{
+    kind: 'region' | 'image';
+    path: string;
+    label: string;
+    text?: string;
+    annotation?: Pick<AttachmentAnnotation, 'type' | 'text'>;
+  }>;
   /**
    * Lecture speech from this document's recordings (DESIGN §22), resolved by chat.ts:
    * per slide of the focus window what was said on it (already capped), and — while a live recording of this
@@ -161,6 +190,13 @@ export interface BuildTurnInput {
     bySlide: Array<{ slide: number; text: string }>;
     recent?: { text: string; minutes: number };
   };
+  /**
+   * The student's own memos on the slides of the focus window (DESIGN §25 "학생의 메모"), resolved by chat.ts
+   * (annotations.memosForTutor) for question turns unless the request said `memos: false`: only memos with
+   * MemoItem.tutor !== false and non-blank text, each ≤ MAX_MEMO_CHARS, at most MAX_TUTOR_MEMOS (the focused slide's
+   * first, then the nearest neighbours). Absent for prime turns. context.ts orders them the same way and caps the total.
+   */
+  studentMemos?: StudentMemo[];
   settings: ContextSettings;
   /** Provider.maxImagesPerConversation of the session's provider. */
   maxImagesPerConversation: number;

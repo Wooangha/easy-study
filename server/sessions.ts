@@ -21,7 +21,7 @@ import { ATTACHMENTS_DIR } from './assets.ts';
 import { attachmentFileNames, removeUnreferencedAttachments } from './attachments.ts';
 import { HttpError } from './config.ts';
 import { initialProviderState } from './context.ts';
-import type { SessionRecord } from './internal-types.ts';
+import type { SessionChange, SessionRecord } from './internal-types.ts';
 import {
   createKeyedQueue,
   demoteHeadings,
@@ -52,6 +52,38 @@ const MAX_HEADING_QUESTION_CHARS = 120;
 const sessionQueue = createKeyedQueue();
 /** Serializes notes regeneration of one document (key: docId). */
 const notesQueue = createKeyedQueue();
+
+// ---------------------------------------------------------------------------
+// Session changes the annotations' question markers care about (DESIGN §25)
+// ---------------------------------------------------------------------------
+
+const sessionListeners = new Set<(change: SessionChange) => void>();
+
+/**
+ * Registers a listener for SessionChange (a turn finished, a session was deleted); returns the unsubscribe.
+ * annotations.ts forwards the changes to the document's SSE subscribers as AnnotationEvent 'qa'.
+ */
+export function onSessionsChanged(listener: (change: SessionChange) => void): () => void {
+  sessionListeners.add(listener);
+  return () => {
+    sessionListeners.delete(listener);
+  };
+}
+
+/**
+ * Tells the listeners that a session of a document changed: chat.ts calls it once per turn, after the turn's final
+ * save (not on the saves at its start or per delta); deleteSession calls it with `updatedAt: null`. A failing
+ * listener is logged, never thrown at the caller.
+ */
+export function notifySessionsChanged(change: SessionChange): void {
+  for (const listener of [...sessionListeners]) {
+    try {
+      listener(change);
+    } catch (err) {
+      console.error('[sessions] change listener failed:', err);
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Time helpers (local time — the notes are read by the person who studied)
@@ -307,6 +339,7 @@ export async function deleteSession(docId: string, sessionId: string): Promise<b
     console.warn(`[sessions] could not remove the attachments of ${sessionId}: ${(err as Error).message}`);
   }
   await writeNotes(docId);
+  notifySessionsChanged({ docId, sessionId, updatedAt: null });
   return true;
 }
 

@@ -4,8 +4,8 @@
 //
 // Layout (docs/DESIGN.md §2, §11, §12, §15, §17):
 //   library/<docId>/doc.json, source.pdf, slides/NNN.png, sheets/sheet-NN.png, sheets/sheets.json,
-//   text/NNN.txt, text/.engine, sessions/<sid>.json, notes/<sid>.md, STUDY_NOTES.md,
-//   digest/digest.json, DIGEST.md,
+//   text/NNN.txt, text/NNN.layout.json, text/.engine, sessions/<sid>.json, notes/<sid>.md, STUDY_NOTES.md,
+//   digest/digest.json, DIGEST.md, annotations/NNN.json, annotations/index.json (server/annotations.ts),
 //   view/NNN-<w>.webp, thumbs/NNN.webp, inline/<dir>-<name>.jpg (derived images, server/assets.ts)
 //   library/courses/<courseId>/course.json, COURSE.md
 //
@@ -79,6 +79,8 @@ export interface DocPaths {
   digestDir: string;
   digestJson: string;
   digestMd: string;
+  /** Slide annotations and their index (server/annotations.ts, DESIGN §25); JSON only, kept across a re-ingest. */
+  annotationsDir: string;
 }
 
 export interface CoursePaths {
@@ -116,6 +118,7 @@ export function docPaths(docId: string): DocPaths {
     digestDir: path.join(dir, 'digest'),
     digestJson: path.join(dir, 'digest', 'digest.json'),
     digestMd: path.join(dir, 'DIGEST.md'),
+    annotationsDir: path.join(dir, 'annotations'),
   };
 }
 
@@ -1059,6 +1062,26 @@ export function requestDerivedImages(docId: string): void {
   if (Date.now() - (backfillRanAt.get(docId) ?? -Infinity) < BACKFILL_COOLDOWN_MS) return;
   backfillQueue.add(docId);
   pumpBackfill();
+}
+
+/**
+ * Asks the backfill to extract a document's text again (a slide's text layout, text/NNN.layout.json of DESIGN §25,
+ * was requested but does not exist yet): the same queue and cooldown as requestDerivedImages — the backfill does
+ * the text of a document first, when an older engine wrote it (needsTextExtraction), then its derived images.
+ * The queue is insertion-ordered; the document is taken in its turn.
+ */
+export function requestTextBackfill(docId: string): void {
+  requestDerivedImages(docId);
+}
+
+/**
+ * Whether the backfill can still write a document's text files (and text layouts): its text was written by another
+ * engine than the current one and source.pdf is there to extract from. False = the current engine already ran (a
+ * missing layout will never appear) or there is no PDF to extract from. Invalid or unknown ids: false.
+ */
+export async function textExtractionPending(docId: string): Promise<boolean> {
+  if (!isDocId(docId)) return false;
+  return needsTextExtraction(docPaths(docId));
 }
 
 /**

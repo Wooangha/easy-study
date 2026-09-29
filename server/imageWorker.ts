@@ -4,10 +4,11 @@
 // and its WebAssembly memory goes away with the process.
 //
 // A run works on one document directory and is one of three jobs:
-//   - PdfJob (ingest, runPdfWorker): source.pdf → slides/NNN.png + text/NNN.txt + text/.engine, reporting the
-//     page count first and then every slide written (§3 steps 1-3);
-//   - TextJob (backfill, runTextWorker): source.pdf → text/NNN.txt + text/.engine only, for documents whose
-//     text an older engine wrote (poppler's pdftotext, an earlier PDFium extraction); the slides are not touched (§17);
+//   - PdfJob (ingest, runPdfWorker): source.pdf → slides/NNN.png + text/NNN.txt + text/NNN.layout.json (the word
+//     boxes, DESIGN §25) + text/.engine, reporting the page count first and then every slide written (§3 steps 1-3);
+//   - TextJob (backfill, runTextWorker): source.pdf → text/NNN.txt + text/NNN.layout.json + text/.engine only, for
+//     documents whose text an older engine wrote (poppler's pdftotext, an earlier PDFium extraction); the slides
+//     are not touched (§17);
 //   - ImageJob (runImageWorker):
 //       1. optionally (ingest) the overview contact sheets: sheets/sheet-NN.png + sheets/sheets.json (§3 step 4),
 //       2. optionally the derived files of server/assets.ts that are still missing: view renditions (lossy
@@ -28,7 +29,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type sharpModule from 'sharp';
 import type { OutputInfo, OverlayOptions, Sharp as SharpPipeline } from 'sharp';
-import type { RegionRect } from '../shared/types.ts';
+import type { RegionRect, SlideTextLayout } from '../shared/types.ts';
 import {
   ATTACHMENTS_DIR,
   ATTACHMENT_FILE_ID_RE,
@@ -45,7 +46,7 @@ import {
 } from './assets.ts';
 import { trackChild } from './children.ts';
 import { childProcessEnv } from './config.ts';
-import { TEXT_ENGINE, TEXT_ENGINE_FILE, slideFileName, textFileName } from './pageNames.ts';
+import { TEXT_ENGINE, TEXT_ENGINE_FILE, layoutFileName, slideFileName, textFileName } from './pageNames.ts';
 import type { PdfDocument, PdfPage } from './pdf.ts';
 
 // ---------------------------------------------------------------------------
@@ -84,7 +85,7 @@ export interface ImageWorkerResult {
   failed: ImageFailure[];
 }
 
-/** Job of runPdfWorker(): library/<docId>/source.pdf → slides/NNN.png + text/NNN.txt (DESIGN §3 steps 1-3). */
+/** Job of runPdfWorker(): library/<docId>/source.pdf → slides/NNN.png + text/NNN.txt + text/NNN.layout.json (DESIGN §3 steps 1-3). */
 export interface PdfJob {
   kind: 'pdf';
   /** Absolute path of library/<docId> (source.pdf in, slides/ and text/ out). */
@@ -93,7 +94,7 @@ export interface PdfJob {
   longEdge: number;
 }
 
-/** Job of runTextWorker(): library/<docId>/source.pdf → text/NNN.txt + text/.engine (DESIGN §17). */
+/** Job of runTextWorker(): library/<docId>/source.pdf → text/NNN.txt + text/NNN.layout.json + text/.engine (DESIGN §17, §25). */
 export interface TextJob {
   kind: 'text';
   /** Absolute path of library/<docId>. */
@@ -706,15 +707,30 @@ function pageText(page: PdfPage, clean: (text: string) => string): string {
   }
 }
 
+/**
+ * The word boxes of a page for text/NNN.layout.json (SlideTextLayout, DESIGN §25), compact JSON; a page whose layout
+ * cannot be read gets an empty one (the file says the run happened: the client then highlights without snapping).
+ */
+function pageLayout(page: PdfPage): string {
+  let lines: SlideTextLayout['lines'] = [];
+  try {
+    lines = page.textLayout();
+  } catch {
+    lines = [];
+  }
+  const layout: SlideTextLayout = { version: 1, engine: TEXT_ENGINE, lines };
+  return JSON.stringify(layout);
+}
+
 /** text/.engine, written after every text file: the text of this document comes from the current engine. */
 async function writeTextEngineMarker(textDir: string): Promise<void> {
   await writeAtomic(path.join(textDir, TEXT_ENGINE_FILE), `${TEXT_ENGINE}\n`);
 }
 
 /**
- * source.pdf → slides/NNN.png (long edge job.longEdge, RGB PNG) + text/NNN.txt (trimmed; '' without text),
- * then text/.engine. The PNG of page n is encoded (sharp, libuv pool) while page n+1 is rasterized (PDFium,
- * main thread); 'progress' is sent once a PNG is on disk.
+ * source.pdf → slides/NNN.png (long edge job.longEdge, RGB PNG) + text/NNN.txt (trimmed; '' without text) +
+ * text/NNN.layout.json (the word boxes), then text/.engine. The PNG of page n is encoded (sharp, libuv pool) while
+ * page n+1 is rasterized (PDFium, main thread); 'progress' is sent once a PNG is on disk.
  */
 async function runPdfJob(job: PdfJob, send: (message: ChildMessage) => Promise<void>): Promise<void> {
   const [{ openPdf, cleanPageText, fallbackFontWarning }, sharp] = await Promise.all([import('./pdf.ts'), import('sharp').then((mod) => mod.default)]);
@@ -734,7 +750,11 @@ async function runPdfJob(job: PdfJob, send: (message: ChildMessage) => Promise<v
     const first = doc.withPage(1, (page) => ({ width: page.width, height: page.height }));
     await send({ type: 'info', pageCount, aspectRatio: first.width > 0 && first.height > 0 ? first.width / first.height : 4 / 3 });
     for (let n = 1; n <= pageCount; n++) {
-      const { rendered, text } = doc.withPage(n, (page) => ({ rendered: page.render(job.longEdge), text: pageText(page, cleanPageText) }));
+      const { rendered, text, layout } = doc.withPage(n, (page) => ({
+        rendered: page.render(job.longEdge),
+        text: pageText(page, cleanPageText),
+        layout: pageLayout(page),
+      }));
       const warning = warned ? null : fallbackFontWarning();
       if (warning) {
         warned = true;
@@ -751,6 +771,7 @@ async function runPdfJob(job: PdfJob, send: (message: ChildMessage) => Promise<v
       // Awaited before the next page (or below); a failure while this page's text is written is not "unhandled".
       encoding.catch(() => {});
       await writeAtomic(path.join(textDir, textFileName(n, pageCount)), text);
+      await writeAtomic(path.join(textDir, layoutFileName(n, pageCount)), layout);
     }
     await encoding;
     await writeTextEngineMarker(textDir);
@@ -762,8 +783,9 @@ async function runPdfJob(job: PdfJob, send: (message: ChildMessage) => Promise<v
 }
 
 /**
- * source.pdf → text/NNN.txt for pages 1..job.pageCount, then text/.engine (DESIGN §17). Pages the PDF does not
- * have (a page count that differs from the earlier engine's) keep their file.
+ * source.pdf → text/NNN.txt and text/NNN.layout.json for pages 1..job.pageCount, then text/.engine (DESIGN §17, §25).
+ * Pages the PDF does not have (a page count that differs from the earlier engine's) keep their file. Leftover
+ * `*.tmp` files of a text or layout write that was stopped are removed first.
  */
 async function runTextJob(job: TextJob, send: (message: ChildMessage) => Promise<void>): Promise<void> {
   const { openPdf, cleanPageText } = await import('./pdf.ts');
@@ -774,8 +796,9 @@ async function runTextJob(job: TextJob, send: (message: ChildMessage) => Promise
   try {
     const pages = Math.min(doc.pageCount, job.pageCount);
     for (let n = 1; n <= pages; n++) {
-      const text = doc.withPage(n, (page) => pageText(page, cleanPageText));
+      const { text, layout } = doc.withPage(n, (page) => ({ text: pageText(page, cleanPageText), layout: pageLayout(page) }));
       await writeAtomic(path.join(textDir, textFileName(n, job.pageCount)), text);
+      await writeAtomic(path.join(textDir, layoutFileName(n, job.pageCount)), layout);
     }
     await writeTextEngineMarker(textDir);
     await send({ type: 'done', written: pages, failed: [] });

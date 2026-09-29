@@ -234,6 +234,8 @@ export interface ContextInfo {
   switched?: true;
   /** Number of attachments (selected slide regions / images) sent with this question. */
   attachments?: number;
+  /** Number of the student's own memos (§25 "학생의 메모") given to the tutor with this question; absent when none. */
+  memos?: number;
 }
 
 export interface ChatMessage {
@@ -346,6 +348,11 @@ export interface SendMessageRequest {
   neighbors?: number;
   /** Ids of attachments created beforehand (POST …/attachments or …/regions) of this document, max MAX_ATTACHMENTS. */
   attachments?: string[];
+  /**
+   * Include the student's memos on the focus window's slides as "학생의 메모" (DESIGN §25; the device's 설정 › 공부
+   * switch). Omitted = true. Memos with MemoItem.tutor === false are never included.
+   */
+  memos?: boolean;
 }
 
 export interface PrimeRequest {
@@ -542,13 +549,33 @@ export interface Attachment {
   height: number;
   /** kind 'region': text of the PDF text layer inside the rectangle ('' when none). */
   text?: string;
+  /**
+   * kind 'region' made from an annotation item (📎 첨부 of a 필기, DESIGN §25): a snapshot taken when the attachment was
+   * made — the item's id and type and, for memos / text boxes / text highlights, its text (≤ MAX_ANNOTATION_TEXT_CHARS).
+   * Stored on the user message with the attachment; question markers link the item to the Q&A through it.
+   */
+  annotation?: AttachmentAnnotation;
   createdAt: string;
+}
+
+/** Attachment.annotation: which 필기 a region attachment was made from. */
+export interface AttachmentAnnotation {
+  /** ANNOTATION_ID_RE — the item may be deleted later; markers then fall back to the attachment's rect. */
+  id: string;
+  type: AnnotationItem['type'];
+  /** The memo's / text box's text or the highlighted words, as they were when attached. */
+  text?: string;
 }
 
 /** POST /api/docs/:docId/regions */
 export interface CreateRegionRequest {
   slide: number;
   rect: RegionRect;
+  /**
+   * Make the region from this annotation item of `slide` (DESIGN §25): the server reads the item and stores
+   * Attachment.annotation; an unknown id → 400 '그 필기를 찾을 수 없습니다'.
+   */
+  annotationId?: string;
 }
 
 export const MAX_ATTACHMENTS = 6;
@@ -678,3 +705,302 @@ export const LIVE_SAMPLE_RATE = 16000;
 export const LIVE_SPEECH_IDLE_MS = 10 * 60 * 1000;
 /** Maximum size of an uploaded recording (bytes). */
 export const MAX_RECORDING_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024;
+
+// ---------------------------------------------------------------------------
+// Slide annotations (DESIGN §25): 형광펜 / 텍스트 형광 / 사각형 / 동그라미 / 텍스트 상자 / 스티커 메모 drawn on slides
+// with the mouse or trackpad, stored per slide under the lecture folder (annotations/NNN.json), shared live between
+// devices over SSE; 질문 표시 (question markers) are derived from sessions, only hidden ones are stored.
+//
+// Coordinates: every geometry is normalised 0..1 to the rendered slide IMAGE (origin top-left, /Rotate applied) —
+// exactly RegionRect of §21, not PDF points and not the slide box — so a text-fitted highlight, a region attachment
+// and a question marker share one coordinate system at every zoom and on letterboxed pages. The client rounds to
+// 4 decimals; the server clamps to 0..1 and rounds to 4.
+// ---------------------------------------------------------------------------
+
+export type AnnotationColor = 'yellow' | 'green' | 'pink' | 'blue';
+export const ANNOTATION_COLORS: readonly AnnotationColor[] = ['yellow', 'green', 'pink', 'blue'];
+/** `an-` + 12 hex (6 random bytes, crypto.getRandomValues in the browser), chosen by the client so an optimistic item keeps its id. */
+export const ANNOTATION_ID_RE = /^an-[0-9a-f]{12}$/;
+
+/** When an item was made on the recording clock (seconds, 3 decimals; the clock of SlideViewEvent.t). */
+export interface RecordedAt {
+  /** RECORDING_ID_RE; the recording may be deleted later (the stamp stays, a click on it then toasts). */
+  rid: string;
+  /** Finite, ≥ 0, rounded to 3 decimals. */
+  t: number;
+}
+
+export interface AnnotationBase {
+  /** ANNOTATION_ID_RE; unique within the slide. */
+  id: string;
+  color: AnnotationColor;
+  /** ISO; set by the client on `add` (the server stamps its own clock when the value is not a valid ISO string). */
+  createdAt: string;
+  /** ISO; always the server's clock, stamped on every accepted add / update (a client-sent value is replaced). */
+  updatedAt: string;
+  /**
+   * Made while a live recording of this lecture ran. Stamped by the creating client (recorder.clock()); when absent
+   * on an `add` and the server holds a live recording of the document, the server stamps `{ rid, t: durationSec }`
+   * (the audio stored so far — the two-device case: the phone records, the laptop annotates). Only creation stamps
+   * it: never patched.
+   */
+  recordedAt?: RecordedAt;
+}
+/**
+ * 형광펜: one straight translucent band. Snapped to the text line under the drag's start when the slide's text layout
+ * (SlideTextLayout) has one — the band takes the line's extent along its minor axis and the drag's along its major
+ * axis (`dir`) — else a band of HIGHLIGHT_BAND_H centred on the start.
+ */
+export interface HighlightItem extends AnnotationBase {
+  type: 'highlight';
+  rect: RegionRect;
+}
+/**
+ * 텍스트 형광: one rect per line, fitted to the words; anchored to the PDFium char index range [start, end) of the
+ * page's text layer (SlideTextLayout words carry the same indices), so rects can be recomputed after an engine change.
+ */
+export interface TextHighlightItem extends AnnotationBase {
+  type: 'textHighlight';
+  /** ≤ MAX_TEXT_HIGHLIGHT_RECTS, each w,h > 0. */
+  rects: RegionRect[];
+  /** Integers, 0 ≤ start < end. */
+  chars: [start: number, end: number];
+  /**
+   * The text layout's engine (SlideTextLayout.engine) `chars` were taken from. The layer draws the stored `rects`;
+   * when the viewer loads the slide's layout (a highlight tool used on it) and its engine differs, the client
+   * re-anchors by searching `text` in the layout and writes the new fit back (rects, chars, engine, text).
+   */
+  engine: string;
+  /** The highlighted words (≤ MAX_ANNOTATION_TEXT_CHARS; for the tutor and the memo list). */
+  text: string;
+}
+/** 사각형 */
+export interface RectItem extends AnnotationBase {
+  type: 'rect';
+  rect: RegionRect;
+}
+/** 동그라미: the ellipse inscribed in `rect`. */
+export interface EllipseItem extends AnnotationBase {
+  type: 'ellipse';
+  rect: RegionRect;
+}
+/** 텍스트 상자: typed text drawn on the slide (≤ MAX_ANNOTATION_TEXT_CHARS); rect.h is the last laid-out height. */
+export interface TextItem extends AnnotationBase {
+  type: 'text';
+  rect: RegionRect;
+  text: string;
+}
+/**
+ * Where a memo links to (never a URL). Clicking navigates: a slide of this lecture, a slide of another lecture (its
+ * title looked up client-side; a deleted one shows "지워진 강의"), or a moment of a recording (played in the 녹음 tab).
+ */
+export type MemoLink =
+  | { kind: 'slide'; slide: number }
+  | { kind: 'doc'; docId: string; slide?: number }
+  | { kind: 'recording'; rid: string; t: number };
+/** 스티커 메모 */
+export interface MemoItem extends AnnotationBase {
+  type: 'memo';
+  /** Top-left anchor on the image (0..1). */
+  at: { x: number; y: number };
+  /** ≤ MAX_ANNOTATION_TEXT_CHARS. Rendered as plain text only (no Markdown). */
+  text: string;
+  /**
+   * ≤ MAX_MEMO_TAGS, each ≤ MAX_TAG_CHARS: trimmed, inner whitespace squeezed to one space, no leading '#', unique
+   * (case-sensitive).
+   */
+  tags: string[];
+  collapsed: boolean;
+  /** 👁 "튜터에게 보이기" (default true): included in the tutor's "학생의 메모" of the focus window. */
+  tutor: boolean;
+  /** ≤ MAX_MEMO_LINKS. A memo created during a live recording gets `{ kind: 'recording', rid, t }` (its 🎙 chip). */
+  links: MemoLink[];
+}
+export type AnnotationItem = HighlightItem | TextHighlightItem | RectItem | EllipseItem | TextItem | MemoItem;
+
+/**
+ * Which question a marker belongs to: the session (SESSION_ID_RE), the user message (MESSAGE_ID_RE) and the region
+ * attachment (ATTACHMENT_ID_RE). Markers are derived from sessions on the client (DESIGN §25 "질문 표시"); only hidden
+ * ones are stored, by key.
+ */
+export interface MarkerKey {
+  sessionId: string;
+  messageId: string;
+  attachmentId: string;
+}
+
+/** library/<docId>/annotations/NNN.json (NNN = the slide's padded number, like text/NNN.txt) and GET/PUT/PATCH …/annotations/:slide. */
+export interface SlideAnnotations {
+  version: 1;
+  slide: number;
+  /** 0 = no file yet; +1 per accepted write (optimistic concurrency: PUT/PATCH carry `baseRev`). */
+  rev: number;
+  updatedAt: string;
+  /** z-order = array order; ≤ MAX_ANNOTATION_ITEMS; ids unique. */
+  items: AnnotationItem[];
+  /** ≤ MAX_HIDDEN_MARKERS, unique keys. */
+  hiddenMarkers: MarkerKey[];
+}
+export const MAX_ANNOTATION_ITEMS = 200;
+/** Memo / text box text, the highlighted words of a 텍스트 형광, and Attachment.annotation.text. */
+export const MAX_ANNOTATION_TEXT_CHARS = 2000;
+/**
+ * JSON length of a slide's stored document (SlideAnnotations) after a write; a write that would exceed it → 400
+ * '이 슬라이드의 필기가 너무 많아요 (일부를 지워 주세요)'. Keeps every slide doc, the PATCH bodies and the client's held
+ * slides small (≤ 24 loaded slides per client).
+ */
+export const MAX_SLIDE_ANNOTATION_BYTES = 256 * 1024;
+export const MAX_MEMO_TAGS = 10;
+export const MAX_TAG_CHARS = 30;
+export const MAX_MEMO_LINKS = 8;
+export const MAX_TEXT_HIGHLIGHT_RECTS = 200;
+export const MAX_ANNOTATION_OPS = 100;
+export const MAX_HIDDEN_MARKERS = 500;
+/** 형광펜 band height (of the image) when no text line is under the drag's start. */
+export const HIGHLIGHT_BAND_H = 0.028;
+/** ChatMessage.id inside a MarkerKey (a uuid today; checked, never used as a path). */
+export const MESSAGE_ID_RE = /^[A-Za-z0-9-]{1,64}$/;
+
+/**
+ * A client's id for the annotation SSE / write pairing: PUT/PATCH send it in the ANNOTATION_CLIENT_HEADER header and
+ * GET …/annotations/events takes it as `?client=`; the hub does not echo a client's own `slide` / `slide-reset` events
+ * back to it. Optional (curl, tests): without it every subscriber gets every event.
+ */
+export const ANNOTATION_CLIENT_HEADER = 'X-Annotation-Client';
+export const ANNOTATION_CLIENT_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
+
+/** PUT …/annotations/:slide — replaces the slide's items and hidden markers. */
+export interface PutSlideAnnotationsRequest {
+  /** The rev the client holds (0 for a slide without a file); ≠ the stored rev → 409 with `current`. */
+  baseRev: number;
+  items: AnnotationItem[];
+  hiddenMarkers: MarkerKey[];
+}
+/**
+ * The fields of an item an `update` op may change: everything but the id, the type, `createdAt` and `recordedAt`
+ * (creation-only). `updatedAt` is accepted so the server's applied op (AnnotationEvent 'slide') can carry its stamp;
+ * a client-sent value is replaced. Distributive over the union: `{ rect }` is valid for a rect item, `{ tags }` for a
+ * memo; the server applies only the fields of that item's type (patchableFields[type]) and rejects a key of another
+ * type (400).
+ */
+export type Patchable<T> = T extends AnnotationItem ? Partial<Omit<T, 'id' | 'type' | 'createdAt' | 'recordedAt'>> : never;
+/** PATCH …/annotations/:slide — ops applied in order on the current document; undo/redo replay inverse ops. */
+export type AnnotationOp =
+  /** Duplicate id → 409 with `current`. */
+  | { op: 'add'; item: AnnotationItem }
+  /** Missing id → 409 with `current`. */
+  | { op: 'update'; id: string; patch: Patchable<AnnotationItem> }
+  /** Idempotent (undo/redo may replay it). */
+  | { op: 'remove'; id: string }
+  /** Both de-duplicate keys; unhiding an unknown key is a no-op. */
+  | { op: 'hideMarker'; key: MarkerKey }
+  | { op: 'unhideMarker'; key: MarkerKey };
+export interface PatchSlideAnnotationsRequest {
+  baseRev: number;
+  /** ≤ MAX_ANNOTATION_OPS. */
+  ops: AnnotationOp[];
+}
+/** 409 body of PUT/PATCH …/annotations/:slide (HttpError `fields`, like `missingAttachments`): the document as stored now. */
+export interface SlideAnnotationsConflict {
+  error: string;
+  current: SlideAnnotations;
+}
+
+/** A memo as the per-lecture summary lists it (the memo tab, filters; no per-slide loads). */
+export interface MemoSummary {
+  id: string;
+  slide: number;
+  color: AnnotationColor;
+  /** The first MAX_MEMO_SUMMARY_CHARS characters, at most two lines (whitespace squeezed). */
+  text: string;
+  tags: string[];
+  tutor: boolean;
+  createdAt: string;
+  updatedAt: string;
+  recordedAt?: RecordedAt;
+  links: MemoLink[];
+}
+export const MAX_MEMO_SUMMARY_CHARS = 400;
+/**
+ * library/<docId>/annotations/index.json and GET …/annotations — the per-lecture summary, rewritten (debounced) after
+ * every write, rebuilt from the slide files when missing. Readers ignore unknown fields.
+ */
+export interface AnnotationSummary {
+  version: 1;
+  /** Only slides that have items, ascending; `rev` lets a reconnecting client tell which loaded slides are stale. */
+  slides: Array<{ slide: number; rev: number; items: number; memos: number; tags: string[] }>;
+  /** Every memo of the lecture: slide order, then createdAt. */
+  memos: MemoSummary[];
+  /** Every tag of the lecture with the number of memos carrying it, most used first, then alphabetical. */
+  tags: Array<{ tag: string; count: number }>;
+}
+/** GET /api/annotations/tags — library-wide, for autocomplete. */
+export interface AnnotationTagsResponse {
+  tags: Array<{ tag: string; count: number }>;
+}
+
+/** A box on the slide image: [x, y, w, h] normalised 0..1, 4 decimals. */
+export type LayoutBox = [x: number, y: number, w: number, h: number];
+/**
+ * text/NNN.layout.json (engine pdfium-3) and GET …/text-layout/:slide: word boxes of the page's text layer, for
+ * 텍스트 형광 and 형광펜 snapping. Lines are in reading (content) order; each knows the axis its words advance along on
+ * the image ('h' for a page read left to right, 'v' when /Rotate or the glyphs' own angle turned the line): the band
+ * of a 형광펜 takes the line's extent along the other axis, and 텍스트 형광 orders words by the coordinate along `dir`.
+ */
+export interface SlideTextLayout {
+  version: 1;
+  /** TEXT_ENGINE of the extraction that wrote it (TextHighlightItem.engine). */
+  engine: string;
+  lines: Array<{
+    r: LayoutBox;
+    dir: 'h' | 'v';
+    /**
+     * Split at blanks and, for CJK, around each Han / Hiragana / Katakana code point (and each Hangul syllable of a
+     * run without spaces), so a drag can select less than a whole line. `c` = PDFium char indices [start, end) — the
+     * anchor TextHighlightItem.chars uses.
+     */
+    words: Array<{ r: LayoutBox; t: string; c: [start: number, end: number] }>;
+  }>;
+}
+/** 404 body of GET …/text-layout/:slide: `pending` = the backfill was asked for it (ask again later); false = it will never exist. */
+export interface TextLayoutMissingResponse {
+  error: string;
+  pending: boolean;
+}
+
+/** Events on GET …/annotations/events (SSE, `event: <type>`, JSON data; no replay — clients refetch what they hold on reconnect). */
+export type AnnotationEvent =
+  /**
+   * After every accepted PATCH: the ops as the server applied them (`add` carries the stored item with the server's
+   * `updatedAt` / `recordedAt`, `update` the accepted patch plus `updatedAt`), and the new rev. Clients apply them with
+   * the same pure applyOps when `rev` follows the rev they hold, else refetch the slide. Not sent to the writer's own
+   * client id.
+   */
+  | { type: 'slide'; slide: number; rev: number; updatedAt: string; ops: AnnotationOp[] }
+  /** After an accepted PUT (the whole slide document; not sent to the writer's own client id). */
+  | { type: 'slide-reset'; annotations: SlideAnnotations }
+  /** Counts / tags / memo summaries changed → clients refetch the summary if they show it. */
+  | { type: 'summary' }
+  /**
+   * A session of this lecture finished a turn (`updatedAt` = the session's) or was deleted (`updatedAt: null`) →
+   * clients refresh their notes (question markers) unless they already hold that state.
+   */
+  | { type: 'qa'; sessionId: string; updatedAt: string | null }
+  | { type: 'ping' };
+
+/**
+ * Per-device annotation settings (localStorage; web/src/lib/storage.ts keys of the same names; DESIGN §25). Only
+ * `memosToTutor` reaches the server, as SendMessageRequest.memos.
+ */
+export interface AnnotationDeviceSettings {
+  /** Color of new items (`annotColor`). Default 'yellow'. */
+  annotColor: AnnotationColor;
+  /** 필기 보기/숨기기 (`annotLayer`). Default true; hidden = layers unmount, tools disabled. */
+  annotLayer: boolean;
+  /** 슬라이드에 질문 표시 보기 (`questionMarkers`). Default true. */
+  questionMarkers: boolean;
+  /** 학생의 메모를 튜터에게 보이기 (`memosToTutor`). Default true. */
+  memosToTutor: boolean;
+  /** 그때 필기 재생 (`replayAnnotations`). Default false; effective only while a recording of the lecture is selected in the 녹음 tab. */
+  replayAnnotations: boolean;
+}

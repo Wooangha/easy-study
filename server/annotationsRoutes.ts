@@ -1,0 +1,134 @@
+// HTTP routes of slide annotations (DESIGN §25): the per-lecture summary, the per-slide documents (GET / PUT /
+// PATCH with optimistic concurrency), the SSE stream of a document, the text layout of a slide and the library-wide
+// tag list. Mounted by server/index.ts inside the API router, after the Host/Origin guard and the login (remote
+// mode): every route needs a session there. Errors are HttpErrors → JSON {error, …} through the API's error handler.
+// Ids are validated before any file is touched; `/annotations` and `/annotations/events` are registered before
+// `/annotations/:slide` so the slide validator never sees 'events'.
+import path from 'node:path';
+import express from 'express';
+import type { Request, Response } from 'express';
+import { ANNOTATION_CLIENT_HEADER, ANNOTATION_CLIENT_ID_RE, DOC_ID_RE } from '../shared/types.ts';
+import type { TextLayoutMissingResponse } from '../shared/types.ts';
+import { listAnnotationTags, patchSlideAnnotations, putSlideAnnotations, readSlideAnnotations, readSummary, subscribeAnnotations } from './annotations.ts';
+import { HttpError } from './config.ts';
+import { docPaths, readStoredDoc, requestTextBackfill, textExtractionPending } from './library.ts';
+import { layoutFileName } from './pageNames.ts';
+
+const NOT_FOUND_SLIDE = '슬라이드를 찾을 수 없습니다';
+/** 404 bodies of GET …/text-layout/:slide (TextLayoutMissingResponse). */
+export const LAYOUT_PENDING = '이 슬라이드의 글자 위치를 아직 준비하지 못했어요';
+export const LAYOUT_NEVER = '이 슬라이드에는 글자 위치 정보가 없어요';
+
+/** The writer's client id of a PUT / PATCH (its own events are not echoed to it), when the header carries a valid one. */
+function clientOf(req: Request): string | undefined {
+  const value = req.get(ANNOTATION_CLIENT_HEADER)?.trim();
+  return value && ANNOTATION_CLIENT_ID_RE.test(value) ? value : undefined;
+}
+
+/** `?client=` of the events stream, when valid (else the subscriber gets every event). */
+function clientOfQuery(req: Request): string | undefined {
+  const value = typeof req.query.client === 'string' ? req.query.client.trim() : '';
+  return value && ANNOTATION_CLIENT_ID_RE.test(value) ? value : undefined;
+}
+
+/** res.sendFile with the file's folder as `root` (Express refuses dot segments only below `root`, see index.ts). */
+function sendFile(res: Response, file: string, options: Parameters<Response['sendFile']>[1]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    res.sendFile(path.basename(file), { ...options, root: path.dirname(file) }, (err) => (err ? reject(err) : resolve()));
+  });
+}
+
+export function createAnnotationsRouter(): express.Router {
+  const router = express.Router();
+  router.param('docId', (_req, _res, next, value: string) => {
+    next(DOC_ID_RE.test(value) ? undefined : new HttpError(404, '문서를 찾을 수 없습니다'));
+  });
+  // An integer ≥ 1; the range (1..pageCount) is checked by the store.
+  router.param('slide', (_req, _res, next, value: string) => {
+    next(/^[1-9]\d{0,5}$/.test(value) ? undefined : new HttpError(404, NOT_FOUND_SLIDE));
+  });
+
+  /** Library-wide tag counts, for autocomplete. */
+  router.get('/annotations/tags', async (_req, res) => {
+    res.set('Cache-Control', 'no-cache');
+    res.json(await listAnnotationTags());
+  });
+
+  const base = '/docs/:docId/annotations';
+
+  router.get(base, async (req, res) => {
+    res.set('Cache-Control', 'no-cache');
+    res.json(await readSummary(req.params.docId as string));
+  });
+
+  /** SSE: slide (ops) / slide-reset / summary / qa / ping; no replay (clients refetch what they hold on reconnect). */
+  router.get(`${base}/events`, async (req, res) => {
+    const docId = req.params.docId as string;
+    if ((await readStoredDoc(docId)) === null) throw new HttpError(404, '문서를 찾을 수 없습니다'); // as JSON, before the stream opens
+    res.status(200);
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+    res.socket?.setNoDelay(true);
+    let unsubscribe: (() => void) | null = null;
+    let closed = false;
+    res.on('close', () => {
+      closed = true;
+      unsubscribe?.();
+    });
+    try {
+      unsubscribe = await subscribeAnnotations(docId, res, clientOfQuery(req));
+      if (closed) unsubscribe();
+    } catch {
+      if (!res.writableEnded) res.end();
+    }
+  });
+
+  router.get(`${base}/:slide`, async (req, res) => {
+    res.set('Cache-Control', 'no-cache');
+    res.json(await readSlideAnnotations(req.params.docId as string, Number(req.params.slide)));
+  });
+
+  router.put(`${base}/:slide`, async (req, res) => {
+    res.set('Cache-Control', 'no-cache');
+    res.json(await putSlideAnnotations(req.params.docId as string, Number(req.params.slide), req.body, clientOf(req)));
+  });
+
+  router.patch(`${base}/:slide`, async (req, res) => {
+    res.set('Cache-Control', 'no-cache');
+    res.json(await patchSlideAnnotations(req.params.docId as string, Number(req.params.slide), req.body, clientOf(req)));
+  });
+
+  /**
+   * The word boxes of a slide (text/NNN.layout.json, served with no-cache + ETag: it changes only with the engine).
+   * 409 while the document is not ready; 404 `pending: true` when the backfill can still write it (asked for), 404
+   * `pending: false` when it never will exist (no source.pdf, or the current engine already ran).
+   */
+  router.get('/docs/:docId/text-layout/:slide', async (req, res) => {
+    const docId = req.params.docId as string;
+    const doc = await readStoredDoc(docId);
+    if (!doc) throw new HttpError(404, '문서를 찾을 수 없습니다');
+    if (doc.status !== 'ready') {
+      throw new HttpError(409, doc.status === 'error' ? `문서 처리에 실패했습니다: ${doc.error ?? '알 수 없는 오류'}` : '문서를 아직 처리하는 중입니다');
+    }
+    const slide = Number(req.params.slide);
+    if (slide > doc.pageCount) throw new HttpError(404, NOT_FOUND_SLIDE);
+    const file = path.join(docPaths(docId).textDir, layoutFileName(slide, doc.pageCount));
+    try {
+      await sendFile(res, file, { cacheControl: false, headers: { 'Cache-Control': 'no-cache', 'Content-Type': 'application/json; charset=utf-8' } });
+      return;
+    } catch (err) {
+      if (res.headersSent) {
+        if ((err as NodeJS.ErrnoException).code !== 'ECONNABORTED') console.warn(`[http] ${req.path}: ${(err as Error).message}`);
+        return;
+      }
+    }
+    const pending = await textExtractionPending(docId);
+    if (pending) requestTextBackfill(docId);
+    const body: Omit<TextLayoutMissingResponse, 'error'> = { pending };
+    throw new HttpError(404, pending ? LAYOUT_PENDING : LAYOUT_NEVER, body);
+  });
+
+  return router;
+}

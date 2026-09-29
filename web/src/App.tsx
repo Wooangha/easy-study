@@ -1,21 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import type { Attachment, DocMeta, RegionRect } from '../../shared/types.ts';
+import type { AnnotationItem, Attachment, DocMeta, RegionRect } from '../../shared/types.ts';
 import { ApiError, errorMessage, startDigest } from './api.ts';
 import { AttachmentContext, AttachmentPreview, type AttachmentActions } from './components/Attachments.tsx';
-import { ChatPanel, type PanelTab } from './components/ChatPanel.tsx';
+import { ChatPanel, type PanelTab, type ScrollRequest } from './components/ChatPanel.tsx';
 import { ConfirmHost } from './components/ConfirmDialog.tsx';
 import { DigestPanel, type DigestMode } from './components/DigestPanel.tsx';
 import { DocStatusView, LibraryView } from './components/LibraryView.tsx';
+import { MemoListPanel } from './components/MemoListPanel.tsx';
 import { NotesPanel, type NotesFilter } from './components/NotesPanel.tsx';
 import { RecordControl, RecordingStrip } from './components/recording/RecorderBar.tsx';
 import { RecordingUploadContext } from './components/recording/RecordingUploads.tsx';
-import { RecordingsPanel } from './components/recording/RecordingsPanel.tsx';
+import { RecordingsPanel, type PlayRequest } from './components/recording/RecordingsPanel.tsx';
 import { SettingsDialog } from './components/SettingsDialog.tsx';
 import { SlideViewer, type SlideViewerHandle } from './components/SlideViewer.tsx';
 import { SplitPane } from './components/SplitPane.tsx';
 import { Toaster } from './components/Toaster.tsx';
 import { TopBar } from './components/TopBar.tsx';
 import { UpdateBanner } from './components/UpdateBanner.tsx';
+import { useAnnotations } from './hooks/useAnnotations.ts';
 import { useAttachments } from './hooks/useAttachments.ts';
 import { useCourses } from './hooks/useCourses.ts';
 import { useDigest } from './hooks/useDigest.ts';
@@ -188,6 +190,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
   const {
     addFiles,
     addRegion,
+    addAnnotation,
     take: takeAttachments,
     restore: restoreAttachments,
     settle: settleAttachments,
@@ -242,6 +245,14 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
     },
     [addRegion],
   );
+  /** 📎 첨부 of an annotation item (DESIGN §25): a chip in the composer, sent with the next question. */
+  const attachItem = useCallback(
+    (slide: number, item: AnnotationItem) => {
+      setTab('chat');
+      void addAnnotation(slide, item);
+    },
+    [addAnnotation],
+  );
   const openNotesFor = useCallback(
     (slide: number) => {
       setTab('notes');
@@ -271,6 +282,74 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
     changeTab('recordings');
   }, [readyDocId, setDocId, changeTab]);
   const togglePin = useCallback(() => setPinnedSlide((p) => (p === null ? focusedSlide : null)), [focusedSlide]);
+
+  // ---- Slide annotations (DESIGN §25): the memo tab, question markers → Q&A, memo links, recording moments ----
+  const annotations = useAnnotations(readyDocId);
+  const annotationStore = annotations.store;
+  const memoCount = annotations.snapshot.summary?.memos.length ?? 0;
+  // Another device's turn finished (or a session was deleted): the notes (and so the markers) are stale.
+  useEffect(() => {
+    if (!annotationStore) return;
+    return annotationStore.onQa((change) => {
+      const known = studyRef.current.sessions?.find((s) => s.id === change.sessionId);
+      if (known && change.updatedAt !== null && known.updatedAt === change.updatedAt) return;
+      void refreshNotes(annotationStore.docId);
+      void studyRef.current.refreshSessions(annotationStore.docId);
+    });
+  }, [annotationStore, refreshNotes, studyRef]);
+  const [scrollRequest, setScrollRequest] = useState<ScrollRequest | null>(null);
+  const scrollSeq = useRef(0);
+  /** A question marker was clicked: the chat shows that Q&A (its session opened, the message scrolled into view). */
+  const openQa = useCallback(
+    (sessionId: string, messageId: string) => {
+      const s = studyRef.current;
+      if (s.sessions && !s.sessions.some((x) => x.id === sessionId)) {
+        toast('그 질문의 세션을 찾을 수 없어요', 'info');
+        return;
+      }
+      setTab('chat');
+      if (s.sessionId !== sessionId) s.selectSession(sessionId);
+      setScrollRequest({ sessionId, messageId, seq: ++scrollSeq.current, at: Date.now() });
+    },
+    [studyRef],
+  );
+  const [playRequest, setPlayRequest] = useState<PlayRequest | null>(null);
+  const playSeq = useRef(0);
+  const recordingsRef = useLatest(recordings);
+  /** A memo's 🎙 chip: play that moment in the 녹음 tab. */
+  const playRecording = useCallback(
+    (rid: string, t: number) => {
+      const list = recordingsRef.current.list;
+      if (list && !list.some((r) => r.id === rid)) {
+        toast('그 녹음을 찾을 수 없어요', 'info');
+        return;
+      }
+      changeTab('recordings');
+      setPlayRequest({ rid, t, seq: ++playSeq.current });
+    },
+    [recordingsRef, changeTab],
+  );
+  /** A memo's link to another lecture: open it on that slide (the viewer restores the remembered slide). */
+  const openDoc = useCallback(
+    (target: string, slide?: number) => {
+      if (target === readyDocId) {
+        if (slide) goToSlide(slide);
+        return;
+      }
+      if (!docs?.some((d) => d.id === target)) {
+        toast('그 강의는 지워졌어요', 'info');
+        return;
+      }
+      if (slide) writeStorage(storageKeys.slide(target), slide);
+      setDocId(target);
+    },
+    [readyDocId, docs, goToSlide, setDocId],
+  );
+  const openMemo = useCallback((slide: number, id: string) => viewerRef.current?.showItem(slide, id), []);
+  useEffect(() => {
+    setScrollRequest(null);
+    setPlayRequest(null);
+  }, [readyDocId]);
 
   // ---- Upload target: the course new PDFs go into ------------------------------------------------
   // Chosen in the library, and following the course of the lecture that is open ("you are in Compiler").
@@ -610,6 +689,12 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
               onAttachRegion={attachRegion}
               onAskRegion={onAskRegion}
               askDisabledReason={askDisabledReason}
+              onAttachItem={attachItem}
+              onOpenQa={openQa}
+              onPlayRecording={playRecording}
+              onOpenDoc={openDoc}
+              notes={notesState.notes}
+              docs={docs}
             />
           }
           right={
@@ -647,6 +732,18 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
                 ) : null
               }
               recordingCount={recordings.list?.length ?? null}
+              memoCount={memoCount}
+              scrollTo={scrollRequest}
+              memos={
+                <MemoListPanel
+                  key={doc.id}
+                  docId={doc.id}
+                  focusedSlide={focusedSlide}
+                  onOpenMemo={openMemo}
+                  onGoToSlide={goToSlide}
+                  onPlayRecording={playRecording}
+                />
+              }
               recordings={
                 <RecordingsPanel
                   key={doc.id}
@@ -657,6 +754,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
                   choice={choice}
                   recordings={recordings}
                   onGoToSlide={goToSlide}
+                  playRequest={playRequest}
                 />
               }
               digest={

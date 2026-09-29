@@ -412,6 +412,14 @@ class Recorder {
     return (s.baseFrames + s.workletFrames) / (BYTES_PER_SECOND / 2);
   }
 
+  /**
+   * The recording clock (seconds of audio captured; frozen while paused, 0 when idle): the clock of the slide-view
+   * events, and of the `recordedAt` stamp of an annotation made while recording (DESIGN §25).
+   */
+  clock(): number {
+    return this.clockSeconds();
+  }
+
   // ---- start / continue ---------------------------------------------------------------------------------------
 
   /** Why recording is impossible on this page (insecure origin, no microphone API), or null. */

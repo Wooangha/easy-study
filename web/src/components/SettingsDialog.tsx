@@ -7,6 +7,7 @@ import type { HealthResponse } from '../../../shared/types.ts';
 import { useAsrStatus } from '../hooks/useAsrStatus.ts';
 import { useLatest } from '../hooks/useLatest.ts';
 import { NEIGHBOR_OPTIONS, useNeighbors } from '../hooks/useNeighbors.ts';
+import { useMemosToTutor, useQuestionMarkers } from '../lib/annotations/settings.ts';
 import { copyText } from '../lib/clipboard.ts';
 import { confirmDialog } from '../lib/confirm.ts';
 import {
@@ -227,6 +228,8 @@ function DisplaySection({ inApp }: { inApp: boolean }) {
 
 function StudySection() {
   const [neighbors, setNeighbors] = useNeighbors();
+  const [memosToTutor, setMemosToTutor] = useMemosToTutor();
+  const [markers, setMarkers] = useQuestionMarkers();
   return (
     <>
       <label className="settings-row">
@@ -240,6 +243,17 @@ function StudySection() {
         </select>
       </label>
       <p className="settings-hint">대화 창의 ‘앞뒤 ±N’과 같은 설정이에요.</p>
+      <h4 className="settings-sub">필기</h4>
+      <label className="rec-setting rec-setting-check">
+        <input type="checkbox" checked={memosToTutor} onChange={(e) => setMemosToTutor(e.target.checked)} />
+        <span>학생의 메모를 튜터에게 보이기</span>
+      </label>
+      <p className="settings-hint">질문할 때 지금 슬라이드와 앞뒤 슬라이드에 붙인 메모를 함께 전달해요. 메모마다 👁로 따로 끌 수도 있어요.</p>
+      <label className="rec-setting rec-setting-check">
+        <input type="checkbox" checked={markers} onChange={(e) => setMarkers(e.target.checked)} />
+        <span>슬라이드에 질문 표시 보기</span>
+      </label>
+      <p className="settings-hint">슬라이드의 한 부분을 첨부해서 질문한 자리에 💬 표시가 남아요. 표시를 클릭하면 그 질문과 답으로 가요.</p>
     </>
   );
 }
@@ -473,7 +487,10 @@ function AboutSection({ health, marker }: { health: HealthResponse | null; marke
     [<kbd>/</kbd>, '질문 입력창으로'],
     [<kbd>Enter</kbd>, '질문 보내기'],
     [<><kbd>Shift</kbd>+<kbd>Enter</kbd></>, '줄 바꾸기'],
-    [<kbd>Esc</kbd>, '창 닫기'],
+    [<kbd>Esc</kbd>, '창 닫기 · 필기 도구 끄기 · 선택 해제'],
+    [<kbd>{`${mod}Z`}</kbd>, '필기 되돌리기'],
+    [<kbd>{marker?.os === 'macos' || !marker ? '⌘⇧Z' : 'Ctrl+Y'}</kbd>, '필기 다시 실행'],
+    [<kbd>Delete</kbd>, '선택한 필기 삭제'],
   ];
   if (marker) {
     keys.push([<kbd>{`${mod},`}</kbd>, '설정 (앱)']);

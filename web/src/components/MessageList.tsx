@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import type { Attachment, ChatMessage, LlmSwitch, MessageStatus, ProviderInfo } from '../../../shared/types.ts';
 import { PENDING_ASSISTANT_ID, PENDING_USER_ID } from '../hooks/useStudySession.ts';
-import { CHAT_WINDOW, chatWindowStart, switchAtWindowStart } from '../lib/chatWindow.ts';
+import { CHAT_WINDOW, chatWindowStart, switchAtWindowStart, windowStartFor } from '../lib/chatWindow.ts';
 import { copyText } from '../lib/clipboard.ts';
 import {
   describeContext,
@@ -42,10 +42,20 @@ interface MessageListProps {
    */
   onRetryPrime?: () => void;
   empty?: ReactNode;
+  /**
+   * Scroll a message into view (a question marker was clicked, DESIGN §25): the window is widened to it when it
+   * is behind "이전 메시지 보기", then it is centred and flashed. Tried again whenever the messages change (the session
+   * may still be loading) and given up after SCROLL_TO_GIVE_UP_MS.
+   */
+  scrollTo?: { messageId: string; seq: number; at: number } | null;
 }
 
 /** Distance from the bottom (px) under which the list keeps following new content. */
 const STICK_THRESHOLD = 80;
+/** A jump to a message that never appears is dropped after this long. */
+export const SCROLL_TO_GIVE_UP_MS = 10_000;
+/** How long the target message keeps its outline. */
+const TARGET_FLASH_MS = 2000;
 
 export function MessageList({
   messages,
@@ -61,10 +71,15 @@ export function MessageList({
   onRetry,
   onRetryPrime,
   empty,
+  scrollTo = null,
 }: MessageListProps) {
   const listRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
   const [showJump, setShowJump] = useState(false);
+  /** The seq of the scroll request already done. */
+  const scrolledRef = useRef(0);
+  const targetTimer = useRef(0);
+  useEffect(() => () => window.clearTimeout(targetTimer.current), []);
 
   // Only the last messages are rendered (lib/chatWindow.ts); the window resets whenever scrollKey changes.
   const [win, setWin] = useState({ key: scrollKey, limit: CHAT_WINDOW });
@@ -115,6 +130,29 @@ export function MessageList({
   useLayoutEffect(() => {
     scrollToBottom();
   }, [scrollKey, scrollToBottom]);
+
+  // A jump to a message (after the bottom jump of a session switch, which is a layout effect).
+  useEffect(() => {
+    if (!scrollTo || scrolledRef.current === scrollTo.seq) return;
+    if (Date.now() - scrollTo.at > SCROLL_TO_GIVE_UP_MS) {
+      scrolledRef.current = scrollTo.seq;
+      return;
+    }
+    const index = messages.findIndex((m) => m.id === scrollTo.messageId);
+    if (index === -1) return; // still loading: tried again when the messages change
+    if (index < start) {
+      setWin({ key: scrollKey, limit: messages.length - windowStartFor(messages, index) });
+      return; // rendered on the next run
+    }
+    const el = listRef.current?.querySelector<HTMLElement>(`.msg[data-msg-id="${CSS.escape(scrollTo.messageId)}"]`);
+    if (!el) return;
+    scrolledRef.current = scrollTo.seq;
+    stickRef.current = false;
+    el.scrollIntoView({ block: 'center' });
+    el.classList.add('is-target');
+    window.clearTimeout(targetTimer.current);
+    targetTimer.current = window.setTimeout(() => el.classList.remove('is-target'), TARGET_FLASH_MS);
+  }, [scrollTo, messages, start, scrollKey]);
 
   // Late layout changes (KaTeX fonts, images) while following: stay pinned to the bottom.
   useEffect(() => {
@@ -260,7 +298,7 @@ function ContextLine({ message }: { message: ChatMessage }) {
 function UserBubble({ message: m, onGoToSlide }: MessageItemProps) {
   const pending = m.id === PENDING_USER_ID;
   return (
-    <div className="msg msg-user">
+    <div className="msg msg-user" data-msg-id={m.id}>
       <div className="msg-user-meta">
         <button type="button" className="slide-chip" onClick={() => onGoToSlide(m.slide)} title="이 슬라이드로 이동">
           p.{m.slide}
@@ -293,7 +331,7 @@ function PrimeCard({ message: m, pageCount, pairStatus }: MessageItemProps) {
     : [];
   const cls = state.tone === 'normal' ? 'msg system-card' : `msg system-card is-${state.tone}`;
   return (
-    <div className={cls}>
+    <div className={cls} data-msg-id={m.id}>
       <div className="system-card-title">{state.title}</div>
       {extra.length > 0 && <div className="system-card-detail">{extra.join(' · ')}</div>}
     </div>
@@ -325,7 +363,7 @@ function AssistantMessage({
   };
 
   return (
-    <div className={`msg msg-assistant status-${m.status}`}>
+    <div className={`msg msg-assistant status-${m.status}`} data-msg-id={m.id}>
       <div className="msg-assistant-head">
         <span className="assistant-avatar" aria-hidden>
           {m.kind === 'prime' ? '📋' : '🎓'}

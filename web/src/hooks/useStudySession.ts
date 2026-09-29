@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import type { Attachment, ChatMessage, Session, SessionSummary, StreamEvent, TokenUsage, UsageLimits } from '../../../shared/types.ts';
 import * as api from '../api.ts';
+import { getMemosToTutor } from '../lib/annotations/settings.ts';
 import { missingAttachmentsMessage } from '../lib/attachments.ts';
 import { readStorage, storageKeys, writeStorage, isString } from '../lib/storage.ts';
 import { newerLimits, readLatestLimits, withLatestLimits } from '../lib/usage.ts';
@@ -391,10 +392,12 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
           await api.primeSession(forDoc, sid, { slide, neighbors: neighborCount }, onEvent, turn.controller.signal);
         } else {
           const ids = turn.attachments.map((a) => a.id);
+          // "학생의 메모를 튜터에게 보이기" (DESIGN §25): omitted = true, so only an off switch travels.
+          const memos = getMemosToTutor() ? {} : { memos: false };
           await api.sendMessage(
             forDoc,
             sid,
-            { text: question, slide, neighbors: neighborCount, ...(ids.length > 0 ? { attachments: ids } : {}) },
+            { text: question, slide, neighbors: neighborCount, ...(ids.length > 0 ? { attachments: ids } : {}), ...memos },
             onEvent,
             turn.controller.signal,
           );

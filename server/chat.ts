@@ -12,6 +12,11 @@
 // images of the student). They are resolved and pinned (so no cleanup takes them away) for the whole turn, fed
 // after the focus window, and stored as Attachment[] on the user message.
 //
+// Slide annotations (DESIGN §25): a question also carries the student's memos on the slides of the focus window
+// ("학생의 메모", ChatDeps.studentMemos, unless the request says `memos: false`); a region attachment made from a
+// 필기 keeps its snapshot (Attachment.annotation) for the label and the note's text. Once the turn's final save is
+// done, sessions.ts listeners are told (the question markers of other devices refresh).
+//
 // Recovery (DESIGN §14): when the provider lost the conversation ('resume_invalid': expired CLI
 // session, unknown thread or previous_response_id) or it became too large ('context_overflow'), the
 // turn is rebuilt as a new conversation (re-prime + recap) and retried once within the same request.
@@ -22,20 +27,21 @@
 import { randomUUID } from 'node:crypto';
 import type { ChatMessage, ProviderId, Session, StreamEvent, TokenUsage, UsageLimits } from '../shared/types.ts';
 import { addSessionUsage, addUsage, totalTokens } from '../shared/usage.ts';
+import { memosForTutor } from './annotations.ts';
 import { holdAttachments } from './attachments.ts';
 import type { HeldAttachments } from './attachments.ts';
 import { acquireCliSlot } from './cliBudget.ts';
 import type { AcquireCliSlot } from './cliBudget.ts';
 import { HttpError } from './config.ts';
 import { appendHistory, buildTurn, defaultContextSettings } from './context.ts';
-import type { BuildTurnInput, BuildTurnOutput, ContextSettings, DocAssets, ProviderState, SessionRecord } from './internal-types.ts';
+import type { BuildTurnInput, BuildTurnOutput, ContextSettings, DocAssets, ProviderState, SessionRecord, StudentMemo } from './internal-types.ts';
 import { loadDocAssets } from './library.ts';
 import { attachmentLabel } from './prompts.ts';
 import { getProvider, providerInfos } from './providers/index.ts';
 import { lectureSpeechFor } from './recordings/speech.ts';
 import { providerErrorKind } from './providers/types.ts';
 import type { Part, Provider, ProviderRunResult } from './providers/types.ts';
-import { getSession, repairInterruptedMessages, saveSession, toSession, writeNotes } from './sessions.ts';
+import { getSession, notifySessionsChanged, repairInterruptedMessages, saveSession, toSession, writeNotes } from './sessions.ts';
 
 const MAX_QUESTION_CHARS = 20_000;
 /** Neighbor slides fed before/after the focused one are clamped to 0..MAX_NEIGHBORS (DESIGN §10). */
@@ -91,6 +97,12 @@ export interface ChatDeps {
     windowSlides: number[],
     options?: { fresh?: boolean; signal?: AbortSignal },
   ) => Promise<BuildTurnInput['lectureSpeech']>;
+  /**
+   * The student's memos on the slides of the focus window (DESIGN §25 "학생의 메모"), for question turns unless the
+   * request says `memos: false`; `slide` is the focused one (its memos come first when the cap bites). Omitted = no
+   * memos are ever given.
+   */
+  studentMemos?: (docId: string, windowSlides: number[], slide: number) => Promise<StudentMemo[]>;
 }
 
 /** The real modules: provider registry (availability cached 60 s) and the context builder. */
@@ -106,6 +118,7 @@ export function defaultChatDeps(): ChatDeps {
     contextSettings: () => defaultContextSettings(),
     cliSlot: acquireCliSlot,
     lectureSpeech: lectureSpeechFor,
+    studentMemos: memosForTutor,
   };
 }
 
@@ -127,6 +140,11 @@ export interface TurnRequest {
    * dropped). Ignored for kind === 'prime'. Unknown ids → HttpError 400.
    */
   attachments?: string[];
+  /**
+   * Whether the student's memos on the focus window go to the tutor (SendMessageRequest.memos, DESIGN §25). Omitted
+   * = true. Ignored for kind === 'prime'.
+   */
+  memos?: boolean;
   /** Receives start / delta / status / done. Exceptions thrown by the listener are ignored. */
   onEvent: (event: StreamEvent) => void;
   /** External cancellation, e.g. the HTTP client disconnected. */
@@ -347,17 +365,27 @@ async function startTurn(validated: ValidatedTurn): Promise<TurnResult> {
     settings,
     maxImagesPerConversation: provider.maxImagesPerConversation,
   };
+  // The focus window as the context builder will see it (the same slides the speech and the memos are read for).
+  const windowSlides: number[] = [];
+  for (let s = Math.max(1, slide - turnInput.neighbors); s <= Math.min(doc.meta.pageCount, slide + turnInput.neighbors); s++) windowSlides.push(s);
   if (deps.lectureSpeech) {
     // Never fails the turn: without the speech the tutor still has the slides.
     try {
-      const n = turnInput.neighbors;
-      const windowSlides: number[] = [];
-      for (let s = Math.max(1, slide - n); s <= Math.min(doc.meta.pageCount, slide + n); s++) windowSlides.push(s);
       // A question during a live recording waits a few seconds for the speech right before it (DESIGN §22).
       const speech = await deps.lectureSpeech(docId, slide, windowSlides, { fresh: kind === 'question', signal });
       if (speech) turnInput.lectureSpeech = speech;
     } catch (err) {
       console.warn(`[chat] lecture speech of ${docId} unavailable: ${errorText(err)}`);
+    }
+  }
+  // The student's memos of the window (DESIGN §25): questions only, unless the request turned them off. Never
+  // fails the turn either.
+  if (kind === 'question' && request.memos !== false && deps.studentMemos) {
+    try {
+      const memos = await deps.studentMemos(docId, windowSlides, slide);
+      if (Array.isArray(memos) && memos.length > 0) turnInput.studentMemos = memos;
+    } catch (err) {
+      console.warn(`[chat] memos of ${docId} unavailable: ${errorText(err)}`);
     }
   }
   if (held.items.length > 0) {
@@ -366,6 +394,10 @@ async function startTurn(validated: ValidatedTurn): Promise<TurnResult> {
       path,
       label: attachmentLabel(i + 1, attachment),
       ...(attachment.kind === 'region' ? { text: attachment.text ?? '' } : {}),
+      // A region made from a 필기 (DESIGN §25): its kind and text reach the context builder.
+      ...(attachment.annotation
+        ? { annotation: attachment.annotation.text ? { type: attachment.annotation.type, text: attachment.annotation.text } : { type: attachment.annotation.type } }
+        : {}),
     }));
   }
   let built = deps.buildTurn(turnInput);
@@ -522,8 +554,10 @@ async function startTurn(validated: ValidatedTurn): Promise<TurnResult> {
   // 5. Persist, regenerate notes, finish --------------------------------------------------------
   // `done` carries the whole session (a Session is a SessionSummary plus its messages) so the client
   // also gets the final user message, whose context a recovery may have replaced.
-  await persistOutcome(session);
+  const saved = await persistOutcome(session);
   emit({ type: 'done', assistantMessage: structuredClone(assistantMessage), session: structuredClone(toSession(session)) });
+  // Once per turn, after its final save (DESIGN §25): other devices refresh their question markers.
+  if (saved) notifySessionsChanged({ docId, sessionId, updatedAt: session.updatedAt });
   return { assistantMessage, session: toSession(session) };
 }
 
@@ -543,18 +577,19 @@ function recoveryKind(attempt: Extract<Attempt, { ok: false }>, turn: BuildTurnO
   return kind === 'resume_invalid' || kind === 'context_overflow' ? kind : null;
 }
 
-/** Saves the finished turn unless the session was deleted meanwhile. Never throws. */
-async function persistOutcome(session: SessionRecord): Promise<void> {
+/** Saves the finished turn unless the session was deleted meanwhile (false then). Never throws. */
+async function persistOutcome(session: SessionRecord): Promise<boolean> {
   try {
-    if ((await getSession(session.docId, session.id)) === null) return;
+    if ((await getSession(session.docId, session.id)) === null) return false;
     await saveSession(session);
   } catch (err) {
     console.error(`[chat] could not save session ${session.id}:`, err);
-    return;
+    return false;
   }
   try {
     await writeNotes(session.docId);
   } catch (err) {
     console.error(`[chat] could not regenerate notes of ${session.docId}:`, err);
   }
+  return true;
 }

@@ -49,7 +49,7 @@ import {
   writeFileAtomic,
 } from '../server/library.ts';
 import type { ServerLockInfo, StoredDocMeta } from '../server/library.ts';
-import { TEXT_ENGINE, TEXT_ENGINE_FILE } from '../server/pageNames.ts';
+import { TEXT_ENGINE, TEXT_ENGINE_FILE, layoutFileName } from '../server/pageNames.ts';
 import { GARBAGE_PDF, baselinePdf, cjkPdf, deckPdf, encryptedPdf, symbolFontPdf } from './pdfFixtures.ts';
 
 const SAMPLE_PDF = path.join(repoRoot(), 'samples', 'sample-lecture.pdf');
@@ -215,10 +215,10 @@ describe('ingest of the sample deck', () => {
     assert.equal(Math.max(width ?? 0, height ?? 0), 1600);
   });
 
-  test('9 text files, split per page and trimmed, then the marker of the text engine', async () => {
+  test('9 text files (each with its word-box layout, DESIGN §25), split per page and trimmed, then the marker of the text engine', async () => {
     const paths = docPaths(meta.id);
     const files = (await fs.readdir(paths.textDir)).sort();
-    assert.deepEqual(files, [TEXT_ENGINE_FILE, ...Array.from({ length: 9 }, (_, i) => textFileName(i + 1, 9))]);
+    assert.deepEqual(files, [TEXT_ENGINE_FILE, ...Array.from({ length: 9 }, (_, i) => [layoutFileName(i + 1, 9), textFileName(i + 1, 9)]).flat()]);
     assert.equal(await fs.readFile(path.join(paths.textDir, TEXT_ENGINE_FILE), 'utf8'), `${TEXT_ENGINE}\n`);
     const first = await fs.readFile(path.join(paths.textDir, '001.txt'), 'utf8');
     assert.match(first, /^Lecture 5: CPU Scheduling/);

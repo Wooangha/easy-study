@@ -1,6 +1,8 @@
 // Typed client for the easy-study HTTP API (DESIGN.md §4). Same-origin, everything under /api.
 import type {
   AlignmentMarker,
+  AnnotationSummary,
+  AnnotationTagsResponse,
   AsrStatus,
   Attachment,
   AuthStatusResponse,
@@ -16,22 +18,26 @@ import type {
   HealthResponse,
   LibraryLayout,
   NotesResponse,
+  PatchSlideAnnotationsRequest,
   PrimeRequest,
   ProviderId,
   PutLayoutRequest,
+  PutSlideAnnotationsRequest,
   RecordingInfo,
   RecordingLanguage,
   RecordingTranscript,
   SendMessageRequest,
   Session,
   SessionSummary,
+  SlideAnnotations,
+  SlideTextLayout,
   StartDigestRequest,
   StreamEvent,
   UpdateCourseRequest,
   UpdateGroupRequest,
   UpdateSessionRequest,
 } from '../../shared/types.ts';
-import { ATTACHMENT_ID_RE } from '../../shared/types.ts';
+import { ANNOTATION_CLIENT_HEADER, ATTACHMENT_ID_RE } from '../../shared/types.ts';
 import {
   getAuthSnapshot,
   loginPending,
@@ -244,10 +250,15 @@ export function checkSessionSoon(): void {
     });
 }
 
-function sendJSON<T>(method: 'POST' | 'PATCH' | 'PUT', path: string, body?: unknown): Promise<T> {
+function sendJSON<T>(
+  method: 'POST' | 'PATCH' | 'PUT',
+  path: string,
+  body?: unknown,
+  extraHeaders?: Record<string, string>,
+): Promise<T> {
   return request<T>(path, {
     method,
-    headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+    headers: body === undefined ? extraHeaders : { 'Content-Type': 'application/json', ...extraHeaders },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
 }
@@ -489,7 +500,11 @@ function uploadOnce(
 /** The stored image of an attachment (thumbnails and previews). */
 export const attachmentUrl = (docId: string, id: string) => `${docPath(docId)}/attachments/${enc(id)}`;
 
-/** Crop a region of a slide (the server also reads the text inside it). 400 bad slide/rect, 409 doc not ready. */
+/**
+ * Crop a region of a slide (the server also reads the text inside it). 400 bad slide/rect (or an unknown
+ * `annotationId`), 409 doc not ready. With `annotationId` (📎 첨부 of a 필기, DESIGN §25) the attachment carries
+ * `annotation`.
+ */
 export const createRegion = (docId: string, body: CreateRegionRequest) =>
   postJSON<Attachment>(`${docPath(docId)}/regions`, body);
 
@@ -782,6 +797,74 @@ export const sendMessage = (
 /** User-facing message for a failed recording request: the server's own words (a 409 is not a busy chat turn here). */
 export function recordingErrorMessage(e: unknown): string {
   if (e instanceof ApiError) return e.status === 401 ? '로그인이 필요해요' : e.message;
+  return errorMessage(e);
+}
+
+// ---------------------------------------------------------------------------
+// Slide annotations (DESIGN §25): per-slide documents, the per-lecture summary, text layouts, the SSE stream
+// ---------------------------------------------------------------------------
+
+const annotationsPath = (docId: string) => `${docPath(docId)}/annotations`;
+
+/** The per-lecture summary: slides with items (and their revs), every memo, tag counts. */
+export const getAnnotationSummary = (docId: string) =>
+  request<AnnotationSummary>(annotationsPath(docId), { cache: 'no-store' });
+
+/** The annotations of one slide (rev 0 and no items when none were made yet). 404 for a slide out of range. */
+export const getSlideAnnotations = (docId: string, slide: number) =>
+  request<SlideAnnotations>(`${annotationsPath(docId)}/${slide}`, { cache: 'no-store' });
+
+const clientHeaders = (client?: string): Record<string, string> | undefined =>
+  client ? { [ANNOTATION_CLIENT_HEADER]: client } : undefined;
+
+/**
+ * Replace a slide's items and hidden markers. 409 (`ApiError.data.current` = the stored document) when `baseRev` is
+ * stale, 400 for a bad item. `client` is this tab's id: the server does not echo the write to its own stream.
+ */
+export const putSlideAnnotations = (docId: string, slide: number, body: PutSlideAnnotationsRequest, client?: string) =>
+  sendJSON<SlideAnnotations>('PUT', `${annotationsPath(docId)}/${slide}`, body, clientHeaders(client));
+
+/** Apply ops (add / update / remove / hideMarker / unhideMarker) to a slide; the same answers as PUT. */
+export const patchSlideAnnotations = (docId: string, slide: number, body: PatchSlideAnnotationsRequest, client?: string) =>
+  sendJSON<SlideAnnotations>('PATCH', `${annotationsPath(docId)}/${slide}`, body, clientHeaders(client));
+
+/** SSE of a lecture's annotations: `slide` (ops), `slide-reset`, `summary`, `qa`, `ping`. */
+export function annotationEventsUrl(docId: string, client?: string): string {
+  return `${annotationsPath(docId)}/events${client ? `?client=${enc(client)}` : ''}`;
+}
+
+/**
+ * Word boxes of a slide's text layer (텍스트 형광, 형광펜 snapping). 404 with `ApiError.data.pending` true while the
+ * server still has to make it, false when it never will; 409 while the document is not ready.
+ */
+export const getTextLayout = (docId: string, slide: number) =>
+  request<SlideTextLayout>(`${docPath(docId)}/text-layout/${slide}`);
+
+/** Every tag used in the library with its count (memo tag autocomplete). */
+export const listAnnotationTags = () => request<AnnotationTagsResponse>('/api/annotations/tags');
+
+/** The stored document a 409 of PUT/PATCH …/annotations/:slide carries, or null. */
+export function conflictCurrentOf(e: unknown): SlideAnnotations | null {
+  const current = e instanceof ApiError && e.status === 409 ? e.data?.current : null;
+  return current && typeof current === 'object' && Array.isArray((current as SlideAnnotations).items) ? (current as SlideAnnotations) : null;
+}
+
+/** The `pending` flag of a 404 of GET …/text-layout/:slide (true when unknown: ask again later). */
+export function layoutPendingOf(e: unknown): boolean {
+  if (!(e instanceof ApiError) || e.status !== 404) return true;
+  return e.data?.pending !== false;
+}
+
+/**
+ * User-facing message for a failed annotation request: the server's own words — a 409 here is another device's
+ * write, never the chat's "이미 답변을 생성하고 있어요".
+ */
+export function annotationErrorMessage(e: unknown): string {
+  if (e instanceof ApiError) {
+    if (e.status === 401) return '로그인이 필요해요';
+    if (e.status === 0) return '서버에 연결할 수 없어요';
+    return e.message;
+  }
   return errorMessage(e);
 }
 

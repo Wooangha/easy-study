@@ -4,6 +4,7 @@
 import {
   MAX_ATTACHMENT_BYTES,
   MAX_ATTACHMENTS,
+  type AnnotationItem,
   type Attachment,
   type RegionRect,
 } from '../../../shared/types.ts';
@@ -305,17 +306,43 @@ export function clipboardImages<T extends FileLike>(text: string, files: readonl
 // Labels and messages
 // ---------------------------------------------------------------------------
 
-type Labelled = Pick<Attachment, 'kind' | 'slide' | 'name'>;
+type Labelled = Pick<Attachment, 'kind' | 'slide' | 'name' | 'annotation'>;
 
-/** "p.12 영역" / the file name / "이미지". */
+/** What a region made from a 필기 (Attachment.annotation, DESIGN §25) is called in its chip. */
+const ANNOTATION_KIND_LABELS: Record<AnnotationItem['type'], string> = {
+  memo: '메모',
+  highlight: '형광',
+  textHighlight: '형광',
+  text: '텍스트',
+  rect: '사각형',
+  ellipse: '동그라미',
+};
+
+/** …and in the longer description. */
+const ANNOTATION_KIND_TITLES: Record<AnnotationItem['type'], string> = {
+  memo: '붙인 메모',
+  highlight: '형광펜으로 칠한 부분',
+  textHighlight: '형광펜으로 칠한 글',
+  text: '쓴 텍스트 상자',
+  rect: '사각형으로 표시한 부분',
+  ellipse: '동그라미로 표시한 부분',
+};
+
+/** "p.12 영역" / "p.12 메모" (a region made from a 필기) / the file name / "이미지". */
 export function attachmentLabel(a: Labelled): string {
-  if (a.kind === 'region') return a.slide ? `p.${a.slide} 영역` : '선택 영역';
+  if (a.kind === 'region') {
+    const what = a.annotation ? ANNOTATION_KIND_LABELS[a.annotation.type] : '영역';
+    return a.slide ? `p.${a.slide} ${what}` : a.annotation ? what : '선택 영역';
+  }
   return a.name?.trim() || '이미지';
 }
 
 /** Longer description (tooltips, alt text). */
 export function attachmentTitle(a: Labelled): string {
-  if (a.kind === 'region') return a.slide ? `슬라이드 ${a.slide}에서 선택한 영역` : '슬라이드에서 선택한 영역';
+  if (a.kind === 'region') {
+    const where = a.slide ? `슬라이드 ${a.slide}` : '슬라이드';
+    return a.annotation ? `${where}에 ${ANNOTATION_KIND_TITLES[a.annotation.type]}` : `${where}에서 선택한 영역`;
+  }
   return a.name?.trim() ? `첨부한 이미지: ${a.name.trim()}` : '첨부한 이미지';
 }
 

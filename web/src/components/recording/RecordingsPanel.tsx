@@ -28,6 +28,8 @@ import {
 } from '../../lib/recording/labels.ts';
 import type { MarkerAction } from '../../lib/recording/markers.ts';
 import { markerLabel } from '../../lib/recording/markers.ts';
+import { useReplayAnnotations } from '../../lib/annotations/settings.ts';
+import { clearPlayhead, setPlayhead } from '../../lib/recording/playhead.ts';
 import { recorder } from '../../lib/recording/recorder.ts';
 import { isPlaybackRate } from '../../lib/recording/rate.ts';
 import { formatClock, pastLoadedEnd, segmentIndexAt, slideAtTime } from '../../lib/recording/timeline.ts';
@@ -42,6 +44,13 @@ import { Transcript, type TranscriptMode } from './Transcript.tsx';
 
 const isMode = (v: unknown): v is TranscriptMode => v === 'current' || v === 'all';
 
+/** "Play this moment" (a memo's 🎙 chip, DESIGN §25): the recording and the time; `seq` makes repeats distinct. */
+export interface PlayRequest {
+  rid: string;
+  t: number;
+  seq: number;
+}
+
 interface RecordingsPanelProps {
   doc: DocMeta;
   focusedSlide: number;
@@ -52,9 +61,11 @@ interface RecordingsPanelProps {
   choice: ProviderChoice | null;
   recordings: RecordingsState;
   onGoToSlide: (slide: number) => void;
+  /** Play a moment of a recording of this lecture (selects it; the live recording still wins). */
+  playRequest?: PlayRequest | null;
 }
 
-export function RecordingsPanel({ doc, focusedSlide, active, providers, choice, recordings, onGoToSlide }: RecordingsPanelProps) {
+export function RecordingsPanel({ doc, focusedSlide, active, providers, choice, recordings, onGoToSlide, playRequest = null }: RecordingsPanelProps) {
   const rec = useRecorder();
   const asr = useAsrStatus(active);
   const uploads = useRecordingUploads().filter((u) => u.docId === doc.id);
@@ -68,6 +79,9 @@ export function RecordingsPanel({ doc, focusedSlide, active, providers, choice, 
   useEffect(() => {
     if (liveHere) setPicked(liveHere);
   }, [liveHere]);
+  useEffect(() => {
+    if (playRequest && !liveHere) setPicked(playRequest.rid);
+  }, [playRequest, liveHere]);
   const selected = list?.find((r) => r.id === picked) ?? list?.[0] ?? null;
 
   const recordingHere = rec.phase !== 'idle' && rec.docId === doc.id;
@@ -201,6 +215,7 @@ export function RecordingsPanel({ doc, focusedSlide, active, providers, choice, 
           choice={choice}
           recordings={recordings}
           onGoToSlide={onGoToSlide}
+          playRequest={playRequest}
         />
       )}
     </div>
@@ -242,9 +257,10 @@ interface DetailProps {
   choice: ProviderChoice | null;
   recordings: RecordingsState;
   onGoToSlide: (slide: number) => void;
+  playRequest: PlayRequest | null;
 }
 
-function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice, recordings, onGoToSlide }: DetailProps) {
+function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice, recordings, onGoToSlide, playRequest }: DetailProps) {
   const feed = useRecordingFeed(doc.id, listInfo.id, listInfo);
   const info = feed?.info ?? listInfo;
   const segments = feed?.segments ?? [];
@@ -339,6 +355,26 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
     if (audio.paused) void audio.play().catch(() => setAudioError('재생하지 못했어요.'));
     else audio.pause();
   };
+
+  // A memo's 🎙 chip asked for a moment of this recording: play from there (the audio may still be loading: then
+  // the seek is applied once its metadata is known).
+  const playedSeq = useRef(0);
+  useEffect(() => {
+    if (!playRequest || playRequest.rid !== info.id || playedSeq.current === playRequest.seq) return;
+    playedSeq.current = playRequest.seq;
+    if (audioRef.current) playFrom(playRequest.t);
+    else pendingSeek.current = { t: Math.max(0, playRequest.t), play: true };
+  }, [playRequest, info.id, playFrom]);
+
+  // 그때 필기 재생 (DESIGN §25): the viewer follows this player's position while the toggle is on; otherwise it only
+  // knows which recording is selected (so it can offer the toggle).
+  const [replayOn, setReplayOn] = useReplayAnnotations();
+  const liftT = replayOn ? time : 0;
+  const liftPlaying = replayOn && playing;
+  useEffect(() => {
+    setPlayhead({ docId: doc.id, rid: info.id, t: liftT, playing: liftPlaying });
+  }, [doc.id, info.id, liftT, liftPlaying]);
+  useEffect(() => () => clearPlayhead(info.id), [info.id]);
 
   const total = Math.max(Number.isFinite(duration) ? duration : 0, info.durationSec);
   const activeIndex = segmentIndexAt(segments, time);
@@ -648,6 +684,10 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
             <label className="rec-follow" title="재생하는 동안 슬라이드 창이 지금 설명 중인 슬라이드로 넘어가요">
               <input type="checkbox" checked={follow} onChange={(e) => setFollow(e.target.checked)} />
               <span>슬라이드 따라가기</span>
+            </label>
+            <label className="rec-follow" title="재생하는 동안 그때까지 쓴 필기(형광·메모 등)만 슬라이드에 보여요">
+              <input type="checkbox" checked={replayOn} onChange={(e) => setReplayOn(e.target.checked)} />
+              <span>그때 필기 재생</span>
             </label>
             {live && (
               <button

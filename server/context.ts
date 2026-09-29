@@ -15,6 +15,9 @@
 // - Lecture recordings (DESIGN §22): a question may carry what the professor said on the slides of the focus window
 //   and, while the lecture is being recorded, its last minutes (BuildTurnInput.lectureSpeech, resolved by chat.ts;
 //   capped again here). Priming then says in one line that recordings exist.
+// - Slide annotations (DESIGN §25): a question may carry the student's own memos on the slides of the focus window
+//   (BuildTurnInput.studentMemos, resolved by chat.ts; capped again here, the focused slide first), and a region
+//   attachment made from a 필기 carries the item's text after the selection text. Priming takes neither.
 // - When the conversation would exceed the provider's image budget, or the orchestrator reports that
 //   the provider lost the conversation / found it too large (BuildTurnInput.forceNewConversation), or
 //   the session's LLM was changed and its conversation dropped (ProviderState.switched), a fresh
@@ -78,6 +81,10 @@ const MAX_TITLE_CHARS = 200;
 export const MAX_SLIDE_SPEECH_CHARS = 1_500;
 export const MAX_WINDOW_SPEECH_CHARS = 4_000;
 export const MAX_RECENT_SPEECH_CHARS = 3_000;
+/** Student memo caps (DESIGN §25): per memo, all memos of the window together, and how many. */
+export const MAX_MEMO_CHARS = 600;
+export const MAX_WINDOW_MEMO_CHARS = 2_000;
+export const MAX_TUTOR_MEMOS = 12;
 
 type ImagePart = Extract<Part, { type: 'image' }>;
 type Sheet = DocAssets['sheets'][number];
@@ -250,6 +257,7 @@ export function buildTurn(input: BuildTurnInput): BuildTurnOutput {
   appendFocus(out, doc, slide, pageCount, windowSlides, new Set(attached), materialOf, agenticCli);
   appendAttachments(out, attachments, settings.maxSlideTextChars);
   if (kind === 'question') appendLectureSpeech(out, input.lectureSpeech, windowSlides, slide);
+  const memosIncluded = kind === 'question' ? appendStudentMemos(out, input.studentMemos, windowSlides, slide) : 0;
   if (kind === 'prime') {
     // Only ask how the lecture builds on earlier ones when their summaries are actually in context.
     out.text(prompts.primeInstruction((earlier?.included ?? 0) > 0));
@@ -267,6 +275,7 @@ export function buildTurn(input: BuildTurnInput): BuildTurnOutput {
   if (forced !== null) context.recoveredFrom = forced;
   if (switched) context.switched = true;
   if (attachments.length > 0) context.attachments = attachments.length;
+  if (memosIncluded > 0) context.memos = memosIncluded;
 
   return {
     systemPrompt: prompts.tutorSystemPrompt(),
@@ -535,8 +544,52 @@ function appendAttachments(out: PartsBuilder, attachments: TurnAttachment[], max
     out.image({ type: 'image', path: attachment.path, detail: 'high', label: attachment.label });
     if (attachment.kind === 'region') {
       out.text(prompts.selectionTextBlock(truncateText(cleanExtractedText(attachment.text ?? ''), maxTextChars)));
+      // A region made from a 필기 with text (DESIGN §25): the student's note or the highlighted words follow.
+      const annotation = attachment.annotation;
+      if (annotation && typeof annotation.text === 'string' && annotation.text.trim()) {
+        out.text(prompts.annotationTextBlock(annotation.type, truncateText(cleanExtractedText(annotation.text), maxTextChars)));
+      }
     }
   }
+}
+
+/**
+ * STUDENT MEMOS (DESIGN §25), after the lecture speech and before the question: the student's memos on the slides
+ * of the focus window (others are ignored), one text part per slide in ascending slide order; the focused slide's
+ * memos are kept first when the caps bite (≤ MAX_MEMO_CHARS each, ≤ MAX_WINDOW_MEMO_CHARS together, ≤
+ * MAX_TUTOR_MEMOS). Returns how many memos were included (ContextInfo.memos).
+ */
+function appendStudentMemos(out: PartsBuilder, memos: BuildTurnInput['studentMemos'], windowSlides: number[], slide: number): number {
+  if (!Array.isArray(memos)) return 0;
+  const bySlide = new Map<number, Array<{ text: string; tags?: string[] }>>();
+  for (const memo of memos) {
+    if (!memo || typeof memo !== 'object' || !windowSlides.includes(memo.slide) || typeof memo.text !== 'string') continue;
+    const text = memo.text.replace(/\s+/g, ' ').trim();
+    if (!text) continue;
+    const tags = Array.isArray(memo.tags) ? memo.tags.filter((tag): tag is string => typeof tag === 'string' && tag.trim() !== '') : [];
+    const list = bySlide.get(memo.slide) ?? [];
+    list.push(tags.length > 0 ? { text, tags } : { text });
+    bySlide.set(memo.slide, list);
+  }
+  // The focused slide first, then its neighbours nearest first, share the caps.
+  const order = [...bySlide.keys()].sort((a, b) => Math.abs(a - slide) - Math.abs(b - slide) || a - b);
+  let budget = MAX_WINDOW_MEMO_CHARS;
+  let count = 0;
+  const kept = new Map<number, Array<{ text: string; tags?: string[] }>>();
+  for (const s of order) {
+    for (const memo of bySlide.get(s) ?? []) {
+      const cap = Math.min(MAX_MEMO_CHARS, budget);
+      if (count >= MAX_TUTOR_MEMOS || cap <= prompts.TRUNCATED_MARK.length) break;
+      const text = memo.text.length > cap ? truncateText(memo.text, cap - prompts.TRUNCATED_MARK.length) : memo.text;
+      budget -= text.length;
+      count++;
+      const list = kept.get(s) ?? [];
+      list.push(memo.tags ? { text, tags: memo.tags } : { text });
+      kept.set(s, list);
+    }
+  }
+  for (const s of [...kept.keys()].sort((a, b) => a - b)) out.text(prompts.studentMemosBlock(s, kept.get(s) ?? []));
+  return count;
 }
 
 /**
@@ -583,7 +636,17 @@ function normalizeAttachments(raw: BuildTurnInput['attachments'], max: number): 
     (a): a is TurnAttachment =>
       !!a && typeof a === 'object' && (a.kind === 'region' || a.kind === 'image') && typeof a.path === 'string' && !!a.path && typeof a.label === 'string',
   );
-  return valid.slice(0, Math.max(0, max)).map((a) => ({ ...a, label: a.label.replace(/\s+/g, ' ').trim() || 'Attachment' }));
+  return valid.slice(0, Math.max(0, max)).map((a) => {
+    const attachment: TurnAttachment = { ...a, label: a.label.replace(/\s+/g, ' ').trim() || 'Attachment' };
+    // The 필기 snapshot (DESIGN §25) only when it is well formed.
+    const annotation = a.annotation;
+    if (annotation && typeof annotation === 'object' && typeof annotation.type === 'string') {
+      attachment.annotation = typeof annotation.text === 'string' ? { type: annotation.type, text: annotation.text } : { type: annotation.type };
+    } else {
+      delete attachment.annotation;
+    }
+    return attachment;
+  });
 }
 
 /**

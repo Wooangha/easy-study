@@ -1,7 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type KeyboardEvent, type ReactNode } from 'react';
 import { MAX_ATTACHMENTS } from '../../../shared/types.ts';
+import { useAnnotations } from '../hooks/useAnnotations.ts';
 import type { AttachmentsApi } from '../hooks/useAttachments.ts';
 import { useLatest } from '../hooks/useLatest.ts';
+import { useMemosToTutor } from '../lib/annotations/settings.ts';
 import { clipboardImages, defaultQuestion, readyAttachments, type Chip } from '../lib/attachments.ts';
 import { toast } from '../lib/toast.ts';
 import { AttachmentChips } from './Attachments.tsx';
@@ -54,6 +56,27 @@ function fitTextarea(el: HTMLTextAreaElement, placeholder: string): void {
     el.value = '';
   }
   el.style.height = `${Math.min(height, MAX_TEXTAREA_PX)}px`;
+}
+
+/**
+ * "📝 메모 N개 포함" (DESIGN §25): the memos on the target slide and its neighbours that the next question carries as
+ * "학생의 메모" — those with 👁 on, while the device's switch is on. Counted from the annotation summary.
+ */
+function StudentMemosChip({ docId, targetSlide, neighbors, pageCount }: { docId: string; targetSlide: number; neighbors: number; pageCount: number }) {
+  const [enabled] = useMemosToTutor();
+  const { snapshot } = useAnnotations(enabled ? docId : null);
+  if (!enabled) return null;
+  const from = Math.max(1, targetSlide - neighbors);
+  const to = Math.min(pageCount, targetSlide + neighbors);
+  const count = (snapshot.summary?.memos ?? []).filter((m) => m.tutor && m.slide >= from && m.slide <= to && m.text.trim() !== '').length;
+  if (count === 0) return null;
+  return (
+    <div className="composer-context">
+      <span className="speech-chip memo-chip" title="이 슬라이드와 앞뒤 슬라이드의 메모를 튜터에게 함께 보내요 (설정 › 공부에서 끌 수 있어요)">
+        📝 메모 {count}개 포함
+      </span>
+    </div>
+  );
 }
 
 /** The files of a paste (some browsers only list them as items). */
@@ -209,6 +232,7 @@ export function Composer({
         onRemove={attachments.remove}
       />
       <LectureSpeechChip docId={docId} />
+      <StudentMemosChip docId={docId} targetSlide={targetSlide} neighbors={neighbors} pageCount={pageCount} />
       <div className={blocked ? 'composer-box is-blocked' : 'composer-box'}>
         <button
           type="button"

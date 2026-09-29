@@ -18,7 +18,16 @@ import { MessageList } from './MessageList.tsx';
 import { RecordingTabBadge } from './recording/LectureSpeech.tsx';
 import { UsageBar } from './UsageBar.tsx';
 
-export type PanelTab = 'chat' | 'digest' | 'notes' | 'recordings';
+export type PanelTab = 'chat' | 'digest' | 'notes' | 'memos' | 'recordings';
+
+/** A jump to a Q&A (a question marker, DESIGN §25): the message to scroll into view. */
+export interface ScrollRequest {
+  sessionId: string;
+  messageId: string;
+  seq: number;
+  /** When it was asked for (the list gives up after a while when the session never shows the message). */
+  at: number;
+}
 
 interface ChatPanelProps {
   doc: DocMeta;
@@ -63,6 +72,11 @@ interface ChatPanelProps {
   recordings: ReactNode;
   /** Recordings of this lecture (tab badge), null while unknown. */
   recordingCount: number | null;
+  /** Content of the 메모 tab (DESIGN §25): mounted the first time the tab is opened, then kept. */
+  memos: ReactNode;
+  memoCount: number;
+  /** Scroll the chat to a message (a question marker was clicked). */
+  scrollTo?: ScrollRequest | null;
 }
 
 /** "Codex (gpt-5.5, 추론 높음)" for the session badge's tooltip. */
@@ -119,6 +133,9 @@ export function ChatPanel({
   overlay,
   recordings,
   recordingCount,
+  memos,
+  memoCount,
+  scrollTo = null,
 }: ChatPanelProps) {
   const { session, messages, liveTurn, running, creating } = study;
   const targetSlide = pinnedSlide ?? focusedSlide;
@@ -133,6 +150,9 @@ export function ChatPanel({
   const [recordingsOpenedFor, setRecordingsOpenedFor] = useState<string | null>(null);
   if (tab === 'recordings' && recordingsOpenedFor !== doc.id) setRecordingsOpenedFor(doc.id);
   const recordingsMounted = recordingsOpenedFor === doc.id;
+  const [memosOpenedFor, setMemosOpenedFor] = useState<string | null>(null);
+  if (tab === 'memos' && memosOpenedFor !== doc.id) setMemosOpenedFor(doc.id);
+  const memosMounted = memosOpenedFor === doc.id;
 
   // `ask` / `primeCurrent` are stable while streaming, so memoized message items do not re-render on every delta.
   const { ask, primeCurrent } = study;
@@ -282,6 +302,16 @@ export function ChatPanel({
         <button
           type="button"
           role="tab"
+          aria-selected={tab === 'memos'}
+          className={tab === 'memos' ? 'panel-tab is-active' : 'panel-tab'}
+          onClick={() => onTabChange('memos')}
+          title="슬라이드에 붙인 메모"
+        >
+          메모{memoCount > 0 && <span className="tab-count">{memoCount}</span>}
+        </button>
+        <button
+          type="button"
+          role="tab"
           aria-selected={tab === 'recordings'}
           className={tab === 'recordings' ? 'panel-tab is-active' : 'panel-tab'}
           onClick={() => onTabChange('recordings')}
@@ -393,6 +423,7 @@ export function ChatPanel({
           onRetry={onRetry}
           onRetryPrime={onRetryPrime}
           empty={empty}
+          scrollTo={scrollTo && scrollTo.sessionId === study.sessionId ? scrollTo : null}
         />
 
         <Composer
@@ -432,6 +463,10 @@ export function ChatPanel({
 
       <div className="notes-view" hidden={tab !== 'notes'}>
         {notesMounted && notes}
+      </div>
+
+      <div className="notes-view memos-view" hidden={tab !== 'memos'}>
+        {memosMounted && memos}
       </div>
 
       <div className="recordings-view" hidden={tab !== 'recordings'}>

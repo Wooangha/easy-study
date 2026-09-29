@@ -3,8 +3,9 @@
 // sent with the next question. The chips belong to the open document; they survive slide changes, leave the
 // composer when a question is sent and come back when the question was not accepted.
 import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react';
-import { MAX_ATTACHMENT_BYTES, type Attachment, type RegionRect } from '../../../shared/types.ts';
+import { MAX_ATTACHMENT_BYTES, type AnnotationItem, type Attachment, type RegionRect } from '../../../shared/types.ts';
 import * as api from '../api.ts';
+import { itemBounds } from '../lib/annotations/geometry.ts';
 import {
   attachErrorMessage,
   attachmentLabel,
@@ -35,6 +36,11 @@ export interface AttachmentsApi {
   addFiles: (files: readonly File[], options?: { pasted?: boolean }) => void;
   /** Crop a region of a slide; resolves with the attachment, or null when it failed (a toast says why). */
   addRegion: (slide: number, rect: RegionRect) => Promise<Attachment | null>;
+  /**
+   * 📎 첨부 of an annotation item (DESIGN §25): a region attachment of the item's bounds that carries the item
+   * (`Attachment.annotation`), as a chip like any region — sent with the next question, nothing now.
+   */
+  addAnnotation: (slide: number, item: AnnotationItem) => Promise<Attachment | null>;
   /** Remove a chip (and the unused attachment on the server). */
   remove: (key: string) => void;
   /** Takes the ready chips out of the composer for sending (see restore). */
@@ -174,22 +180,28 @@ export function useAttachments(docId: string | null): AttachmentsApi {
     [docIdRef, dispatch],
   );
 
-  const addRegion = useCallback(
-    async (slide: number, rect: RegionRect): Promise<Attachment | null> => {
+  const addRegionOf = useCallback(
+    async (slide: number, rect: RegionRect, item: AnnotationItem | null): Promise<Attachment | null> => {
       const forDoc = docIdRef.current;
       if (!forDoc) return null;
       if (freeSlots(current()) === 0) {
         toast(limitMessage(1), 'error');
         return null;
       }
-      const key = `region-${++chipSeq}`;
+      // The same item twice would be two chips of one region: the first one stands.
+      if (item && current().some((c) => c.attachment?.annotation?.id === item.id || c.key.endsWith(`:${item.id}`))) {
+        toast('이미 입력창에 첨부되어 있어요', 'info', 2500);
+        return null;
+      }
+      const key = item ? `region-${++chipSeq}:${item.id}` : `region-${++chipSeq}`;
+      const labelled = { kind: 'region' as const, slide, ...(item ? { annotation: { id: item.id, type: item.type } } : {}) };
       dispatch({
         type: 'add',
         item: {
           key,
           kind: 'region',
-          label: attachmentLabel({ kind: 'region', slide }),
-          title: attachmentTitle({ kind: 'region', slide }),
+          label: attachmentLabel(labelled),
+          title: attachmentTitle(labelled),
           slide,
           rect,
           status: 'uploading',
@@ -197,7 +209,7 @@ export function useAttachments(docId: string | null): AttachmentsApi {
         },
       });
       const promise = api
-        .createRegion(forDoc, { slide, rect })
+        .createRegion(forDoc, { slide, rect, ...(item ? { annotationId: item.id } : {}) })
         .then((attachment) => {
           if (discardLate(forDoc, key, attachment)) return null;
           dispatch({ type: 'ready', key, attachment });
@@ -206,7 +218,7 @@ export function useAttachments(docId: string | null): AttachmentsApi {
         .catch((e: unknown) => {
           const status = e instanceof api.ApiError ? e.status : -1;
           const message = status === -1 ? api.errorMessage(e) : attachErrorMessage(status, api.errorMessage(e));
-          if (stateRef.current.docId === forDoc) toast(`영역을 첨부하지 못했어요: ${message}`, 'error');
+          if (stateRef.current.docId === forDoc) toast(`${item ? '필기를' : '영역을'} 첨부하지 못했어요: ${message}`, 'error');
           dispatch({ type: 'remove', keys: [key] });
           return null;
         })
@@ -216,6 +228,10 @@ export function useAttachments(docId: string | null): AttachmentsApi {
     },
     [docIdRef, dispatch],
   );
+
+  const addRegion = useCallback((slide: number, rect: RegionRect) => addRegionOf(slide, rect, null), [addRegionOf]);
+
+  const addAnnotation = useCallback((slide: number, item: AnnotationItem) => addRegionOf(slide, itemBounds(item), item), [addRegionOf]);
 
   const remove = useCallback(
     (key: string) => {
@@ -265,7 +281,7 @@ export function useAttachments(docId: string | null): AttachmentsApi {
   const items = stateRef.current.docId === docId ? stateRef.current.items : NO_CHIPS;
   const uploading = isUploading(items);
   return useMemo(
-    () => ({ docId, items, uploading, addFiles, addRegion, remove, take, restore, settle, count }),
-    [docId, items, uploading, addFiles, addRegion, remove, take, restore, settle, count],
+    () => ({ docId, items, uploading, addFiles, addRegion, addAnnotation, remove, take, restore, settle, count }),
+    [docId, items, uploading, addFiles, addRegion, addAnnotation, remove, take, restore, settle, count],
   );
 }

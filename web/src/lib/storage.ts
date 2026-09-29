@@ -32,6 +32,12 @@ export const storageKeys = {
    * first paint, under this exact name: keep the two in sync.
    */
   theme: 'theme',
+  /** Slide annotations (DESIGN §25): the color of new items, the layer toggle, 질문 표시, "학생의 메모" → 튜터, 그때 필기 재생. */
+  annotColor: 'annotColor',
+  annotLayer: 'annotLayer',
+  questionMarkers: 'questionMarkers',
+  memosToTutor: 'memosToTutor',
+  replayAnnotations: 'replayAnnotations',
   /** "여기부터 p.N" markers sent for a recording (the API has no GET for them). */
   recordingMarkers: (recordingId: string) => `recordingMarkers:${recordingId}`,
   slide: (docId: string) => `slide:${docId}`,

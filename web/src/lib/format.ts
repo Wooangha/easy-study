@@ -87,7 +87,8 @@ export type ContextChipKind =
   | 'overview'
   | 'attached'
   | 'reused'
-  | 'attachments';
+  | 'attachments'
+  | 'memos';
 
 export interface ContextChip {
   kind: ContextChipKind;
@@ -134,6 +135,14 @@ export function describeContext(ctx: ContextInfo | undefined): ContextChip[] {
       kind: 'attachments',
       text: `📎 첨부 ${extra}개`,
       title: '질문과 함께 보낸 선택 영역·이미지 (선택 영역은 그 안의 텍스트도 함께 전달돼요)',
+    });
+  }
+  const memos = ctx.memos ?? 0;
+  if (memos > 0) {
+    out.push({
+      kind: 'memos',
+      text: `📝 메모 ${memos}개`,
+      title: '이 슬라이드와 앞뒤 슬라이드에 쓴 메모를 튜터에게 함께 전달했어요',
     });
   }
   return out;

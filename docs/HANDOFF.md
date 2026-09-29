@@ -1,14 +1,15 @@
 # easy-study — handoff for the next agent
 
-Read this first, then `README.md` (user-facing, Korean) and `docs/DESIGN.md` (the spec: §1–24, every round's contract).
-Last updated: 2026-09-29 (0.5.0 released with the in-app updater; 0.5.1 = LAN sharing from the desktop app + the loopback
-proxy that lets the app record against a plain-http remote).
+Read this first, then `README.md` (user-facing, Korean) and `docs/DESIGN.md` (the spec: §1–25, every round's contract).
+Last updated: 2026-09-29 (slide annotations, DESIGN §25, built and E2E-checked in the working tree — not yet committed or
+released; the last release is 0.5.3. Earlier: 0.5.0 = the in-app updater; 0.5.1 = LAN sharing from the desktop app + the
+loopback proxy that lets the app record against a plain-http remote).
 
 ## Paste-ready prompt
 
 > You are continuing work on **easy-study** (this repository; GitHub `Wooangha/easy-study`).
-> Read `docs/HANDOFF.md` completely before doing anything, then `docs/DESIGN.md` §22 and the sections it references.
-> Current state and next steps: "Lecture recordings" → "Status" in HANDOFF.md (v0.4.0 is out as a draft). Follow the hard rules in HANDOFF.md exactly — especially: never modify
+> Read `docs/HANDOFF.md` completely before doing anything, then `docs/DESIGN.md` §25 (slide annotations, the current work) and
+> the sections it references. Current state and next steps: "Slide annotations" → "Status" in HANDOFF.md. Follow the hard rules in HANDOFF.md exactly — especially: never modify
 > `library/` (the user's real study data), never send requests to the user's app on `127.0.0.1:5180`, never make
 > real claude/codex model calls in tests, never trigger a real microphone permission prompt without asking the user,
 > and never write this Mac's LAN IP into repo files. The user writes in Korean; answer in Korean, briefly.
@@ -145,12 +146,16 @@ macOS has no `timeout` command.
 - `server/index.ts` routes/guards/SSE; `config.ts` env/settings; `library.ts` ingest (PDF worker), docs, backfills;
   `pdf.ts` PDFium; `imageWorker.ts` sharp/PDFium child; `sessions.ts` + `chat.ts` turns; `context.ts` + `prompts.ts`
   what the tutor sees; `digest.ts`/`digestPrompt.ts` 정리본; `courses.ts` + `layout.ts` courses/groups; `attachments.ts`;
+  `annotations.ts` + `annotationsRoutes.ts` slide annotations (per-slide store, summary index, SSE hub, "학생의 메모" for the
+  tutor; DESIGN §25; `pdf.ts` `textLayout()` writes `text/NNN.layout.json` for the text-fitted highlights);
   `auth.ts` remote mode; `desktop.ts` + `children.ts` desktop-mode lifecycle (share mode: `EASY_STUDY_DESKTOP_SHARE`,
   `shareUrls`, exit 3 for a taken port); `shellWatch.ts` the ready line + shell watch shared by the server and the proxy;
   `proxy.ts` the desktop app's loopback proxy (`dist-server/server/proxy.js --to <http origin>`, tests/proxy.test.ts);
   `providers/*` claude/codex/APIs; `recordings/*` recording store, live protocol, ASR runner, models, ffmpeg, alignment,
   speech context.
 - `web/src` React 19 app (`App.tsx`, `components/`, `hooks/`, `lib/`); `web/src/components/recording` + `lib/recording`;
+  `components/annotations` + `lib/annotations` (layer, tools, memo card, question markers, the per-document store with undo)
+  and `components/MemoListPanel.tsx` (the 메모 tab);
   `lib/desktop.ts` the shell bridge (pushed state incl. `share`, actions incl. `share/*`, busy wording).
 - `desktop/` Tauri shell (`src-tauri/src/main.rs`, `server.rs`, `media.rs`, `share.rs` (the switch flow), `proxy.rs`
   (the proxy child's lifecycle), …), build scripts in `desktop/scripts` (`build.mjs`, `prepare.mjs`, `whisper.mjs`,
@@ -223,6 +228,28 @@ FIXTURES_OUT=/tmp/easy-study-fixtures python3 scripts/recording-fixtures/tools/b
 Output: ko-mixed (13 min, Korean with English terms), en (12 min), smoke (55 s), long (60 min) with exact
 `ground_truth.json` (segments → slide, a tangent, a back-reference, a skipped slide). The previous session also kept a
 copy under its scratchpad (`…/scratchpad/rec/fixtures`), which may be gone. Never commit the generated audio.
+
+## Slide annotations (DESIGN §25, in the working tree, unreleased)
+
+What: 형광펜 (snaps to text lines), 텍스트 형광 (fitted to words from the new `text/NNN.layout.json`), 사각형, 동그라미, 텍스트 상자,
+스티커 메모 (tags, links to slides/lectures/recording moments, 👁 for the tutor), 📎 첨부 of any item as a region attachment, 질문 표시
+derived from the sessions (only hidden markers are stored), the 메모 tab, slide filters, ⌘Z/⌘⇧Z, live sync between devices over SSE,
+"학생의 메모" in the tutor context, 그때 필기 재생 in playback. Storage: `library/<doc>/annotations/NNN.json` + `index.json`.
+The user chose the wording **첨부** (not "이걸로 질문하기") and nothing is attached automatically.
+
+Status (2026-09-29):
+- Built by parallel packages (contract A, server B/C/D, web E/F) and integrated: typecheck clean (3 projects); `npm test` 1108/1108;
+  `npm run desktop:test` 43/43. New suites: tests/annotations.test.ts, annotations-http.test.ts, annotations-context.test.ts,
+  annotation-attachments.test.ts, textLayout.test.ts; web/tests/annotations-geometry, textSelect, annotation-history,
+  annotation-markers, annotations-store, annotation-chips, memo-list, qa-jump, recording-playhead.
+- Browser E2E run in the desktop app's browser pane against a temp library (one copied lecture, fake CLIs, port 5199): every flow
+  of DESIGN §25 "Work plan › G" passed (draw/snap/fit, text box, memo + tag + link, collapse, delete + undo, move, 📎 첨부 → marker →
+  tooltip → jump, a ✂ region question's marker, hide a marker, layer toggle, tag filter, SSE to a second tab and from a curl client,
+  reload persistence, the tutor stdin with and without the memo, dark mode, 360 px). Not exercised in the browser: 그때 필기 재생 and
+  🎙 links (no recording in the temp library — covered by unit tests), a link to another lecture (one document only), touch devices.
+- `TEXT_ENGINE` is now 'pdfium-3': the startup backfill re-extracts every old document once (text + layouts; ~1 s per 40 pages).
+- Next: commit + release notes (README "필기와 메모" is written); a real-device pass on a phone-sized remote client; later ideas
+  from the request: freehand pen, PDF export, exam mode.
 
 ## 0.5.1 E2E recipe (LAN sharing + the loopback proxy, on this Mac)
 
