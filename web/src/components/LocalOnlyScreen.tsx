@@ -26,6 +26,7 @@ export function LocalOnlyScreen({ message, onRetry }: LocalOnlyScreenProps) {
         </div>
         <div className="auth-hint auth-hint-plain">
           <ul>
+            <li>서버 컴퓨터에서 easy-study 앱을 쓴다면 ⚙ 설정 › 데스크톱 앱 › ‘다른 기기에서 접속 허용’을 켜세요.</li>
             <li>
               서버를 실행한 컴퓨터에서는 <code>http://127.0.0.1:{port}</code> 로 열 수 있어요.
             </li>

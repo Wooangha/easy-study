@@ -20,7 +20,7 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 use crate::config::{self, lock};
 use crate::update::{self, UpdateState};
-use crate::AppState;
+use crate::{server, share, AppState};
 
 /// The reserved path. The server answers it with 204, so a navigation that is not caught leaves the page alone.
 pub const PREFIX: &str = "/__easy-study-desktop/";
@@ -52,6 +52,11 @@ const PUSH_GAP: Duration = Duration::from_millis(250);
 const THEME_GAP: Duration = Duration::from_secs(1);
 /// Log lines a page can cause, per kind and minute.
 const LOG_LINES: u32 = 20;
+/// How long the access code stays in the local page's pushed state after its share/reveal (the page holds an
+/// HttpOnly session; the code, which lets any device in, is only there while the user looks at it).
+const REVEAL_FOR: Duration = Duration::from_secs(60);
+/// share/reveal: the user confirms in a dialog no page can draw before the code goes into the page's state.
+const CONFIRM_REVEAL: &str = "접속 코드를 이 화면에 보여 줄까요?\n\n코드를 아는 사람은 같은 네트워크에서 이 컴퓨터의 easy-study에 로그인할 수 있어요.";
 
 pub fn init_script(version: &str, os: &str) -> String {
     let json = |s: &str| serde_json::Value::String(s.to_string()).to_string();
@@ -72,6 +77,12 @@ pub enum Action {
     CancelUpdate,
     /// "system", "light" or "dark".
     Theme(&'static str),
+    /// "다른 기기에서 접속 허용" on or off (share.rs; only this computer's own page).
+    Share(bool),
+    /// Show the access code in the pushed state for a while (only this computer's own page).
+    ShareReveal,
+    /// A new access code, every device logged out (only this computer's own page).
+    ShareResetCode,
 }
 
 impl Action {
@@ -86,6 +97,10 @@ impl Action {
             "theme/system" => Action::Theme("system"),
             "theme/light" => Action::Theme("light"),
             "theme/dark" => Action::Theme("dark"),
+            "share/on" => Action::Share(true),
+            "share/off" => Action::Share(false),
+            "share/reveal" => Action::ShareReveal,
+            "share/reset-code" => Action::ShareResetCode,
             _ => return None,
         })
     }
@@ -155,7 +170,47 @@ pub fn on_action(app: &AppHandle, action: Action, origin: String) {
         }
         Action::CancelUpdate => update::cancel(app),
         Action::Theme(theme) => page_theme(app, theme),
+        // Sharing is this computer's server's business: another computer's page (or a relayed one) cannot touch it.
+        // share/on and share/reveal go through a native dialog (share.rs, reveal_code): the page's own session
+        // must not be enough to open this computer to the network or to read the code that lets any device in.
+        Action::Share(on) if local => share::request(app, share::Change::Share(on), share::From::Page { origin }),
+        Action::ShareResetCode if local => share::request(app, share::Change::ResetCode, share::From::Page { origin }),
+        Action::ShareReveal if local => reveal_code(app, &origin),
+        Action::Share(_) | Action::ShareResetCode | Action::ShareReveal => {
+            log_limited(app, "page-share", &format!("{action:?} from {origin} ignored (not this computer's server)"));
+            push_state(app);
+        }
     }
+}
+
+/// share/reveal: once the user agreed in a native dialog (at most as often as the page may ask), the code goes into
+/// the next pushes for REVEAL_FOR, then a push without it follows.
+fn reveal_code(app: &AppHandle, origin: &str) {
+    if !page_may_ask(app, origin, true) {
+        log_limited(app, "page-share", &format!("share/reveal from {origin} ignored (asked too recently)"));
+        return push_state(app);
+    }
+    let ok = confirm(app, CONFIRM_REVEAL, "보기", "취소");
+    page_asked(app, origin, true, ok);
+    if !ok {
+        return push_state(app);
+    }
+    *lock(&app.state::<AppState>().bridge.reveal) = Some(Instant::now());
+    push_state(app);
+    let h = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(REVEAL_FOR + Duration::from_millis(100));
+        if lock(&h.state::<AppState>().bridge.reveal).is_some_and(|t| t.elapsed() >= REVEAL_FOR) {
+            *lock(&h.state::<AppState>().bridge.reveal) = None;
+            push_state(&h);
+        }
+    });
+}
+
+/// The access code for the pushed state: only while revealed (share/reveal) and only on a shared server.
+fn revealed_code(app: &AppHandle) -> Option<String> {
+    let revealed = lock(&app.state::<AppState>().bridge.reveal).is_some_and(|t| t.elapsed() < REVEAL_FOR);
+    revealed.then(|| server::access_code(app)).flatten()
 }
 
 /// "system" | "light" | "dark": saved, applied to every window (the menus and title bars too), and pushed. Nothing
@@ -210,6 +265,21 @@ struct Connection {
     startup: &'static str,
 }
 
+/// "다른 기기에서 접속" of this computer's server (only pushed into its own page).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShareState {
+    /// The setting.
+    on: bool,
+    /// The local server runs shared right now (the setting applies at a start; an address list can be empty
+    /// while it does, e.g. offline).
+    running: bool,
+    /// The addresses other devices can use while the server runs shared (empty otherwise).
+    urls: Vec<String>,
+    /// The access code, only for REVEAL_FOR after the page's share/reveal.
+    code: Option<String>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PageState {
@@ -219,6 +289,8 @@ struct PageState {
     update: UpdateState,
     /// The version this launch was updated to (for a toast).
     just_updated: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    share: Option<ShareState>,
 }
 
 #[derive(Default)]
@@ -227,6 +299,8 @@ pub struct Bridge {
     last_push: Mutex<Option<Instant>>,
     logs: Mutex<HashMap<&'static str, LogLimit>>,
     theme: Mutex<PageTheme>,
+    /// When the local page last asked to see the access code (share/reveal).
+    reveal: Mutex<Option<Instant>>,
 }
 
 /// Pushes the shell's state into the main window's page when it shows the allowed origin (never the chooser, which
@@ -249,6 +323,11 @@ pub fn push_state(app: &AppHandle) {
             s.for_remote()
         }
     };
+    // Sharing only into this computer's own page: a remote or relayed page never learns the addresses or the code.
+    let share = local.then(|| {
+        let urls = lock(&st.share_urls).clone();
+        ShareState { on: cfg.share, running: urls.is_some(), code: urls.is_some().then(|| revealed_code(app)).flatten(), urls: urls.unwrap_or_default() }
+    });
     let state = PageState {
         v: 1,
         theme: match cfg.theme.as_str() {
@@ -258,13 +337,15 @@ pub fn push_state(app: &AppHandle) {
         },
         connection: Connection {
             kind: if local { "local" } else { "remote" },
-            origin: origin.clone(),
+            // A relayed page (proxy.rs) is the remote server's: named as such, not by the relay's loopback origin.
+            origin: crate::proxy::target_of(app, &origin).unwrap_or_else(|| origin.clone()),
             startup: if cfg.mode.is_empty() { "ask" } else { "auto" },
         },
         update,
         // Every push of this launch: the first page load can be replaced by a second one (macOS reports two when the
         // server was ready before the chooser), and a login screen may come first. The page toasts once per version.
         just_updated: lock(&st.update.just_updated).clone(),
+        share,
     };
     let (Ok(origin), Ok(state)) = (serde_json::to_string(&origin), serde_json::to_string(&state)) else { return };
     // The origin check in the page: a navigation may have replaced it since.
@@ -505,16 +586,50 @@ pub enum Gate {
 
 const BLOCK_RECORDING: &str = "강의를 녹음하는 중이에요. 녹음을 끝낸 뒤 다시 설치해 주세요.";
 const BLOCK_UNSENT: &str = "녹음한 소리를 아직 서버로 보내는 중이에요. 다 보낸 뒤 다시 설치해 주세요.";
+const BLOCK_RECORDING_SHARE: &str = "강의를 녹음하는 중이에요. 녹음을 끝낸 뒤 다시 바꿔 주세요.";
+const BLOCK_UNSENT_SHARE: &str = "녹음한 소리를 아직 서버로 보내는 중이에요. 다 보낸 뒤 다시 바꿔 주세요.";
 
-/// Whether an install (a restart) may go on now. `page_asked`: the page started it and has asked the user about
-/// its own work (answers, uploads) already; what could lose audio blocks whatever the page says.
-pub fn decide(page: &PageAnswer, server: &ServerAnswer, page_asked: bool) -> Gate {
+/// What the restart behind a busy check is for: the texts name it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Restart {
+    /// An update is installed and the app restarts (update.rs).
+    Install,
+    /// The local server restarts with another share setting or a new access code (share.rs).
+    Share,
+}
+
+impl Restart {
+    fn block_recording(self) -> &'static str {
+        match self {
+            Restart::Install => BLOCK_RECORDING,
+            Restart::Share => BLOCK_RECORDING_SHARE,
+        }
+    }
+
+    fn block_unsent(self) -> &'static str {
+        match self {
+            Restart::Install => BLOCK_UNSENT,
+            Restart::Share => BLOCK_UNSENT_SHARE,
+        }
+    }
+
+    fn warn_tail(self) -> &'static str {
+        match self {
+            Restart::Install => "다시 시작하면 이 작업이 멈춰요. 그래도 설치하고 다시 시작할까요?",
+            Restart::Share => "다시 시작하면 이 작업이 멈춰요. 그래도 서버를 다시 시작할까요?",
+        }
+    }
+}
+
+/// Whether a restart may go on now. `page_asked`: the page started it and has asked the user about its own work
+/// (answers, uploads) already; what could lose audio blocks whatever the page says.
+pub fn decide_for(page: &PageAnswer, server: &ServerAnswer, page_asked: bool, restart: Restart) -> Gate {
     let mut warn: Vec<String> = Vec::new();
     // The server counts the answer this page is making too (a page makes one at a time): named once, as the page's.
     let own_answer = matches!(page, PageAnswer::Busy(p) if p.answering);
     match page {
-        PageAnswer::Busy(p) if p.recording => return Gate::Block(BLOCK_RECORDING.into()),
-        PageAnswer::Busy(p) if p.holds_audio() => return Gate::Block(BLOCK_UNSENT.into()),
+        PageAnswer::Busy(p) if p.recording => return Gate::Block(restart.block_recording().into()),
+        PageAnswer::Busy(p) if p.holds_audio() => return Gate::Block(restart.block_unsent().into()),
         PageAnswer::Busy(p) if !page_asked => {
             if p.answering {
                 warn.push("답변을 만드는 중이에요.".into());
@@ -561,7 +676,7 @@ pub fn decide(page: &PageAnswer, server: &ServerAnswer, page_asked: bool) -> Gat
         return Gate::Go;
     }
     let list: Vec<String> = warn.iter().map(|w| format!("• {w}")).collect();
-    Gate::Warn(format!("{}\n\n다시 시작하면 이 작업이 멈춰요. 그래도 설치하고 다시 시작할까요?", list.join("\n")))
+    Gate::Warn(format!("{}\n\n{}", list.join("\n"), restart.warn_tail()))
 }
 
 /// The main window shows a page of the allowed origin (not the chooser).
@@ -582,11 +697,16 @@ pub fn page_answer(app: &AppHandle) -> PageAnswer {
     }
 }
 
-/// Asks this computer's server over loopback (no Origin header: its API guard lets it through).
+/// Asks this computer's server over loopback (no Origin header: its API guard lets it through). A shared server
+/// wants a login like everyone else: the code from the library as a bearer (never a loopback bypass); without
+/// one the 401 counts as no answer (a warning, never a block).
 fn server_answer(app: &AppHandle) -> ServerAnswer {
-    let Some(base) = lock(&app.state::<AppState>().server_url).clone() else { return ServerAnswer::NotRunning };
+    let st = app.state::<AppState>();
+    let Some(base) = lock(&st.server_url).clone() else { return ServerAnswer::NotRunning };
     let Ok(url) = Url::parse(&format!("{base}/api/desktop/busy")) else { return ServerAnswer::NoAnswer };
-    let res = match crate::remote::get(&url) {
+    let bearer = lock(&st.share_urls).is_some().then(|| server::access_code(app)).flatten().map(|code| format!("Bearer {code}"));
+    let headers: Vec<(&str, &str)> = bearer.iter().map(|b| ("Authorization", b.as_str())).collect();
+    let res = match crate::remote::get_with(&url, &headers) {
         Ok(res) if res.status == 200 => res,
         Ok(res) => {
             config::log(app, &format!("busy check: the server answered HTTP {}", res.status));
@@ -604,12 +724,17 @@ fn server_answer(app: &AppHandle) -> ServerAnswer {
     json.as_ref().and_then(ServerBusy::parse).map_or(ServerAnswer::NoAnswer, ServerAnswer::Busy)
 }
 
-/// decide() with the page's and the server's answers. Blocks up to ~20 s: never on the main thread.
+/// busy_gate_for an install (update.rs).
 pub fn busy_gate(app: &AppHandle, page_asked: bool) -> Gate {
+    busy_gate_for(app, page_asked, Restart::Install)
+}
+
+/// decide_for() with the page's and the server's answers. Blocks up to ~20 s: never on the main thread.
+pub fn busy_gate_for(app: &AppHandle, page_asked: bool, restart: Restart) -> Gate {
     let page = page_answer(app);
     let server = server_answer(app);
-    let gate = decide(&page, &server, page_asked);
-    config::log(app, &format!("busy check: {gate:?} (page {page:?}; server {server:?})"));
+    let gate = decide_for(&page, &server, page_asked, restart);
+    config::log(app, &format!("busy check ({restart:?}): {gate:?} (page {page:?}; server {server:?})"));
     gate
 }
 
@@ -672,8 +797,12 @@ mod tests {
         for theme in ["system", "light", "dark"] {
             assert_eq!(at(&format!("http://127.0.0.1:5351/__easy-study-desktop/theme/{theme}")), Nav::Action(Action::Theme(theme)));
         }
+        assert_eq!(at("http://127.0.0.1:5351/__easy-study-desktop/share/on"), Nav::Action(Action::Share(true)));
+        assert_eq!(at("http://127.0.0.1:5351/__easy-study-desktop/share/off"), Nav::Action(Action::Share(false)));
+        assert_eq!(at("http://127.0.0.1:5351/__easy-study-desktop/share/reveal"), Nav::Action(Action::ShareReveal));
+        assert_eq!(at("http://127.0.0.1:5351/__easy-study-desktop/share/reset-code"), Nav::Action(Action::ShareResetCode));
         // Unknown actions and theme values, and near misses of the path: never acted on.
-        for bad in ["theme/blue", "theme/", "theme", "choose/", "Choose", "install-update/now", ""] {
+        for bad in ["theme/blue", "theme/", "theme", "choose/", "Choose", "install-update/now", "", "share/", "share", "share/ON", "share/true", "share/reset"] {
             assert_eq!(at(&format!("http://127.0.0.1:5351/__easy-study-desktop/{bad}")), Nav::Reserved, "{bad}");
         }
         assert_eq!(at("http://127.0.0.1:5351/__easy-study-desktop"), Nav::Reserved);
@@ -705,6 +834,11 @@ mod tests {
 
     fn server(v: serde_json::Value) -> ServerAnswer {
         ServerAnswer::Busy(ServerBusy::parse(&v).unwrap())
+    }
+
+    /// The install's decision (update.rs busy_gate).
+    fn decide(page: &PageAnswer, server: &ServerAnswer, page_asked: bool) -> Gate {
+        decide_for(page, server, page_asked, Restart::Install)
     }
 
     #[test]
@@ -758,6 +892,22 @@ mod tests {
         assert!(text.contains("• 답변 1개를 만드는 중이에요."), "{text}");
         // Garbage in the answers counts as nothing (only the page itself can be hurt by lying).
         assert_eq!(PageBusy::parse(&json!({ "recording": "yes", "unsentSeconds": -4, "uploads": "x" })), Some(PageBusy::default()));
+    }
+
+    #[test]
+    fn the_share_restart_has_its_own_texts() {
+        let idle_server = server(json!({}));
+        let recording = page(json!({ "recording": true }));
+        assert_eq!(decide_for(&recording, &idle_server, true, Restart::Share), Gate::Block(BLOCK_RECORDING_SHARE.into()));
+        assert_eq!(decide_for(&page(json!({ "unsentSeconds": 2 })), &idle_server, false, Restart::Share), Gate::Block(BLOCK_UNSENT_SHARE.into()));
+        assert!(BLOCK_RECORDING_SHARE.contains("다시 바꿔") && !BLOCK_RECORDING_SHARE.contains("설치"));
+        let Gate::Warn(text) = decide_for(&PageAnswer::NotShown, &server(json!({ "chatTurns": 1 })), false, Restart::Share) else { panic!() };
+        assert!(text.ends_with("그래도 서버를 다시 시작할까요?") && !text.contains("설치"), "{text}");
+        let Gate::Warn(text) = decide_for(&PageAnswer::NotShown, &server(json!({ "chatTurns": 1 })), false, Restart::Install) else { panic!() };
+        assert!(text.ends_with("그래도 설치하고 다시 시작할까요?"), "{text}");
+        // The install's wrappers keep the install texts.
+        assert_eq!(decide(&recording, &idle_server, false), Gate::Block(BLOCK_RECORDING.into()));
+        assert_eq!(decide_for(&PageAnswer::NotShown, &ServerAnswer::NotRunning, false, Restart::Share), Gate::Go);
     }
 
     #[test]

@@ -217,3 +217,9 @@ footer { margin-top: 28px; text-align: center; }
 .segmented input, .check input { accent-color: var(--accent); margin: 0; }
 .check { display: flex; gap: 8px; align-items: center; color: var(--text-2); font-size: 14px; cursor: pointer; }
 progress { width: 100%; height: 6px; accent-color: var(--accent); }
+
+/* "다른 기기에서 접속": the addresses and the code, each with its copy button. */
+.share-info { display: grid; gap: 6px; }
+.path.inline { display: inline-block; padding: 2px 6px; user-select: all; }
+.share-urls { margin: 0; padding-left: 0; list-style: none; display: grid; gap: 4px; }
+.share-urls li { display: flex; gap: 8px; align-items: center; }

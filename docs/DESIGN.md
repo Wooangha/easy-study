@@ -90,7 +90,7 @@ All JSON. Errors: HTTP 4xx/5xx with `{ "error": string }` (plus machine-readable
 | Method & path | Body | Response |
 |---|---|---|
 | GET `/api/health` | – | `HealthResponse` (with the server's `version` from package.json, §24) |
-| GET `/api/desktop/busy` | – | `DesktopBusyResponse`: desktop mode only (404 otherwise), for the shell before an update (§24): the live recording (ids, status, its and its lecture's titles) and counts of transcriptions, 정리본 calls, answers and model downloads; no paths or content, `no-store` |
+| GET `/api/desktop/busy` | – | `DesktopBusyResponse`: desktop mode only (404 otherwise), for the shell before an update or a share restart (§24): the live recording (ids, status, its and its lecture's titles) and counts of transcriptions, 정리본 calls, answers and model downloads; no paths or content, `no-store`; behind the login like every /api route when the desktop server is shared (the shell sends the bearer code) |
 | GET `/__easy-study-desktop/*` (not under /api) | – | 204 in every mode: a desktop page action the shell did not intercept leaves the page where it is (§8, §24) |
 | GET `/api/docs` | – | `DocMeta[]` newest first |
 | POST `/api/docs` | raw PDF bytes, `Content-Type: application/pdf`, header `X-Filename` (URI-encoded original name) | `DocMeta` (201). Max 300 MB. Rejects non-`%PDF` bodies (400). |
@@ -367,7 +367,16 @@ Prime turns are excluded from notes. Error/aborted answers are shown as `_(answe
     'download' kinds, with a found version or in phase error, e.g. after an update that did not take), the
     release notes as plain text (`<details>`), "연결: 이 컴퓨터 / 다른 컴퓨터 ({origin})", "시작할 때: …",
     연결 대상 바꾸기… (a confirmDialog first when the page records, still sends audio, answers or uploads) and 다음 실행
-    때 선택 화면 보기 (only when the connection starts automatically).
+    때 선택 화면 보기 (only when the connection starts automatically). Then, only when `connection.kind === 'local'`
+    and the push has `share` (§16 "Desktop share mode"): **다른 기기에서 접속** — the checkbox "다른 기기에서 접속 허용
+    (같은 네트워크, 접속 코드 필요)" (disabled with `shareBlockReason(busy)` while audio could be cut off; `shareWarning`
+    → confirmDialog "서버를 다시 시작할까요?" for answers/uploads; then `share/on` | `share/off`), a hint that the switch
+    restarts this computer's server and what the code grants, and while `share.on` with addresses: the list "다른 기기에서
+    열 주소" (`<code>` + 복사 via `copyText`, a name URL marked "(같은 네트워크에서 이름이 풀릴 때만)"), "접속 코드
+    <code>" + 복사 when the shell pushed `share.code`, otherwise a 보기 button (`share/reveal`) and the note that the
+    chooser's ⚙ 앱 설정 shows it, "접속 코드 새로 만들기 (모든 기기 로그아웃)" (`resetCodeConfirm` → `share/reset-code`,
+    same gate), and the firewall / app-to-app recording / HTTPS-for-tablets / cookie note. `share.on` without addresses:
+    "서버를 다시 시작하면 주소가 나와요."
 - **Theme** (web/src/lib/theme.ts, web/public/theme-boot.js): styles.css keeps the light tokens on `:root` and the dark ones
   twice, identically — under `@media (prefers-color-scheme: dark) { :root:not([data-theme='light']) }` and under
   `:root[data-theme='dark']` — plus `color-scheme` for a forced theme; the same for `--rec`. highlight.js's GitHub theme
@@ -385,10 +394,12 @@ Prime turns are excluded from notes. Error/aborted answers are shown as `_(answe
   - `desktopMarker()` reads the static marker `{v:1, version, os}`; `useDesktopState()` is a useSyncExternalStore over
     `window.__easyStudyDesktopState` and the `easy-study-desktop` event. The push is untrusted input: every field is
     checked (known enums, version-like strings, finite counts, `releaseUrl` https only, `origin` http(s), notes cut to
-    2000 characters); a malformed push is ignored and the previous state stays. Pages of other computers get fewer update
-    fields (no notes, dates, errors of their own) and must work with them.
+    2000 characters, `share` = `{on: boolean, urls: ≤32 http(s) origins, code: null | a generated-code shape}`); a
+    malformed push is ignored and the previous state stays. Pages of other computers get fewer update fields (no notes,
+    dates, errors of their own) and never `share`, and must work with them.
   - `desktopAction(name)` navigates to `<page origin>/__easy-study-desktop/<name>` (choose, forget-choice, check-update,
-    install-update, dismiss-update, cancel-update, theme/system|light|dark; nothing else is built) after allowing the
+    install-update, dismiss-update, cancel-update, theme/system|light|dark, share/on|off|reveal|reset-code; nothing
+    else is built) after allowing the
     page to be left for 1 s: App.tsx's beforeunload guard (answers, uploads, recordings) asks `leaveAllowed()` first,
     because WebView2 runs beforeunload even for a navigation the shell cancels. The server answers the prefix with 204
     in every mode, so an action that is not intercepted leaves the page where it is.
@@ -407,7 +418,10 @@ Prime turns are excluded from notes. Error/aborted answers are shown as `_(answe
     version and tab (sessionStorage `easy-study:toastedUpdate`): the shell sends it with every push of that launch.
     An error text that is a sentence of its own ("업데이트가 끝나지 않았어요…") gets no "업데이트하지 못했어요:" in front.
   - LoginScreen and LocalOnlyScreen have "다른 서버에 연결…" (→ choose) inside the app; over a mounted app its warning
-    is shown inline (the app's dialogs cannot be answered under the login screen).
+    is shown inline (the app's dialogs cannot be answered under the login screen). Both say where the code is (the
+    app's ⚙ 설정 › 데스크톱 앱 › 다른 기기에서 접속, or the terminal of `npm run start:remote`); LocalOnlyScreen's first
+    bullet is the switch. The login screen's plain-HTTP notice also shows when the app relays a plain-http remote
+    (`connection.kind === 'remote'` with an `http:` origin): the page is at 127.0.0.1 then, the network hop is not.
 
 ## 9. Module ownership (parallel implementation)
 
@@ -685,6 +699,59 @@ covered by the cookie automatically (same origin).
 - Layout must remain usable on tablets/phones (existing ≤800px stacked layout) — check that the login screen and the
   main view work at 390×844.
 
+### Desktop share mode and the loopback proxy as a client of remote mode (0.5.1)
+The desktop app (§19) uses remote mode twice, without changing its rules:
+- **Share mode** ("다른 기기에서 접속 허용", desktop.json `share`): the shell starts the bundled server with
+  `EASY_STUDY_DESKTOP_SHARE=1` and `server/desktop.ts` turns that into exactly `host: '0.0.0.0', auth: 'on',
+  password: null` — the generated code of `<library>/.auth.json`, the login on. `networkSettings` still refuses auth
+  off on a non-loopback host, so no path exposes a login-less server. The code is never printed on stdout (the shell
+  copies stdout into server.log) or pushed to a remote page; the shell reads it from the file when the chooser or the
+  local page shows it, and logs its own window in through `GET /login?code=` (303 + cookie: loopback is never
+  authentication — a `tailscale serve`-style loopback peer never gets in for free). `GET /api/desktop/busy` stays
+  behind the login; the shell probes it with `Authorization: Bearer <code>` over loopback. `EASY_STUDY_DESKTOP_RESET_CODE=1`
+  is `--reset-access-code` for "접속 코드 새로 만들기". The ready line gains `share.urls` (§19). Plain HTTP on the LAN
+  carries the code and cookie unencrypted: same-Wi‑Fi only, Tailscale/HTTPS elsewhere (README, chooser hint).
+- **Loopback proxy** (`server/proxy.ts`, a separate `dist-server/server/proxy.js` entry the shell runs per app session
+  with `--to http://<host>:<port>`): a plain-http remote is not a secure context, so the WebView hides the microphone
+  from its page. The shell shows `http://127.0.0.1:<proxyPort>` instead; the proxy relays every request to that one
+  origin — SSE and uploads as they flow (nothing buffered, `res.flushHeaders()` + `setNoDelay`), HTTP Range, HEAD,
+  `Set-Cookie` untouched (host-only cookies land on 127.0.0.1), `Location` on the remote origin rewritten to the
+  proxy's, `Host`/`Origin`/`Referer` of the proxy origin rewritten to the remote's so `apiGuard`/`isSameOrigin` pass.
+  Any other `Origin` passes unchanged and the remote refuses it (CSRF holds: the 127.0.0.1 cookie is SameSite=Strict
+  + HttpOnly). It binds 127.0.0.1 only, answers 421 to any other `Host` (DNS rebinding), 400 to an absolute-form
+  target, closes every `Upgrade`, sends no `X-Forwarded-*`/`Forwarded` and drops incoming ones (the remote trusts
+  those from loopback peers: a spoofed `https` would make it set a `Secure` cookie the WebView drops over http; a
+  spoofed address would change rate-limit keys), adds no credentials (a local process reaching it gets no more than
+  reaching the LAN remote directly), resolves the remote's name per request and connects only private addresses
+  (loopback, RFC 1918, link-local, 100.64/10, IPv6 ULA/link-local — the shell's `remote.rs` rules; an IP literal is
+  checked in the handler because `net.connect` skips the lookup for it) → 502 "연결한 컴퓨터(…)에 닿지 않아요" when the
+  remote is down or public. An answer that arrives before the request body ended (401, 413) is relayed with
+  `Connection: close`; the proxy then reads ≤ 16 MB / 5 s of the rest off before ending, so the client reads the
+  answer instead of a reset (the remote itself does the same, `drainRest`; beyond its bound a direct client can be
+  reset too). A client that leaves destroys the upstream request (the remote aborts the turn / unsubscribes). It never
+  logs a URL or header (`/login?code=` carries the code). https remotes are shown directly (already secure), and so
+  are loopback remotes (127.0.0.1 / localhost) unless the shell's test knob `EASY_STUDY_DESKTOP_FORCE_PROXY=1` says
+  otherwise. The remote's security headers pass through untouched.
+- **Cookies are host-scoped, not port-scoped**: the WebView keeps ONE cookie jar for 127.0.0.1, shared by the shell's
+  own server (share mode: its `es_session`, set by the shell's `/login?code=`), the proxy and any later proxy for
+  another remote (the port is remembered, so it is even the same origin). Left alone, every request through the proxy
+  would carry the local server's `es_session` — valid for 30 days, never revoked by `open_remote` (which only stops the
+  server) — to whichever remote is behind it, and one remote's cookie to the next. So the proxy scopes the session
+  cookie itself (`scopedSessionCookieName`, `downstreamSetCookie`, `upstreamCookie`): `Set-Cookie: es_session=…` from
+  the remote (a login, the sliding refresh, the `Max-Age=0` of a logout) is stored as `es_session_<12 hex of
+  sha256(remote origin)>`, attributes untouched, and the `Cookie` header sent to the remote holds only that one back
+  under the name `es_session`; a bare `es_session` and every other `es_session_*` are dropped. The local server's login
+  therefore never reaches a remote, one remote's never reaches another, and the logins coexist: switching local ⇄
+  remote or between remotes does not ask for a code again (a remote's cookie does still reach the local server on
+  its port, where `sessionCookieValues` reads only `es_session`; a loopback dev server shown directly, not through the
+  proxy, shares the plain `es_session` with the shell's shared server — a developer-only case). tests/proxy.test.ts
+  asserts a valid token under a foreign name is not a login.
+- **A page cannot open this computer to the network by itself**: `share/on` and `share/reveal` from the local page go
+  through `bridge::confirm` (native, rate-limited by `PageDialogs`) before anything happens (§24), because the page's
+  session is HttpOnly and page-bound while the code lets any device in; the chooser (IPC-only, the trusted bundle)
+  needs no dialog. The plain-http relay is a trade-off the README states: the network can also alter the page, and an
+  altered page at the relay origin has the microphone and the session — trusted network only, Tailscale/HTTPS elsewhere.
+
 ## 17. Round 6 — PDFium (no external PDF tools)
 
 Goal: the app needs nothing but Node and `npm ci` on macOS, Windows and Linux (prerequisite for the desktop app).
@@ -852,7 +919,27 @@ Server "desktop mode" (`EASY_STUDY_DESKTOP=1`, set only by the shell):
   shell shows the stderr tail in the chooser;
 - the library and the install may sit under dot folders (Linux ~/.local/share/…, the AppImage's /tmp/.mount_…): files are sent
   relative to their own folder (Express refuses any dot segment of an absolute path), and errors outside /api are plain text
-  without stack traces or paths.
+  without stack traces or paths;
+- (0.5.1) `EASY_STUDY_DESKTOP_SHARE=1|true|on|yes` = remote mode on 0.0.0.0 with auth on and the generated code (§16 "Desktop
+  share mode"); the ready line is then `EASY_STUDY_READY {"url":"http://127.0.0.1:<port>","port":<port>,"share":{"urls":[…]}}`
+  (`url` stays loopback: the shell reaches it there), byte-identical to before without sharing. `share.urls` =
+  `shareUrls()`: every non-internal IPv4 except 169.254.*, physical adapters first (en*/eth*/wlan*/Wi-Fi/Ethernet), tunnels,
+  bridges and virtual adapters last, the host name last of all (left out on Windows without a domain suffix). The code is
+  read from `<library>/.auth.json` (`code`, `^[0-9a-hjkmnp-tv-z]{5}(-…){3}$`) by the shell, never printed.
+  `EASY_STUDY_DESKTOP_RESET_CODE=1` = `resetAccessCode: true` (a new code, every login ended, "이전 로그인은 모두 끊었습니다" on stdout).
+  Both variables are the shell's (STRIP_ENV): the user's environment cannot share the server;
+- (0.5.1) a port held by another program exits with code 3 (`EXIT_PORT_IN_USE`; the message unchanged), so the shell can tell it
+  from other failures and try another port — a 0.0.0.0 test-bind in the shell would be no test (SO_REUSEADDR lets a wildcard
+  bind succeed beside a loopback listener) and would trigger firewall prompts for the shell binary;
+- (0.5.1) the loopback proxy `dist-server/server/proxy.js --to <http origin>` (env `PORT`, 0 = any; no EASY_STUDY_* at all):
+  binds 127.0.0.1, prints the same ready line shape (`{"url":"http://127.0.0.1:<p>","port":<p>}`) after
+  `[proxy] http://127.0.0.1:<p> → <origin>`, exits 0 on stdin EOF / parent gone / SIGINT/SIGTERM/SIGHUP(/SIGBREAK) after
+  `server.close()` + `closeAllConnections()` (2 s force timer), 1 when it cannot listen ("포트 <p>를 다른 프로그램이 쓰고 있습니다"
+  for EADDRINUSE: the shell retries with PORT=0), 2 for a bad `--to` ("중계할 주소가 올바르지 않습니다: …"; http only, a host, no
+  userinfo, path `/` or none, no query/fragment). Korean stderr goes to the shell's proxy.log. The shared pieces (`readyLine`,
+  `watchShell`, `shellAlive`, `stopSignals`) live in `server/shellWatch.ts`, which imports no server module; desktop.ts
+  re-exports them. `scripts/build-server.mjs` requires the entry; `desktop/scripts/prepare.mjs` (pack-server) must be re-run
+  before an app build that needs it.
 
 Shell (Rust, src/main.rs):
 - single instance (focus the existing window); stable local port remembered in the app config (not 5180; fall back to a free port) so
@@ -872,7 +959,42 @@ Shell (Rust, src/main.rs):
   instance; the local ones also upload a one-page PDF and load its slide images; a failure shown by the chooser must leave it
   usable;
 - library location: default app data dir; the chooser offers "라이브러리 폴더 선택…" (tauri-plugin-dialog) to use an existing folder
-  such as the repo's library/ (the single-instance lock prevents running together with `npm start` on the same folder).
+  such as the repo's library/ (the single-instance lock prevents running together with `npm start` on the same folder);
+- (0.5.1, share flow, `share.rs`): the switch "다른 기기에서 접속 허용" in the chooser's ⚙ 앱 설정 (IPC `set_share`) and in the
+  local page's ⚙ 설정 (page actions `share/on|off`, honoured only from the local origin; a remote page's are logged and
+  ignored) persists desktop.json `share` and, when the local server runs, restarts it through the busy gate (§24, `Restart::Share`
+  wording; never while a recording runs or audio is unsent; refused with a note while the server is still starting or an
+  update replaces the app). A page's `share/on` is confirmed in a native dialog first (`bridge::confirm`, one per
+  `PageDialogs` gap); the chooser's switch is not. `on_ready` of a shared server navigates to `/login?code=<code>` (the 303
+  sets the cookie and drops the code from the address bar; `server::page_url`, also used when "연결" finds the server already
+  running) instead of the bare URL — except after a change made in the chooser while the server ran (`AppState::stay_on_chooser`,
+  set by share.rs before `server::start`, cleared by `start_ended` and by `connect_local`): the chooser stays with the
+  addresses and the code, and "연결" opens the page. `share_urls` (from the ready line, parsed defensively: ≤32 http URLs,
+  non-loopback hosts) is the one "runs shared" fact; `access_code()` reads `.auth.json` on demand and the code appears in
+  get_state/push_state only for the chooser and the local page (pushed only after `share/reveal`, briefly), never in a log or
+  smoke line. "접속 코드 새로 만들기" (`share/reset-code`, chooser button) restarts once with `EASY_STUDY_DESKTOP_RESET_CODE=1`.
+  `open_remote` keeps stopping the local server, shared or not ("다른 컴퓨터에 연결하면 이 컴퓨터의 서버(공유 포함)는 멈춰요");
+- (0.5.1, proxy lifecycle, `proxy.rs`): for a plain-http, non-loopback remote (or any http remote with
+  `EASY_STUDY_DESKTOP_FORCE_PROXY=1`, a STRIP_ENV test knob), after the direct probe (`remote::get`: the public-address refusal
+  stays), the shell spawns `proxy.js --to <origin>` on `proxyPort` (remembered in desktop.json — a stable origin keeps the
+  WebView's storage across app sessions; note it is ONE origin for every relayed remote, so the web client's localStorage
+  (last document, recorder settings) is shared among them, while the logins are kept apart by the proxy's scoped cookie,
+  §16; the saved port when free, else 5360..=5369, else any; the port actually used is saved from the ready line) with
+  stdin/stdout/stderr piped, the process group / Job Object / PDEATHSIG of the server, stderr → proxy.log, and shows
+  `http://127.0.0.1:<p>` (+ `/login?code=…` when a code was given and the remote requires one).
+  Ready within 15 s or "연결 통로(프록시)가 15초 안에 준비되지 않았어요"; a failed start is a chooser error line of proxy.rs
+  (all named "연결 통로(프록시)…", shown as they are; smoke: exit 2); a proxy that dies later shows the chooser with
+  "연결 통로(프록시)가 예기치 않게 종료됐어요 …". It is stopped (stdin EOF, ≤3 s, then kill) at RunEvent::Exit, by show_chooser,
+  by a `go_to` of another origin and by a start for another remote, under one lifecycle lock so a pending stop never races a
+  newer start (every stop first closes the page-N windows on the proxy origin, except at exit). The proxy origin is the
+  `allowed_origin` while shown: page actions, page-N windows and the
+  smoke checks work unchanged; `Connection.origin` pushed to the page and "open in browser" use the remote origin
+  (`proxy_target`), `is_local` stays false (remote dialog limits, `for_remote()` update state);
+- (0.5.1, media): `media::allowed()` trusts the loopback origin the shell itself runs — its server or its proxy
+  (`local_server = server_url.or(proxy_url)`; §22) — so the microphone works on the proxy origin on Linux/Windows too
+  (macOS grants through the entitlement). Smoke runs report `recorder {secure, mediaDevices, worklet}` on local and proxied pages
+  and, with `EASY_STUDY_DESKTOP_SMOKE_WRITE=1` (STRIP_ENV, README), also upload a PDF to a remote/proxied server and check a fake-CLI
+  SSE stream and a 0.5 s WAV recording upload; the result line's `url` is the proxy origin when proxied. Still no `getUserMedia(`.
 
 Packaging: macOS .app/.dmg (arm64 and x64, ad-hoc signed `signingIdentity "-"`; notarization later), Windows NSIS (currentUser,
 WebView2 bootstrapper), Linux .deb (Depends += libatomic1; Recommends fonts-noto-cjk) + .rpm (compression none or skip if slow) +
@@ -1071,7 +1193,10 @@ about using lecture speech.
 ### Desktop shell + CI
 - macOS: Info.plist NSMicrophoneUsageDescription (Korean + English), entitlement com.apple.security.device.audio-input (hardened runtime);
   Linux: enable media stream + permission-request handler allowing audio capture for the local server origin (and a remote origin the user
-  connected to over HTTPS); Windows: PermissionRequested → allow microphone for those origins.
+  connected to over HTTPS); Windows: PermissionRequested → allow microphone for those origins. Since 0.5.1 "the local server origin"
+  means the loopback origin the shell itself runs: its own server or its loopback proxy for a plain-http remote (§16, §19) — only
+  the page the main window may show, and only while it is the shell's own child. A plain-http remote's page is never trusted
+  directly (it is not a secure context anyway).
 - CI builds whisper-cli v1.9.4 per target (Metal on macOS; CPU elsewhere; on Windows with OpenMP and MSVC's vcomp140.dll next to it,
   since ggml's own busy-waiting thread pool hangs there when threads outnumber free CPUs) and the minimal LGPL ffmpeg, caches them, ships them like es-node
   (resources on macOS/Windows, externalBin on Linux), and passes EASY_STUDY_WHISPER / EASY_STUDY_FFMPEG to the server. Licenses in
@@ -1157,12 +1282,20 @@ chooser included). The web half (settings dialog, theme, banner, hooks) is in §
 - **Marker**: `initialization_script` of the main window, main frame only (never page-N windows):
   `window.__EASY_STUDY_DESKTOP__ = Object.freeze({v:1, version, os})`. `version` is `package_info().version` at run time
   (never a literal), `os` macos|windows|linux; both JSON-quoted. desktop.test.mjs checks it never names `__TAURI`.
-- **Pushed state**: `window.__easyStudyDesktopState = {v:1, theme, connection:{kind, origin, startup}, update, justUpdated}`
-  then `dispatchEvent(new Event('easy-study-desktop'))`, serde_json through `eval` (never text built from what a page
+- **Pushed state**: `window.__easyStudyDesktopState = {v:1, theme, connection:{kind, origin, startup}, update, justUpdated,
+  share?}` then `dispatchEvent(new Event('easy-study-desktop'))`, serde_json through `eval` (never text built from what a page
   said), guarded by `location.origin === <origin>` in the page. Sent on every page load (PageLoadEvent::Finished) of the
   allowed origin and on every change; download progress at most every 250 ms. `justUpdated` is in every push of the
   launch (macOS may report two loads when the server was ready before the chooser, and a login screen may come first). The chooser is never pushed to (it polls
   get_state). Another computer's page gets `update` without notes, date, checkedAt, lastError, lastErrorAt.
+  `share` = `{on, running, urls, code}` (0.5.1) only for the page of this computer's own server (`is_local`): `on` = desktop.json
+  `share`, `running` = the server runs shared right now (`share_urls.is_some()`; the page tells "restart pending" from
+  "shared but no address, e.g. offline" by it), `urls` = the running shared server's addresses (empty when not shared or
+  without a network), `code` = the access code only for a short while after the page asked with `share/reveal` and the user
+  agreed in the native dialog that action shows (null otherwise: an XSS in the web client must not turn a page-bound session
+  into the code that lets any device in — the dialog, not the 60 s window, is the gate; the chooser, a trusted bundle, always
+  shows it). Never to a remote or proxied page.
+  `connection.origin` of a page shown through the loopback proxy is the remote's origin (kind "remote"), not the proxy's.
 - **UpdateState** (update.rs, camelCase, optional fields left out, never null): phase idle|checking|latest|available|
   downloading|downloaded|installing|error, current, version?, notes? (latest.json is not signed: plain text only, ≤2000
   chars), date?, releaseUrl, received, total?, error?, install inApp|download|none, reason?, kind app|nsis|appimage|deb|
@@ -1170,7 +1303,9 @@ chooser included). The web half (settings dialog, theme, banner, hooks) is in §
   `lastError` are always one of the fixed Korean texts of update.rs (no paths, no user names); raw errors go to
   shell.log only. The web shows `reason` whenever install is download.
 - **Actions**: a navigation to `<allowed origin>/__easy-study-desktop/<action>`: choose, forget-choice, check-update,
-  install-update, dismiss-update, cancel-update, theme/system|light|dark. `bridge::classify` runs first in
+  install-update, dismiss-update, cancel-update, theme/system|light|dark, and (0.5.1, honoured only from this computer's
+  own page; a remote or proxied page's are logged — rate-limited — and ignored) share/on (native confirm first),
+  share/off, share/reveal (native confirm, then the code is pushed for ~60 s), share/reset-code. `bridge::classify` runs first in
   `allow_main_navigation`: a known action on the allowed http(s) origin is done on its own thread and the navigation
   cancelled; the prefix anywhere else (another origin or scheme, an unknown action) is cancelled and never opened in the
   browser; the query is ignored. `new_window` and the page-N windows refuse the prefix without acting (answers open links
@@ -1192,8 +1327,11 @@ chooser included). The web half (settings dialog, theme, banner, hooks) is in §
   kind and minute (shell.log is rotated at launch only).
 
 ### Busy gate (bridge::decide, unit-tested)
-Asked before an install (and again after the download): the page (`__easyStudyBusy`) and this computer's server
-(`GET /api/desktop/busy` over loopback; desktop mode only, no side effects, never asrStatus()).
+Asked before an install (and again after the download), and since 0.5.1 before the restart of this computer's server for
+"다른 기기에서 접속 허용" or a new access code (`Restart::Share`: the same table, the texts say "다시 바꿔 주세요" / "그래도
+서버를 다시 시작할까요?" instead of installing): the page (`__easyStudyBusy`) and this computer's server (`GET
+/api/desktop/busy` over loopback; desktop mode only, no side effects, never asrStatus(); with `Authorization: Bearer <code>`
+when the server is shared — a missing code is "no answer" = Warn, never Block).
 
 | Answer | Result |
 |---|---|
@@ -1276,6 +1414,10 @@ the chooser, where no page is asked, still installs). Menu "연결 대상 바꾸
   when its page has been up 30 s, on a normal exit and before an update restart. Still set at the next launch (the app
   died or was force-quit right after connecting) → the chooser comes first with a note.
 - desktop.json keeps fields it does not know (`#[serde(flatten)] extra`): a downgrade does not drop a newer build's settings.
+- (0.5.1) desktop.json `share: bool` (absent = off; the file of a fresh install stays `{"mode":""}`) and `proxyPort`
+  (the loopback proxy's remembered port). The access code is never in desktop.json: it is the server's `<library>/.auth.json`,
+  per library (a library change keeps `share`; a new library gets a new code). `connection.origin` rule: the remote's origin
+  for a proxied page, the page origin otherwise; the page-side origin guard still uses the page's own origin.
 
 ### Releases (desktop/scripts; runbook in docs/HANDOFF.md)
 - CI (desktop.yml) packs the macOS updater archive `easy-study_<v>_<arch>.app.tar.gz` right after the build: one top

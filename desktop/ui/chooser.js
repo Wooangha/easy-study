@@ -1,8 +1,8 @@
 // The desktop app's start page (DESIGN §19). Talks to the shell (src-tauri/src/main.rs) through Tauri's IPC,
 // which only this bundled page may use: get_state, connect_local, connect_remote, pick_library, set_library,
 // open_library, and for "⚙ 앱 설정" (DESIGN §24) check_update, install_update, cancel_update, set_theme,
-// set_update_check, forget_choice, open_logs. Everything it shows comes from get_state (never from the address),
-// so a page that links here cannot put text on it.
+// set_update_check, forget_choice, open_logs, set_share, reset_share_code. Everything it shows comes from get_state
+// (never from the address), so a page that links here cannot put text on it.
 'use strict';
 
 const invoke = (cmd, args) => window.__TAURI_INTERNALS__.invoke(cmd, args);
@@ -142,10 +142,73 @@ function renderUpdate(st) {
   }
 }
 
+/** Copies `text` (the clipboard API, or the old command when the page cannot use it) and says so on `button`. */
+function copyText(text, button) {
+  const fallback = () => {
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.setAttribute('readonly', '');
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    document.body.append(area);
+    area.select();
+    try {
+      document.execCommand('copy');
+    } finally {
+      area.remove();
+    }
+  };
+  const done = () => {
+    const label = button.textContent;
+    button.textContent = '복사됨';
+    setTimeout(() => {
+      button.textContent = label;
+    }, 1500);
+  };
+  const clipboard = navigator.clipboard?.writeText(text);
+  if (clipboard) clipboard.then(done, () => (fallback(), done()));
+  else (fallback(), done());
+}
+
+/** "다른 기기에서 접속": the switch, and while the local server runs shared, its addresses and access code. */
+function renderShare(st) {
+  $('share').checked = st.share;
+  $('share').disabled = Boolean(st.busy);
+  $('share-off').hidden = st.share;
+  $('share-idle').hidden = !(st.share && !st.shareRunning);
+  $('share-info').hidden = !st.shareRunning;
+  if (!st.shareRunning) return;
+  const list = $('share-urls');
+  const urls = st.shareUrls ?? [];
+  if (list.dataset.urls !== urls.join(' ')) {
+    list.dataset.urls = urls.join(' ');
+    list.replaceChildren(
+      ...urls.map((url) => {
+        const li = document.createElement('li');
+        const code = document.createElement('code');
+        code.className = 'path inline';
+        code.textContent = url;
+        const copy = document.createElement('button');
+        copy.type = 'button';
+        copy.className = 'link copy';
+        copy.textContent = '복사';
+        copy.addEventListener('click', () => copyText(url, copy));
+        li.append(code, copy);
+        return li;
+      }),
+    );
+  }
+  $('share-no-urls').hidden = urls.length > 0;
+  $('share-code').textContent = st.shareCode ?? '(코드를 읽지 못했어요)';
+  $('share-copy').hidden = !st.shareCode;
+  $('share-reset').disabled = Boolean(st.busy);
+}
+
 function renderSettings(st) {
   applyTheme(st.theme);
   for (const input of document.querySelectorAll('input[name=theme]')) input.checked = input.value === st.theme;
   renderUpdate(st);
+  renderShare(st);
   const startup =
     st.mode === 'local'
       ? '시작하면 ‘이 컴퓨터에서 실행’에 바로 연결해요.'
@@ -289,6 +352,16 @@ $('update-cancel').addEventListener('click', () => updateAction('cancel_update')
 $('update-auto').addEventListener('change', () => {
   invoke('set_update_check', { on: $('update-auto').checked }).then(() => refresh(), fail);
 });
+// Sharing: the shell asks (busy check, a dialog) and restarts the server on its own thread; the busy line shows up
+// through polling, and the box follows the setting the shell keeps.
+$('share').addEventListener('change', () => {
+  // A moment for the shell to write the setting (no server running) or to put up its busy line: the box would
+  // otherwise snap back to the old value for one poll.
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 250));
+  invoke('set_share', { on: $('share').checked }).then(settle).then(() => refresh(), fail);
+});
+$('share-copy').addEventListener('click', () => copyText($('share-code').textContent, $('share-copy')));
+$('share-reset').addEventListener('click', () => invoke('reset_share_code').then(() => refresh(), fail));
 $('forget-choice').addEventListener('click', async () => {
   try {
     await invoke('forget_choice');

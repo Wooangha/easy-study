@@ -44,6 +44,20 @@ pub fn parse(input: &str) -> Result<Url, String> {
     Ok(url)
 }
 
+/// `<origin>/login?code=<code>`: the server's one-click login (auth.ts loginLink) sets the session cookie and
+/// answers 303 to "/", so the code leaves the address bar. `origin` is an origin or a base URL without a path.
+pub fn login_url(origin: &str, code: &str) -> Result<String, String> {
+    let base = Url::parse(origin).map_err(|e| e.to_string())?;
+    let mut login = base.join("/login").map_err(|e| e.to_string())?;
+    login.query_pairs_mut().append_pair("code", code);
+    Ok(login.to_string())
+}
+
+/// Whether `host` (of a URL) is this computer itself: loopback addresses and `localhost`.
+pub fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost") || host.trim_matches(['[', ']']).parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
 /// Addresses that stay on this computer or this network (including Tailscale's CGNAT range).
 pub fn is_private(ip: IpAddr) -> bool {
     match ip {
@@ -72,6 +86,12 @@ impl<T: Read + Write> Stream for T {}
 
 /// A small HTTP/1.1 GET (Connection: close) over TCP or TLS, for the probe.
 pub fn get(url: &Url) -> Result<Response, String> {
+    get_with(url, &[])
+}
+
+/// `get` with extra request headers (`Authorization: Bearer <code>` for the shared local server's busy check).
+/// Names and values are the shell's own constants: a value with CR/LF would end the header block and is refused.
+pub fn get_with(url: &Url, extra: &[(&str, &str)]) -> Result<Response, String> {
     let host = url.host_str().unwrap_or_default().to_string();
     let port = url.port_or_known_default().unwrap_or(80);
     let addrs: Vec<SocketAddr> = url
@@ -119,9 +139,14 @@ pub fn get(url: &Url) -> Result<Response, String> {
         Some(q) => format!("{}?{q}", url.path()),
         None => url.path().to_string(),
     };
-    let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {authority}\r\nAccept: application/json\r\nUser-Agent: easy-study-desktop\r\nConnection: close\r\n\r\n"
-    );
+    let mut request = format!("GET {path} HTTP/1.1\r\nHost: {authority}\r\nAccept: application/json\r\nUser-Agent: easy-study-desktop\r\nConnection: close\r\n");
+    for (name, value) in extra {
+        if name.contains(['\r', '\n', ':']) || value.contains(['\r', '\n']) {
+            return Err(format!("요청 헤더 {name}의 값이 올바르지 않아요."));
+        }
+        request.push_str(&format!("{name}: {value}\r\n"));
+    }
+    request.push_str("\r\n");
     stream.write_all(request.as_bytes()).map_err(|e| format!("{host}:{port}에 요청을 보내지 못했어요: {e}"))?;
     let mut raw = Vec::new();
     let mut chunk = [0u8; 8192];
@@ -271,6 +296,19 @@ mod tests {
         assert!(parse("ftp://host").is_err());
         assert!(parse("http://user:pw@host").is_err());
         assert!(parse("").is_err());
+    }
+
+    #[test]
+    fn login_links_carry_the_code_in_the_query() {
+        assert_eq!(login_url("http://127.0.0.1:5378", "k7qm2-x9fda-3hz8w-p0rtc").unwrap(), "http://127.0.0.1:5378/login?code=k7qm2-x9fda-3hz8w-p0rtc");
+        assert_eq!(login_url("http://192.168.0.10:5180/", "a b&c").unwrap(), "http://192.168.0.10:5180/login?code=a+b%26c");
+        assert!(login_url("not a url", "x").is_err());
+        for host in ["127.0.0.1", "localhost", "LOCALHOST", "[::1]", "::1", "127.5.5.5"] {
+            assert!(is_loopback_host(host), "{host}");
+        }
+        for host in ["192.168.0.10", "my-mac.local", "[fd7a:115c:a1e0::1]", "localhost.example", ""] {
+            assert!(!is_loopback_host(host), "{host}");
+        }
     }
 
     #[test]

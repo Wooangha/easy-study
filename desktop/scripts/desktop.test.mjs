@@ -44,6 +44,7 @@ import { WHISPER, pickVcomp, whisperFlags } from './whisper.mjs';
 const tauriDir = path.join(DESKTOP_DIR, 'src-tauri');
 const readJson = (file) => JSON.parse(fs.readFileSync(path.join(tauriDir, file), 'utf8'));
 const mainRs = fs.readFileSync(path.join(tauriDir, 'src', 'main.rs'), 'utf8');
+const shareRs = fs.readFileSync(path.join(tauriDir, 'src', 'share.rs'), 'utf8');
 
 test('only the bundled chooser page gets IPC: no capability has a `remote` key or other windows', () => {
   const dir = path.join(tauriDir, 'capabilities');
@@ -326,8 +327,61 @@ test('the shell hands the recording tools and the models folder to the server', 
   // … and checks, without opening the microphone, that the page could record: a secure context with getUserMedia
   // (macOS: only with NSMicrophoneUsageDescription; Linux: enable-media-stream) and AudioWorklet.
   assert.match(mainRs, /s\.recorder = \{ secure: window\.isSecureContext === true, mediaDevices: typeof navigator\.mediaDevices\?\.getUserMedia === 'function',/);
-  assert.match(mainRs, /let recorder = !local \|\| \["secure", "mediaDevices", "worklet"\]\.iter\(\)\.all/);
+  // … on this computer's server and on a remote server shown through the loopback relay (proxy.rs).
+  assert.match(mainRs, /let recorder = !\(local \|\| proxied\) \|\| \["secure", "mediaDevices", "worklet"\]\.iter\(\)\.all/);
   assert.ok(!/getUserMedia\(/.test(mainRs), 'the smoke run never asks for the microphone');
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Sharing with other devices and the loopback relay (DESIGN §16, §19): share.rs, proxy.rs
+// ---------------------------------------------------------------------------------------------------------------
+
+const proxyRs = fs.readFileSync(path.join(tauriDir, 'src', 'proxy.rs'), 'utf8');
+const bridgeRs = fs.readFileSync(path.join(tauriDir, 'src', 'bridge.rs'), 'utf8');
+
+test('sharing: one dedicated variable the user cannot set, the code never in a log line, the relay is the packed proxy.js', () => {
+  // The shell strips what would let the user's environment share the server, make smoke runs write, or force the relay.
+  const strip = /pub\(crate\) const STRIP_ENV: &\[&str\] = &\[([^\]]*)\]/.exec(serverRs)?.[1] ?? '';
+  for (const key of ['EASY_STUDY_DESKTOP_SHARE', 'EASY_STUDY_DESKTOP_RESET_CODE', 'EASY_STUDY_DESKTOP_FORCE_PROXY', 'EASY_STUDY_DESKTOP_SMOKE_WRITE', 'EASY_STUDY_HOST', 'EASY_STUDY_AUTH']) {
+    assert.ok(strip.includes(`"${key}"`), `${key} in STRIP_ENV`);
+  }
+  // EASY_STUDY_HOST stays loopback in every mode: sharing is EASY_STUDY_DESKTOP_SHARE=1 (server/desktop.ts).
+  assert.match(serverRs, /\.env\("EASY_STUDY_HOST", "127\.0\.0\.1"\)/);
+  assert.match(serverRs, /const ENV_SHARE: &str = "EASY_STUDY_DESKTOP_SHARE";/);
+  assert.match(serverRs, /const ENV_RESET_CODE: &str = "EASY_STUDY_DESKTOP_RESET_CODE";/);
+  // The code comes from the library's .auth.json on demand and the shell logs its own window in through /login?code=.
+  assert.match(serverRs, /library\.join\("\.auth\.json"\)/);
+  assert.match(serverRs, /fn page_url\(app: &AppHandle, url: &str, shared: bool\) -> String \{\n\s+match shared\.then\(\|\| access_code\(app\)\)\.flatten\(\) \{\n\s+Some\(code\) => remote::login_url\(url, &code\)/);
+  assert.match(serverRs, /config::log\(app, &format!\("server ready \{url\}\{\}\{\}"/);
+  // A change made in the chooser while the server runs: the chooser stays when the server is back (the addresses and
+  // the code are there); "연결" opens the page, logged in.
+  assert.match(serverRs, /let stay = st\.stay_on_chooser\.load\(SeqCst\);/);
+  assert.match(serverRs, /let shared = lock\(&st\.share_urls\)\.is_some\(\);\n\s+crate::go_to\(app, &page_url\(app, &url, shared\)\);/);
+  assert.match(shareRs, /st\.stay_on_chooser\.store\(matches!\(from, From::Chooser\), SeqCst\);\n\s+if let Err\(e\) = server::start\(app\)/);
+  // A page's share/on and share/reveal go through a native dialog (the page's own session must not be enough).
+  assert.match(shareRs, /if let \(Some\(origin\), Change::Share\(true\)\) = \(&page, change\) \{[\s\S]*?bridge::confirm\(app, CONFIRM_SHARE_ON, "허용", "취소"\)/);
+  assert.match(bridgeRs, /fn reveal_code\(app: &AppHandle, origin: &str\) \{[\s\S]*?let ok = confirm\(app, CONFIRM_REVEAL, "보기", "취소"\);/);
+  // Page URLs in the log without their query (the login link carries the code).
+  assert.match(mainRs, /"page loaded \{\}", without_query\(payload\.url\(\)\)/);
+  // The pushed state carries sharing only into this computer's own page, and the code only after share/reveal.
+  assert.match(bridgeRs, /let share = local\.then\(\|\| \{\n\s+let urls = lock\(&st\.share_urls\)\.clone\(\);\n\s+ShareState \{/);
+  assert.match(bridgeRs, /"share\/on" => Action::Share\(true\)/);
+  assert.match(bridgeRs, /"share\/reveal" => Action::ShareReveal/);
+  // The relay: the packed server's proxy.js, loopback only, started for one remote origin.
+  assert.match(proxyRs, /join\("dist-server"\)\.join\("server"\)\.join\("proxy\.js"\)/);
+  assert.match(proxyRs, /\.arg\("--to"\)/);
+  assert.match(proxyRs, /cmd\.env\("PORT", port\.to_string\(\)\)/);
+  assert.ok(!/EASY_STUDY_DESKTOP"|EASY_STUDY_LIBRARY/.test(proxyRs), 'the relay gets no library and no desktop-mode variable');
+  // The microphone policy trusts the relay's origin like the local server's (media.rs allowed()).
+  assert.match(mediaRs, /lock\(&st\.server_url\)\.clone\(\)\.or_else\(\|\| lock\(&st\.proxy_url\)\.clone\(\)\)/);
+  // The chooser's share block and its commands.
+  const html = fs.readFileSync(path.join(DESKTOP_DIR, 'ui', 'index.html'), 'utf8');
+  for (const id of ['share', 'share-off', 'share-idle', 'share-info', 'share-urls', 'share-code', 'share-copy', 'share-reset']) assert.match(html, new RegExp(`id="${id}"`), id);
+  const chooser = fs.readFileSync(path.join(DESKTOP_DIR, 'ui', 'chooser.js'), 'utf8');
+  assert.match(chooser, /invoke\('set_share', \{ on: \$\('share'\)\.checked \}\)/);
+  assert.match(chooser, /invoke\('reset_share_code'\)/);
+  assert.match(chooser, /navigator\.clipboard\?\.writeText\(text\)/);
+  assert.match(chooser, /document\.execCommand\('copy'\)/);
 });
 
 test('whisper.cpp: the pinned release, portable flags per target, OpenMP only on Windows', () => {

@@ -10,6 +10,12 @@
 //! Lecture recordings (DESIGN §22): the server transcribes with the bundled whisper-cli and decodes uploads with
 //! the bundled ffmpeg; the shell passes their paths (EASY_STUDY_WHISPER, EASY_STUDY_FFMPEG) and the folder for the
 //! downloaded speech models (EASY_STUDY_MODELS_DIR = <app data dir>/models, next to the default library).
+//!
+//! "다른 기기에서 접속 허용" (share.rs, DESIGN §16/§19): with EASY_STUDY_DESKTOP_SHARE=1 the server binds every
+//! interface in remote mode — the login on, a generated access code in the library's .auth.json — and its ready
+//! line adds `"share":{"urls":[…]}`, the addresses other devices can use. The shell reads the code from that file
+//! on demand (access_code) and logs its own window in through `GET /login?code=` (loopback is never
+//! authentication): the code never goes on stdout (server.log copies it), into shell.log or into desktop.json.
 
 use std::collections::VecDeque;
 use std::fs;
@@ -24,7 +30,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, Url};
 
 use crate::config::{self, lock};
-use crate::{pathenv, AppState};
+use crate::{pathenv, remote, AppState};
 
 /// The local server's preferred ports (not 5180, which `npm start` uses); the last one used is remembered.
 const PREFERRED_PORTS: std::ops::RangeInclusive<u16> = 5350..=5359;
@@ -33,10 +39,18 @@ const READY_TIMEOUT: Duration = Duration::from_secs(90);
 const STOP_GRACE: Duration = Duration::from_secs(9);
 const TAIL_LINES: usize = 40;
 const LOG_MAX_BYTES: u64 = 4 * 1024 * 1024;
+/// At most this many addresses from the ready line's `share.urls`.
+const SHARE_URLS_MAX: usize = 32;
+/// A port another program holds (server/desktop.ts EXIT_PORT_IN_USE, and its stderr message from
+/// startupFailureMessage for older packed servers): the shell then tries once more on another port. A loopback
+/// test-bind cannot tell (SO_REUSEADDR lets a wildcard and a loopback listener share a port on macOS), so the
+/// server's own answer is what counts.
+const EXIT_PORT_IN_USE: i32 = 3;
+const PORT_TAKEN_MARK: &str = "다른 프로그램이 이미 쓰고 있어서";
 
-/// Variables of the user's environment the server must not inherit: the shell decides port, host, library
-/// and login (local mode), and NODE_OPTIONS could change how the bundled Node runs.
-const STRIP_ENV: &[&str] = &[
+/// Variables of the user's environment the server (and the relay, proxy.rs) must not inherit: the shell decides
+/// port, host, library, login and sharing, and NODE_OPTIONS could change how the bundled Node runs.
+pub(crate) const STRIP_ENV: &[&str] = &[
     "PORT",
     "EASY_STUDY_HOST",
     "EASY_STUDY_AUTH",
@@ -46,14 +60,23 @@ const STRIP_ENV: &[&str] = &[
     "EASY_STUDY_LIBRARY",
     "EASY_STUDY_DESKTOP_HOME",
     "EASY_STUDY_DESKTOP_LIBRARY",
+    "EASY_STUDY_DESKTOP_SHARE",
+    "EASY_STUDY_DESKTOP_RESET_CODE",
+    "EASY_STUDY_DESKTOP_FORCE_PROXY",
     "EASY_STUDY_DESKTOP_SMOKE",
     "EASY_STUDY_DESKTOP_SMOKE_TIMEOUT",
     "EASY_STUDY_DESKTOP_SMOKE_URL",
     "EASY_STUDY_DESKTOP_SMOKE_CODE",
     "EASY_STUDY_DESKTOP_SMOKE_ASR",
+    "EASY_STUDY_DESKTOP_SMOKE_WRITE",
     "NODE_OPTIONS",
     "WATCH_REPORT_DEPENDENCIES",
 ];
+
+/// The variable that turns the bundled server's share mode on (server/desktop.ts desktopServerOptions).
+const ENV_SHARE: &str = "EASY_STUDY_DESKTOP_SHARE";
+/// One start with a new access code, every device logged out (server/desktop.ts → resetAccessCode).
+const ENV_RESET_CODE: &str = "EASY_STUDY_DESKTOP_RESET_CODE";
 
 pub struct Running {
     child: Child,
@@ -61,13 +84,25 @@ pub struct Running {
     /// The server printed EASY_STUDY_READY: it stops by itself when its stdin closes.
     aware: Arc<AtomicBool>,
     pub library: PathBuf,
+    /// The port it was started on (a port another program holds is tried once more elsewhere).
+    port: u16,
+}
+
+/// What the ready line says.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Ready {
+    /// `http://127.0.0.1:<port>`.
+    pub url: String,
+    /// Share mode: the addresses other devices can use (None: local mode).
+    pub share: Option<Vec<String>>,
 }
 
 /// Starts the local server in the background (or shows it when it already runs). Never blocks.
 pub fn start(app: &AppHandle) -> Result<(), String> {
     let st = app.state::<AppState>();
     if let Some(url) = lock(&st.server_url).clone() {
-        crate::go_to(app, &url);
+        let shared = lock(&st.share_urls).is_some();
+        crate::go_to(app, &page_url(app, &url, shared));
         return Ok(());
     }
     if st.starting.swap(true, SeqCst) {
@@ -115,8 +150,9 @@ fn spawn_server(app: &AppHandle) -> Result<(), String> {
         .map_err(|e| format!("라이브러리 폴더를 만들 수 없어요: {} ({e})", library.path.display()))?;
     let tools = Tools::find(&res, config::data_dir(app).join("models"));
     let _ = fs::create_dir_all(&tools.models);
-    let port = pick_port(cfg.port);
+    let port = pick_port(cfg.port, *lock(&st.failed_port));
     config::update(app, |c| c.port = Some(port));
+    let sharing = Sharing { on: cfg.share, reset_code: st.reset_code_pending.swap(false, SeqCst) };
 
     let log_file = config::log_dir(app).join("server.log");
     config::rotate(&log_file, LOG_MAX_BYTES);
@@ -128,7 +164,7 @@ fn spawn_server(app: &AppHandle) -> Result<(), String> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    child_env(&mut cmd, &path_env, port, &library.path, &tools);
+    child_env(&mut cmd, &path_env, port, &library.path, &tools, sharing);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -147,11 +183,13 @@ fn spawn_server(app: &AppHandle) -> Result<(), String> {
     config::log(
         app,
         &format!(
-            "spawned server pid {} port {port} in {} ms; library {}; {}; PATH ({how}): {path_env}",
+            "spawned server pid {} port {port} in {} ms; library {}; {}; shared {}{}; PATH ({how}): {path_env}",
             child.id(),
             t.elapsed().as_millis(),
             library.path.display(),
-            tools.describe()
+            tools.describe(),
+            sharing.on,
+            if sharing.reset_code { " (new access code)" } else { "" }
         ),
     );
     config::append_log(&log_file, &format!("---- easy-study desktop: server pid {} port {port} library {}", child.id(), library.path.display()));
@@ -160,7 +198,7 @@ fn spawn_server(app: &AppHandle) -> Result<(), String> {
     let stderr = child.stderr.take().ok_or("no stderr")?;
     let stdin = child.stdin.take();
     let aware = Arc::new(AtomicBool::new(false));
-    *lock(&st.server) = Some(Running { child, stdin, aware: aware.clone(), library: library.path.clone() });
+    *lock(&st.server) = Some(Running { child, stdin, aware: aware.clone(), library: library.path.clone(), port });
     drop(_life);
 
     let (stderr_done, stderr_finished) = mpsc::channel::<()>();
@@ -184,10 +222,10 @@ fn spawn_server(app: &AppHandle) -> Result<(), String> {
         for_each_line(stdout, |line| {
             config::append_log(&log_file, &line);
             if !ready {
-                if let Some(url) = ready_url(&line) {
+                if let Some(parsed) = parse_ready(&line) {
                     ready = true;
                     aware.store(true, SeqCst);
-                    on_ready(&h, generation, url);
+                    on_ready(&h, generation, parsed);
                 }
             }
         });
@@ -221,7 +259,7 @@ fn spawn_server(app: &AppHandle) -> Result<(), String> {
 }
 
 /// Reads `reader` line by line (lossy UTF-8, so odd bytes never stop the draining) until EOF.
-fn for_each_line(reader: impl Read, mut f: impl FnMut(String)) {
+pub(crate) fn for_each_line(reader: impl Read, mut f: impl FnMut(String)) {
     let mut reader = BufReader::new(reader);
     let mut buf = Vec::new();
     loop {
@@ -233,24 +271,110 @@ fn for_each_line(reader: impl Read, mut f: impl FnMut(String)) {
     }
 }
 
-/// The server's URL from its ready line `EASY_STUDY_READY {"url":…,"port":…}` (the banner before it is not
-/// enough: only the ready line says the server stops by itself on stdin EOF).
-fn ready_url(line: &str) -> Option<String> {
+/// The ready line `EASY_STUDY_READY {"url":…,"port":…[,"share":{"urls":[…]}]}` (the banner before it is not
+/// enough: only the ready line says the server stops by itself on stdin EOF). The relay (proxy.rs) prints the
+/// same shape without `share`.
+pub(crate) fn parse_ready(line: &str) -> Option<Ready> {
     let rest = line.strip_prefix("EASY_STUDY_READY ")?;
     let v: serde_json::Value = serde_json::from_str(rest.trim()).ok()?;
     let url = Url::parse(v.get("url")?.as_str()?).ok()?;
-    (url.scheme() == "http" && url.host_str() == Some("127.0.0.1")).then(|| url.as_str().trim_end_matches('/').to_string())
+    if url.scheme() != "http" || url.host_str() != Some("127.0.0.1") {
+        return None;
+    }
+    Some(Ready { url: url.as_str().trim_end_matches('/').to_string(), share: v.get("share").map(share_urls) })
 }
 
-fn on_ready(app: &AppHandle, generation: u64, url: String) {
+/// The URL of a ready line (proxy.rs).
+pub(crate) fn ready_url(line: &str) -> Option<String> {
+    parse_ready(line).map(|r| r.url)
+}
+
+/// `share.urls` of the ready line, as shown to the user: at most SHARE_URLS_MAX, each an http URL with a
+/// non-loopback host (anything else is dropped), IP addresses before names. A bare computer name (no dot) is
+/// left out on Windows, where other devices rarely resolve it.
+fn share_urls(share: &serde_json::Value) -> Vec<String> {
+    let Some(list) = share.get("urls").and_then(|u| u.as_array()) else { return Vec::new() };
+    let mut ips = Vec::new();
+    let mut names = Vec::new();
+    for url in list.iter().take(SHARE_URLS_MAX).filter_map(|u| u.as_str()).filter_map(|s| Url::parse(s).ok()) {
+        if url.scheme() != "http" || url.path() != "/" || url.query().is_some() {
+            continue;
+        }
+        let shown = url.as_str().trim_end_matches('/').to_string();
+        let Some(host) = url.host_str() else { continue };
+        match host.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
+            Ok(ip) if !ip.is_loopback() && !ip.is_unspecified() => ips.push(shown),
+            Ok(_) => {}
+            Err(_) if !host.eq_ignore_ascii_case("localhost") && (!cfg!(windows) || host.contains('.')) => names.push(shown),
+            Err(_) => {}
+        }
+    }
+    ips.extend(names);
+    ips
+}
+
+/// The running local server's access code (share mode): `code` of `<library>/.auth.json`, the file the server
+/// owns. Read on demand and never kept anywhere else: not in a log line, not in desktop.json.
+pub fn access_code(app: &AppHandle) -> Option<String> {
+    let library = lock(&app.state::<AppState>().server).as_ref()?.library.clone();
+    let text = fs::read_to_string(library.join(".auth.json")).ok()?;
+    code_in(&text)
+}
+
+/// `code` of an .auth.json's text, when it looks like one the server generates (4 groups of 5 Crockford base32
+/// characters, e.g. `k7qm2-x9fda-3hz8w-p0rtc`): a code that somebody edited into the file is not shown.
+fn code_in(auth_json: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(auth_json).ok()?;
+    let code = v.get("code")?.as_str()?;
+    valid_code(code).then(|| code.to_string())
+}
+
+/// `^[0-9a-hjkmnp-tv-z]{5}(-[0-9a-hjkmnp-tv-z]{5}){3}$` (server/auth.ts generateAccessCode).
+fn valid_code(code: &str) -> bool {
+    let group_ok = |g: &str| g.len() == 5 && g.chars().all(|c| c.is_ascii_digit() || (c.is_ascii_lowercase() && !matches!(c, 'i' | 'l' | 'o' | 'u')));
+    let groups: Vec<&str> = code.split('-').collect();
+    groups.len() == 4 && groups.iter().all(|g| group_ok(g))
+}
+
+/// What the window opens for the running local server. Share mode: the login is on for everyone, this window
+/// included, so the shell logs itself in with the code it can read from the library (`/login?code=`: the 303 sets
+/// the session cookie and drops the code from the address bar); a loopback bypass in the server would let any
+/// loopback peer in (DESIGN §16). Otherwise the bare URL.
+fn page_url(app: &AppHandle, url: &str, shared: bool) -> String {
+    match shared.then(|| access_code(app)).flatten() {
+        Some(code) => remote::login_url(url, &code).unwrap_or_else(|_| url.to_string()),
+        None => {
+            if shared {
+                config::log(app, "no access code in the library's .auth.json: the page shows the login screen");
+            }
+            url.to_string()
+        }
+    }
+}
+
+fn on_ready(app: &AppHandle, generation: u64, ready: Ready) {
     let st = app.state::<AppState>();
     if st.generation.load(SeqCst) != generation {
         return;
     }
+    // A restart for a change made in the chooser (share.rs): the chooser stays, with the addresses and the code.
+    let stay = st.stay_on_chooser.load(SeqCst);
+    let Ready { url, share } = ready;
+    let shared = share.is_some();
+    let wanted = config::load(app).share;
+    if shared != wanted {
+        // A toggle while the server was starting: the setting applies at the next start (share.rs refuses it then).
+        config::log(app, &format!("server ready shared {shared}, but the setting says {wanted}: it applies at the next start"));
+    }
+    *lock(&st.share_urls) = share;
     *lock(&st.server_url) = Some(url.clone());
     st.start_ended();
-    config::log(app, &format!("server ready {url}"));
-    crate::go_to(app, &url);
+    config::log(app, &format!("server ready {url}{}{}", if shared { " (shared)" } else { "" }, if stay { ", the chooser stays" } else { "" }));
+    if stay {
+        return;
+    }
+    let target = page_url(app, &url, shared);
+    crate::go_to(app, &target);
 }
 
 fn on_exit(app: &AppHandle, generation: u64, was_ready: bool) {
@@ -269,8 +393,24 @@ fn on_exit(app: &AppHandle, generation: u64, was_ready: bool) {
     st.generation.fetch_add(1, SeqCst);
     st.start_ended();
     *lock(&st.server_url) = None;
+    *lock(&st.share_urls) = None;
     let how = describe(status);
     config::log(app, &format!("server exited on its own ({how}), ready: {was_ready}"));
+    // Another program holds the port (a LAN-side listener the loopback test-bind could not see, say): once more
+    // on another port, this launch.
+    let port_taken = !was_ready
+        && (status.and_then(|s| s.code()) == Some(EXIT_PORT_IN_USE) || lock(&st.tail).iter().any(|l| l.contains(PORT_TAKEN_MARK)));
+    if port_taken && lock(&st.failed_port).is_none() {
+        *lock(&st.failed_port) = Some(running.port);
+        config::update(app, |c| c.port = None);
+        config::log(app, &format!("port {} is taken: trying another port", running.port));
+        drop(life);
+        return start(app).unwrap_or_else(|e| {
+            *lock(&st.error) = Some(e);
+            crate::show_chooser(app);
+            crate::smoke_fail(app, 2, "server did not start");
+        });
+    }
     *lock(&st.error) = Some(if was_ready {
         format!("이 컴퓨터의 easy-study 서버가 예기치 않게 종료됐어요 ({how}). \"연결\"을 누르면 다시 시작해요.")
     } else {
@@ -290,6 +430,7 @@ pub fn stop(app: &AppHandle) {
     // Also after the ready timeout: the chooser that comes back must not stay "busy" (and disabled) for good.
     st.start_ended();
     *lock(&st.server_url) = None;
+    *lock(&st.share_urls) = None;
     let Some(mut running) = lock(&st.server).take() else { return };
     let t = Instant::now();
     let pid = running.child.id();
@@ -308,7 +449,7 @@ pub fn stop(app: &AppHandle) {
     config::log(app, &format!("server pid {pid} stopped in {} ms ({})", t.elapsed().as_millis(), describe(status)));
 }
 
-fn wait_for(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
+pub(crate) fn wait_for(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
@@ -319,7 +460,7 @@ fn wait_for(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
     }
 }
 
-fn force_kill(child: &mut Child) -> Option<ExitStatus> {
+pub(crate) fn force_kill(child: &mut Child) -> Option<ExitStatus> {
     #[cfg(unix)]
     unsafe {
         libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
@@ -331,13 +472,13 @@ fn force_kill(child: &mut Child) -> Option<ExitStatus> {
 /// Whatever is left of the server's process group (a CLI it could not stop). Safe after the server was
 /// reaped: a process group id is not reused while the group has members.
 #[cfg(unix)]
-fn kill_group(child: &Child) {
+pub(crate) fn kill_group(child: &Child) {
     unsafe {
         libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
     }
 }
 
-fn describe(status: Option<ExitStatus>) -> String {
+pub(crate) fn describe(status: Option<ExitStatus>) -> String {
     match status {
         Some(s) => match s.code() {
             Some(code) => format!("종료 코드 {code}"),
@@ -356,15 +497,19 @@ fn describe(status: Option<ExitStatus>) -> String {
     }
 }
 
-fn port_free(port: u16) -> bool {
+/// Free on loopback, as far as a test-bind can tell (see PORT_TAKEN_MARK for what it cannot).
+pub(crate) fn port_free(port: u16) -> bool {
     TcpListener::bind(("127.0.0.1", port)).is_ok()
 }
 
-fn pick_port(saved: Option<u16>) -> u16 {
-    if let Some(p) = saved.filter(|p| *p != 0 && port_free(*p)) {
+/// The saved port when free, else the first free preferred one, else any. `avoid`: a port the server could not
+/// bind this launch (on_exit), skipped whatever the test-bind says.
+fn pick_port(saved: Option<u16>, avoid: Option<u16>) -> u16 {
+    let usable = |p: u16| p != 0 && Some(p) != avoid && port_free(p);
+    if let Some(p) = saved.filter(|p| usable(*p)) {
         return p;
     }
-    if let Some(p) = PREFERRED_PORTS.into_iter().find(|p| port_free(*p)) {
+    if let Some(p) = PREFERRED_PORTS.into_iter().find(|p| usable(*p)) {
         return p;
     }
     TcpListener::bind(("127.0.0.1", 0)).and_then(|l| l.local_addr()).map(|a| a.port()).unwrap_or(0)
@@ -372,7 +517,7 @@ fn pick_port(saved: Option<u16>) -> u16 {
 
 /// The bundled Node: a resource on macOS and Windows; on Linux the externalBin `es-node` next to the app
 /// binary (/usr/bin/es-node in deb/rpm, $APPDIR/usr/bin/es-node in the AppImage).
-fn node_path(res: &Path) -> PathBuf {
+pub(crate) fn node_path(res: &Path) -> PathBuf {
     #[cfg(windows)]
     {
         res.join("node").join("node.exe")
@@ -454,7 +599,18 @@ fn user_env(key: &str) -> Option<String> {
     std::env::var(key).ok()
 }
 
-fn child_env(cmd: &mut Command, path_env: &str, port: u16, library: &Path, tools: &Tools) {
+/// Share mode for one start (server/desktop.ts).
+#[derive(Clone, Copy, Debug)]
+struct Sharing {
+    /// EASY_STUDY_DESKTOP_SHARE=1: every interface, the login on.
+    on: bool,
+    /// EASY_STUDY_DESKTOP_RESET_CODE=1: a new access code, every device logged out.
+    reset_code: bool,
+}
+
+/// The environment of a Node child of the shell (the server here, the relay in proxy.rs): the user's own PATH,
+/// nothing of STRIP_ENV, and on Linux without the CA paths the shell set for the updater.
+pub(crate) fn base_env(cmd: &mut Command, path_env: &str) {
     #[allow(unused_mut)]
     let mut path_value = path_env.to_string();
     #[cfg(target_os = "linux")]
@@ -470,18 +626,30 @@ fn child_env(cmd: &mut Command, path_env: &str, port: u16, library: &Path, tools
     for key in crate::update::ssl_env_not_from_user() {
         cmd.env_remove(key);
     }
-    cmd.env("PATH", path_value)
-        .env("PORT", port.to_string())
+    cmd.env("PATH", path_value);
+}
+
+fn child_env(cmd: &mut Command, path_env: &str, port: u16, library: &Path, tools: &Tools, sharing: Sharing) {
+    base_env(cmd, path_env);
+    // EASY_STUDY_HOST stays 127.0.0.1 in every mode: only the dedicated variable turns sharing on (never the
+    // user's environment, and the server's "ignored settings" warning stays quiet).
+    cmd.env("PORT", port.to_string())
         .env("EASY_STUDY_HOST", "127.0.0.1")
         .env("EASY_STUDY_LIBRARY", library)
         .env("EASY_STUDY_DESKTOP", "1");
+    if sharing.on {
+        cmd.env(ENV_SHARE, "1");
+    }
+    if sharing.reset_code {
+        cmd.env(ENV_RESET_CODE, "1");
+    }
     cmd.envs(tools.env(user_env));
 }
 
 /// Linux: PR_SET_PDEATHSIG is tied to the THREAD that forked the child, so every server is spawned by one
 /// thread that lives as long as the app.
 #[cfg(target_os = "linux")]
-fn spawn(mut cmd: Command) -> std::io::Result<Child> {
+pub(crate) fn spawn(mut cmd: Command) -> std::io::Result<Child> {
     use std::os::unix::process::CommandExt;
     use std::sync::OnceLock;
     type Job = (Command, mpsc::Sender<std::io::Result<Child>>);
@@ -514,12 +682,12 @@ fn spawn(mut cmd: Command) -> std::io::Result<Child> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn spawn(mut cmd: Command) -> std::io::Result<Child> {
+pub(crate) fn spawn(mut cmd: Command) -> std::io::Result<Child> {
     cmd.spawn()
 }
 
 #[cfg(windows)]
-mod winjob {
+pub(crate) mod winjob {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
@@ -564,9 +732,90 @@ mod tests {
             ready_url(r#"EASY_STUDY_READY {"url":"http://127.0.0.1:5353","port":5353}"#).as_deref(),
             Some("http://127.0.0.1:5353")
         );
+        assert_eq!(
+            parse_ready(r#"EASY_STUDY_READY {"url":"http://127.0.0.1:5353","port":5353}"#),
+            Some(Ready { url: "http://127.0.0.1:5353".into(), share: None })
+        );
         assert_eq!(ready_url("  easy-study   →  http://127.0.0.1:5351"), None);
         assert_eq!(ready_url(r#"EASY_STUDY_READY {"url":"http://192.168.0.2:5353"}"#), None);
         assert_eq!(ready_url("EASY_STUDY_READY not json"), None);
+        // Share mode: the same URL for this window, plus the addresses for other devices.
+        let shared = parse_ready(
+            r#"EASY_STUDY_READY {"url":"http://127.0.0.1:5378","port":5378,"share":{"urls":["http://192.168.0.10:5378","http://my-mac.local:5378"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(shared.url, "http://127.0.0.1:5378");
+        assert_eq!(shared.share, Some(vec!["http://192.168.0.10:5378".to_string(), "http://my-mac.local:5378".to_string()]));
+        // The key without usable addresses still means "shared" (the login is on).
+        assert_eq!(parse_ready(r#"EASY_STUDY_READY {"url":"http://127.0.0.1:5378","share":{}}"#).unwrap().share, Some(vec![]));
+        assert_eq!(parse_ready(r#"EASY_STUDY_READY {"url":"http://127.0.0.1:5378","share":null}"#).unwrap().share, Some(vec![]));
+    }
+
+    #[test]
+    fn share_urls_keep_only_addresses_other_devices_can_use() {
+        let list = |urls: serde_json::Value| share_urls(&serde_json::json!({ "urls": urls }));
+        // Loopback, unspecified, https, other paths, non-strings and garbage are dropped; IPs come before names.
+        let shown = list(serde_json::json!([
+            "http://127.0.0.1:5378",
+            "http://localhost:5378",
+            "http://0.0.0.0:5378",
+            "http://[::1]:5378",
+            "https://192.168.0.10:5378",
+            "http://192.168.0.10:5378/x",
+            "http://my-mac.local:5378",
+            "http://192.168.0.10:5378",
+            "http://[fd7a:115c:a1e0::1]:5378",
+            "http://10.0.0.5:5378/",
+            "http://my-mac:5378",
+            "not a url",
+            42,
+            null
+        ]));
+        let mut want = vec!["http://192.168.0.10:5378", "http://[fd7a:115c:a1e0::1]:5378", "http://10.0.0.5:5378", "http://my-mac.local:5378"];
+        // A bare computer name (no dot) is left out on Windows only.
+        if !cfg!(windows) {
+            want.push("http://my-mac:5378");
+        }
+        assert_eq!(shown, want);
+        assert_eq!(list(serde_json::json!("nope")), Vec::<String>::new());
+        assert_eq!(share_urls(&serde_json::json!({})), Vec::<String>::new());
+        let many: Vec<String> = (0..50).map(|i| format!("http://10.0.{i}.1:5378")).collect();
+        assert_eq!(list(serde_json::json!(many)).len(), SHARE_URLS_MAX);
+    }
+
+    #[test]
+    fn the_access_code_comes_from_the_auth_file_only_when_it_looks_generated() {
+        let file = r#"{"version":1,"code":"k7qm2-x9fda-3hz8w-p0rtc","codeCreatedAt":"2026-09-29T00:00:00.000Z","secret":{"salt":"a","hash":"b"},"sessions":[]}"#;
+        assert_eq!(code_in(file).as_deref(), Some("k7qm2-x9fda-3hz8w-p0rtc"));
+        // No code (EASY_STUDY_PASSWORD was used), not JSON, wrong shape.
+        assert_eq!(code_in(r#"{"version":1,"sessions":[]}"#), None);
+        assert_eq!(code_in("{"), None);
+        assert_eq!(code_in(r#"{"code":42}"#), None);
+        for bad in [
+            "k7qm2-x9fda-3hz8w",         // three groups
+            "k7qm2-x9fda-3hz8w-p0rtc-a", // five
+            "K7QM2-X9FDA-3HZ8W-P0RTC",   // upper case
+            "k7qm2-x9fdi-3hz8w-p0rtc",   // i is not in the alphabet
+            "k7qm2-x9fda-3hz8w-p0rt",    // a short group
+            "k7qm2 x9fda 3hz8w p0rtc",
+            "k7qm2-x9fda-3hz8w-p0rtc\n",
+            "",
+        ] {
+            assert!(!valid_code(bad), "{bad:?}");
+            assert_eq!(code_in(&format!(r#"{{"code":{}}}"#, serde_json::Value::String(bad.into()))), None, "{bad:?}");
+        }
+        assert!(valid_code("00000-zzzzz-abcde-fghjk"));
+    }
+
+    #[test]
+    fn a_port_the_server_could_not_bind_is_avoided() {
+        // An ephemeral port that is free right now: picked when saved, skipped when it is the one that failed.
+        let free = TcpListener::bind(("127.0.0.1", 0)).and_then(|l| l.local_addr()).map(|a| a.port()).unwrap();
+        assert_eq!(pick_port(Some(free), None), free);
+        assert_ne!(pick_port(Some(free), Some(free)), free);
+        assert_ne!(pick_port(None, Some(free)), free);
+        assert_ne!(pick_port(Some(0), None), 0);
+        assert!(PORT_TAKEN_MARK.chars().all(|c| !c.is_ascii_digit()), "no port number in the marker (it varies)");
     }
 
     fn tools(whisper: Option<&str>, ffmpeg: Option<&str>) -> Tools {
@@ -601,5 +850,31 @@ mod tests {
                 (ENV_FFMPEG, "/app/ffmpeg/ffmpeg".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn sharing_is_one_dedicated_variable_and_the_user_cannot_set_it() {
+        let env_of = |sharing: Sharing| {
+            let mut cmd = Command::new("node");
+            child_env(&mut cmd, "/usr/bin", 5378, Path::new("/lib"), &tools(None, None), sharing);
+            let vars: Vec<(String, Option<String>)> = cmd
+                .get_envs()
+                .map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned())))
+                .collect();
+            vars
+        };
+        let local = env_of(Sharing { on: false, reset_code: false });
+        let get = |vars: &[(String, Option<String>)], k: &str| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        assert_eq!(get(&local, "EASY_STUDY_HOST"), Some(Some("127.0.0.1".into())));
+        assert_eq!(get(&local, "EASY_STUDY_DESKTOP"), Some(Some("1".into())));
+        assert_eq!(get(&local, ENV_SHARE), Some(None), "removed (STRIP_ENV), never set in local mode");
+        assert_eq!(get(&local, ENV_RESET_CODE), Some(None));
+        let shared = env_of(Sharing { on: true, reset_code: true });
+        assert_eq!(get(&shared, "EASY_STUDY_HOST"), Some(Some("127.0.0.1".into())), "the host variable is not how sharing is turned on");
+        assert_eq!(get(&shared, ENV_SHARE), Some(Some("1".into())));
+        assert_eq!(get(&shared, ENV_RESET_CODE), Some(Some("1".into())));
+        for key in [ENV_SHARE, ENV_RESET_CODE, "EASY_STUDY_DESKTOP_SMOKE_WRITE", "EASY_STUDY_DESKTOP_FORCE_PROXY", "EASY_STUDY_AUTH", "PORT"] {
+            assert!(STRIP_ENV.contains(&key), "{key}");
+        }
     }
 }

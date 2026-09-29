@@ -16,12 +16,16 @@ import {
   getDesktopState,
   installBlockReason,
   installWarning,
+  isNameUrl,
   leaveAllowed,
   leaveConfirm,
   parseDesktopMarker,
   parseDesktopState,
   readPageBusy,
+  resetCodeConfirm,
   settingsSection,
+  shareBlockReason,
+  shareWarning,
   TOASTED_UPDATE_ITEM,
   firstUpdatedToast,
   updateErrorText,
@@ -60,7 +64,34 @@ const withUpdate = (patch: Record<string, unknown>) => ({ ...PUSH, update: { ...
 describe('parseDesktopState: what the shell pushes is checked', () => {
   test('a complete push', () => {
     const state = parseDesktopState(PUSH);
-    assert.deepEqual(state, { ...PUSH, update: { ...PUSH.update } });
+    assert.deepEqual(state, { ...PUSH, update: { ...PUSH.update }, share: null });
+  });
+
+  test('share (다른 기기에서 접속): the switch, the addresses and the code, checked; malformed → the whole push', () => {
+    const share = { on: true, running: true, urls: ['http://192.168.0.10:5350', 'http://my-mac.local:5350/'], code: 'k7qm2-x9fda-3hz8w-p0rtc' };
+    assert.deepEqual(parseDesktopState({ ...PUSH, share })?.share, { on: true, running: true, urls: ['http://192.168.0.10:5350', 'http://my-mac.local:5350'], code: 'k7qm2-x9fda-3hz8w-p0rtc' });
+    assert.deepEqual(parseDesktopState({ ...PUSH, share: { on: false, running: false } })?.share, { on: false, running: false, urls: [], code: null });
+    // Running shared without an address (offline): told apart from "not restarted yet" (on, not running).
+    assert.deepEqual(parseDesktopState({ ...PUSH, share: { on: true, running: true, urls: [], code: null } })?.share, { on: true, running: true, urls: [], code: null });
+    assert.deepEqual(parseDesktopState({ ...PUSH, share: { on: true, running: false, urls: [], code: null } })?.share, { on: true, running: false, urls: [], code: null });
+    // A shell without `running` (before 0.5.1's field) ran shared exactly when it had addresses.
+    assert.deepEqual(parseDesktopState({ ...PUSH, share: { on: true, urls: ['http://192.168.0.10:5350'] } })?.share, { on: true, running: true, urls: ['http://192.168.0.10:5350'], code: null });
+    assert.deepEqual(parseDesktopState({ ...PUSH, share: { on: true } })?.share, { on: true, running: false, urls: [], code: null });
+    assert.equal(parseDesktopState({ ...PUSH, share: null })?.share, null, 'another computer’s page: no share');
+    const bad: Array<[string, unknown]> = [
+      ['no switch', { urls: [] }],
+      ['switch as text', { on: 'yes' }],
+      ['running as text', { on: true, running: 'yes' }],
+      ['urls not a list', { on: true, urls: 'http://192.168.0.10:5350' }],
+      ['url: script', { on: true, urls: ['javascript:alert(1)'] }],
+      ['url: not an origin', { on: true, urls: ['192.168.0.10:5350'] }],
+      ['too many urls', { on: true, urls: Array.from({ length: 33 }, (_, i) => `http://10.0.0.${i}:5350`) }],
+      ['code: wrong shape', { on: true, urls: [], code: 'hunter2' }],
+      ['code: html', { on: true, urls: [], code: '<b>k7qm2-x9fda-3hz8w-p0rtc</b>' }],
+      ['code: number', { on: true, urls: [], code: 12345 }],
+      ['share as a list', []],
+    ];
+    for (const [what, share] of bad) assert.equal(parseDesktopState({ ...PUSH, share }), null, what);
   });
 
   test('pages of other computers get fewer update fields; unknown fields of a newer shell are ignored', () => {
@@ -78,7 +109,7 @@ describe('parseDesktopState: what the shell pushes is checked', () => {
     assert.equal(state.justUpdated, '0.5.0');
     assert.equal('somethingNew' in state, false);
     // Before the first check and without a connection yet.
-    assert.deepEqual(parseDesktopState({ v: 1, theme: 'light' }), { v: 1, theme: 'light', connection: null, update: null, justUpdated: null });
+    assert.deepEqual(parseDesktopState({ v: 1, theme: 'light' }), { v: 1, theme: 'light', connection: null, update: null, justUpdated: null, share: null });
   });
 
   test('the shell’s push before any check (serde of UpdateState: empty releaseUrl, kind and install "none")', () => {
@@ -189,11 +220,11 @@ describe('actions: a navigation to the reserved path of the page’s own origin'
   test('URLs of every action; unknown ones throw', () => {
     assert.equal(desktopActionUrl('http://127.0.0.1:5350', 'choose'), 'http://127.0.0.1:5350/__easy-study-desktop/choose');
     assert.equal(desktopActionUrl('https://my-mac.tail1234.ts.net', 'theme/dark'), 'https://my-mac.tail1234.ts.net/__easy-study-desktop/theme/dark');
-    for (const action of ['choose', 'forget-choice', 'check-update', 'install-update', 'dismiss-update', 'theme/system', 'theme/light', 'theme/dark']) {
+    for (const action of ['choose', 'forget-choice', 'check-update', 'install-update', 'dismiss-update', 'theme/system', 'theme/light', 'theme/dark', 'share/on', 'share/off', 'share/reveal', 'share/reset-code']) {
       assert.ok((DESKTOP_ACTIONS as readonly string[]).includes(action), `${action} (the shared contract)`);
     }
-    for (const action of DESKTOP_ACTIONS) assert.match(desktopActionUrl('http://127.0.0.1:5350', action), /^http:\/\/127\.0\.0\.1:5350\/__easy-study-desktop\/[a-z-]+(\/[a-z]+)?$/);
-    for (const bad of ['../choose', 'install-update?now=1', 'theme/blue', '', 'CHOOSE']) {
+    for (const action of DESKTOP_ACTIONS) assert.match(desktopActionUrl('http://127.0.0.1:5350', action), /^http:\/\/127\.0\.0\.1:5350\/__easy-study-desktop\/[a-z-]+(\/[a-z-]+)?$/);
+    for (const bad of ['../choose', 'install-update?now=1', 'theme/blue', '', 'CHOOSE', 'share/', 'share/ON', 'share/toggle']) {
       assert.throws(() => desktopActionUrl('http://127.0.0.1:5350', bad as DesktopActionName), /unknown desktop action/, bad);
     }
   });
@@ -252,6 +283,28 @@ describe('before leaving or restarting', () => {
     assert.equal(installBlockReason(busy({ answering: true, uploads: 2 })), null);
     assert.match(installWarning(busy({ answering: true }))!, /그래도 설치할까요/);
     assert.ok(installWarning(busy({ uploads: 1 })));
+  });
+
+  test('다른 기기에서 접속: the same gate as an update, with its own wording; the reset-code confirmation', () => {
+    assert.equal(shareBlockReason(NOT_BUSY), null);
+    assert.equal(shareWarning(NOT_BUSY), null);
+    assert.equal(shareBlockReason(busy({ recording: true })), '녹음 중에는 바꿀 수 없어요 — 녹음을 끝낸 뒤 눌러 주세요.');
+    assert.equal(shareBlockReason(busy({ unsentSeconds: 2 })), '녹음한 소리를 서버로 보내는 중이에요 — 다 보낸 뒤 바꿀 수 있어요.');
+    assert.equal(shareBlockReason(busy({ finishing: 1 })), '녹음한 소리를 서버로 보내는 중이에요 — 다 보낸 뒤 바꿀 수 있어요.');
+    assert.equal(shareBlockReason(busy({ recordingUploads: 1 })), '녹음 파일을 올리는 중이에요 — 다 올린 뒤 바꿀 수 있어요.');
+    assert.equal(shareBlockReason(busy({ answering: true, uploads: 2 })), null);
+    assert.equal(shareWarning(busy({ answering: true })), '답변을 만들거나 파일을 올리는 중이에요. 서버를 다시 시작하면 멈춰요. 그래도 바꿀까요?');
+    assert.ok(shareWarning(busy({ uploads: 1 })));
+    const reset = resetCodeConfirm(NOT_BUSY);
+    assert.equal(reset.title, '접속 코드를 새로 만들까요?');
+    assert.equal(reset.confirmLabel, '새로 만들기');
+    assert.match(reset.message!, /다른 기기는 모두 로그아웃/);
+    assert.doesNotMatch(reset.message!, /그래도 바꿀까요/);
+    assert.match(resetCodeConfirm(busy({ answering: true })).message!, /답변을 만들거나 파일을 올리는 중이에요\. 서버를 다시 시작하면 멈춰요\.$/);
+    assert.equal(isNameUrl('http://my-mac.local:5350'), true);
+    assert.equal(isNameUrl('http://192.168.0.10:5350'), false);
+    assert.equal(isNameUrl('http://[fd00::1]:5350'), false);
+    assert.equal(isNameUrl('nope'), false);
   });
 });
 

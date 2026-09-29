@@ -336,6 +336,7 @@ describe('microphone and origin', () => {
     const lan = recordingUnavailableReason({ ...base, isSecureContext: false, hasMediaDevices: false, origin: 'http://study-pc.lan:5180' });
     assert.match(lan!, /http:\/\/study-pc\.lan:5180/);
     assert.match(lan!, /HTTPS/);
+    assert.match(lan!, /easy-study 앱으로 그 컴퓨터에 연결/, 'the app records over http through its loopback relay');
     assert.match(recordingUnavailableReason({ ...base, hasAudioWorklet: false })!, /AudioWorklet/);
   });
 

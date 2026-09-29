@@ -3,9 +3,10 @@
 //
 //   marker   window.__EASY_STUDY_DESKTOP__ = {v:1, version, os}, frozen, set by the shell before any script of a
 //            page in the main window. Absent in browsers: every desktop-only control is hidden then.
-//   state    window.__easyStudyDesktopState = {v:1, theme, connection, update, justUpdated}, pushed by the shell on
-//            every page load and every change, followed by an 'easy-study-desktop' event. Untrusted input as far as
-//            this page goes (another shell version, a bug): checked field by field, and a malformed push is ignored.
+//   state    window.__easyStudyDesktopState = {v:1, theme, connection, update, justUpdated, share?}, pushed by the
+//            shell on every page load and every change, followed by an 'easy-study-desktop' event. Untrusted input as
+//            far as this page goes (another shell version, a bug): checked field by field, and a malformed push is
+//            ignored. `share` (다른 기기에서 접속 허용) comes only to the page of this computer's own server.
 //   actions  a navigation to <origin>/__easy-study-desktop/<action>: the shell cancels it and acts (no parameters,
 //            the query is ignored). The server answers the prefix with 204, so one that gets through changes nothing.
 //   hooks    functions the shell calls with eval (App.tsx installs them): __easyStudyBusy, __easyStudyOpenSettings,
@@ -65,9 +66,28 @@ export interface UpdateState {
 export interface DesktopConnection {
   /** 'local' = the app's own server ("이 컴퓨터"), 'remote' = a server on another computer. */
   kind: 'local' | 'remote';
+  /**
+   * The server's origin. For a plain-http remote shown through the app's loopback relay (DESIGN §19) this is still the
+   * remote's own origin (http://192.168.0.10:5180), not the relay's (http://127.0.0.1:<port>) the page runs on.
+   */
   origin: string;
   /** What the next launch does: connect to this again ('auto') or show the chooser ('ask'). */
   startup: 'auto' | 'ask';
+}
+
+/** "다른 기기에서 접속 허용" of this computer's server (DESIGN §16/§19); pushed only to that server's own page. */
+export interface DesktopShare {
+  /** The setting (desktop.json `share`). */
+  on: boolean;
+  /** This computer's server runs shared right now (the setting applies at a start; `urls` can be empty meanwhile). */
+  running: boolean;
+  /** The addresses other devices can use while the server runs shared (empty otherwise, or before a restart). */
+  urls: string[];
+  /**
+   * The access code, when the shell chose to push it (after 'share/reveal', for a short while); null otherwise — the
+   * chooser's ⚙ 앱 설정 always shows it.
+   */
+  code: string | null;
 }
 
 export interface DesktopState {
@@ -77,6 +97,8 @@ export interface DesktopState {
   update: UpdateState | null;
   /** Set once after an update: the version the app was updated to (a toast says so). */
   justUpdated: string | null;
+  /** Only on the page of this computer's own server (absent elsewhere). */
+  share: DesktopShare | null;
 }
 
 /** What the page is doing that a restart or leaving would interrupt (`window.__easyStudyBusy()`). */
@@ -128,6 +150,11 @@ export const DESKTOP_ACTIONS = [
   'theme/system',
   'theme/light',
   'theme/dark',
+  // 다른 기기에서 접속 허용 (this computer's page only): the switch, showing the code, a new code for every device.
+  'share/on',
+  'share/off',
+  'share/reveal',
+  'share/reset-code',
 ] as const;
 export type DesktopActionName = (typeof DESKTOP_ACTIONS)[number];
 
@@ -144,6 +171,10 @@ const INSTALL_KINDS: readonly InstallKind[] = ['app', 'nsis', 'appimage', 'deb',
 export const MAX_NOTES = 2000;
 const MAX_TEXT = 500;
 const VERSION_RE = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/;
+/** A generated access code (server/auth.ts): 4 groups of 5 base32 characters. */
+const ACCESS_CODE_RE = /^[0-9a-z]{5}(-[0-9a-z]{5}){3}$/;
+/** More addresses than any computer has network adapters. */
+const MAX_SHARE_URLS = 32;
 
 /** A malformed field: the whole push is refused. */
 class Malformed extends Error {}
@@ -181,15 +212,15 @@ function optionalFlag(value: unknown, field: string): boolean | undefined {
 }
 
 /** The origin of an http(s) URL (a connection is to a web server, nothing else). */
-function origin(value: unknown): string {
-  if (typeof value !== 'string' || value.length > 2048) throw new Malformed('connection.origin');
+function origin(value: unknown, field = 'connection.origin'): string {
+  if (typeof value !== 'string' || value.length > 2048) throw new Malformed(field);
   let url: URL;
   try {
     url = new URL(value);
   } catch {
-    throw new Malformed('connection.origin');
+    throw new Malformed(field);
   }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Malformed('connection.origin');
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Malformed(field);
   return url.origin;
 }
 
@@ -240,6 +271,22 @@ function parseConnection(value: unknown): DesktopConnection | null {
   };
 }
 
+function parseShare(value: unknown): DesktopShare | null {
+  if (value === undefined || value === null) return null;
+  if (!isRecord(value) || typeof value.on !== 'boolean') throw new Malformed('share');
+  const urls = value.urls === undefined || value.urls === null ? [] : value.urls;
+  if (!Array.isArray(urls) || urls.length > MAX_SHARE_URLS) throw new Malformed('share.urls');
+  // `running` (0.5.1): a shell without it ran shared exactly when it had addresses.
+  if (value.running !== undefined && typeof value.running !== 'boolean') throw new Malformed('share.running');
+  const running = value.running ?? urls.length > 0;
+  let code: string | null = null;
+  if (value.code !== undefined && value.code !== null) {
+    if (typeof value.code !== 'string' || !ACCESS_CODE_RE.test(value.code)) throw new Malformed('share.code');
+    code = value.code;
+  }
+  return { on: value.on, running, urls: urls.map((u) => origin(u, 'share.urls')), code };
+}
+
 /** The shell's pushed state, checked; null when anything in it is malformed (or it is not version 1). */
 export function parseDesktopState(value: unknown): DesktopState | null {
   try {
@@ -251,6 +298,7 @@ export function parseDesktopState(value: unknown): DesktopState | null {
       connection: parseConnection(value.connection),
       update: value.update === undefined || value.update === null ? null : parseUpdate(value.update),
       justUpdated,
+      share: parseShare(value.share),
     };
   } catch (err) {
     if (err instanceof Malformed) return null;
@@ -435,6 +483,44 @@ export function installBlockReason(b: PageBusy): string | null {
 /** What a restart would stop that the user may accept (asked first), or null. */
 export function installWarning(b: PageBusy): string | null {
   return b.answering || b.uploads > 0 ? '답변을 만들거나 파일을 올리는 중이에요. 다시 시작하면 멈춰요. 그래도 설치할까요?' : null;
+}
+
+/**
+ * 다른 기기에서 접속 허용: turning it on or off (and a new access code) restarts this computer's server, under the same
+ * gate as an update (the shell refuses these too). Why it cannot be changed now, or null.
+ */
+export function shareBlockReason(b: PageBusy): string | null {
+  if (b.recording) return '녹음 중에는 바꿀 수 없어요 — 녹음을 끝낸 뒤 눌러 주세요.';
+  if (b.unsentSeconds > 0 || b.finishing > 0) return '녹음한 소리를 서버로 보내는 중이에요 — 다 보낸 뒤 바꿀 수 있어요.';
+  if (b.recordingUploads > 0) return '녹음 파일을 올리는 중이에요 — 다 올린 뒤 바꿀 수 있어요.';
+  return null;
+}
+
+/** What the restart for a share change would stop that the user may accept (asked first), or null. */
+export function shareWarning(b: PageBusy): string | null {
+  return b.answering || b.uploads > 0 ? '답변을 만들거나 파일을 올리는 중이에요. 서버를 다시 시작하면 멈춰요. 그래도 바꿀까요?' : null;
+}
+
+/** The confirmation before "접속 코드 새로 만들기" (every device is logged out; the server restarts once). */
+export function resetCodeConfirm(b: PageBusy): ConfirmOptions {
+  const warning = shareWarning(b);
+  return {
+    title: '접속 코드를 새로 만들까요?',
+    message:
+      '지금 코드로 로그인한 다른 기기는 모두 로그아웃돼요. 새 코드를 만들려고 이 컴퓨터의 서버를 한 번 다시 시작해요.' +
+      (warning ? ` ${warning.replace(/ 그래도 바꿀까요\?$/, '')}` : ''),
+    confirmLabel: '새로 만들기',
+  };
+}
+
+/** A shared address that is a host name (not an IP): it resolves only on networks that know it. */
+export function isNameUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.replace(/^\[|\]$/g, '');
+    return !/^[\d.]+$/.test(host) && !host.includes(':');
+  } catch {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------------------------------------------

@@ -46,6 +46,14 @@ pub struct Config {
     /// chooser comes first.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub auto_connect_pending: bool,
+    /// "다른 기기에서 접속 허용": the local server listens on every interface with the login on (share.rs). The
+    /// access code itself lives only in the library's .auth.json, which the server owns.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub share: bool,
+    /// The loopback relay's port for plain-http remote servers (proxy.rs): the same port keeps the page origin
+    /// of that connection, and with it its localStorage and cookies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_port: Option<u16>,
     /// Fields this build does not know (written by a newer version): kept when an older build rewrites the file.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
@@ -207,5 +215,12 @@ mod tests {
         let pending: Config = serde_json::from_str(r#"{"mode":"remote","autoConnectPending":true,"updatedFrom":"0.5.0"}"#).unwrap();
         assert!(pending.auto_connect_pending && pending.extra.is_empty());
         assert_eq!(pending.updated_from.as_deref(), Some("0.5.0"));
+        // Sharing and the relay's port (0.5.1): read back, written only when set.
+        let shared: Config = serde_json::from_str(r#"{"mode":"","port":5378,"share":true,"proxyPort":5379}"#).unwrap();
+        assert!(shared.share && shared.extra.is_empty());
+        assert_eq!(shared.proxy_port, Some(5379));
+        let written: serde_json::Value = serde_json::to_value(&shared).unwrap();
+        assert_eq!(written, serde_json::json!({ "mode": "", "port": 5378, "share": true, "proxyPort": 5379 }));
+        assert!(!Config::default().share);
     }
 }

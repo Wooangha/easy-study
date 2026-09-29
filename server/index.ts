@@ -333,6 +333,14 @@ function sendFile(res: Response, file: string, options: Parameters<Response['sen
   });
 }
 
+/**
+ * A request's path for a log line: never its query (a login link `/login?code=` carries the access code, and in
+ * the desktop app stderr ends up in server.log).
+ */
+function logPath(req: Request): string {
+  return req.originalUrl.replace(/[?#].*$/, '');
+}
+
 /** Logs a failed transfer unless the client simply went away. */
 function warnTransfer(req: Request, err: unknown): void {
   if ((err as NodeJS.ErrnoException).code !== 'ECONNABORTED') console.warn(`[http] ${req.path}: ${errorMessage(err)}`);
@@ -938,7 +946,7 @@ function apiErrorHandler(err: unknown, req: Request, res: Response, _next: NextF
     const candidate = bodyParserError.status ?? bodyParserError.statusCode;
     if (typeof candidate === 'number' && candidate >= 400 && candidate < 600) status = candidate;
   }
-  if (status >= 500) console.error(`[http] ${req.method} ${req.originalUrl} failed:`, err);
+  if (status >= 500) console.error(`[http] ${req.method} ${logPath(req)} failed:`, err);
   if (res.headersSent) {
     res.end();
     return;
@@ -1001,7 +1009,7 @@ function clientErrorHandler(err: unknown, req: Request, res: Response, _next: Ne
   const fields = (typeof err === 'object' && err !== null ? err : {}) as { status?: unknown; statusCode?: unknown };
   const candidate = fields.status ?? fields.statusCode;
   const status = typeof candidate === 'number' && candidate >= 400 && candidate < 600 ? candidate : 500;
-  if (status >= 500) console.error(`[http] ${req.method} ${req.originalUrl} failed:`, err);
+  if (status >= 500) console.error(`[http] ${req.method} ${logPath(req)} failed:`, err);
   if (res.headersSent) {
     res.end();
     return;

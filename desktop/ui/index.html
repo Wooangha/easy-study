@@ -85,8 +85,9 @@
             <span class="label">접속 코드</span>
             <input id="code" type="password" placeholder="처음 연결할 때만 (예: k7qm2-x9fda-…)" autocomplete="off" autocapitalize="off" spellcheck="false">
           </label>
-          <p class="hint">주소와 접속 코드는 그 컴퓨터에서 <code>npm run start:remote</code>를 실행한 터미널에 표시돼요. 로그인은 30일 동안 유지돼요.
-            http는 같은 네트워크(집·학교 Wi-Fi, Tailscale)에서만 쓸 수 있고, https는 이 컴퓨터가 신뢰하는 인증서(예: <code>tailscale serve</code>)여야 해요.</p>
+          <p class="hint">주소와 접속 코드는 그 컴퓨터의 easy-study 앱(⚙ 설정 › 데스크톱 앱, 또는 이 화면의 ⚙ 앱 설정) 또는 <code>npm run start:remote</code>를 실행한 터미널에 표시돼요. 로그인은 30일 동안 유지돼요.
+            http는 같은 네트워크(집·학교 Wi-Fi, Tailscale)에서만 쓸 수 있고(앱 안에서는 http 주소여도 녹음돼요), https는 이 컴퓨터가 신뢰하는 인증서(예: <code>tailscale serve</code>)여야 해요.
+            http로는 같은 네트워크의 누군가가 오가는 내용을 엿보거나 바꿀 수 있어요 (바뀐 화면은 마이크와 로그인까지 쓸 수 있어요): 믿을 수 있는 네트워크에서만 쓰고, 다른 곳에서는 Tailscale·HTTPS를 쓰세요.</p>
         </div>
       </div>
     </fieldset>
@@ -123,6 +124,27 @@
           <button type="button" id="update-cancel" class="link" hidden>취소</button>
         </div>
         <label class="check"><input type="checkbox" id="update-auto"> 시작할 때 새 버전 확인 (GitHub에서 확인해요)</label>
+      </div>
+
+      <div class="setting">
+        <span class="label">다른 기기에서 접속</span>
+        <label class="check"><input type="checkbox" id="share"> 다른 기기에서 접속 허용 (같은 네트워크, 접속 코드 필요)</label>
+        <p id="share-off" class="hint">같은 Wi‑Fi의 다른 컴퓨터·태블릿에서 이 컴퓨터의 easy-study를 쓸 수 있어요. 켜거나 끄면 서버를 다시 시작해요.</p>
+        <p id="share-idle" class="hint" hidden>‘이 컴퓨터에서 실행’으로 연결하면 주소와 접속 코드가 여기 나와요.</p>
+        <div id="share-info" class="share-info" hidden>
+          <p>다른 기기에서 열 주소</p>
+          <ul id="share-urls" class="share-urls"></ul>
+          <p id="share-no-urls" class="hint" hidden>네트워크 주소를 찾지 못했어요. Wi‑Fi나 이더넷에 연결한 뒤 스위치를 껐다 켜세요.</p>
+          <p>접속 코드 <code id="share-code" class="path inline"></code> <button type="button" id="share-copy" class="link">복사</button></p>
+          <div class="buttons">
+            <button type="button" id="share-reset" class="secondary">접속 코드 새로 만들기 (모든 기기 로그아웃)</button>
+          </div>
+          <p class="hint">코드를 아는 사람은 이 컴퓨터의 Claude/Codex로 질문하고 강의 파일을 보고 지울 수 있어요: 같은 Wi‑Fi처럼 믿을 수 있는 네트워크에서만 켜세요.
+            macOS·Windows가 ‘node’의 네트워크 연결을 허용할지 물으면 허용하세요 (앱에 든 서버예요; 직접 빌드한 앱은 실행할 때마다 물을 수 있어요).
+            다른 컴퓨터에서는 easy-study 앱의 ‘다른 컴퓨터에 연결’(녹음도 돼요) 또는 브라우저로 여세요. 태블릿·폰의 브라우저에서 녹음하려면 HTTPS가 필요해요.
+            http로는 같은 네트워크의 누군가가 오가는 내용을 엿보거나 바꿀 수 있어요 (바뀐 화면은 마이크와 로그인까지 쓸 수 있어요): 믿을 수 있는 네트워크에서만 켜고, 다른 곳에서는 Tailscale·HTTPS를 쓰세요.
+            주소가 바뀌면(다른 Wi‑Fi) 스위치를 껐다 켜세요.</p>
+        </div>
       </div>
 
       <div class="setting">

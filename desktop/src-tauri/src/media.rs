@@ -12,9 +12,11 @@
 //!   "127.0.0.1:<port>" (and could remember a "no"): the microphone is allowed for the trusted origins and denied
 //!   for any other page, the camera is always denied, everything else keeps WebView2's default.
 //!
-//! Trusted: the page is the one the main window may show (`allowed_origin`), and that is this computer's server
-//! (http://127.0.0.1:<port>, a secure context) or a server the user connected to over https. A plain-http page on
-//! another computer is no secure context: the browser engine hides getUserMedia there anyway.
+//! Trusted: the page is the one the main window may show (`allowed_origin`), and that is a loopback origin the
+//! shell itself runs — this computer's server (http://127.0.0.1:<port>, a secure context) or its relay for a
+//! plain-http server on another computer (proxy.rs, the same kind of origin) — or a server the user connected to
+//! over https. A plain-http page on another computer, shown directly, is no secure context: the browser engine
+//! hides getUserMedia there anyway (which is what the relay is for).
 
 use tauri::{AppHandle, Url};
 
@@ -33,7 +35,8 @@ fn origin(url: &Url) -> String {
 }
 
 /// Whether the page at `page` (the requesting document's URL) may capture audio: it is the main window's
-/// `allowed_origin`, and that is the local server (`local_server`, its URL) or an https origin.
+/// `allowed_origin`, and that is the loopback origin the shell runs (`local_server`: its server's URL, or its
+/// relay's) or an https origin.
 #[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
 pub fn audio_capture_allowed(page: &str, allowed_origin: Option<&str>, local_server: Option<&str>) -> bool {
     let Ok(url) = Url::parse(page) else { return false };
@@ -48,12 +51,13 @@ pub fn audio_capture_allowed(page: &str, allowed_origin: Option<&str>, local_ser
     local || url.scheme() == "https"
 }
 
-/// audio_capture_allowed with the app's current state.
+/// audio_capture_allowed with the app's current state: the loopback origin the shell itself runs is its server
+/// or, while a plain-http remote is shown through it, its relay (the main window shows one of them at a time).
 #[cfg(any(target_os = "linux", windows))]
 fn allowed(app: &AppHandle, page: &str) -> bool {
     let st = app.state::<AppState>();
     let allowed_origin = lock(&st.allowed_origin).clone();
-    let local_server = lock(&st.server_url).clone();
+    let local_server = lock(&st.server_url).clone().or_else(|| lock(&st.proxy_url).clone());
     audio_capture_allowed(page, allowed_origin.as_deref(), local_server.as_deref())
 }
 
@@ -175,6 +179,19 @@ mod tests {
         // Another port on this computer is another origin (e.g. `npm start` on 5180 in some window).
         assert!(!audio_capture_allowed("http://127.0.0.1:5180/", allowed, Some(LOCAL)));
         assert!(!audio_capture_allowed("http://localhost:5350/", allowed, Some(LOCAL)));
+    }
+
+    #[test]
+    fn the_relay_for_a_plain_http_remote_may_record_like_the_local_server() {
+        // The window shows the relay (proxy.rs) instead of http://192.168.0.10:5180: its loopback origin is the one
+        // the shell runs now, passed as `local_server`.
+        let relay = "http://127.0.0.1:5360";
+        assert!(audio_capture_allowed("http://127.0.0.1:5360/", Some(relay), Some(relay)));
+        assert!(audio_capture_allowed("http://127.0.0.1:5360/?doc=abc", Some(relay), Some(relay)));
+        // Another loopback port (a server the shell does not run), and the relay's page when it is not the allowed one.
+        assert!(!audio_capture_allowed("http://127.0.0.1:5361/", Some(relay), Some(relay)));
+        assert!(!audio_capture_allowed("http://127.0.0.1:5360/", Some(LOCAL), Some(LOCAL)));
+        assert!(!audio_capture_allowed("http://127.0.0.1:5360/", Some(relay), None));
     }
 
     #[test]

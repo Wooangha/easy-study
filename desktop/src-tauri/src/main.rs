@@ -1,7 +1,9 @@
 // easy-study desktop app (DESIGN §19). One main window that shows either
 //  - the bundled chooser page (ui/, the ONLY page with IPC: capabilities/chooser.json has no `remote` key),
-//  - the local server's UI ("이 컴퓨터에서 실행": the bundled Node runs the packed server, see server.rs), or
-//  - another computer's easy-study server ("다른 컴퓨터에 연결": URL + access code, see remote.rs).
+//  - the local server's UI ("이 컴퓨터에서 실행": the bundled Node runs the packed server, see server.rs; shared
+//    with other devices on request, see share.rs), or
+//  - another computer's easy-study server ("다른 컴퓨터에 연결": URL + access code, see remote.rs; a plain-http
+//    one through the loopback relay of proxy.rs, so that the recorder has a secure context).
 // Pages served over http(s) get no IPC. Links to other sites open in the system browser. The shell and the pages
 // talk through bridge.rs (a static marker, pushed state, reserved navigations); in-app updates: update.rs (DESIGN §24).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -10,8 +12,10 @@ mod bridge;
 mod config;
 mod media;
 mod pathenv;
+mod proxy;
 mod remote;
 mod server;
+mod share;
 mod update;
 
 use std::collections::VecDeque;
@@ -34,14 +38,37 @@ const MAIN: &str = "main";
 const SMOKE_ENV: &str = "EASY_STUDY_DESKTOP_SMOKE";
 /// "0": the smoke run does not check the recording tools (GET /api/asr).
 const SMOKE_ASR_ENV: &str = "EASY_STUDY_DESKTOP_SMOKE_ASR";
+/// "1": the smoke run may WRITE to the connected server, whichever it is (a test server): the PDF check on a
+/// remote or relayed page too, plus a streamed chat turn and a recording upload on every page.
+const SMOKE_WRITE_ENV: &str = "EASY_STUDY_DESKTOP_SMOKE_WRITE";
 
 pub struct AppState {
     /// The chooser page's URL (tauri://localhost/index.html, http://tauri.localhost/index.html on Windows).
     chooser_url: Mutex<Option<Url>>,
-    /// The http(s) origin the main window may show: the local server's or the chosen remote server's.
+    /// The http(s) origin the main window may show: the local server's, the relay's or the chosen remote server's.
     allowed_origin: Mutex<Option<String>>,
     pub server: Mutex<Option<server::Running>>,
     pub server_url: Mutex<Option<String>>,
+    /// Some(urls) iff the RUNNING local server was started shared (share.rs): the addresses of its ready line.
+    pub share_urls: Mutex<Option<Vec<String>>>,
+    /// A port the local server could not bind this launch (server.rs on_exit): skipped from then on.
+    pub failed_port: Mutex<Option<u16>>,
+    /// The next local start makes a new access code (share.rs, EASY_STUDY_DESKTOP_RESET_CODE).
+    pub reset_code_pending: AtomicBool,
+    /// A share change runs (share.rs: one at a time).
+    pub share_flow: AtomicBool,
+    /// The local server restarts for a change made in the chooser (share.rs): when it is ready, the chooser stays
+    /// (the addresses and the code are there) instead of the page opening. Cleared with the start (start_ended).
+    pub stay_on_chooser: AtomicBool,
+    /// The relay for a plain-http remote server (proxy.rs), what the window shows for it (`http://127.0.0.1:<p>`)
+    /// and the remote origin behind it.
+    pub proxy: Mutex<Option<proxy::Running>>,
+    pub proxy_url: Mutex<Option<String>>,
+    pub proxy_target: Mutex<Option<String>>,
+    /// Incremented for every relay spawn and stop: late events of an old relay are ignored.
+    pub proxy_generation: AtomicU64,
+    /// Held while a relay is spawned or stopped (a start waits for a stop that is under way).
+    pub proxy_lifecycle: Mutex<()>,
     /// The local server is being started (until its ready line).
     pub starting: AtomicBool,
     /// What the chooser shows as "in progress" (local start, checking a saved remote server).
@@ -80,6 +107,16 @@ impl AppState {
             allowed_origin: Mutex::new(None),
             server: Mutex::new(None),
             server_url: Mutex::new(None),
+            share_urls: Mutex::new(None),
+            failed_port: Mutex::new(None),
+            reset_code_pending: AtomicBool::new(false),
+            share_flow: AtomicBool::new(false),
+            stay_on_chooser: AtomicBool::new(false),
+            proxy: Mutex::new(None),
+            proxy_url: Mutex::new(None),
+            proxy_target: Mutex::new(None),
+            proxy_generation: AtomicU64::new(0),
+            proxy_lifecycle: Mutex::new(()),
             starting: AtomicBool::new(false),
             busy: Mutex::new(None),
             error: Mutex::new(None),
@@ -106,6 +143,7 @@ impl AppState {
     /// is set, so a path that forgot it would leave the chooser unusable until the app restarts.
     pub fn start_ended(&self) {
         self.starting.store(false, SeqCst);
+        self.stay_on_chooser.store(false, SeqCst);
         *lock(&self.busy) = None;
     }
 }
@@ -127,10 +165,24 @@ pub(crate) fn origin_of(url: &Url) -> String {
     url.origin().ascii_serialization()
 }
 
+/// `url` without its query and fragment, for log lines: a login link carries the access code in its query.
+fn without_query(url: &Url) -> String {
+    let mut shown = url.clone();
+    shown.set_query(None);
+    shown.set_fragment(None);
+    shown.to_string()
+}
+
 /// Lets the main window show `url`'s origin and goes there.
 pub fn go_to(app: &AppHandle, url: &str) {
     let Ok(target) = Url::parse(url) else { return };
-    *lock(&app.state::<AppState>().allowed_origin) = Some(origin_of(&target));
+    let st = app.state::<AppState>();
+    let origin = origin_of(&target);
+    *lock(&st.allowed_origin) = Some(origin.clone());
+    // Leaving a relayed page for another origin (this computer's server, an https server): the relay is not needed.
+    if lock(&st.proxy_url).as_deref().is_some_and(|relay| relay != origin) {
+        proxy::stop_async(app);
+    }
     if let Some(w) = main_window(app) {
         let _ = w.navigate(target);
     }
@@ -143,8 +195,11 @@ pub fn show_chooser(app: &AppHandle) {
     // (Not the chooser itself: on Windows it is served over http from tauri.localhost.)
     let shown = main_window(app).and_then(|w| w.url().ok()).filter(|u| matches!(u.scheme(), "http" | "https") && !is_chooser(app, u));
     if let Some(shown) = shown {
-        *lock(&st.previous) = Some(origin_of(&shown));
+        // A relayed page was the remote server's, as far as the user is concerned.
+        let origin = origin_of(&shown);
+        *lock(&st.previous) = Some(proxy::target_of(app, &origin).unwrap_or(origin));
     }
+    proxy::stop_async(app);
     if let (Some(url), Some(w)) = (chooser, main_window(app)) {
         let _ = w.navigate(url);
         let _ = w.set_focus();
@@ -274,12 +329,19 @@ struct StateDto {
     /// The origin shown before the chooser came back.
     previous: Option<String>,
     notice: Option<String>,
+    /// "다른 기기에서 접속 허용" (the setting; share.rs).
+    share: bool,
+    /// The local server runs shared right now: its addresses for other devices and its access code.
+    share_running: bool,
+    share_urls: Vec<String>,
+    share_code: Option<String>,
 }
 
 #[tauri::command]
 fn get_state(app: AppHandle, state: State<'_, AppState>) -> StateDto {
     let cfg = config::load(&app);
     let server_url = lock(&state.server_url).clone();
+    let share_urls = lock(&state.share_urls).clone();
     StateDto {
         mode: cfg.mode.clone(),
         remote_url: cfg.remote_url.clone(),
@@ -288,6 +350,11 @@ fn get_state(app: AppHandle, state: State<'_, AppState>) -> StateDto {
         busy: lock(&state.busy).clone().or_else(|| lock(&state.update.state).busy_line()),
         running: server_url.is_some(),
         server_url,
+        share: cfg.share,
+        share_running: share_urls.is_some(),
+        // The chooser is the app's own trusted page: it may show the code (read from the library on demand).
+        share_code: share_urls.is_some().then(|| server::access_code(&app)).flatten(),
+        share_urls: share_urls.unwrap_or_default(),
         error: lock(&state.error).clone(),
         stderr_tail: server::tail(&app),
         log_file: config::log_dir(&app).join("server.log").to_string_lossy().into_owned(),
@@ -346,6 +413,19 @@ fn forget_choice(app: AppHandle) {
     bridge::forget_choice(&app);
 }
 
+/// "다른 기기에서 접속 허용": on its own thread (dialogs, the busy check, a restart of the server); the chooser polls
+/// get_state meanwhile.
+#[tauri::command]
+fn set_share(app: AppHandle, on: bool) {
+    std::thread::spawn(move || share::request(&app, share::Change::Share(on), share::From::Chooser));
+}
+
+/// "접속 코드 새로 만들기": the same way.
+#[tauri::command]
+fn reset_share_code(app: AppHandle) {
+    std::thread::spawn(move || share::request(&app, share::Change::ResetCode, share::From::Chooser));
+}
+
 #[tauri::command]
 fn open_logs(app: AppHandle) -> Result<(), String> {
     app.opener().open_path(config::log_dir(&app).to_string_lossy(), None::<&str>).map_err(|e| e.to_string())
@@ -363,6 +443,8 @@ fn not_installing(app: &AppHandle) -> Result<(), String> {
 fn connect_local(app: AppHandle, remember: bool) -> Result<(), String> {
     not_installing(&app)?;
     config::update(&app, |c| c.mode = if remember { "local".into() } else { String::new() });
+    // "연결" means the page, also when a share change is restarting the server right now.
+    app.state::<AppState>().stay_on_chooser.store(false, SeqCst);
     server::start(&app)
 }
 
@@ -374,8 +456,7 @@ async fn connect_remote(app: AppHandle, url: String, code: Option<String>, remem
         .map_err(|e| e.to_string())?
 }
 
-/// Checks the remote server, remembers it, and shows it: through `GET /login?code=` when a code was given
-/// (the server sets the session cookie and redirects to "/", so the code leaves the address bar). Blocks.
+/// Checks the remote server, remembers it, and shows it (show_remote). Blocks.
 fn open_remote(app: &AppHandle, url: &str, code: Option<String>, remember: bool) -> Result<(), String> {
     let origin = remote::parse(url)?;
     let status = remote::probe(&origin)?;
@@ -385,19 +466,29 @@ fn open_remote(app: &AppHandle, url: &str, code: Option<String>, remember: bool)
         c.mode = if remember { "remote".into() } else { String::new() };
     });
     *lock(&st.error) = None;
-    let target = match code.map(|c| c.trim().to_string()).filter(|c| !c.is_empty()) {
-        Some(code) if status.auth_required => {
-            let mut login = origin.join("/login").map_err(|e| e.to_string())?;
-            login.query_pairs_mut().append_pair("code", &code);
-            login.to_string()
-        }
-        _ => origin.to_string(),
-    };
-    config::log(app, &format!("connecting to {origin} (login required: {})", status.auth_required));
-    go_to(app, &target);
-    // Another computer's server is shown: the local one is not needed (frees its memory).
+    show_remote(app, &origin, code, &status)?;
+    // Another computer's server is shown: the local one is not needed (frees its memory; a shared one stops with it).
     let h = app.clone();
     std::thread::spawn(move || server::stop(&h));
+    Ok(())
+}
+
+/// Shows the checked remote server `origin`: a plain-http one through the loopback relay (proxy.rs: a secure
+/// context, so the recorder works there too), an https one directly; through `GET /login?code=` when a code was
+/// given and the server wants one (it sets the session cookie and redirects to "/", so the code leaves the address
+/// bar). Blocks (the relay's start).
+fn show_remote(app: &AppHandle, origin: &Url, code: Option<String>, status: &remote::Status) -> Result<(), String> {
+    let shown = if proxy::wanted(origin) {
+        proxy::start(app, origin)? // its errors name the relay ("연결 통로(프록시)…") themselves
+    } else {
+        origin_of(origin)
+    };
+    let target = match code.map(|c| c.trim().to_string()).filter(|c| !c.is_empty()) {
+        Some(code) if status.auth_required => remote::login_url(&shown, &code)?,
+        _ => shown.clone(),
+    };
+    config::log(app, &format!("connecting to {origin} as {shown} (login required: {})", status.auth_required));
+    go_to(app, &target);
     Ok(())
 }
 
@@ -671,7 +762,12 @@ fn on_menu(app: &AppHandle, id: &str) {
         "settings" => menu_thread(app, &SETTINGS_FLOW, open_settings),
         "check-update" => menu_thread(app, &CHECK_FLOW, update::menu_check),
         "open-browser" => {
-            let url = main_window(app).and_then(|w| w.url().ok()).filter(|u| matches!(u.scheme(), "http" | "https"));
+            let url = main_window(app)
+                .and_then(|w| w.url().ok())
+                .filter(|u| matches!(u.scheme(), "http" | "https"))
+                // A relayed page: the remote server itself (the relay dies with the app; the browser has its own
+                // cookies anyway).
+                .map(|u| proxy::target_of(app, &origin_of(&u)).and_then(|t| Url::parse(&t).ok()).unwrap_or(u));
             if let Some(url) = url.or_else(|| lock(&app.state::<AppState>().server_url).as_deref().and_then(|u| Url::parse(u).ok())) {
                 open_externally(app, &url);
             }
@@ -699,10 +795,13 @@ fn on_menu(app: &AppHandle, id: &str) {
 // client rendered, /api/health answers (with the login cookie for a remote server), the page has no IPC but the
 // shell's marker and pushed state (update phase idle: smoke runs never check for updates), and — local server
 // only — a one-page PDF uploads, converts and its slide images load (the document is deleted again), the page has
-// what the lecture recorder needs (a secure context with navigator.mediaDevices.getUserMedia and AudioWorklet: Info.plist's microphone key on macOS, media.rs on Linux; the microphone is never opened), and
-// GET /api/asr finds the speech recognition engine and ffmpeg the shell passed (DESIGN §22; the last one skipped with
-// EASY_STUDY_DESKTOP_SMOKE_ASR=0). A smoke run registers no single-instance handover: another running copy of the
-// app must not turn it into a silent success.
+// what the lecture recorder needs (a secure context with navigator.mediaDevices.getUserMedia and AudioWorklet:
+// Info.plist's microphone key on macOS, media.rs on Linux; the microphone is never opened; also checked on a page
+// shown through the relay, proxy.rs), and GET /api/asr finds the speech recognition engine and ffmpeg the shell
+// passed (DESIGN §22; the last one skipped with EASY_STUDY_DESKTOP_SMOKE_ASR=0). EASY_STUDY_DESKTOP_SMOKE_WRITE=1
+// (a test server): the PDF check on a remote or relayed page too, and on every page a chat turn streamed as SSE
+// (events arrive, the stream ends) and a recording upload (a short WAV, 201). A smoke run registers no
+// single-instance handover: another running copy of the app must not turn it into a silent success.
 // ---------------------------------------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -743,8 +842,8 @@ impl Smoke {
 /// A one-page PDF (960x540, a bar and a line of Helvetica text; tests/pdfFixtures.ts pagesPdf) for the upload check.
 const SMOKE_PDF_BASE64: &str = "JVBERi0xLjQKJeLjz9MKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFs0IDAgUl0gL0NvdW50IDEgPj4KZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL0ZvbnQgL1N1YnR5cGUgL1R5cGUxIC9CYXNlRm9udCAvSGVsdmV0aWNhIC9FbmNvZGluZyAvV2luQW5zaUVuY29kaW5nID4+CmVuZG9iago0IDAgb2JqCjw8IC9UeXBlIC9QYWdlIC9QYXJlbnQgMiAwIFIgL01lZGlhQm94IFswIDAgOTYwIDU0MF0gL1Jlc291cmNlcyA8PCAvRm9udCA8PCAvRjEgMyAwIFIgPj4gPj4gL0NvbnRlbnRzIDUgMCBSID4+CmVuZG9iago1IDAgb2JqCjw8ICAvTGVuZ3RoIDg2ID4+CnN0cmVhbQowLjIgMC40IDAuOCByZyA2MCA2MCA4NDAgMTIwIHJlIGYgQlQgL0YxIDY0IFRmIDYwIDM2MCBUZCAoZWFzeS1zdHVkeSBzbW9rZSB0ZXN0KSBUaiBFVAplbmRzdHJlYW0KZW5kb2JqCnhyZWYKMCA2CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDAxNSAwMDAwMCBuIAowMDAwMDAwMDY0IDAwMDAwIG4gCjAwMDAwMDAxMjEgMDAwMDAgbiAKMDAwMDAwMDIxOCAwMDAwMCBuIAowMDAwMDAwMzQ0IDAwMDAwIG4gCnRyYWlsZXIKPDwgL1NpemUgNiAvUm9vdCAxIDAgUiA+PgpzdGFydHhyZWYKNDgxCiUlRU9GCg==";
 
-/// Runs once per page (the result object survives a second "finished" event of the same page). __INGEST__, __ASR__
-/// and __PDF__ are filled in by smoke_page_loaded.
+/// Runs once per page (the result object survives a second "finished" event of the same page). __INGEST__, __ASR__,
+/// __RECORDER__, __WRITE__ and __PDF__ are filled in by smoke_page_loaded.
 const SMOKE_PROBE_JS: &str = r#"(() => {
   if (window.__esSmoke) return;
   const s = (window.__esSmoke = { ipc: 'no-ipc' });
@@ -769,10 +868,12 @@ const SMOKE_PROBE_JS: &str = r#"(() => {
       s.asr = a.engineAvailable === true && a.ffmpegAvailable === true ? 'ok' : 'FAIL';
     }, (e) => { s.asr = 'error: ' + e; }).finally(() => { s.asrDone = true; });
   }
+  if (__RECORDER__) {
+    // What the lecture recorder checks before it asks for the microphone (never asked here: no getUserMedia call).
+    s.recorder = { secure: window.isSecureContext === true, mediaDevices: typeof navigator.mediaDevices?.getUserMedia === 'function',
+      worklet: typeof AudioWorkletNode === 'function' };
+  }
   if (!__INGEST__) return;
-  // What the lecture recorder checks before it asks for the microphone (never asked here: no getUserMedia call).
-  s.recorder = { secure: window.isSecureContext === true, mediaDevices: typeof navigator.mediaDevices?.getUserMedia === 'function',
-    worklet: typeof AudioWorkletNode === 'function' };
   s.ingest = 'pending';
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   (async () => {
@@ -792,7 +893,40 @@ const SMOKE_PROBE_JS: &str = r#"(() => {
       s.images.push(p + ' ' + r.status + ' ' + (r.headers.get('content-type') || '-') + ' ' + (await r.arrayBuffer()).byteLength);
     }
     s.ingest = s.images.every((line) => / 200 image\/\S+ [1-9]/.test(line)) ? 'ok' : 'FAIL';
-  })().catch((e) => { s.ingest = 'error: ' + e; }).finally(async () => {
+    if (!__WRITE__) return;
+    // A chat turn streamed as SSE (the test server's fake CLIs answer): events arrive and the stream ends in 60 s.
+    s.stream = 'pending';
+    const session = await fetch('/api/docs/' + s.docId + '/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: 'claude-code' }) });
+    if (session.status !== 201) throw new Error('session: HTTP ' + session.status + ' ' + (await session.text()));
+    const sid = (await session.json()).id;
+    const turn = await fetch('/api/docs/' + s.docId + '/sessions/' + sid + '/messages', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' }, body: JSON.stringify({ text: 'smoke', slide: 1 }) });
+    if (!turn.ok) throw new Error('turn: HTTP ' + turn.status + ' ' + (await turn.text()));
+    const reader = turn.body.getReader();
+    const decoder = new TextDecoder();
+    const deadline = Date.now() + 60000;
+    let text = '';
+    let ended = false;
+    while (Date.now() < deadline) {
+      const next = await Promise.race([reader.read(), sleep(Math.max(1, deadline - Date.now())).then(() => ({ done: false, late: true }))]);
+      if (next.late) break;
+      if (next.done) { ended = true; break; }
+      text += decoder.decode(next.value, { stream: true });
+    }
+    if (!ended) reader.cancel().catch(() => {});
+    s.streamEvents = (text.match(/^event: /gm) || []).length;
+    s.stream = ended && s.streamEvents >= 1 ? 'ok' : 'FAIL';
+    // A recording upload: half a second of silence as a 16 kHz mono WAV (the server answers 201 once it is stored).
+    s.recording = 'pending';
+    const samples = 8000;
+    const wav = new Uint8Array(44 + samples * 2);
+    const dv = new DataView(wav.buffer);
+    const tag = (at, t) => { for (let i = 0; i < 4; i++) wav[at + i] = t.charCodeAt(i); };
+    tag(0, 'RIFF'); dv.setUint32(4, 36 + samples * 2, true); tag(8, 'WAVE'); tag(12, 'fmt '); dv.setUint32(16, 16, true);
+    dv.setUint16(20, 1, true); dv.setUint16(22, 1, true); dv.setUint32(24, 16000, true); dv.setUint32(28, 32000, true);
+    dv.setUint16(32, 2, true); dv.setUint16(34, 16, true); tag(36, 'data'); dv.setUint32(40, samples * 2, true);
+    const rec = await fetch('/api/docs/' + s.docId + '/recordings/upload', { method: 'POST', headers: { 'Content-Type': 'audio/wav', 'X-Filename': 'smoke.wav' }, body: wav });
+    s.recording = rec.status === 201 ? 'ok' : 'HTTP ' + rec.status + ' ' + (await rec.text()).slice(0, 200);
+  })().catch((e) => { if (s.ingest === 'pending') s.ingest = 'error: ' + e; else if (s.stream === 'pending') s.stream = 'error: ' + e; else s.recording = 'error: ' + e; }).finally(async () => {
     if (s.docId) s.deleted = await fetch('/api/docs/' + s.docId, { method: 'DELETE' }).then((r) => r.status, (e) => String(e));
     s.ingestDone = true;
   });
@@ -958,13 +1092,20 @@ fn smoke_page_loaded(app: &AppHandle, url: &Url) {
     if st.smoke_page_started.swap(true, SeqCst) {
         return;
     }
-    // The upload check only on this computer's server (never add a document to another computer's library).
     let local = lock(&st.server_url).as_deref().and_then(|u| Url::parse(u).ok()).is_some_and(|u| origin_of(&u) == origin_of(url));
+    // A remote server shown through the relay (proxy.rs): the page must be a secure context there as well.
+    let proxied = lock(&st.proxy_url).as_deref() == Some(origin_of(url).as_str());
+    // Writes to another computer's server only when asked (a test server): never add a document to someone's library.
+    let write = std::env::var(SMOKE_WRITE_ENV).is_ok_and(|v| v.trim() == "1");
+    let ingest = local || write;
     // The recording tools of this computer's server (the bundled whisper-cli and ffmpeg).
     let asr = local && std::env::var(SMOKE_ASR_ENV).map_or(true, |v| v.trim() != "0");
+    let js_bool = |b: bool| if b { "true" } else { "false" };
     let probe = SMOKE_PROBE_JS
-        .replace("__INGEST__", if local { "true" } else { "false" })
-        .replace("__ASR__", if asr { "true" } else { "false" })
+        .replace("__INGEST__", js_bool(ingest))
+        .replace("__WRITE__", js_bool(write))
+        .replace("__RECORDER__", js_bool(local || proxied))
+        .replace("__ASR__", js_bool(asr))
         .replace("__PDF__", SMOKE_PDF_BASE64);
     let h = app.clone();
     std::thread::spawn(move || {
@@ -981,7 +1122,7 @@ fn smoke_page_loaded(app: &AppHandle, url: &Url) {
                 if page.get("ipc").is_none() {
                     continue 'probe;
                 }
-                let ingest_done = !local || page["ingestDone"] == true;
+                let ingest_done = !ingest || page["ingestDone"] == true;
                 let asr_done = !asr || page["asrDone"] == true;
                 if page.get("health").is_some() && page.get("auth").is_some() && ingest_done && asr_done {
                     break 'probe;
@@ -995,11 +1136,13 @@ fn smoke_page_loaded(app: &AppHandle, url: &Url) {
         let health = page.get("health").and_then(|v| v.as_i64()) == Some(200);
         let auth = &page["auth"];
         let logged_in = auth["authenticated"].as_bool() == Some(true) || auth["authRequired"].as_bool() == Some(false);
-        let slides = !local || page["ingest"] == "ok";
+        let slides = !ingest || page["ingest"] == "ok";
         let tools = !asr || page["asr"] == "ok";
-        let recorder = !local || ["secure", "mediaDevices", "worklet"].iter().all(|k| page["recorder"][k] == true);
+        let recorder = !(local || proxied) || ["secure", "mediaDevices", "worklet"].iter().all(|k| page["recorder"][k] == true);
+        let stream = !write || page["stream"] == "ok";
+        let recording = !write || page["recording"] == "ok";
         let shell = page["desktop"] == 1 && page["updatePhase"] == "idle";
-        if rendered && no_ipc && health && logged_in && slides && tools && recorder && shell {
+        if rendered && no_ipc && health && logged_in && slides && tools && recorder && stream && recording && shell {
             smoke_verdict(&h, 0, "ok");
         } else {
             smoke_verdict(
@@ -1007,7 +1150,8 @@ fn smoke_page_loaded(app: &AppHandle, url: &Url) {
                 4,
                 &format!(
                     "FAIL checks: rendered {rendered}, no IPC {no_ipc}, health {health}, logged in {logged_in}, PDF upload and slide images {slides}, \
-                     speech recognition tools {tools}, recorder APIs {recorder}, desktop marker and state {shell}"
+                     speech recognition tools {tools}, recorder APIs {recorder}, chat stream {stream}, recording upload {recording}, \
+                     desktop marker and state {shell}"
                 ),
             );
         }
@@ -1088,7 +1232,9 @@ fn main() {
             set_theme,
             set_update_check,
             forget_choice,
-            open_logs
+            open_logs,
+            set_share,
+            reset_share_code
         ])
         .menu(build_menu)
         .on_menu_event(|app, event| on_menu(app, event.id().as_ref()))
@@ -1149,7 +1295,8 @@ fn main() {
                     if matches!(payload.event(), PageLoadEvent::Started) {
                         *lock(&h_load.state::<AppState>().page_origin) = None;
                     } else if matches!(payload.event(), PageLoadEvent::Finished) {
-                        bridge::log_limited(&h_load, "page", &format!("page loaded {}", payload.url()));
+                        // Without the query: an engine may report the login link (the code in its query) here.
+                        bridge::log_limited(&h_load, "page", &format!("page loaded {}", without_query(payload.url())));
                         if is_chooser(&h_load, payload.url()) {
                             smoke_chooser_loaded(&h_load);
                         } else {
@@ -1196,15 +1343,14 @@ fn main() {
                         *lock(&st.busy) = Some(format!("{saved} 에 연결하는 중…"));
                         let hr = h.clone();
                         std::thread::spawn(move || {
-                            let result = remote::parse(&saved).and_then(|origin| remote::probe(&origin).map(|_| origin));
+                            let result = remote::parse(&saved)
+                                .and_then(|origin| remote::probe(&origin).map(|status| (origin, status)))
+                                .and_then(|(origin, status)| show_remote(&hr, &origin, None, &status));
                             let st = hr.state::<AppState>();
                             *lock(&st.busy) = None;
-                            match result {
-                                Ok(origin) => go_to(&hr, origin.as_str()),
-                                Err(e) => {
-                                    *lock(&st.error) = Some(format!("저장된 연결 대상에 연결하지 못했어요. {e}"));
-                                    show_chooser(&hr);
-                                }
+                            if let Err(e) = result {
+                                *lock(&st.error) = Some(format!("저장된 연결 대상에 연결하지 못했어요. {e}"));
+                                show_chooser(&hr);
                             }
                         });
                     }
@@ -1255,6 +1401,7 @@ fn main() {
             app.state::<AppState>().quitting.store(true, SeqCst);
             config::log(app, "exit: stopping the server");
             server::stop(app);
+            proxy::stop(app);
             // A normal quit (or the restart after an update): the next launch connects as remembered.
             if config::load(app).auto_connect_pending {
                 config::update(app, |c| c.auto_connect_pending = false);
@@ -1306,6 +1453,16 @@ mod tests {
     fn the_smoke_pdf_is_a_pdf() {
         assert!(SMOKE_PDF_BASE64.starts_with("JVBERi0")); // "%PDF-"
         assert_eq!(SMOKE_PDF_BASE64.len() % 4, 0);
-        assert!(SMOKE_PROBE_JS.contains("__INGEST__") && SMOKE_PROBE_JS.contains("__PDF__") && SMOKE_PROBE_JS.contains("__ASR__"));
+        for hole in ["__INGEST__", "__PDF__", "__ASR__", "__RECORDER__", "__WRITE__"] {
+            assert!(SMOKE_PROBE_JS.contains(hole), "{hole}");
+        }
+        // (That the probe never opens the microphone is checked by desktop.test.mjs over this file's text.)
+    }
+
+    #[test]
+    fn log_lines_show_pages_without_their_query() {
+        let login = Url::parse("http://127.0.0.1:5378/login?code=k7qm2-x9fda-3hz8w-p0rtc#x").unwrap();
+        assert_eq!(without_query(&login), "http://127.0.0.1:5378/login");
+        assert_eq!(without_query(&Url::parse("https://study-pc.tail1234.ts.net/?doc=abc").unwrap()), "https://study-pc.tail1234.ts.net/");
     }
 }

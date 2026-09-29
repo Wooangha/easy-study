@@ -240,6 +240,7 @@ export function recordingUnavailableReason(env: {
     return (
       `이 주소(${env.origin})는 보안 연결(HTTPS)이 아니라서 브라우저가 마이크를 막아요. ` +
       '녹음하려면 서버 컴퓨터에서 easy-study 앱이나 http://127.0.0.1 주소로 열거나, ' +
+      'easy-study 앱으로 그 컴퓨터에 연결하거나(앱 안에서는 http 주소여도 녹음돼요), ' +
       'HTTPS로 접속해 주세요 (예: tailscale serve, 또는 EASY_STUDY_TLS_CERT/KEY). 녹음 파일 올리기는 여기서도 돼요.'
     );
   }

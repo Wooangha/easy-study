@@ -17,11 +17,16 @@ import {
   desktopMarker,
   downloadHint,
   installBlockReason,
+  isNameUrl,
   leaveConfirm,
   readPageBusy,
+  resetCodeConfirm,
+  shareBlockReason,
+  shareWarning,
   updateStatusLine,
   useDesktopState,
   type DesktopMarker,
+  type DesktopShare,
   type PageBusy,
   type SettingsSection,
 } from '../lib/desktop.ts';
@@ -272,10 +277,98 @@ async function chooseServer(busy: PageBusy): Promise<void> {
   desktopAction('choose');
 }
 
+/** The switch "다른 기기에서 접속 허용": the shell restarts this computer's server (the chooser shows meanwhile). */
+async function setShare(on: boolean, busy: PageBusy): Promise<void> {
+  const warning = shareWarning(readPageBusy() ?? busy);
+  if (warning && !(await confirmDialog({ title: '서버를 다시 시작할까요?', message: warning, confirmLabel: '다시 시작' }))) return;
+  desktopAction(on ? 'share/on' : 'share/off');
+}
+
+/** "접속 코드 새로 만들기": every device is logged out, the server restarts once with a new code. */
+async function resetShareCode(busy: PageBusy): Promise<void> {
+  if (!(await confirmDialog(resetCodeConfirm(readPageBusy() ?? busy)))) return;
+  desktopAction('share/reset-code');
+}
+
+function copyWithToast(text: string, what: string): void {
+  copyText(text).then(
+    () => toast(`${what}를 복사했어요.`, 'success'),
+    () => toast('복사하지 못했어요.', 'error'),
+  );
+}
+
+/** 다른 기기에서 접속 (this computer's server only, DESIGN §16/§19). */
+function ShareBlock({ share, busy }: { share: DesktopShare; busy: PageBusy }) {
+  const blocked = shareBlockReason(busy);
+  return (
+    <>
+      <h4 className="settings-sub">다른 기기에서 접속</h4>
+      <label className="rec-setting rec-setting-check">
+        <input type="checkbox" checked={share.on} disabled={blocked !== null} onChange={(e) => void setShare(e.target.checked, busy)} />
+        <span>다른 기기에서 접속 허용 (같은 네트워크, 접속 코드 필요)</span>
+      </label>
+      {blocked && <p className="settings-hint">{blocked}</p>}
+      <p className="settings-hint">
+        같은 Wi‑Fi의 다른 컴퓨터·태블릿에서 이 컴퓨터의 easy-study를 쓸 수 있어요. 켜거나 끄면 이 컴퓨터의 서버를 다시 시작해요 (잠시
+        연결 선택 화면이 나와요). 코드를 아는 사람은 이 컴퓨터의 Claude/Codex로 질문하고 강의 파일을 보고 지울 수 있어요.
+      </p>
+      {share.on && !share.running && <p className="settings-hint">서버를 다시 시작하면 주소가 나와요.</p>}
+      {share.running && (
+        <>
+          <p className="settings-line">다른 기기에서 열 주소</p>
+          {share.urls.length === 0 && <p className="settings-hint">네트워크 주소를 찾지 못했어요. Wi‑Fi나 이더넷에 연결한 뒤 스위치를 껐다 켜세요.</p>}
+          {share.urls.map((url) => (
+            <p key={url} className="settings-line">
+              <span className="settings-path">
+                <code>{url}</code>
+                <button type="button" className="ghost-btn tiny" onClick={() => copyWithToast(url, '주소')}>
+                  복사
+                </button>
+                {isNameUrl(url) && <span className="settings-status">(같은 네트워크에서 이름이 풀릴 때만)</span>}
+              </span>
+            </p>
+          ))}
+          <p className="settings-line">
+            {share.code ? (
+              <span className="settings-path">
+                접속 코드 <code>{share.code}</code>
+                <button type="button" className="ghost-btn tiny" onClick={() => copyWithToast(share.code!, '접속 코드')}>
+                  복사
+                </button>
+              </span>
+            ) : (
+              <span className="settings-path">
+                접속 코드
+                <button type="button" className="ghost-btn tiny" onClick={() => desktopAction('share/reveal')}>
+                  보기
+                </button>
+                <span className="settings-status">(연결 선택 화면의 ⚙ 앱 설정에도 있어요)</span>
+              </span>
+            )}
+          </p>
+          <div className="settings-actions">
+            <button type="button" className="ghost-btn small" disabled={blocked !== null} title={blocked ?? undefined} onClick={() => void resetShareCode(busy)}>
+              접속 코드 새로 만들기 (모든 기기 로그아웃)
+            </button>
+          </div>
+          <p className="settings-hint">
+            macOS·Windows가 ‘node’의 네트워크 연결을 허용할지 물으면 허용하세요 (앱에 든 서버예요; 직접 빌드한 앱은 켤 때마다 물을 수
+            있어요). 다른 컴퓨터에서는 easy-study 앱의 ‘다른 컴퓨터에 연결’(녹음도 돼요) 또는 브라우저로 여세요. 태블릿·폰의
+            브라우저에서 녹음하려면 HTTPS가 필요해요. http로는 같은 네트워크의 누군가가 오가는 내용을 엿보거나 바꿀 수 있어요
+            (바뀐 화면은 마이크와 로그인까지 쓸 수 있어요): 믿을 수 있는 네트워크에서만 켜고, 다른 곳에서는 Tailscale·HTTPS를 쓰세요.
+            Wi‑Fi가 바뀌어 주소가 바뀌면 껐다 켜세요.
+          </p>
+        </>
+      )}
+    </>
+  );
+}
+
 function DesktopSection({ marker, busy }: { marker: DesktopMarker; busy: PageBusy }) {
   const state = useDesktopState();
   const update = state?.update ?? null;
   const connection = state?.connection ?? null;
+  const share = connection?.kind === 'local' ? (state?.share ?? null) : null;
   const mac = marker.os === 'macos';
   const pending = update && (update.phase === 'available' || update.phase === 'downloaded');
   const canInstall = !!pending && update.install === 'inApp';
@@ -358,6 +451,7 @@ function DesktopSection({ marker, busy }: { marker: DesktopMarker; busy: PageBus
       <p className="settings-hint">
         메뉴 연결 › 연결 대상 바꾸기… (<kbd>{mac ? '⌘⇧K' : 'Ctrl+Shift+K'}</kbd>)로도 바꿀 수 있어요.
       </p>
+      {share && <ShareBlock share={share} busy={busy} />}
     </>
   );
 }

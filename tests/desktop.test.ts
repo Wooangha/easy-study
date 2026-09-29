@@ -18,11 +18,16 @@ import { VIEW_WIDTHS, inlinePathFor, thumbPath, viewPath } from '../server/asset
 import { killRunningChildren, runningChildCount, trackChild } from '../server/children.ts';
 import { ConfigError, desktopMode, repoRoot } from '../server/config.ts';
 import {
+  EXIT_PORT_IN_USE,
   READY_PREFIX,
   desktopPort,
+  desktopResetCode,
   desktopServerOptions,
+  desktopShare,
   ignoredNetworkSettings,
+  interfaceRank,
   readyLine,
+  shareUrls,
   shellAlive,
   startupFailureMessage,
   watchShell,
@@ -489,14 +494,15 @@ describe('desktop mode (EASY_STUDY_DESKTOP=1)', () => {
     assert.deepEqual(await fs.readdir(library), [SERVER_LOCK_FILE_NAME], 'nothing else touched');
   });
 
-  test('a port in use: Korean message, exit 1, the lock is not left behind', async () => {
+  test('a port in use: Korean message, exit 3 (the shell may try another port), the lock is not left behind', async () => {
     const library = await tempDir('easy-study-desktop-lib-');
     const blocker = net.createServer();
     await new Promise<void>((resolve) => blocker.listen(0, '127.0.0.1', resolve));
     const { port } = blocker.address() as net.AddressInfo;
     try {
       const server = startServerProcess(library, { PORT: String(port) });
-      assert.deepEqual(await exitWithin(server, 10_000), { code: 1, signal: null });
+      assert.equal(EXIT_PORT_IN_USE, 3);
+      assert.deepEqual(await exitWithin(server, 10_000), { code: EXIT_PORT_IN_USE, signal: null });
       assert.match(server.stderr(), new RegExp(`포트 ${port}을\\(를\\) 다른 프로그램이 이미 쓰고 있어서`));
       assert.doesNotMatch(server.stdout(), /EASY_STUDY_READY/);
       assert.equal(await exists(path.join(library, SERVER_LOCK_FILE_NAME)), false);
@@ -540,6 +546,68 @@ describe('desktop mode (EASY_STUDY_DESKTOP=1)', () => {
     assert.doesNotMatch(server.stdout(), /접속 코드/);
     server.child.stdin!.end();
     assert.equal((await exitWithin(server, 8_000)).code, 0);
+  });
+
+  // The one test of `npm test` that binds 0.0.0.0 (tests/auth.test.ts keeps EASY_STUDY_HOST=127.0.0.1 on purpose): a
+  // macOS application firewall asks whether `node` may accept incoming connections each run. EASY_STUDY_TEST_NO_LAN=1
+  // skips it (the desktopServerOptions test below keeps the contract; CI runs it).
+  const NO_LAN = { skip: process.env.EASY_STUDY_TEST_NO_LAN === '1' ? 'EASY_STUDY_TEST_NO_LAN=1: the LAN-side bind is skipped' : false };
+
+  test('EASY_STUDY_DESKTOP_SHARE=1: remote mode on every interface, the code only in .auth.json, the ready line lists the addresses', NO_LAN, async () => {
+    const library = await tempDir('easy-study-desktop-lib-');
+    const server = startServerProcess(library, { EASY_STUDY_DESKTOP_SHARE: '1' });
+    const ready = (await waitForReady(server)) as { url: string; port: number; share?: { urls: string[] } };
+    assert.equal(ready.url, `http://127.0.0.1:${ready.port}`, 'the shell still reaches it through loopback');
+    assert.ok(Array.isArray(ready.share?.urls), 'share.urls');
+    for (const url of ready.share!.urls) {
+      assert.match(url, new RegExp(`^http://[^/]+:${ready.port}$`), url);
+      assert.doesNotMatch(url, /127\.0\.0\.1|localhost|169\.254\./, url);
+    }
+    const line = server.stdout().split(/\r?\n/).find((l) => l.startsWith(READY_PREFIX))!;
+    assert.deepEqual(Object.keys(JSON.parse(line.slice(READY_PREFIX.length + 1)) as object), ['url', 'port', 'share']);
+
+    // Login required, from this computer too (loopback is never authentication, DESIGN §16).
+    const status = (await (await fetch(`${ready.url}/api/auth/status`)).json()) as { authRequired: boolean; authenticated: boolean };
+    assert.deepEqual(status, { authRequired: true, authenticated: false });
+    const busyAnonymous = await fetch(`${ready.url}/api/desktop/busy`);
+    assert.equal(busyAnonymous.status, 401);
+    await busyAnonymous.arrayBuffer();
+
+    // The code lives in the library's .auth.json, never on stdout (the shell copies stdout into server.log).
+    const auth = JSON.parse(await fs.readFile(path.join(library, '.auth.json'), 'utf8')) as { code: string };
+    assert.match(auth.code, /^[0-9a-hjkmnp-tv-z]{5}(-[0-9a-hjkmnp-tv-z]{5}){3}$/);
+    assert.doesNotMatch(server.stdout(), /접속 코드|login\?code/);
+    assert.ok(!server.stdout().includes(auth.code) && !server.stderr().includes(auth.code), 'the code is never printed');
+    assert.match(server.stdout(), /다른 기기에서\s+→/);
+
+    // The shell logs its own window in with the code (303 + cookie) and probes the busy route as a bearer.
+    const login = await fetch(`${ready.url}/login?code=${encodeURIComponent(auth.code)}`, { redirect: 'manual' });
+    assert.equal(login.status, 303);
+    assert.equal(login.headers.get('location'), '/');
+    assert.match(login.headers.get('set-cookie') ?? '', /^es_session=/);
+    await login.arrayBuffer();
+    const busy = await fetch(`${ready.url}/api/desktop/busy`, { headers: { Authorization: `Bearer ${auth.code}` } });
+    assert.equal(busy.status, 200);
+    assert.deepEqual(await busy.json(), { recording: null, transcriptions: 0, digests: 0, chatTurns: 0, modelDownloads: 0 });
+    const wrong = await fetch(`${ready.url}/api/desktop/busy`, { headers: { Authorization: 'Bearer nope' } });
+    assert.equal(wrong.status, 401);
+    await wrong.arrayBuffer();
+
+    server.child.stdin!.end();
+    assert.deepEqual(await exitWithin(server, 8_000), { code: 0, signal: null });
+
+    // EASY_STUDY_DESKTOP_RESET_CODE=1 ("접속 코드 새로 만들기"): a new code at that start, the logins ended, said on stdout.
+    const again = startServerProcess(library, { EASY_STUDY_DESKTOP_SHARE: '1', EASY_STUDY_DESKTOP_RESET_CODE: '1' });
+    const readyAgain = await waitForReady(again);
+    const renewed = JSON.parse(await fs.readFile(path.join(library, '.auth.json'), 'utf8')) as { code: string };
+    assert.notEqual(renewed.code, auth.code);
+    assert.match(again.stdout(), /이전 로그인은 모두 끊었습니다/);
+    assert.ok(!again.stdout().includes(renewed.code));
+    const old = await fetch(`${readyAgain.url}/api/desktop/busy`, { headers: { Authorization: `Bearer ${auth.code}` } });
+    assert.equal(old.status, 401);
+    await old.arrayBuffer();
+    again.child.stdin!.end();
+    assert.equal((await exitWithin(again, 8_000)).code, 0);
   });
 });
 
@@ -741,10 +809,50 @@ describe('desktop helpers', () => {
     assert.equal(desktopMode({}, ['--desktop']), true);
   });
 
-  test('readyLine is one line of JSON after the prefix', () => {
+  test('readyLine is one line of JSON after the prefix; shared servers add their addresses', () => {
     const line = readyLine('http://127.0.0.1:5351', 5351);
     assert.equal(line, 'EASY_STUDY_READY {"url":"http://127.0.0.1:5351","port":5351}');
     assert.deepEqual(JSON.parse(line.slice(READY_PREFIX.length + 1)), { url: 'http://127.0.0.1:5351', port: 5351 });
+    assert.equal(
+      readyLine('http://127.0.0.1:5351', 5351, { urls: ['http://192.168.0.10:5351', 'http://my-mac.local:5351'] }),
+      'EASY_STUDY_READY {"url":"http://127.0.0.1:5351","port":5351,"share":{"urls":["http://192.168.0.10:5351","http://my-mac.local:5351"]}}',
+    );
+  });
+
+  test('shareUrls: non-internal IPv4 addresses, physical adapters first, the host name last (not a bare Windows name)', () => {
+    const iface = (address: string, internal = false, family: 'IPv4' | 'IPv6' = 'IPv4') => ({ address, netmask: '', family, mac: '', internal, cidr: null });
+    const interfaces = {
+      lo0: [iface('127.0.0.1', true)],
+      utun3: [iface('100.101.102.103')],
+      en0: [iface('192.168.0.10'), iface('fe80::1', false, 'IPv6')],
+      bridge100: [iface('192.168.64.1')],
+      en5: [iface('169.254.10.10')],
+      en1: [iface('192.168.0.11'), iface('192.168.0.11')],
+    } as unknown as ReturnType<typeof os.networkInterfaces>;
+    assert.deepEqual(shareUrls(5350, interfaces, 'My-Mac.local', 'darwin'), [
+      'http://192.168.0.10:5350',
+      'http://192.168.0.11:5350',
+      'http://100.101.102.103:5350',
+      'http://192.168.64.1:5350',
+      'http://my-mac.local:5350',
+    ]);
+    const windows = { 'vEthernet (WSL)': [iface('172.29.0.1')], 'Wi-Fi': [iface('192.168.0.20')], Tailscale: [iface('100.100.1.2')] } as unknown as ReturnType<typeof os.networkInterfaces>;
+    assert.deepEqual(shareUrls(5350, windows, 'DESKTOP-ABC', 'win32'), ['http://192.168.0.20:5350', 'http://172.29.0.1:5350', 'http://100.100.1.2:5350']);
+    assert.deepEqual(shareUrls(5350, windows, 'desktop-abc.home.arpa', 'win32').at(-1), 'http://desktop-abc.home.arpa:5350');
+    assert.deepEqual(shareUrls(5350, {}, '192.168.0.10', 'linux'), [], 'a host name that is an address adds nothing');
+    assert.deepEqual(shareUrls(5350, {}, 'bad host', 'linux'), []);
+    assert.deepEqual([interfaceRank('en0'), interfaceRank('wlp2s0'), interfaceRank('Ethernet 2'), interfaceRank('utun4'), interfaceRank('docker0'), interfaceRank('vEthernet (Default Switch)'), interfaceRank('awdl0'), interfaceRank('foo0')], [0, 0, 0, 2, 2, 2, 2, 1]);
+  });
+
+  test('desktopShare / desktopResetCode: 1/true/on/yes (set only by the shell)', () => {
+    for (const value of ['1', 'true', 'ON', ' yes ']) {
+      assert.equal(desktopShare({ EASY_STUDY_DESKTOP_SHARE: value }), true, value);
+      assert.equal(desktopResetCode({ EASY_STUDY_DESKTOP_RESET_CODE: value }), true, value);
+    }
+    for (const value of [undefined, '', '0', 'false', 'off', 'share']) {
+      assert.equal(desktopShare({ EASY_STUDY_DESKTOP_SHARE: value }), false, String(value));
+      assert.equal(desktopResetCode({ EASY_STUDY_DESKTOP_RESET_CODE: value }), false, String(value));
+    }
   });
 
   test('desktopPort: unset = any free port, otherwise 0-65535', () => {
@@ -766,6 +874,17 @@ describe('desktop helpers', () => {
     });
     assert.throws(() => desktopServerOptions({ PORT: '5351' }), (err: Error) => err instanceof ConfigError && /EASY_STUDY_LIBRARY/.test(err.message));
     assert.throws(() => desktopServerOptions({ EASY_STUDY_LIBRARY: '  ' }), ConfigError);
+    // Sharing: every interface with the login on and a generated code (never EASY_STUDY_PASSWORD, never the user's auth setting).
+    assert.deepEqual(desktopServerOptions({ EASY_STUDY_LIBRARY: '/x/library', PORT: '5351', EASY_STUDY_DESKTOP_SHARE: '1', EASY_STUDY_AUTH: 'off', EASY_STUDY_PASSWORD: 'secret-password' }), {
+      port: 5351,
+      host: '0.0.0.0',
+      auth: 'on',
+      password: null,
+      tls: null,
+      desktop: true,
+    });
+    assert.equal(desktopServerOptions({ EASY_STUDY_LIBRARY: '/x/library', EASY_STUDY_DESKTOP_SHARE: '1', EASY_STUDY_DESKTOP_RESET_CODE: '1' }).resetAccessCode, true);
+    assert.equal('resetAccessCode' in desktopServerOptions({ EASY_STUDY_LIBRARY: '/x/library', EASY_STUDY_DESKTOP_RESET_CODE: '0' }), false);
   });
 
   test('ignoredNetworkSettings names only settings that would have changed something', () => {
@@ -783,6 +902,7 @@ describe('desktop helpers', () => {
     try {
       assert.deepEqual(startupFailureMessage(new ConfigError('PORT 값이 올바르지 않습니다'), 0), {
         known: true,
+        exitCode: 1,
         message: '설정 오류: PORT 값이 올바르지 않습니다',
       });
       const locked = startupFailureMessage(new LibraryLockedError(path.join(library, '.server.lock'), { pid: 42, port: 5180, startedAt: '' }), 0);
@@ -790,11 +910,12 @@ describe('desktop helpers', () => {
       assert.match(locked.message, /^이 라이브러리 폴더는 다른 easy-study가 이미 쓰고 있습니다 \(pid 42, 포트 5180\)\./);
       const inUse = Object.assign(new Error('listen EADDRINUSE'), { code: 'EADDRINUSE' });
       assert.match(startupFailureMessage(inUse, 5351).message, /^포트 5351을\(를\) 다른 프로그램이/);
+      assert.equal(startupFailureMessage(inUse, 5351).exitCode, EXIT_PORT_IN_USE);
       const denied = Object.assign(new Error('EACCES'), { code: 'EACCES', path: path.join(library, '.server.lock.1.tmp') });
       assert.equal(startupFailureMessage(denied, 0).message.split('\n')[0], `라이브러리 폴더에 쓸 권한이 없습니다 (EACCES): ${library}`);
       // Elsewhere than the library: not a library problem.
       const elsewhere = Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES', path: '/somewhere/else' });
-      assert.deepEqual(startupFailureMessage(elsewhere, 0), { known: false, message: '서버를 시작하지 못했습니다: EACCES: permission denied' });
+      assert.deepEqual(startupFailureMessage(elsewhere, 0), { known: false, exitCode: 1, message: '서버를 시작하지 못했습니다: EACCES: permission denied' });
       assert.equal(startupFailureMessage('boom', 0).known, false);
     } finally {
       if (saved === undefined) delete process.env.EASY_STUDY_LIBRARY;

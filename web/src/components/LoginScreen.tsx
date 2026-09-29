@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { ApiError, errorMessage, login } from '../api.ts';
 import { formatWait, hasHangul, isLoopbackHost, markLoggedIn, normalizeAccessCode, type LoginReason } from '../lib/auth.ts';
-import { desktopAction, desktopMarker, leaveConfirm, readPageBusy } from '../lib/desktop.ts';
+import { desktopAction, desktopMarker, leaveConfirm, readPageBusy, useDesktopState } from '../lib/desktop.ts';
 
 interface LoginScreenProps {
   reason: LoginReason | null;
@@ -14,7 +14,7 @@ const NOTICES: Record<LoginReason, { text: string; tone: 'info' | 'error' } | nu
   expired: { text: '로그인이 만료됐어요. 다시 로그인하면 보던 화면 그대로 이어서 쓸 수 있어요.', tone: 'info' },
   logout: { text: '로그아웃했어요.', tone: 'info' },
   'link-failed': {
-    text: '로그인 링크의 접속 코드가 맞지 않아요. 서버 터미널에 표시된 코드를 직접 입력해 주세요.',
+    text: '로그인 링크의 접속 코드가 맞지 않아요. 서버 컴퓨터에 표시된 코드를 직접 입력해 주세요.',
     tone: 'error',
   },
   'link-limited': {
@@ -33,6 +33,7 @@ export function LoginScreen({ reason, overlay }: LoginScreenProps) {
   const [lockedUntil, setLockedUntil] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const inputRef = useRef<HTMLInputElement>(null);
+  const desktop = useDesktopState();
 
   useEffect(() => {
     if (lockedUntil === null) return;
@@ -76,7 +77,7 @@ export function LoginScreen({ reason, overlay }: LoginScreenProps) {
           setError('로그인 시도가 너무 많아요. 잠시 후에 다시 시도해 주세요.');
         }
       } else if (err instanceof ApiError && err.status === 401) {
-        setError('접속 코드가 맞지 않아요. 서버 터미널에 표시된 코드를 다시 확인해 주세요.');
+        setError('접속 코드가 맞지 않아요. 서버 컴퓨터에 표시된 코드를 다시 확인해 주세요.');
       } else {
         setError(errorMessage(err));
       }
@@ -87,7 +88,10 @@ export function LoginScreen({ reason, overlay }: LoginScreenProps) {
 
   const notice = reason ? NOTICES[reason] : null;
   const hangul = hasHangul(code);
-  const insecure = window.location.protocol === 'http:' && !isLoopbackHost(window.location.hostname);
+  // Plain HTTP to another computer — also when the app shows a plain-http remote through its loopback relay (the page
+  // is at 127.0.0.1 then, but the code and cookie still cross the network unencrypted).
+  const remoteHttp = desktop?.connection?.kind === 'remote' && desktop.connection.origin.startsWith('http:');
+  const insecure = (window.location.protocol === 'http:' && !isLoopbackHost(window.location.hostname)) || remoteHttp;
   const message = locked ? `로그인 시도가 너무 많아요. ${formatWait(waitLeft)} 후에 다시 시도해 주세요.` : error;
 
   return (
@@ -176,8 +180,9 @@ export function LoginScreen({ reason, overlay }: LoginScreenProps) {
 
         <div className="auth-hint">
           <p>
-            💡 접속 코드는 <strong>easy-study 서버를 실행한 컴퓨터의 터미널</strong>에 표시돼요. 터미널에 함께 나온
-            로그인 링크(<code>…/login?code=…</code>)를 열어도 바로 들어올 수 있어요.
+            💡 접속 코드는 <strong>easy-study 서버를 실행한 컴퓨터</strong>에 표시돼요 — easy-study 앱이면 ⚙ 설정 › 데스크톱 앱 ›
+            다른 기기에서 접속, 터미널이면 <code>npm run start:remote</code>의 출력. 터미널에 함께 나온 로그인 링크(
+            <code>…/login?code=…</code>)를 열어도 바로 들어올 수 있어요.
           </p>
           <details className="auth-help">
             <summary>코드가 보이지 않나요?</summary>
@@ -187,9 +192,9 @@ export function LoginScreen({ reason, overlay }: LoginScreenProps) {
                 <code>EASY_STUDY_PASSWORD</code>로 비밀번호를 직접 정해 두었다면 그 비밀번호를 입력하세요.
               </li>
               <li>
-                새 코드가 필요하면 터미널에 함께 나온 ‘코드를 바꾸고 모든 로그인을 끊으려면’ 명령(
-                <code>… -- --reset-access-code</code>)으로 서버를 다시 실행하세요. 로그인해 둔 다른 기기들도 모두
-                로그아웃돼요.
+                새 코드가 필요하면 앱에서는 ‘접속 코드 새로 만들기’, 터미널에서는 함께 나온 ‘코드를 바꾸고 모든 로그인을
+                끊으려면’ 명령(<code>… -- --reset-access-code</code>)으로 서버를 다시 실행하세요. 로그인해 둔 다른 기기들도
+                모두 로그아웃돼요.
               </li>
             </ul>
           </details>
@@ -199,8 +204,9 @@ export function LoginScreen({ reason, overlay }: LoginScreenProps) {
 
         {insecure && (
           <p className="auth-foot">
-            🔓 암호화되지 않은 연결(HTTP)이에요. 같은 Wi‑Fi처럼 믿을 수 있는 네트워크에서만 사용하세요. 이
-            주소에서는 Chrome/Edge의 ‘앱 설치’도 되지 않아요 (HTTPS가 필요해요: README의 ‘앱으로 설치하기’ 참고).
+            🔓 암호화되지 않은 연결(HTTP)이에요. 같은 네트워크의 누군가가 오가는 내용을 엿보거나 바꿀 수 있으니 같은 Wi‑Fi처럼
+            믿을 수 있는 네트워크에서만 사용하세요 (다른 곳에서는 Tailscale·HTTPS). 이 주소에서는 Chrome/Edge의 ‘앱 설치’도 되지
+            않아요 (HTTPS가 필요해요: README의 ‘앱으로 설치하기’ 참고).
           </p>
         )}
       </main>

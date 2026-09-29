@@ -1,6 +1,6 @@
 {
   "name": "easy-study",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "description": "Study lecture PDFs slide-by-slide with Claude Code / Codex / Claude API / OpenAI API",
   "type": "module",

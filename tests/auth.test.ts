@@ -1058,6 +1058,39 @@ describe('a flood of wrong logins from many addresses', () => {
 });
 
 describe('sessions over HTTP: expiry, restart, reset', () => {
+  test('a login link whose session cannot be saved fails without the code in the log', async () => {
+    // The desktop shell logs its own window in through /login?code= and copies the server's stderr into server.log:
+    // an error line must name the path, never the query with the code.
+    const library = await useLibrary();
+    const server = await start({ auth: 'on' });
+    const errors: string[] = [];
+    const error = console.error;
+    console.error = (...args: unknown[]) => void errors.push(args.map(String).join(' '));
+    try {
+      const code = server.access!.accessCode;
+      // .auth.json cannot be written any more: a directory sits where the file goes (the write is a rename onto it).
+      const file = path.join(library, AUTH_FILE_NAME);
+      await fs.rm(file);
+      await fs.mkdir(file);
+      const link = await request(server.url, `/login?code=${encodeURIComponent(code)}`);
+      assert.equal(link.status, 500);
+      assert.deepEqual(setCookies(link), []);
+      assert.ok(errors.some((line) => line.startsWith('[http] GET /login failed:')), errors.join('\n'));
+      assert.ok(!errors.join('\n').includes(code), 'the access code is not in the log');
+      assert.doesNotMatch(errors.join('\n'), /login\?code/);
+      // The JSON login fails the same way, and the API's error line is just as quiet.
+      await fs.rmdir(file);
+      await fs.mkdir(file);
+      const post = await jsonLogin(server.url, code);
+      assert.equal(post.status, 500);
+      assert.ok(errors.some((line) => line.startsWith('[http] POST /api/auth/login failed:')), errors.join('\n'));
+      assert.ok(!errors.join('\n').includes(code));
+    } finally {
+      console.error = error;
+      await server.close();
+    }
+  });
+
   test('a session ends 30 days after its last use and slides while used', async () => {
     await useLibrary();
     let clock = Date.now();

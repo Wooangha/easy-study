@@ -2,26 +2,38 @@
 // EASY_STUDY_DESKTOP=1, EASY_STUDY_LIBRARY (the library folder) and PORT (a remembered port, 0 = any), stdin,
 // stdout and stderr piped, as the leader of its own process group (POSIX). Then:
 //
-// - Local mode only: 127.0.0.1, no login, plain HTTP. EASY_STUDY_HOST / EASY_STUDY_AUTH / EASY_STUDY_TLS_* do
-//   not apply (the app opens the page without an access code; §16 remote mode is `npm run serve:remote`).
+// - Local mode by default: 127.0.0.1, no login, plain HTTP. EASY_STUDY_DESKTOP_SHARE=1 ("다른 기기에서 접속 허용",
+//   set only by the shell) = remote mode on 0.0.0.0 with the generated access code of `<library>/.auth.json` and the
+//   login on (§16); the code is never printed on stdout (the shell copies stdout into server.log) — the shell reads it
+//   from the file. EASY_STUDY_DESKTOP_RESET_CODE=1 makes a new code at this start and ends every login
+//   (--reset-access-code). The user's EASY_STUDY_HOST / EASY_STUDY_AUTH / EASY_STUDY_TLS_* do not apply (§16 remote
+//   mode from a terminal is `npm run serve:remote`).
 // - After listening, exactly one machine-readable line on stdout (after the usual banner):
 //     EASY_STUDY_READY {"url":"http://127.0.0.1:<port>","port":<port>}
+//   With sharing on it gains one key, `"share":{"urls":["http://192.168.0.10:<port>",…]}` (server/shellWatch.ts
+//   readyLine): the addresses other devices can use, physical adapters first, the host name last.
 // - The shell holds the write end of the stdin pipe for as long as it lives. EOF (the app quit, crashed or
 //   was killed — on every OS the pipe closes with the process) stops the server gracefully, like SIGTERM. A
 //   parent watchdog covers a pipe that stays open anyway (an inherited handle).
 // - A repeated SIGTERM / SIGHUP / EOF does not cut the graceful stop short (Linux PR_SET_PDEATHSIG delivers
 //   SIGTERM once per exiting thread of the shell, 5-11 times were measured); only a second SIGINT forces it.
 // - A failure before listening (library locked by `npm start`, port taken, configuration) ends in a short
-//   Korean message at the end of stderr — the shell shows the tail of stderr — and exit code 1.
+//   Korean message at the end of stderr — the shell shows the tail of stderr — and exit code 1; a port that
+//   another program holds exits with EXIT_PORT_IN_USE (3), so the shell can try another port.
 // - Every child process is gone when the server exits, whatever the path (server/children.ts): the graceful
 //   stop ends them, the exit hook kills what is left, and on POSIX the process group gets SIGTERM for the
 //   grandchildren of the CLIs.
 // - `GET /api/desktop/busy` (DESIGN §24) tells the shell what a restart would interrupt before it installs an
-//   update: registered only in desktop mode (`desktop: true` in the options), 404 otherwise.
+//   update or restarts the server for a setting: registered only in desktop mode (`desktop: true` in the
+//   options), 404 otherwise. With sharing on it is behind the login like every /api route (the shell sends
+//   `Authorization: Bearer <code>` over loopback).
 //
-// Outside desktop mode none of this applies: stdin is never read (`npm start` in a terminal, or with stdin
-// closed), and the banner and signal handling of server/index.ts are unchanged.
+// The loopback proxy the shell runs for plain-http remotes is a separate entry (server/proxy.ts). Outside desktop
+// mode none of this applies: stdin is never read (`npm start` in a terminal, or with stdin closed), and the banner
+// and signal handling of server/index.ts are unchanged.
 import type { AddressInfo } from 'node:net';
+import { isIP } from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import type { DesktopBusyResponse } from '../shared/types.ts';
 import { runningTurnCount } from './chat.ts';
@@ -31,9 +43,11 @@ import { digestCallsInFlight } from './digest.ts';
 import type { RunningServer, ServerOptions } from './index.ts';
 import { LibraryLockedError, readStoredDoc } from './library.ts';
 import { currentLiveRecording, queueState, recordingsConfig } from './recordings/service.ts';
+import { readyLine, stopSignals, watchShell } from './shellWatch.ts';
 
-/** First word of the ready line. */
-export const READY_PREFIX = 'EASY_STUDY_READY';
+// The helpers the shell's children share live in shellWatch.ts (the proxy imports them without the server).
+export { READY_PREFIX, readyLine, shellAlive, watchShell } from './shellWatch.ts';
+export type { ReadyShare, ShellWatchOptions } from './shellWatch.ts';
 
 /**
  * Path prefix of the desktop app's page actions (DESIGN §24): a page in the app's window navigates to
@@ -45,13 +59,10 @@ export const DESKTOP_ACTION_PATH = '/__easy-study-desktop';
 /** How long a graceful stop may take before the server exits anyway (below the shell's own wait). */
 export const DESKTOP_SHUTDOWN_TIMEOUT_MS = 5_000;
 
-/** How often the parent watchdog looks at the parent process. */
-const PARENT_CHECK_MS = 2_000;
+/** Exit code when the port is held by another program (the shell may retry with another port). */
+export const EXIT_PORT_IN_USE = 3;
 
-/** The one line the shell waits for: `EASY_STUDY_READY {"url":"http://127.0.0.1:<port>","port":<port>}`. */
-export function readyLine(url: string, port: number): string {
-  return `${READY_PREFIX} ${JSON.stringify({ url, port })}`;
-}
+const ON_VALUES = ['1', 'true', 'on', 'yes'];
 
 /** PORT in desktop mode: unset = 0 (any free port; the ready line tells which), otherwise 0-65535. */
 export function desktopPort(env: NodeJS.ProcessEnv = process.env): number {
@@ -62,18 +73,29 @@ export function desktopPort(env: NodeJS.ProcessEnv = process.env): number {
   return value;
 }
 
+/** EASY_STUDY_DESKTOP_SHARE=1|true|on|yes: "다른 기기에서 접속 허용" — the server binds every interface with the login on. */
+export function desktopShare(env: NodeJS.ProcessEnv = process.env): boolean {
+  return ON_VALUES.includes(env.EASY_STUDY_DESKTOP_SHARE?.trim().toLowerCase() ?? '');
+}
+
+/** EASY_STUDY_DESKTOP_RESET_CODE=1: "접속 코드 새로 만들기" — a new generated code at this start, every login ended. */
+export function desktopResetCode(env: NodeJS.ProcessEnv = process.env): boolean {
+  return ON_VALUES.includes(env.EASY_STUDY_DESKTOP_RESET_CODE?.trim().toLowerCase() ?? '');
+}
+
 /** Environment variables of §16 that desktop mode ignores, with values that would have changed something. */
 export function ignoredNetworkSettings(env: NodeJS.ProcessEnv = process.env): string[] {
   const ignored: string[] = [];
   const hostValue = env.EASY_STUDY_HOST?.trim();
   if (hostValue && !isLoopbackHost(hostValue)) ignored.push('EASY_STUDY_HOST');
-  if (['on', '1', 'true', 'yes'].includes(env.EASY_STUDY_AUTH?.trim().toLowerCase() ?? '')) ignored.push('EASY_STUDY_AUTH');
+  if (ON_VALUES.includes(env.EASY_STUDY_AUTH?.trim().toLowerCase() ?? '')) ignored.push('EASY_STUDY_AUTH');
   for (const name of ['EASY_STUDY_TLS_CERT', 'EASY_STUDY_TLS_KEY']) if (env[name]?.trim()) ignored.push(name);
   return ignored;
 }
 
 /**
- * startServer options of desktop mode: local mode on 127.0.0.1 and desktopPort(), with the desktop-only routes.
+ * startServer options of desktop mode: local mode on 127.0.0.1 and desktopPort() with the desktop-only routes, or
+ * with EASY_STUDY_DESKTOP_SHARE remote mode on every interface (auth 'on', a generated code: `password: null`).
  * Throws ConfigError without EASY_STUDY_LIBRARY (the default library inside the installed app is read-only or inside
  * its signature).
  */
@@ -81,7 +103,59 @@ export function desktopServerOptions(env: NodeJS.ProcessEnv = process.env): Serv
   if (!env.EASY_STUDY_LIBRARY?.trim()) {
     throw new ConfigError('데스크톱 모드에는 라이브러리 폴더가 필요합니다 (EASY_STUDY_LIBRARY).');
   }
-  return { port: desktopPort(env), host: '127.0.0.1', auth: 'off', password: null, tls: null, desktop: true };
+  const share = desktopShare(env);
+  return {
+    port: desktopPort(env),
+    host: share ? '0.0.0.0' : '127.0.0.1',
+    auth: share ? 'on' : 'off',
+    password: null,
+    tls: null,
+    desktop: true,
+    ...(desktopResetCode(env) ? { resetAccessCode: true } : {}),
+  };
+}
+
+type NetworkInterfaces = ReturnType<typeof os.networkInterfaces>;
+
+/**
+ * 0 = a physical adapter (Wi‑Fi, Ethernet), 2 = a tunnel, bridge or virtual adapter (VPN, Tailscale, Docker, VMs,
+ * Apple's awdl/llw/anpi/ap), 1 = unknown. The interface order of the OS is kept within a rank.
+ */
+export function interfaceRank(name: string): number {
+  const n = name.toLowerCase();
+  if (/^(utun|tun|tap|wg|tailscale|ts\d|zt|bridge|br-|docker|veth|virbr|vmnet|vboxnet|anpi|awdl|llw|ap\d|gif|stf|ppp|ipsec|lo)/.test(n)) return 2;
+  if (/(vethernet|virtual|hyper-v|vpn|tailscale|docker|wsl|vmware|virtualbox|bluetooth|loopback)/.test(n)) return 2;
+  if (/^(en|eth|eno|ens|enp|enx|wlan|wlp|wlx|wl\d)/.test(n) || /(wi-fi|wifi|ethernet|이더넷|무선)/.test(n)) return 0;
+  return 1;
+}
+
+/**
+ * The addresses other devices can use for a shared desktop server (the ready line's `share.urls`, shown in the
+ * chooser and in ⚙ 설정): every non-internal IPv4 address except link-local ones, physical adapters first, then
+ * the host name last — it resolves only on networks with mDNS/DNS for it, so it is left out on Windows without a
+ * domain suffix (a bare `DESKTOP-XXXX` name). IPv4 only: the server binds 0.0.0.0.
+ */
+export function shareUrls(
+  port: number,
+  interfaces: NetworkInterfaces = os.networkInterfaces(),
+  hostname: string = os.hostname(),
+  platform: NodeJS.Platform = process.platform,
+): string[] {
+  const ranked: Array<{ rank: number; url: string }> = [];
+  for (const [name, entries] of Object.entries(interfaces)) {
+    for (const entry of entries ?? []) {
+      const family = entry.family as string | number;
+      if (entry.internal || (family !== 'IPv4' && family !== 4) || isIP(entry.address) !== 4 || entry.address.startsWith('169.254.')) continue;
+      const url = `http://${entry.address}:${port}`;
+      if (!ranked.some((r) => r.url === url)) ranked.push({ rank: interfaceRank(name), url });
+    }
+  }
+  const urls = ranked.sort((a, b) => a.rank - b.rank).map((r) => r.url); // Array.prototype.sort is stable
+  const name = hostname.trim();
+  if (/^[a-z0-9][a-z0-9.-]*$/i.test(name) && isIP(name) === 0 && !(platform === 'win32' && !name.includes('.'))) {
+    urls.push(`http://${name.toLowerCase()}:${port}`);
+  }
+  return urls;
 }
 
 /**
@@ -128,14 +202,15 @@ function describe(err: unknown): string {
 /**
  * Why desktop mode could not start, in Korean, for the shell's error screen (it shows the tail of stderr, so
  * the message is short and names what the user can do in the app). `known` is false for unexpected errors,
- * whose stack trace is worth logging before the message.
+ * whose stack trace is worth logging before the message. `exitCode` is EXIT_PORT_IN_USE for a taken port, 1 otherwise.
  */
-export function startupFailureMessage(err: unknown, port: number): { message: string; known: boolean } {
-  if (err instanceof ConfigError) return { message: `설정 오류: ${err.message}`, known: true };
+export function startupFailureMessage(err: unknown, port: number): { message: string; known: boolean; exitCode: number } {
+  if (err instanceof ConfigError) return { message: `설정 오류: ${err.message}`, known: true, exitCode: 1 };
   if (err instanceof LibraryLockedError) {
     const { holder } = err;
     return {
       known: true,
+      exitCode: 1,
       message: [
         `이 라이브러리 폴더는 다른 easy-study가 이미 쓰고 있습니다 (pid ${holder.pid}, 포트 ${holder.port}).`,
         `  라이브러리: ${libraryDir()}`,
@@ -149,6 +224,7 @@ export function startupFailureMessage(err: unknown, port: number): { message: st
   if (errno?.code === 'EADDRINUSE') {
     return {
       known: true,
+      exitCode: EXIT_PORT_IN_USE,
       message: `포트 ${port}을(를) 다른 프로그램이 이미 쓰고 있어서 서버를 시작하지 못했습니다. 앱을 다시 실행해 보세요.`,
     };
   }
@@ -156,72 +232,11 @@ export function startupFailureMessage(err: unknown, port: number): { message: st
   if (Object.hasOwn(LIBRARY_PROBLEMS, code) && typeof errno?.path === 'string' && isInside(errno.path, libraryDir())) {
     return {
       known: true,
+      exitCode: 1,
       message: `${LIBRARY_PROBLEMS[code]} (${code}): ${libraryDir()}\n  다른 라이브러리 폴더를 고르거나, 이 폴더를 확인해 주세요.`,
     };
   }
-  return { known: false, message: `서버를 시작하지 못했습니다: ${describe(err)}` };
-}
-
-export interface ShellWatchOptions {
-  /** Default process.stdin. */
-  stdin?: NodeJS.ReadableStream;
-  /** Whether the shell still runs (default: see shellAlive). */
-  parentAlive?: () => boolean;
-  /** Default 2 s. */
-  intervalMs?: number;
-}
-
-/**
- * Whether the process that started the server still runs. POSIX: an orphan is re-parented, so the parent pid
- * changes. Windows keeps the original parent pid: it must still exist (the Job Object of the shell kills the
- * server anyway when the shell ends).
- */
-export function shellAlive(parentPid: number, platform: NodeJS.Platform = process.platform): boolean {
-  if (parentPid <= 1) return true; // started by init/launchd itself: nothing to watch
-  if (platform !== 'win32') return process.ppid === parentPid;
-  try {
-    process.kill(parentPid, 0);
-    return true;
-  } catch (err) {
-    return (err as NodeJS.ErrnoException).code === 'EPERM';
-  }
-}
-
-/**
- * Calls `onGone` once when the shell is gone: stdin ends (EOF), fails, or the parent process is no longer
- * there. What the shell writes to stdin is ignored. Returns a function that stops watching (tests).
- */
-export function watchShell(onGone: (reason: string) => void, options: ShellWatchOptions = {}): () => void {
-  const stdin: NodeJS.ReadableStream = options.stdin ?? process.stdin;
-  const parentPid = process.ppid;
-  const parentAlive = options.parentAlive ?? (() => shellAlive(parentPid));
-  let done = false;
-  const onEnd = () => fire('stdin EOF');
-  const onError = () => fire('stdin error');
-  const ignore = () => {};
-  const timer = setInterval(() => {
-    if (!parentAlive()) fire(`parent ${parentPid} is gone`);
-  }, options.intervalMs ?? PARENT_CHECK_MS);
-  timer.unref();
-  const stop = () => {
-    done = true;
-    clearInterval(timer);
-    stdin.off('end', onEnd);
-    stdin.off('close', onEnd);
-    stdin.off('data', ignore);
-    // The 'error' listener stays: a late pipe error must not become an uncaught exception.
-  };
-  function fire(reason: string): void {
-    if (done) return;
-    stop();
-    onGone(reason);
-  }
-  stdin.on('end', onEnd);
-  stdin.on('close', onEnd);
-  stdin.on('error', onError);
-  stdin.on('data', ignore);
-  stdin.resume();
-  return stop;
+  return { known: false, exitCode: 1, message: `서버를 시작하지 못했습니다: ${describe(err)}` };
 }
 
 /** Exits with `code` once what was written to stdout and stderr is out (pipes may be asynchronous). */
@@ -234,13 +249,6 @@ function exitAfterOutput(code: number): void {
   process.stdout.write('', done);
   process.stderr.write('', done);
   setTimeout(() => process.exit(code), 2_000).unref();
-}
-
-/** Signals that stop the server (SIGHUP: session end; SIGBREAK: Ctrl+Break on Windows). */
-function stopSignals(): NodeJS.Signals[] {
-  const signals: NodeJS.Signals[] = ['SIGINT', 'SIGTERM', 'SIGHUP'];
-  if (process.platform === 'win32') signals.push('SIGBREAK');
-  return signals;
 }
 
 /** main() of server/index.ts in desktop mode. */
@@ -285,14 +293,15 @@ export async function runDesktopServer(start: (options: ServerOptions) => Promis
     port = options.port ?? 0;
     const ignored = ignoredNetworkSettings();
     if (ignored.length > 0) {
-      console.warn(`[desktop] ${ignored.join(', ')} 설정은 데스크톱 앱에서 쓰지 않습니다 (이 컴퓨터에서만, 로그인 없이 열립니다).`);
+      const how = desktopShare() ? '공유 여부는 앱 설정이 정합니다' : '이 컴퓨터에서만, 로그인 없이 열립니다';
+      console.warn(`[desktop] ${ignored.join(', ')} 설정은 데스크톱 앱에서 쓰지 않습니다 (${how}).`);
     }
     running = await start(options);
   } catch (err) {
-    const { message, known } = startupFailureMessage(err, port);
+    const { message, known, exitCode } = startupFailureMessage(err, port);
     if (!known) console.error(err);
     console.error(message);
-    exitAfterOutput(1);
+    exitAfterOutput(exitCode);
     return;
   }
 
@@ -302,8 +311,14 @@ export async function runDesktopServer(start: (options: ServerOptions) => Promis
   }
   const actualPort = (running.server.address() as AddressInfo).port;
   console.log(`\n  easy-study (desktop)  →  ${running.url}`);
+  // Shared: the addresses, never the code (stdout ends up in server.log; the shell reads the code from .auth.json).
+  const share = running.access ? { urls: shareUrls(actualPort) } : undefined;
+  if (share) {
+    console.log('  다른 기기에서   →  ' + (share.urls.length > 0 ? share.urls.join('  ') : '(네트워크 주소를 찾지 못했습니다)'));
+    if (running.access?.sessionsRevoked) console.log('  이전 로그인은 모두 끊었습니다 (접속 코드가 바뀌었습니다).');
+  }
   console.log(`  library     →  ${libraryDir()}\n`);
   const fontProblem = fallbackFontProblem();
   if (fontProblem) console.warn(`  ${fontProblem}\n`);
-  console.log(readyLine(running.url, actualPort));
+  console.log(readyLine(running.url, actualPort, share));
 }
