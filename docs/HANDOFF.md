@@ -28,10 +28,10 @@ The user writes short casual Korean. Keep replies in Korean, short, plain; lead 
 
 ## Repository state (at the time of writing)
 
-- `main`: released up to **v0.5.3** (links fixed; public source, MIT) (in-app updates from 0.5.0; LAN sharing + the loopback relay in 0.5.1). Pushed; no
-  other branches. Tags v0.1.0 … v0.5.3. Releases up to v0.4.2 are drafts in the private repo (the user may publish
-  them); v0.5.0 … v0.5.3 are published there AND in the public repo `Wooangha/easy-study-releases` (installers +
-  latest.json, signed on this Mac with `publish-release.mjs`). `packaging/arch/PKGBUILD` + `.SRCINFO` are at 0.5.3.
+- `main`: released up to **v0.6.0** (slide annotations) (in-app updates from 0.5.0; LAN sharing + the loopback relay in 0.5.1). Pushed; no
+  other branches. Tags v0.1.0 … v0.6.0. Releases up to v0.4.2 are drafts in the private repo (the user may publish
+  them); v0.5.0 … v0.6.0 are published there AND in the public repo `Wooangha/easy-study-releases` (installers +
+  latest.json, signed on this Mac with `publish-release.mjs`). `packaging/arch/PKGBUILD` + `.SRCINFO` are at 0.6.0.
 - `gh` is installed and logged in. SSH push to origin works.
 
 ## Commands
