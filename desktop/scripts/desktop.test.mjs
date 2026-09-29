@@ -712,7 +712,7 @@ test('CI builds the recording tools for every target, ships them and checks them
   const ff = /\n {2}ffmpeg:\n([\s\S]*?)\n {2}build:/.exec(wf)?.[1];
   assert.ok(ff, 'job ffmpeg');
   for (const triple of Object.keys(TARGETS).filter((t) => t !== 'aarch64-pc-windows-msvc')) assert.ok(ff.includes(`target: ${triple}`), triple);
-  assert.match(ff, /actions\/cache@[0-9a-f]{40} # v4\./);
+  assert.match(ff, /actions\/cache@[0-9a-f]{40} # v[5-9]\./);
   assert.match(ff, /hashFiles\('desktop\/scripts\/build-ffmpeg\.sh', 'desktop\/scripts\/ffmpeg-min\.flags', 'desktop\/scripts\/ffmpeg\.mjs'/);
   assert.match(ff, /node desktop\/scripts\/ffmpeg\.mjs --target \$\{\{ matrix\.target \}\}/);
   assert.match(ff, /name: ffmpeg-\$\{\{ matrix\.target \}\}/);
@@ -721,7 +721,7 @@ test('CI builds the recording tools for every target, ships them and checks them
   // LGPL: FFmpeg's source goes into the release; the release takes only easy-study-* artifacts (not ffmpeg-<target>).
   assert.match(ff, /ffmpeg\.mjs --source-bundle/);
   assert.match(ff, /name: easy-study-ffmpeg-source/);
-  assert.match(wf, /release:[\s\S]*download-artifact@[0-9a-f]{40} # v4[.\d]*\n\s+with:\n\s+pattern: easy-study-\*/);
+  assert.match(wf, /release:[\s\S]*download-artifact@[0-9a-f]{40} # v[4-9][.\d]*\n\s+with:\n\s+pattern: easy-study-\*/);
   const build = /\n {2}build:\n([\s\S]*?)\n {2}arch:/.exec(wf)?.[1];
   assert.ok(build, 'job build');
   assert.match(build, /needs: \[test, ffmpeg\]/);
