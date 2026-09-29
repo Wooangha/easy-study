@@ -210,7 +210,8 @@ async function readRecord(docId: string): Promise<DigestRecord> {
   return JSON.parse(await fs.readFile(docPaths(docId).digestJson, 'utf8')) as DigestRecord;
 }
 
-async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 5_000): Promise<void> {
+// Generous bounds: a starved CI runner has taken 100× longer than this Mac (the suite passes in 1.5 s here).
+async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 30_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!(await predicate())) {
     if (Date.now() > deadline) throw new Error('condition not met in time');
@@ -219,7 +220,7 @@ async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 
 }
 
 async function finish(docId: string): Promise<DigestInfo> {
-  assert.equal(await waitForDigest(docId, 10_000), true, 'job finished');
+  assert.equal(await waitForDigest(docId, 60_000), true, 'job finished');
   return getDigestInfo(docId);
 }
 
@@ -396,6 +397,8 @@ describe('digest job', () => {
       partial.slides.map((s) => s.slide),
       [1, 2, 3, 4],
     );
+    // DIGEST.md is written right after digest.json: wait for it rather than reading it in the gap.
+    await waitFor(async () => /4\/9 슬라이드/.test(await fs.readFile(docPaths(docId).digestMd, 'utf8').catch(() => '')));
     const md = await fs.readFile(docPaths(docId).digestMd, 'utf8');
     assert.match(md, /^# Persisted — 정리본\n\n_\(미완성 정리본: 4\/9 슬라이드\)_\n/);
     assert.match(md, /## Slide 4 · Title 4/);
@@ -779,7 +782,7 @@ describe('digest job', () => {
     // The last job only waits for a slot: aborting it ends it right away, without any call.
     const callsBefore = shared.calls.length;
     assert.equal(abortDigest('global-c-000001'), true);
-    assert.equal(await waitForDigest('global-c-000001', 1_000), true);
+    assert.equal(await waitForDigest('global-c-000001', 10_000), true);
     assert.equal((await getDigestInfo('global-c-000001')).status, 'aborted');
     assert.equal(shared.calls.length, callsBefore);
 
