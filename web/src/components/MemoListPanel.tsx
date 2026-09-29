@@ -8,6 +8,7 @@ import { confirmDialog } from '../lib/confirm.ts';
 import { formatTime } from '../lib/format.ts';
 import { formatClock } from '../lib/recording/timeline.ts';
 import { toast } from '../lib/toast.ts';
+import { EyeIcon } from './annotations/icons.tsx';
 import { PopoverMenu } from './organize/PopoverMenu.tsx';
 
 interface MemoListPanelProps {
@@ -93,7 +94,7 @@ export function MemoListPanel({ docId, focusedSlide, onOpenMemo, onGoToSlide, on
               🗒
             </div>
             <p>아직 메모가 없어요.</p>
-            <p className="muted small">슬라이드 위 도구의 🗒 메모로 스티커 메모를 붙일 수 있어요. 태그와 다른 슬라이드·녹음으로의 연결도 돼요.</p>
+            <p className="muted small">슬라이드 위 도구 줄의 메모 도구로 스티커 메모를 붙일 수 있어요. 태그와 다른 슬라이드·녹음으로의 연결도 돼요.</p>
           </div>
         )}
         {summary && memos.length > 0 && shown.length === 0 && (
@@ -133,8 +134,8 @@ export function MemoListPanel({ docId, focusedSlide, onOpenMemo, onGoToSlide, on
                   </button>
                   <span className="muted small">{formatTime(m.updatedAt)}</span>
                   {!m.tutor && (
-                    <span className="muted small" title="튜터에게 보이지 않는 메모">
-                      🙈
+                    <span className="memo-row-hidden" role="img" title="튜터에게 숨김" aria-label="튜터에게 숨김">
+                      <EyeIcon off />
                     </span>
                   )}
                 </div>

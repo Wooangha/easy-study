@@ -1111,7 +1111,9 @@ STUDY_NOTES.md) show the attachments under the question: `![p.12 영역](attachm
 
 Web:
 - Slide viewer: drag on a slide draws a selection (mouse: press + move ≥ 6 px; a plain click still focuses the slide; touch: long-press
-  ~350 ms then drag, or the `✂ 영역` toolbar toggle; Esc cancels). On release a small floating menu: `📎 첨부` (POST regions → chip in
+  ~350 ms then drag; Esc cancels) — the default state of the viewer, i.e. while no annotation tool is active and the press is not on
+  an annotation item (§25 "Tools and gestures"; the `✂ 영역` toolbar toggle of 0.6.0 was removed in 0.6.1: no tool = the region state).
+  On release a small floating menu: `📎 첨부` (POST regions → chip in
   the composer), `💬 이 부분 설명해줘` (attach + send with that text), `✕`. Works at every zoom level; the rect is stored normalised.
 - Composer: chips row (thumbnail, "p.12 영역" / file name, ×, click → preview; region chip also scrolls the viewer to the slide and
   flashes the rect). `📎` button → file picker (images, multiple). Paste (Cmd/Ctrl+V) of images into the composer and dropping image files
@@ -1703,10 +1705,10 @@ layouts), tests/annotation-attachments.test.ts (regions with `annotationId`, the
 ### Web
 
 **Files.** New: web/src/lib/annotations/{geometry.ts, textSelect.ts, history.ts, markers.ts, store.ts, layoutCache.ts, settings.ts,
-memoList.ts (the pure filters of the 메모 tab)}; web/src/hooks/{useAnnotations.ts, useTextLayout.ts};
-web/src/components/annotations/{AnnotationLayer.tsx, AnnotationTools.tsx, ItemMenu.tsx, MemoCard.tsx, TagInput.tsx, LinkPicker.tsx,
-QuestionMarkers.tsx, context.ts (the layer's actions/env context), Floating.tsx (a fixed portal in <body> for the link picker and the
-tag suggestions — `.slide-box` clips overflow)}; web/src/components/MemoListPanel.tsx; web/src/lib/recording/playhead.ts. Changed: SlideViewer.tsx, App.tsx, ChatPanel.tsx, MessageList.tsx, Composer.tsx, SettingsDialog.tsx,
+memoList.ts (the pure filters of the 메모 tab), gesture.ts (0.6.1: hit-testing and the press plan, pure)}; web/src/hooks/{useAnnotations.ts,
+useTextLayout.ts}; web/src/components/annotations/{AnnotationLayer.tsx, AnnotationTools.tsx, ItemMenu.tsx, MemoCard.tsx, TagInput.tsx,
+LinkPicker.tsx, QuestionMarkers.tsx, context.ts (the layer's actions/env context), Floating.tsx (a fixed portal in <body> for the link
+picker and the tag suggestions — `.slide-box` clips overflow), icons.tsx (0.6.1: the inline SVG glyphs of the tools and the eye)}; web/src/components/MemoListPanel.tsx; web/src/lib/recording/playhead.ts. Changed: SlideViewer.tsx, App.tsx, ChatPanel.tsx, MessageList.tsx, Composer.tsx, SettingsDialog.tsx,
 recording/RecordingsPanel.tsx, api.ts, lib/storage.ts, lib/attachments.ts, hooks/useAttachments.ts, hooks/useStudySession.ts,
 lib/recording/events.ts (parser injectable), lib/recording/recorder.ts (public `clock()`), lib/format.ts, lib/chatWindow.ts,
 styles.css. `AnnotationTool = 'select' | 'highlight' | 'textHighlight' | 'rect' | 'ellipse' | 'text' | 'memo'` lives in geometry.ts.
@@ -1758,19 +1760,46 @@ loaded or a tool is active):**
   On coarse pointers or narrow panes (the media query below) memos render collapsed by default and expand as a bottom sheet
   (`.memo-sheet`) instead of inline — a 160 px card covers half of a ~340 px-wide slide.
 - Selection handles (HTML, `percentStyle`) for the selected item: 8 for rect/ellipse/text, 2 (left/right — top/bottom for a 'v'
-  line) for a highlight, none for a text highlight (re-drag to change); dragging the body moves it; every drag is one PATCH on
-  pointer-up.
+  line) for a highlight, none for a text highlight (re-drag it with 텍스트 형광 to change its words — `redraw` below); dragging the
+  body moves it; every drag is one PATCH on pointer-up. Items, handles and markers keep their pointer events **whatever tool is
+  active** (0.6.1: the `.viewer.is-annot-tool … { pointer-events: none }` rule of 0.6.0 is gone), so a selected item is moved /
+  resized without leaving the drawing tool; a selected shape / text box shows `cursor: move`. One exception: while a drawing tool
+  is active an **unselected** rect / ellipse gets `pointer-events: visibleStroke`, so its transparent inside shows the tool's
+  crosshair (the hit-test below counts only its ring then) and only the stroke the pointer.
 - `<QuestionMarkers>` (see "질문 표시"). A draft (shape being drawn) renders as a dashed preview from local state. While replaying
   (`replay` prop) an item is shown only when `replayVisible(item, replay)` (below).
 
-**Tools and gestures (SlideViewer.tsx).** New state `tool: AnnotationTool` (default select; not persisted; Esc → select) and `color`
-(persisted `storageKeys.annotColor`, default yellow). While `tool !== 'select'` the scroller's `onPointerDown` starts an annotation
-gesture instead of the region gesture (same rules: mouse moves ≥ 6 px; touch draws at once because `.viewer.is-annot-tool .slide-box {
-touch-action: none; cursor: crosshair }`, like `is-region-mode`), captures the pointer, previews rAF-throttled, and on pointer-up
-builds the item in geometry.ts — `highlightFromDrag(from, to, layout)`, `textHighlightFromDrag(from, to, layout)`, `rectFromPoints`,
-`textBoxFromDrag` (a click gives a default 18 % × 6 % box), `memoAt(point)` (a click places it) — then `store.mutate(slide, [{ op:
-'add', item }])`, stamping `recordedAt` with `recordedAtFor(snapshot, clock, docId)` when a live recording of this lecture runs
-(recording section); the new item is selected, and text/memo items open for editing at once. 형광펜 snapping (`snapBand`): when a
+**Tools and gestures (SlideViewer.tsx; the rules in lib/annotations/gesture.ts, pure).** State `tool: AnnotationTool` (`'select'` =
+**no drawing tool: the default 선택·첨부 state**; not persisted; Esc — or a click on the active tool's own button — returns to it) and
+`color` (persisted `storageKeys.annotColor`, default yellow). Every press on a slide goes through `pressPlan({ tool, target, item,
+selected, touch })` (0.6.1, after the user's first use — "a drag attaches only when no tool is picked", "a highlight just drawn should
+be movable at once without picking the selection tool"): a question marker is left to its own button (`ignore`); a selection handle
+(known from the DOM, `data-annot="handle"`) resizes its item (`resize`; never a memo or a text highlight); otherwise the slide's items
+are **hit-tested** by `hitTestItems(items, point, slop, { visible, outline })` — the SVG's own event target is not enough, a big
+rectangle drawn later covers a small highlight — with `slopFor(size, touch)` = HIT_SLOP_PX 4 px (TOUCH_HIT_SLOP_PX 10 px) of slack per
+axis for thin bands and 3 px outlines; a rect / band / text box by its rect, an ellipse by its shape, a text highlight by its line
+rects (not the gap between lines), items hidden by 그때 필기 재생 skipped, memos never (they are HTML cards that stop propagation and
+select themselves). **The inside of an outline shape is empty area for a drawing tool**: `outline` = `outlineOnly(tool, selectedId)`
+makes an *unselected* rect / ellipse count on its ring only (`slop.ring` = the slack + half the SHAPE_STROKE_PX 3 px stroke either
+side of the edge; a shape thinner than the ring is all ring) while a tool is active, so a 형광펜 stroke, a 텍스트 상자 / 메모 click or
+another shape can start inside a box drawn around a paragraph; once selected (it is moved by its body), and always in the default
+state (the 0.6.0 select behaviour — a tap inside the box selects it and 📎 첨부 is one click away; a region drag inside a box starts
+outside it), the inside counts. Among several hits the one covering the least of the image wins (`itemArea`), among equals the
+topmost — and an item under the press is **selected with ANY tool active** (`select`, `move: true`: a drag from there moves it; a
+text highlight is never moved, and on touch an unselected item is only selected first so a finger can still scroll) — except a text
+highlight under 텍스트 형광, which is **re-dragged** (`redraw`, `immediate` on touch): the gesture is a draw whose release
+`update`s that item's `rects / chars / engine / text` (its id, color and history stay; a click only selects it; no layout → a toast
+and the item is left alone); on empty area a drawing tool gives `draw`
+(`immediate` for the click tools 텍스트 / 메모 and on touch; a mouse activates after ≥ DRAG_THRESHOLD_PX 6 px) — the slide box takes no
+touch scrolling then (`.viewer.is-annot-tool .slide-box { touch-action: none; cursor: crosshair }`) — and, without a tool, `region`:
+the §21 gesture (a mouse drag; touch after a long press). A draw gesture captures the pointer, previews rAF-throttled, and on
+pointer-up — only when it activated AND the pointer moved ≥ MIN_DRAG_PX (a press that jitters a few pixels is a click: the drag tools
+ignore it, the click tools place) — builds the item in geometry.ts — `highlightFromDrag(from, to, layout)`,
+`textHighlightFromDrag(from, to, layout)`, `rectFromPoints`, `textBoxFromDrag` (a click gives a default 18 % × 6 % box),
+`memoAt(point)` (a click places it) — then `store.mutate(slide, [{ op: 'add', item }])`, stamping `recordedAt` with
+`recordedAtFor(snapshot, clock, docId)` when a live recording of this lecture runs (recording section); the new item is selected (its
+handles and menu show while the tool stays active, so it is moved / resized right away), and text/memo items open for editing at once.
+A press on empty area clears the selection (with or without a tool). Picking another tool clears it too. 형광펜 snapping (`snapBand`): when a
 layout line contains `from` (or lies within half a line height across its `dir`), the band takes that line's extent along the minor
 axis (y/h for 'h', x/w for 'v') and the drag's extent along the major axis clamped to the line's range padded 0.5 %; otherwise a band
 of `HIGHLIGHT_BAND_H` centred on `from`; minimum length 1 %. 텍스트 형광 (textSelect.ts): nearest word to `from` and to `to` in reading
@@ -1788,23 +1817,33 @@ dropped with the store. Delete: select → Delete/Backspace (when not typing) or
 `confirmDialog({ title: '메모를 지울까요?' })`); no eraser tool.
 
 **Item menu (ItemMenu.tsx, rendered in `.slide` outside `.slide-box` like `RegionMenu`, placed with `menuPlacement`):** four color dots
-· **📎 첨부** (title '이 필기를 질문에 첨부해요 (입력창 위에 표시돼요)') · 🗑 삭제 · for memos 👁 튜터에게 보이기 and ⋯ (접기/펴기, 연결) ·
-'이 필기로 물어본 질문 N개' when markers point at the item. 첨부 → `onAttachItem(slide, item)` → `useAttachments.addAnnotation(slide,
+· **📎 첨부** (title '이 필기를 질문에 첨부해요 (입력창 위에 표시돼요)') · 🗑 삭제 · for memos the eye of 튜터에게 보이기 (`EyeIcon`
+in a `.region-menu-btn.is-icon`, crossed and muted `.is-off` while hidden; titles '튜터에게 보이기 — 질문할 때 이 메모도 함께 가요
+(클릭하면 숨김)' / '튜터에게 숨김 — 이 메모는 튜터가 보지 않아요 (클릭하면 보이기)') and 접기/펴기 · '이 필기로 물어본 질문 N개' when
+markers point at the item. 첨부 → `onAttachItem(slide, item)` → `useAttachments.addAnnotation(slide,
 item): Promise<Attachment | null>` → `api.createRegion(docId, { slide, rect: itemBounds(item), annotationId: item.id })` (bounds:
 memo = a 12 % × 8 % box around the anchor, clamped; others = the union rect) → an ordinary chip labelled `p.12 메모` / `p.12 형광` /
 `p.12 텍스트` / `p.12 사각형` / `p.12 동그라미` (`attachmentLabel` / `attachmentTitle` branch on `attachment.annotation?.type`; the
 chip's `'ready'` recompute keeps it). Nothing is auto-attached and nothing is sent: the chip goes with the next question like a region
 chip, and removing it deletes the unused attachment as today.
 
-**Toolbar (AnnotationTools.tsx in `.viewer-toolbar`, between the hint and ✂ 영역).** Segmented `.annot-tools`: ↖ 선택 · 🖍 형광펜 · 🔤
-텍스트 형광 · ▭ 사각형 · ◯ 동그라미 · T 텍스트 · 🗒 메모, then the four color dots, then a ⋯ **필기** `PopoverMenu`: 필기 보기/숨기기
+**Toolbar (AnnotationTools.tsx in `.viewer-toolbar`, right after the page jump).** Segmented `.annot-tools`: ↖ **선택·첨부** (the
+default state; `.is-default` — a quiet raised segment when active, while a drawing tool's active state takes the accent, so "is
+something being drawn?" is visible at a glance) · 형광펜 · 텍스트 형광 · 사각형 · 동그라미 · 텍스트 · 메모 — inline SVG glyphs
+(icons.tsx `ToolIcon`: 16 px, currentColor, the stroke of the app's other icons; emoji did not take the active button's contrast
+color) — clicking the active tool's button turns it off (back to 선택·첨부); then the four color dots, then a ⋯ **필기**
+`PopoverMenu`: 필기 보기/숨기기
 (`storageKeys.annotLayer`, default true; hidden → layers unmount, tools disabled, the button shows 필기 숨김), 표시 있는 슬라이드만
 (checkbox), 태그: <select> of this lecture's tags (`summary.tags`, '모든 태그'), 질문 표시 보기 (`storageKeys.questionMarkers`), 그때
 필기 재생 (only while a recording of this lecture is selected in the 녹음 tab). Tool buttons are icon-only (names in
-tooltips) so the toolbar stays one row in a typical pane. When the viewer itself is narrower than 640 px (its ResizeObserver width —
+tooltips, each ending in '(다시 누르거나 Esc로 끔)') so the toolbar stays one row in a typical pane. The one-line `.viewer-hint`
+follows the tools and takes the leftover width (`flex: 1; min-width: 0; text-overflow: ellipsis` — its text changes with the state,
+`toolHint(tool)`: 'j/k · ↑/↓ · 빈 곳을 끌면 영역 첨부', or '형광펜: 빈 곳에서 끌기 · 필기는 클릭해 옮기기 · Esc' — and the buttons must
+never move); the `✂ 영역` button and `regionMode` are gone. When the viewer itself is narrower than 640 px (its ResizeObserver width —
 a 55 % pane of a 1200 px window is as narrow as a phone) or `(max-height: 640px)` matches, the segmented control collapses into
-**one** `PopoverMenu` button (`.annot-tools-compact`) showing the active tool's icon and the current color (the tools, with their
-names, and the dots inside); `.viewer-hint` is hidden by the `@media (max-width: 800px), (max-height: 640px)` rule. Memos
+**one** `PopoverMenu` button (`.annot-tools-compact`, `.is-drawing` = the accent while a tool is on) showing the active tool's glyph
+and the current color (the tools, with their names, and the dots inside); `.viewer-hint` is hidden by the `@media (max-width: 800px),
+(max-height: 640px)` rule. Memos
 collapse to pills and open as a bottom sheet under the same viewer-width rule or on a coarse pointer (`compactMemos`).
 **Slide filter:** `shown: number[]` = every slide, or the summary's slides with items (and, with a tag, only those whose tags include
 it); SlideViewer renders `SlideItem`s for `shown` only and every index-based helper — `slideEls`, `registerSlide`, `computeFocus`,
@@ -1819,7 +1858,14 @@ input is focused; a `<datalist>`-like dropdown, keyboard ↑/↓/Enter); links r
 p.N' number input defaulting to the focused slide, or '다른 강의' <select> of the library's lectures from `useDocs` + optional slide) →
 chips `p.12` / `📘 L6 Parsing II · p.3` (click → `onGoToSlide` / `onOpenDoc(docId, slide)`; a deleted lecture shows '지워진 강의'); 🎙
 시점 → automatic when created during a live recording (chip `🎙 12:34`, `formatClock`; click → `onPlayRecording(rid, t)`), and '지금
-재생 위치 연결' while a recording is playing in the 녹음 tab (reads the playhead store); 👁 toggle (title '튜터에게 보이기', `tutor`).
+재생 위치 연결' while a recording is playing in the 녹음 tab (reads the playhead store); the eye toggle `.memo-eye` (`tutor`; `EyeIcon` +
+the constant label '튜터에게 보이기', `.is-on` green, or the crossed eye, `.is-off` muted; `aria-pressed` carries the state and the
+state-specific `title` explains it — the same accessible name / pressed / title on the item menu's icon button, so a screen reader
+never hears '튜터에게 숨김, not pressed'). While hidden the header (`.memo-head-hidden`) and the 메모 tab row (`.memo-row-hidden`)
+show the crossed eye, muted, as `role="img"` with `aria-label` / title '튜터에게 숨김'; the collapsed pill shows it decoratively
+(`.memo-pill-hidden`, `aria-hidden`) and appends ' · 튜터에게 숨김' to the pill button's own `aria-label`; the card's ⋯ menu says
+'튜터에게 숨기기' / '튜터에게 보이기'. 0.6.1 replaced the 👁 / 🙈 emoji everywhere (the user: "too ugly"); the annotation UI keeps only
+📎 첨부, 🗑 삭제, 🔗 연결, 🎙 and the 💬 markers as emoji.
 
 **Composer.** A context chip next to `LectureSpeechChip`: `📝 메모 N개 포함` (N = memos with `tutor` true on the focus window from
 `summary.memos`; hidden when 0 or the global switch is off; title '이 슬라이드와 앞뒤 슬라이드의 메모를 튜터에게 함께 보내요 (설정 ›
@@ -1827,7 +1873,7 @@ chips `p.12` / `📘 L6 Parsing II · p.3` (click → `onGoToSlide` / `onOpenDoc
 
 **Settings.** 공부: checkbox '학생의 메모를 튜터에게 보이기' (lib/annotations/settings.ts: a `useSyncExternalStore` store like
 `useNeighbors`, `storageKeys.memosToTutor`, default true; `useStudySession` sends it as `SendMessageRequest.memos`) with hint '메모마다
-👁로 따로 끌 수도 있어요', and '슬라이드에 질문 표시 보기' (`storageKeys.questionMarkers`, default true). 정보 › 단축키 rows: ⌘Z /
+눈 모양 버튼(튜터에게 보이기)으로 따로 끌 수도 있어요', and '슬라이드에 질문 표시 보기' (`storageKeys.questionMarkers`, default true). 정보 › 단축키 rows: ⌘Z /
 Ctrl+Z 필기 되돌리기, ⌘⇧Z / Ctrl+Y 다시 실행, Delete 선택한 필기 삭제, Esc 도구 끄기 · 선택 해제. The per-device settings and their
 defaults are `AnnotationDeviceSettings` (shared/types.ts); keys `annotColor`, `annotLayer`, `questionMarkers`, `memosToTutor`,
 `replayAnnotations` in storage.ts.
@@ -1840,12 +1886,17 @@ Clicking a row selects and expands the memo on its slide. Data = `summary.memos`
 
 **CSS (styles.css).** Tokens `--annot-yellow: #ffd23f; --annot-green: #5fd68a; --annot-pink: #ff7fb0; --annot-blue: #6fb0ff` added
 **inside the existing** `:root` token block and, a little darker, inside BOTH existing dark blocks (theme.test.ts asserts exactly two
-dark `@media`/`data-theme` blocks, identical, each dark token overriding a light one — never a new block). Classes: `.annot-layer`,
+dark `@media`/`data-theme` blocks, identical, each dark token overriding a light one — never a new block); `--surface-raised`
+(light `#ffffff`, dark `#252a35` = `--surface-3`) is the active 선택·첨부 segment's background — a surface above the `--surface-2`
+track in both themes (`--surface` is darker than the track in dark mode), kept under `:hover` too; an active drawing tool keeps
+the accent under the pointer (`--accent-strong`; the plain `:hover:not(:disabled)` rule outranks `.is-active`). Classes: `.annot-layer`,
 `.annot-svg`, `.annot-text`, `.annot-handle`, `.annot-draft`, `.annot-item-menu` (z-index 5 like `.region-menu`),
 `.memo-card[.is-collapsed]`, `.memo-sheet`, `.memo-tags`, `.tag-input`, `.link-picker`, `.qa-marker`, `.qa-marker-tip`, `.annot-tools`
-(segmented, `.is-active`), `.annot-tools-compact` (the collapsed picker), `.annot-unsaved`, `.viewer.is-annot-tool .slide-box {
-touch-action: none; cursor: crosshair }`; `@media (max-width: 800px), (max-height: 640px)`: the compact picker, memo cards min-width
-140 px and the bottom sheet.
+(segmented, `.is-active`, `.is-default` for 선택·첨부), `.annot-tools-compact` (the collapsed picker, `.is-drawing`), `.tool-icon` /
+`.eye-icon` (16 px inline SVG; `.is-off` = crossed), `.memo-eye.is-on/.is-off`, `.memo-head-hidden` / `.memo-pill-hidden` /
+`.memo-row-hidden`, `.region-menu-btn.is-icon/.is-off`, `.annot-unsaved`, `.viewer.is-annot-tool .slide-box { touch-action: none;
+cursor: crosshair }` (items keep their pointer events); `.viewer-hint` takes the leftover toolbar width; `@media (max-width: 800px),
+(max-height: 640px)`: the compact picker, memo cards min-width 140 px and the bottom sheet.
 
 **api.ts / storage.ts.** `getAnnotationSummary`, `getSlideAnnotations`, `putSlideAnnotations`, `patchSlideAnnotations` (both with the
 client id header), `annotationEventsUrl(docId, client)`, `getTextLayout`, `listAnnotationTags`, `annotationErrorMessage`; `createRegion`
@@ -1871,8 +1922,35 @@ while it is on) so the viewer can offer the toggle. The 설정 › 정보 rows s
 desktop marker. The memo card's own ⋯ menu labels the attach action '📎 질문에 첨부' and its footer button '📎 첨부'; the item menu's
 button is '📎 첨부' everywhere (nothing says "이걸로 질문하기").
 
+**As shipped (0.6.1 — the user's feedback after using 0.6.0).** (1) "드래그해서 첨부는 도구를 선택 안 했을 때만": the region attachment
+is what a drag on empty slide area does in the default state, the `✂ 영역` button / `regionMode` / `is-region-mode` were removed
+(touch: the long press), the first toolbar segment is ↖ 선택·첨부 and a tool is left with Esc or by clicking it again; the hint says
+what a drag does now. (2) "형광펜을 긋고 나면 생기는 점선·네모를 다루려면 선택 도구를 따로 집어야 해서 불편하다": `pressPlan` puts
+existing items first with any tool — pointer-down selects (menu + handles), a drag moves, handles resize, Delete removes, a press on
+empty area deselects (and draws with a tool) — with hit-testing that prefers the smallest item, a few px of slack and the
+activate-then-move rule for clicks; the 선택 tool as a "tool" is gone (it is the no-tool state). (3) The 👁 / 🙈 emoji became the
+`EyeIcon` (item menu, memo card footer/header/pill, the bottom sheet, the 메모 tab), and the tool buttons inline SVG glyphs. Checked in
+the desktop app's browser pane (a copied lecture in a temp library, fake CLIs, port 5207) and with headless Chrome for full-size
+screenshots: a no-tool drag → region → 📎 첨부 → the "p.1 영역" chip; 형광펜 → a band snapped to the title line, selected, moved by its
+body and widened by its `e` handle with 형광펜 still active; a big 사각형 around it, then a click on the band selected the band (not
+the rectangle); a memo clicked while 사각형 was active → the memo selected, nothing drawn; a click on empty → deselected; Esc → 선택·첨부;
+a 1 % rectangle clicked with 사각형 active → selected → Delete; the eye on/off in the card, header, pill, item menu and 메모 tab, light
+and dark, at 1280 × 860 and 360 × 740 (compact picker, pill, the centred item menu); the toolbar buttons stay put when the hint changes.
+Review fixes before release: (a) the inside of an unselected outline shape had been "the item" for every tool, so nothing could be
+drawn inside a box → `outlineOnly` / `slop.ring` (above) and the `visibleStroke` cursor rule; (b) a text highlight could no longer
+be re-dragged from on top of itself → `redraw`; (c) the active default segment used `--surface`, sunken in dark mode → `--surface-raised`
+(and an active tool lost its accent under the pointer — seen while checking — → the `.is-active:hover` rule);
+(d) the eye toggles' accessible name changed with the state while `aria-pressed` also carried it, and the hidden markers were
+`aria-label`s on plain spans → constant names, `role="img"`, the pill's label suffix.
+
 **Tests.** web/tests/annotations-geometry.test.ts (`applyOps`, `snapBand` on 'h' and 'v' lines, `rectFromPoints`, `itemBounds`,
-`recordedAtFor`, `replayVisible`), annotations-store.test.ts (fake fetch/EventSource like recording-events.test.ts: optimistic ops,
+`recordedAtFor`, `replayVisible`), annotation-gesture.test.ts (0.6.1: `slopFor` with the ring, `itemHit` / `itemArea` — rects, ellipses
+by shape, text-highlight line rects, memos never, the `outline` ring of a rect / ellipse (inside empty, edge ± 5.5 px hit, a thin shape
+all ring; bands / text boxes / text highlights unaffected) —, `outlineOnly`, `hitTestItems` — the smallest wins whatever the z-order,
+ties → topmost, the slack, replay-hidden skipped, a box around a paragraph with 형광펜 in hand: inside → null, edge → the box, a band
+inside → the band, selected or default state → the box —, `pressPlan` — the default state's empty press is `region`, an item is
+selected with every tool, handles / markers, click tools and touch immediate, a text highlight is never moved and is `redraw`n under
+텍스트 형광 only, a touched unselected item is not moved), annotations-store.test.ts (fake fetch/EventSource like recording-events.test.ts: optimistic ops,
 coalescing, ops events, a rev gap → refetch, the 409 rebase then the second-409 replace, own-client echo ignored), textSelect.test.ts
 (word order along `dir`, re-anchoring by `text` on an engine change), annotation-history.test.ts (the global stack, coalesced text
 edits, pruning), annotation-markers.test.ts, annotation-chips.test.ts.

@@ -19,7 +19,6 @@ import { useLoginEpoch } from '../hooks/useAuth.ts';
 import { useLatest } from '../hooks/useLatest.ts';
 import { useTextLayout } from '../hooks/useTextLayout.ts';
 import {
-  CLICK_TOOLS,
   itemBounds,
   memoAt,
   moveRect,
@@ -32,6 +31,7 @@ import {
   newTextHighlight,
   rectFromPoints,
   recordedAtFor,
+  replayVisible,
   resizeRect,
   snapBand,
   textBoxFromDrag,
@@ -39,6 +39,7 @@ import {
   type Handle,
   unionRects,
 } from '../lib/annotations/geometry.ts';
+import { hitTestItems, outlineOnly, pressPlan, slopFor, type PressTarget } from '../lib/annotations/gesture.ts';
 import { deriveMarkers, questionsOnItem, type QuestionMarker } from '../lib/annotations/markers.ts';
 import { useAnnotColor, useAnnotLayer, useQuestionMarkers, useReplayAnnotations } from '../lib/annotations/settings.ts';
 import { reanchorTextHighlight, textHighlightFromDrag } from '../lib/annotations/textSelect.ts';
@@ -69,7 +70,7 @@ import { recorder } from '../lib/recording/recorder.ts';
 import { isNumber, readStorage, storageKeys, writeStorage } from '../lib/storage.ts';
 import { toast } from '../lib/toast.ts';
 import { AnnotationLayer, type Draft, type DragPreview } from './annotations/AnnotationLayer.tsx';
-import { AnnotationTools, NO_FILTER, useMediaQuery, type SlideFilter } from './annotations/AnnotationTools.tsx';
+import { AnnotationTools, NO_FILTER, toolHint, useMediaQuery, type SlideFilter } from './annotations/AnnotationTools.tsx';
 import { LayerContext, type LayerActions, type LayerEnv } from './annotations/context.ts';
 import { ItemMenu } from './annotations/ItemMenu.tsx';
 import { MemoCard } from './annotations/MemoCard.tsx';
@@ -107,8 +108,9 @@ interface ItemSelection {
 }
 
 /**
- * A pointer pressed on a slide: it may become a region selection, or (DESIGN §25) draw an annotation with the active
- * tool, or move / resize the item it was pressed on.
+ * A pointer pressed on a slide (lib/annotations/gesture.ts pressPlan): on an item it selects and moves it, on a
+ * handle it resizes, on empty area it draws with the active tool (DESIGN §25) or, without a tool, becomes a region
+ * selection (§21). A text highlight under 텍스트 형광 is re-dragged: a draw that replaces that item's words.
  */
 interface Gesture {
   pointerId: number;
@@ -124,7 +126,7 @@ interface Gesture {
   timer: number;
   mode: 'region' | 'draw' | 'move' | 'resize';
   tool: AnnotationTool;
-  /** move / resize: the item and its geometry at the press. */
+  /** move / resize: the item and its geometry at the press; draw (텍스트 형광): the text highlight being re-dragged. */
   itemId?: string;
   item?: AnnotationItem;
   handle?: Handle;
@@ -292,6 +294,9 @@ export function SlideViewer({
   const [replayOn, setReplayOn] = useReplayAnnotations();
   const playhead = usePlayhead();
   const replayAvailable = playhead !== null && playhead.docId === doc.id;
+  // 그때 필기 재생: the moment given by the app, else the player's own playhead (only the viewer re-renders with it).
+  const replayNow = replayOn && playhead && playhead.docId === doc.id ? (replay ?? { rid: playhead.rid, t: playhead.t }) : null;
+  const replayRef = useLatest(replayNow);
   const [filter, setFilterState] = useState<SlideFilter>(NO_FILTER);
   const [itemSelection, setItemSelectionState] = useState<ItemSelection | null>(null);
   const itemSelectionRef = useRef<ItemSelection | null>(null);
@@ -406,17 +411,15 @@ export function SlideViewer({
   );
 
   // ---- Region selection (DESIGN §21) -------------------------------------------------------------
-  // Mouse: press and drag (≥ 6 px; a plain click keeps its meaning). Touch: hold still ~350 ms, then drag
-  // (a drag right away scrolls), or turn on "✂ 영역" first. Esc cancels. The rectangle is kept normalised to
-  // the slide image, so it does not depend on the zoom level or on which rendition is shown.
+  // The default state (no drawing tool). Mouse: press on empty area and drag (≥ 6 px; a plain click keeps its
+  // meaning). Touch: hold still ~350 ms, then drag (a drag right away scrolls). Esc cancels. The rectangle is kept
+  // normalised to the slide image, so it does not depend on the zoom level or on which rendition is shown.
   const [selection, setSelectionState] = useState<Selection | null>(null);
   const selectionRef = useRef<Selection | null>(null);
   const setSelection = useCallback((next: Selection | null) => {
     selectionRef.current = next;
     setSelectionState(next);
   }, []);
-  const [regionMode, setRegionMode] = useState(false);
-  const regionModeRef = useLatest(regionMode);
   const gestureRef = useRef<Gesture | null>(null);
   const dragFrame = useRef(0);
   const onAttachRegionRef = useLatest(onAttachRegion);
@@ -463,6 +466,7 @@ export function SlideViewer({
     (slide: number, id: string): AnnotationItem | null => storeRef.current?.snapshot.slides.get(slide)?.items.find((it) => it.id === id) ?? null,
     [storeRef],
   );
+  const itemsOf = useCallback((slide: number): readonly AnnotationItem[] => storeRef.current?.snapshot.slides.get(slide)?.items ?? [], [storeRef]);
 
   /**
    * A slide's text layout (useTextLayout), and the moment its 텍스트 형광 made with another text engine are
@@ -586,9 +590,20 @@ export function SlideViewer({
           break;
         }
         case 'textHighlight': {
-          if (!moved) return;
+          if (!moved) return; // a click on the text highlight being re-dragged only selected it (on the press)
           const result = await withTimeout(ensureLayout(slide), LAYOUT_WAIT_MS, { layout: null, pending: true } as const);
           const fit = result.layout ? textHighlightFromDrag(g.start, point, result.layout) : null;
+          if (g.itemId) {
+            // Re-drag: the existing item takes the new words (its id, color and history stay); without a layout it is left alone.
+            if (!fit) {
+              toast(result.pending ? '이 슬라이드의 글자 위치를 준비하는 중이에요 — 잠시 뒤 다시 해 보세요' : '이 슬라이드에서는 글자를 찾지 못했어요', 'info');
+              return;
+            }
+            if (mutate(slide, [{ op: 'update', id: g.itemId, patch: { rects: fit.rects, chars: fit.chars, engine: fit.engine, text: fit.text } }])) {
+              selectItem(slide, g.itemId);
+            }
+            return;
+          }
           if (fit) {
             item = newTextHighlight(seed(), fit);
           } else {
@@ -639,71 +654,99 @@ export function SlideViewer({
     if (!box || !Number.isInteger(slide) || slide < 1) return;
     const rect = box.getBoundingClientRect();
     const frame = frameOf(box, rect);
+    const touch = e.pointerType !== 'mouse';
+    const start = toImagePoint(e.clientX, e.clientY, rect, frame);
+    const activeTool = layerShown ? toolRef.current : 'select';
+    // What was pressed: a handle or a marker by the DOM; otherwise the slide's items are hit-tested (the SVG's own
+    // target is not enough — a big rectangle drawn later covers a small highlight — and thin bands get some slack;
+    // with a tool an unselected rect / ellipse counts on its outline only, so a box's inside stays drawable).
+    // Memo cards handle their own presses (they stop propagation) and never get here.
+    const kind = annot?.dataset.annot;
+    const handle = annot?.dataset.handle as Handle | undefined;
+    const pressed: PressTarget = kind === 'marker' ? { kind: 'marker' } : kind === 'handle' && handle ? { kind: 'handle', handle } : { kind: 'other' };
+    const selectedId = itemSelectionRef.current?.slide === slide ? itemSelectionRef.current.id : null;
+    const item =
+      pressed.kind === 'handle'
+        ? annot?.dataset.id
+          ? itemOf(slide, annot.dataset.id)
+          : null
+        : layerShown
+          ? hitTestItems(itemsOf(slide), start, slopFor(framePixels(rect, frame), touch), {
+              visible: (it) => replayVisible(it, replayRef.current),
+              outline: outlineOnly(activeTool, selectedId),
+            })
+          : null;
+    const wasSelected = item !== null && selectedId === item.id;
+    const plan = pressPlan({ tool: activeTool, target: pressed, item, selected: wasSelected, touch });
+    if (plan.kind === 'ignore') return;
     const g: Gesture = {
       pointerId: e.pointerId,
-      touch: e.pointerType !== 'mouse',
+      touch,
       slide,
       box,
       frame,
-      start: toImagePoint(e.clientX, e.clientY, rect, frame),
+      start,
       startClient: { x: e.clientX, y: e.clientY },
       active: false,
       timer: 0,
       mode: 'region',
-      tool: toolRef.current,
+      tool: activeTool,
     };
-    const activeTool = layerShown ? toolRef.current : 'select';
-    if (activeTool !== 'select') {
-      // Drawing with the active tool: touch draws at once (the slide box takes no touch scrolling then).
-      g.mode = 'draw';
-      gestureRef.current = g;
-      if (itemSelectionRef.current) setItemSelection(null);
-      if (activeTool === 'highlight' || activeTool === 'textHighlight') void ensureLayout(slide);
-      capture(e);
-      if (g.touch || CLICK_TOOLS.has(activeTool)) g.active = true;
-      return;
-    }
-    if (annot) {
-      const kind = annot.dataset.annot;
-      const id = annot.dataset.id;
-      if (kind === 'marker' || !id) return; // markers are buttons of their own
-      const item = itemOf(slide, id);
-      if (!item) return;
-      if (kind === 'handle') {
-        const handle = annot.dataset.handle as Handle | undefined;
-        if (!handle || item.type === 'memo' || item.type === 'textHighlight') return;
+    switch (plan.kind) {
+      case 'resize':
         g.mode = 'resize';
-        g.itemId = id;
-        g.item = item;
-        g.handle = handle;
+        g.itemId = plan.item.id;
+        g.item = plan.item;
+        g.handle = plan.handle;
         g.active = true;
         gestureRef.current = g;
         capture(e);
         e.preventDefault();
         return;
-      }
-      // An item: select it; a drag moves it (on touch only once it is selected, so a finger can still scroll).
-      const wasSelected = itemSelectionRef.current?.id === id;
-      if (!wasSelected) selectItem(slide, id);
-      if (item.type === 'textHighlight' || (g.touch && !wasSelected)) return;
-      g.mode = 'move';
-      g.itemId = id;
-      g.item = item;
-      g.wasSelected = wasSelected;
-      gestureRef.current = g;
-      return;
-    }
-    if (itemSelectionRef.current) setItemSelection(null);
-    gestureRef.current = g;
-    if (regionModeRef.current) {
-      capture(e);
-      beginSelection(g);
-    } else if (g.touch) {
-      g.timer = window.setTimeout(() => {
-        if (gestureRef.current !== g) return;
-        beginSelection(g);
-        navigator.vibrate?.(10);
-      }, LONG_PRESS_MS);
+      case 'select':
+        // An existing item, with any tool: select it; a drag moves it (its handles resize it) right away.
+        if (!wasSelected) selectItem(slide, plan.item.id);
+        if (!plan.move) return;
+        g.mode = 'move';
+        g.itemId = plan.item.id;
+        g.item = plan.item;
+        g.wasSelected = wasSelected;
+        gestureRef.current = g;
+        return;
+      case 'draw':
+        // Empty area with a tool: touch draws at once (the slide box takes no touch scrolling then).
+        g.mode = 'draw';
+        g.tool = plan.tool;
+        gestureRef.current = g;
+        if (itemSelectionRef.current) setItemSelection(null);
+        if (plan.tool === 'highlight' || plan.tool === 'textHighlight') void ensureLayout(slide);
+        capture(e);
+        if (plan.immediate) g.active = true;
+        return;
+      case 'redraw':
+        // 텍스트 형광 on a text highlight: a drag re-fits that item's words (finishDraw updates it), a click selects it.
+        g.mode = 'draw';
+        g.tool = 'textHighlight';
+        g.itemId = plan.item.id;
+        g.item = plan.item;
+        gestureRef.current = g;
+        if (!wasSelected) selectItem(slide, plan.item.id);
+        void ensureLayout(slide);
+        capture(e);
+        if (plan.immediate) g.active = true;
+        return;
+      case 'region':
+        // Empty area, no tool: the region gesture (a mouse drag; touch after a long press).
+        if (itemSelectionRef.current) setItemSelection(null);
+        gestureRef.current = g;
+        if (g.touch) {
+          g.timer = window.setTimeout(() => {
+            if (gestureRef.current !== g) return;
+            beginSelection(g);
+            navigator.vibrate?.(10);
+          }, LONG_PRESS_MS);
+        }
+        return;
     }
   };
 
@@ -797,7 +840,9 @@ export function SlideViewer({
     const moved = Math.abs(point.x - g.start.x) * size.width >= MIN_DRAG_PX || Math.abs(point.y - g.start.y) * size.height >= MIN_DRAG_PX;
     if (g.mode === 'draw') {
       setDraft(null);
-      void finishDraw(g, point, moved);
+      // A drag only once the gesture activated (a mouse moved ≥ DRAG_THRESHOLD_PX): a press that jitters a few pixels
+      // is a click, which the drag tools ignore and the click tools place.
+      void finishDraw(g, point, g.active && moved);
       return;
     }
     if (g.mode === 'move' || g.mode === 'resize') {
@@ -834,7 +879,6 @@ export function SlideViewer({
     const view = scrollerRef.current?.getBoundingClientRect() ?? box;
     const placement = menuPlacement({ top, bottom: top + inBox.h * box.height }, { top: view.top, bottom: view.bottom });
     setSelection({ slide: g.slide, rect, phase: 'menu', placement });
-    setRegionMode(false);
   };
 
   const onPointerCancel = (e: ReactPointerEvent<HTMLDivElement>) => {
@@ -867,12 +911,12 @@ export function SlideViewer({
   }, []);
 
   // Esc closes the memo sheet (first; its memo stays selected), else cancels a selection (being drawn or waiting in
-  // its menu), the ✂ mode, the annotation tool and the item selection.
+  // its menu), the annotation tool (back to the default 선택·첨부 state) and the item selection.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || e.defaultPrevented || inDialog(e.target)) return;
       const annotating = toolRef.current !== 'select' || itemSelectionRef.current !== null || sheetRef.current !== null;
-      if (!selectionRef.current && !regionModeRef.current && !gestureRef.current && !annotating) return;
+      if (!selectionRef.current && !gestureRef.current && !annotating) return;
       if (isTypingTarget(e.target)) return; // a memo's textarea handles its own Esc
       e.preventDefault();
       if (sheetRef.current) {
@@ -881,7 +925,6 @@ export function SlideViewer({
       }
       cancelGesture();
       setSelection(null);
-      setRegionMode(false);
       setDraft(null);
       setDragPreview(null);
       setToolState('select');
@@ -889,7 +932,7 @@ export function SlideViewer({
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [cancelGesture, setSelection, regionModeRef, toolRef, setItemSelection, sheetRef]);
+  }, [cancelGesture, setSelection, toolRef, setItemSelection, sheetRef]);
 
   const menuActions = useMemo<MenuActions>(
     () => ({
@@ -1174,8 +1217,6 @@ export function SlideViewer({
     if (itemSelection && !selectedItem) setItemSelection(null);
   }, [itemSelection, selectedItem, setItemSelection]);
   const sheetItem = sheet ? (snapshot.slides.get(sheet.slide)?.items.find((it) => it.id === sheet.id) ?? null) : null;
-  // 그때 필기 재생: the moment given by the app, else the player's own playhead (only the viewer re-renders with it).
-  const replayNow = replayOn && playhead && playhead.docId === doc.id ? (replay ?? { rid: playhead.rid, t: playhead.t }) : null;
 
   const slides = [];
   for (let i = 0; i < shown.length; i++) {
@@ -1215,7 +1256,6 @@ export function SlideViewer({
 
   const viewerCls = [
     'viewer',
-    regionMode && 'is-region-mode',
     (selection?.phase === 'drag' || draft) && 'is-selecting',
     layerShown && tool !== 'select' && 'is-annot-tool',
     !layerShown && 'is-annot-hidden',
@@ -1247,12 +1287,6 @@ export function SlideViewer({
             />
             <span className="page-jump-total">/ {pageCount}</span>
           </form>
-          <span
-            className="viewer-hint"
-            title="키보드: j/k 또는 ↑/↓ 로 슬라이드 이동 · 슬라이드에서 끌면 그 영역을 질문에 첨부해요 · ⌘Z/Ctrl+Z 필기 되돌리기"
-          >
-            j/k · ↑/↓ · 끌어서 영역 선택
-          </span>
           <AnnotationTools
             tool={tool}
             onTool={setTool}
@@ -1273,24 +1307,13 @@ export function SlideViewer({
             replaying={replayNow !== null}
             compact={compactTools}
           />
-          <span className="spacer" />
-          <button
-            type="button"
-            className={regionMode ? 'region-toggle is-active' : 'region-toggle'}
-            aria-pressed={regionMode}
-            onClick={() => {
-              setSelection(null);
-              setToolState('select');
-              setRegionMode((on) => !on);
-            }}
-            title={
-              regionMode
-                ? '영역 선택 중 — 슬라이드에서 끌어서 선택하세요 (Esc 취소)'
-                : '영역 선택: 슬라이드에서 끌어서 선택하면 질문에 첨부해요 (마우스는 그냥 끌어도 되고, 터치는 길게 누른 뒤 끌어도 돼요)'
-            }
+          {/* After the tools, taking the leftover width: the buttons never move when the hint changes with the state. */}
+          <span
+            className="viewer-hint"
+            title="키보드: j/k 또는 ↑/↓ 로 슬라이드 이동 · 도구 없이 빈 곳을 끌면 그 영역을 질문에 첨부해요 · 필기는 어느 도구에서든 클릭해서 옮기거나 지워요 · ⌘Z/Ctrl+Z 되돌리기"
           >
-            ✂ 영역
-          </button>
+            {toolHint(layerShown ? tool : 'select')}
+          </span>
           <div className="zoom-controls" role="group" aria-label="확대/축소">
             <button
               type="button"
@@ -1330,7 +1353,7 @@ export function SlideViewer({
           onPointerUp={onPointerUp}
           onPointerCancel={onPointerCancel}
           tabIndex={0}
-          aria-label="슬라이드 (j/k 또는 ↑/↓ 로 이동, 끌어서 영역 선택)"
+          aria-label="슬라이드 (j/k 또는 ↑/↓ 로 이동, 빈 곳을 끌어서 영역 첨부)"
         >
           <div
             className="slides-track"

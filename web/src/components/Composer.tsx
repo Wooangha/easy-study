@@ -60,7 +60,7 @@ function fitTextarea(el: HTMLTextAreaElement, placeholder: string): void {
 
 /**
  * "📝 메모 N개 포함" (DESIGN §25): the memos on the target slide and its neighbours that the next question carries as
- * "학생의 메모" — those with 👁 on, while the device's switch is on. Counted from the annotation summary.
+ * "학생의 메모" — those with 튜터에게 보이기 (the eye) on, while the device's switch is on. Counted from the annotation summary.
  */
 function StudentMemosChip({ docId, targetSlide, neighbors, pageCount }: { docId: string; targetSlide: number; neighbors: number; pageCount: number }) {
   const [enabled] = useMemosToTutor();

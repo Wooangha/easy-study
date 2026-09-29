@@ -1,6 +1,6 @@
 // A sticky memo on a slide (DESIGN §25): UI-sized (not scaled with the slide), dragged by its header, collapsible
 // to a pill, free text (debounced 600 ms, committed at once on blur / ⌘Enter / when the card goes away), tags with autocomplete, links to a
-// slide, another lecture or a recording moment (chips that navigate), and the 👁 "튜터에게 보이기" toggle. On a
+// slide, another lecture or a recording moment (chips that navigate), and the eye toggle of "튜터에게 보이기". On a
 // narrow pane or a touch screen the memo stays a pill and expands in the bottom sheet (`mode: 'sheet'`). Its text
 // is rendered as plain text only.
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react';
@@ -12,6 +12,7 @@ import { usePlayhead } from '../../lib/recording/playhead.ts';
 import { toast } from '../../lib/toast.ts';
 import { PopoverMenu, type MenuSection } from '../organize/PopoverMenu.tsx';
 import { useLayerEnv } from './context.ts';
+import { EyeIcon } from './icons.tsx';
 import { LinkPicker } from './LinkPicker.tsx';
 import { TagInput } from './TagInput.tsx';
 
@@ -183,7 +184,7 @@ export function MemoCard({ slide, item, selected, editing, mode }: MemoCardProps
         { key: 'attach', label: '📎 질문에 첨부', hint: '다음 질문과 함께', onSelect: () => actions.attach(slide, item.id) },
         { key: 'link', label: '🔗 슬라이드·강의 연결', onSelect: () => setLinking(true) },
         ...(nowPlaying ? [{ key: 'now', label: `🎙 지금 재생 위치 연결 (${formatClock(nowPlaying.t)})`, onSelect: () => addLink({ kind: 'recording', rid: nowPlaying.rid, t: Math.round(nowPlaying.t * 1000) / 1000 }) }] : []),
-        { key: 'tutor', label: item.tutor ? '🙈 튜터에게 숨기기' : '👁 튜터에게 보이기', onSelect: () => actions.update(slide, item.id, { tutor: !item.tutor }) },
+        { key: 'tutor', label: item.tutor ? '튜터에게 숨기기' : '튜터에게 보이기', onSelect: () => actions.update(slide, item.id, { tutor: !item.tutor }) },
         ...(inline ? [{ key: 'collapse', label: '접기', onSelect: () => actions.update(slide, item.id, { collapsed: true }) }] : []),
         { key: 'delete', label: '메모 삭제', danger: true, onSelect: () => actions.remove(slide, item.id) },
       ],
@@ -219,14 +220,14 @@ export function MemoCard({ slide, item, selected, editing, mode }: MemoCardProps
         onPointerUp={onHeaderPointerUp}
         onPointerCancel={() => endDrag(false)}
         title={item.text.trim() ? `${item.text.trim().slice(0, 200)}${item.text.length > 200 ? '…' : ''}` : '메모 (클릭해서 펴기)'}
-        aria-label={`메모: ${preview}`}
+        aria-label={item.tutor ? `메모: ${preview}` : `메모: ${preview} · 튜터에게 숨김`}
       >
         <span className="memo-dot" aria-hidden />
         <span className="memo-pill-text">{preview}</span>
         {item.tags.length > 0 && <span className="memo-pill-tags">#{item.tags.length}</span>}
         {!item.tutor && (
-          <span className="memo-pill-hidden" title="튜터에게 보이지 않는 메모">
-            🙈
+          <span className="memo-pill-hidden" title="튜터에게 숨김" aria-hidden>
+            <EyeIcon off />
           </span>
         )}
       </button>
@@ -261,8 +262,8 @@ export function MemoCard({ slide, item, selected, editing, mode }: MemoCardProps
         )}
         <span className="memo-head-title">{preview}</span>
         {!item.tutor && (
-          <span className="memo-head-hidden" title="튜터에게 보이지 않는 메모">
-            🙈
+          <span className="memo-head-hidden" role="img" title="튜터에게 숨김" aria-label="튜터에게 숨김">
+            <EyeIcon off />
           </span>
         )}
         <PopoverMenu label="메모 메뉴" sections={menu} />
@@ -316,12 +317,13 @@ export function MemoCard({ slide, item, selected, editing, mode }: MemoCardProps
       <div className="memo-foot">
         <button
           type="button"
-          className={item.tutor ? 'memo-eye is-on' : 'memo-eye'}
+          className={item.tutor ? 'memo-eye is-on' : 'memo-eye is-off'}
           aria-pressed={item.tutor}
           onClick={() => actions.update(slide, item.id, { tutor: !item.tutor })}
-          title={item.tutor ? '튜터에게 보이기: 켜짐 — 질문할 때 이 메모도 함께 전달돼요' : '튜터에게 보이기: 꺼짐 — 이 메모는 튜터가 보지 않아요'}
+          title={item.tutor ? '튜터에게 보이기 — 질문할 때 이 메모도 함께 가요 (클릭하면 숨김)' : '튜터에게 숨김 — 이 메모는 튜터가 보지 않아요 (클릭하면 보이기)'}
         >
-          {item.tutor ? '👁 튜터에게 보이기' : '🙈 튜터에게 숨김'}
+          <EyeIcon off={!item.tutor} />
+          튜터에게 보이기
         </button>
         <span className="spacer" />
         <button type="button" className="ghost-btn tiny" onClick={() => actions.attach(slide, item.id)} title="이 메모를 질문에 첨부해요 (입력창 위에 표시돼요)">

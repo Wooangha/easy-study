@@ -248,7 +248,7 @@ function StudySection() {
         <input type="checkbox" checked={memosToTutor} onChange={(e) => setMemosToTutor(e.target.checked)} />
         <span>학생의 메모를 튜터에게 보이기</span>
       </label>
-      <p className="settings-hint">질문할 때 지금 슬라이드와 앞뒤 슬라이드에 붙인 메모를 함께 전달해요. 메모마다 👁로 따로 끌 수도 있어요.</p>
+      <p className="settings-hint">질문할 때 지금 슬라이드와 앞뒤 슬라이드에 붙인 메모를 함께 전달해요. 메모마다 눈 모양 버튼(튜터에게 보이기)으로 따로 끌 수도 있어요.</p>
       <label className="rec-setting rec-setting-check">
         <input type="checkbox" checked={markers} onChange={(e) => setMarkers(e.target.checked)} />
         <span>슬라이드에 질문 표시 보기</span>

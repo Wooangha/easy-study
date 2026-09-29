@@ -1,10 +1,12 @@
-// The annotation toolbar (DESIGN §25) in the viewer's toolbar: the tools (선택 · 형광펜 · 텍스트 형광 · 사각형 ·
-// 동그라미 · 텍스트 · 메모), the four colors, and the ⋯ 필기 menu (필기 보기/숨기기, 표시 있는 슬라이드만, a tag
-// filter, 질문 표시 보기, 그때 필기 재생). On a narrow pane the tools and colors fold into one button showing the
-// active tool and color, so the toolbar keeps one row.
+// The annotation toolbar (DESIGN §25) in the viewer's toolbar: the default state 선택·첨부 (no drawing tool: a drag
+// on empty area attaches that region to the next question, a click on an item selects it) and the drawing tools
+// (형광펜 · 텍스트 형광 · 사각형 · 동그라미 · 텍스트 · 메모 — clicking the active one turns it off again), the four
+// colors, and the ⋯ 필기 menu (필기 보기/숨기기, 표시 있는 슬라이드만, a tag filter, 질문 표시 보기, 그때 필기 재생). On a
+// narrow pane the tools and colors fold into one button showing the active tool and color, so the toolbar keeps one row.
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { ANNOTATION_COLORS, type AnnotationColor } from '../../../../shared/types.ts';
-import { ANNOTATION_TOOLS, type AnnotationTool } from '../../lib/annotations/geometry.ts';
+import { ANNOTATION_TOOLS, CLICK_TOOLS, type AnnotationTool } from '../../lib/annotations/geometry.ts';
+import { ToolIcon } from './icons.tsx';
 import { COLOR_NAMES } from './ItemMenu.tsx';
 
 export interface SlideFilter {
@@ -16,18 +18,8 @@ export interface SlideFilter {
 
 export const NO_FILTER: SlideFilter = { onlyAnnotated: false, tag: null };
 
-export const TOOL_ICONS: Record<AnnotationTool, string> = {
-  select: '↖',
-  highlight: '🖍',
-  textHighlight: '🔤',
-  rect: '▭',
-  ellipse: '◯',
-  text: 'T',
-  memo: '🗒',
-};
-
 export const TOOL_LABELS: Record<AnnotationTool, string> = {
-  select: '선택',
+  select: '선택·첨부',
   highlight: '형광펜',
   textHighlight: '텍스트 형광',
   rect: '사각형',
@@ -36,15 +28,23 @@ export const TOOL_LABELS: Record<AnnotationTool, string> = {
   memo: '메모',
 };
 
+const OFF_HINT = '(다시 누르거나 Esc로 끔)';
+
 const TOOL_TITLES: Record<AnnotationTool, string> = {
-  select: '선택: 필기를 클릭해서 옮기거나 지워요 (Esc)',
-  highlight: '형광펜: 글줄 위에서 끌면 그 줄에 맞춰 칠해요',
-  textHighlight: '텍스트 형광: 글자 위에서 끌면 단어에 맞춰 칠해요',
-  rect: '사각형: 끌어서 그려요',
-  ellipse: '동그라미: 끌어서 그려요',
-  text: '텍스트 상자: 클릭하거나 끌어서 만들고 글을 써요',
-  memo: '메모: 클릭한 자리에 스티커 메모를 붙여요',
+  select: '선택·첨부: 필기를 클릭해 옮기거나 지우고, 빈 곳을 끌면 그 영역을 질문에 첨부해요',
+  highlight: `형광펜: 글줄 위에서 끌면 그 줄에 맞춰 칠해요 ${OFF_HINT}`,
+  textHighlight: `텍스트 형광: 글자 위에서 끌면 단어에 맞춰 칠하고, 칠한 글 위를 다시 끌면 범위가 바뀌어요 ${OFF_HINT}`,
+  rect: `사각형: 끌어서 그려요 ${OFF_HINT}`,
+  ellipse: `동그라미: 끌어서 그려요 ${OFF_HINT}`,
+  text: `텍스트 상자: 클릭하거나 끌어서 만들고 글을 써요 ${OFF_HINT}`,
+  memo: `메모: 클릭한 자리에 스티커 메모를 붙여요 ${OFF_HINT}`,
 };
+
+/** The one-line hint of the viewer's toolbar for the state (hidden on narrow panes; the titles say the same). */
+export function toolHint(tool: AnnotationTool): string {
+  if (tool === 'select') return 'j/k · ↑/↓ · 빈 곳을 끌면 영역 첨부';
+  return `${TOOL_LABELS[tool]}: 빈 곳에서 ${CLICK_TOOLS.has(tool) ? '클릭' : '끌기'} · 필기는 클릭해 옮기기 · Esc`;
+}
 
 interface AnnotationToolsProps {
   tool: AnnotationTool;
@@ -77,20 +77,21 @@ export function AnnotationTools(props: AnnotationToolsProps) {
   const { replayAvailable, replayOn, onReplayOn, replaying, compact } = props;
   const disabled = !layerShown;
 
+  // The default state is a quiet "raised" segment, a drawing tool the accent: at a glance, is something being drawn?
   const tools = (vertical: boolean) => (
     <div className={vertical ? 'annot-tools is-vertical' : 'annot-tools'} role="group" aria-label="필기 도구">
       {ANNOTATION_TOOLS.map((t) => (
         <button
           key={t}
           type="button"
-          className={t === tool ? 'annot-tool is-active' : 'annot-tool'}
+          className={['annot-tool', t === 'select' && 'is-default', t === tool && 'is-active'].filter(Boolean).join(' ')}
           aria-pressed={t === tool}
           disabled={disabled && t !== 'select'}
-          onClick={() => onTool(t)}
+          onClick={() => onTool(t === tool ? 'select' : t)}
           title={disabled && t !== 'select' ? '필기가 숨겨져 있어요 (⋯ 필기 메뉴에서 보이기)' : TOOL_TITLES[t]}
         >
           <span className="annot-tool-icon" aria-hidden>
-            {TOOL_ICONS[t]}
+            <ToolIcon tool={t} />
           </span>
           {vertical && <span className="annot-tool-label">{TOOL_LABELS[t]}</span>}
         </button>
@@ -121,12 +122,12 @@ export function AnnotationTools(props: AnnotationToolsProps) {
     <>
       {compact ? (
         <ToolPopover
-          className="annot-tools-compact"
+          className={tool === 'select' ? 'annot-tools-compact' : 'annot-tools-compact is-drawing'}
           label="필기 도구"
           button={
             <>
               <span className="annot-tool-icon" aria-hidden>
-                {TOOL_ICONS[tool]}
+                <ToolIcon tool={tool} />
               </span>
               <span className={`annot-dot is-${color} is-mini`} aria-hidden />
             </>

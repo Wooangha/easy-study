@@ -248,7 +248,14 @@ Status (2026-09-29):
   reload persistence, the tutor stdin with and without the memo, dark mode, 360 px). Not exercised in the browser: 그때 필기 재생 and
   🎙 links (no recording in the temp library — covered by unit tests), a link to another lecture (one document only), touch devices.
 - `TEXT_ENGINE` is now 'pdfium-3': the startup backfill re-extracts every old document once (text + layouts; ~1 s per 40 pages).
-- Next: commit + release notes (README "필기와 메모" is written); a real-device pass on a phone-sized remote client; later ideas
+- 0.6.1 (working tree, after the user's first use of 0.6.0; DESIGN §25 "As shipped (0.6.1)"): no ✂ 영역 button — a drag on empty
+  area attaches a region only in the default ↖ 선택·첨부 state; existing items are selected / moved / resized / deleted with ANY tool
+  active (lib/annotations/gesture.ts `hitTestItems` + `pressPlan`, web/tests/annotation-gesture.test.ts); the 👁/🙈 emoji became an inline
+  SVG eye (components/annotations/icons.tsx, with the tool glyphs). README "필기와 메모" updated. Review fixes: with a tool an unselected
+  rect / ellipse is hit on its outline ring only (`outlineOnly`, `slop.ring`) so a box's inside stays drawable; 텍스트 형광 on a text
+  highlight re-drags it (`redraw` → `update` of its words); `--surface-raised` for the active 선택·첨부 segment (dark mode);
+  constant accessible names + `aria-pressed` on the eye toggles, `role="img"` hidden markers. Not committed.
+- Next: commit + release notes; a real-device pass on a phone-sized remote client; later ideas
   from the request: freehand pen, PDF export, exam mode.
 
 ## 0.5.1 E2E recipe (LAN sharing + the loopback proxy, on this Mac)

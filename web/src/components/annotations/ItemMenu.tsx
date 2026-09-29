@@ -1,11 +1,12 @@
 // The floating menu of a selected annotation item (DESIGN §25), like the region menu: the four colors, 📎 첨부 (a chip
-// in the composer, sent with the next question — nothing is sent now), 🗑 삭제, for memos 👁 튜터에게 보이기 and
+// in the composer, sent with the next question — nothing is sent now), 🗑 삭제, for memos the eye of 튜터에게 보이기 and
 // 접기/펴기 (on a narrow pane / touch, where the card is always a pill, 펴기 opens the bottom sheet instead), and how
 // many questions were asked with the item. Rendered in `.slide` outside the slide box.
 import { useEffect, useRef, type CSSProperties } from 'react';
 import { ANNOTATION_COLORS, type AnnotationItem, type RegionRect } from '../../../../shared/types.ts';
 import type { MenuPlacement } from '../../lib/attachments.ts';
 import { useLayerEnv } from './context.ts';
+import { EyeIcon } from './icons.tsx';
 
 export const COLOR_NAMES: Record<(typeof ANNOTATION_COLORS)[number], string> = {
   yellow: '노랑',
@@ -78,12 +79,13 @@ export function ItemMenu({ slide, item, boxRect, placement, questions }: ItemMen
         <>
           <button
             type="button"
-            className={memo.tutor ? 'region-menu-btn is-on' : 'region-menu-btn is-off'}
+            className={memo.tutor ? 'region-menu-btn is-icon' : 'region-menu-btn is-icon is-off'}
             aria-pressed={memo.tutor}
+            aria-label="튜터에게 보이기"
             onClick={() => actions.update(slide, item.id, { tutor: !memo.tutor })}
-            title={memo.tutor ? '튜터에게 보이기: 켜짐 — 이 메모가 질문과 함께 전달돼요 (클릭하면 끔)' : '튜터에게 보이기: 꺼짐 — 이 메모는 튜터가 보지 않아요 (클릭하면 켬)'}
+            title={memo.tutor ? '튜터에게 보이기 — 질문할 때 이 메모도 함께 가요 (클릭하면 숨김)' : '튜터에게 숨김 — 이 메모는 튜터가 보지 않아요 (클릭하면 보이기)'}
           >
-            {memo.tutor ? '👁' : '🙈'}
+            <EyeIcon off={!memo.tutor} />
           </button>
           {compact ? (
             <button type="button" className="region-menu-btn" onClick={() => actions.openSheet(slide, item.id)} title="메모 펴기 (아래 시트에서 편집)">

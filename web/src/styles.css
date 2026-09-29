@@ -16,6 +16,7 @@
   --surface: #ffffff;
   --surface-2: #f2f4f7;
   --surface-3: #e7eaf0;
+  --surface-raised: #ffffff;
   --border: #e3e6eb;
   --border-strong: #cdd2da;
   --text: #1c2230;
@@ -77,6 +78,7 @@
     --surface: #161920;
     --surface-2: #1c2029;
     --surface-3: #252a35;
+    --surface-raised: #252a35;
     --border: #282d38;
     --border-strong: #3a4150;
     --text: #e5e8ee;
@@ -129,6 +131,7 @@
   --surface: #161920;
   --surface-2: #1c2029;
   --surface-3: #252a35;
+  --surface-raised: #252a35;
   --border: #282d38;
   --border-strong: #3a4150;
   --text: #e5e8ee;
@@ -738,10 +741,15 @@ kbd {
   white-space: nowrap;
 }
 
+/* The state hint after the tools: it takes the leftover width (and is cut, not wrapped), so the tool buttons
+   stay put when its text changes with the active tool. */
 .viewer-hint {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
   font-size: 11px;
   color: var(--muted);
-  margin-right: auto;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -4113,38 +4121,9 @@ kbd {
   -webkit-touch-callout: none;
 }
 
-.viewer.is-region-mode .slide-box {
-  cursor: crosshair;
-  /* ✂ mode: a finger draws right away instead of scrolling. */
-  touch-action: none;
-}
-
 .viewer.is-selecting .slide-box,
 .viewer.is-selecting .viewer-scroll {
   cursor: crosshair;
-}
-
-.region-toggle {
-  height: 28px;
-  padding: 0 9px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--surface);
-  color: var(--text-2);
-  font-size: 12px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.region-toggle:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
-.region-toggle.is-active {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--accent-contrast);
 }
 
 .region-layer {
@@ -5951,7 +5930,8 @@ kbd {
   --annot-color: var(--annot-blue);
 }
 
-/* Toolbar: the tools (icons; the names are in their tooltips), the color dots, the ⋯ 필기 menu. */
+/* Toolbar: the tools (inline SVG glyphs in currentColor; the names are in their tooltips), the color dots, the ⋯ 필기
+   menu. The default 선택·첨부 segment is a quiet raised tab when active; a drawing tool takes the accent. */
 .annot-tools {
   display: inline-flex;
   align-items: center;
@@ -6003,15 +5983,39 @@ kbd {
   color: var(--accent-contrast);
 }
 
+/* The hover rule above outranks .is-active (three simple selectors): keep an active tool in the accent under the pointer. */
+.annot-tool.is-active:hover:not(:disabled) {
+  background: var(--accent-strong);
+  color: var(--accent-contrast);
+}
+
+/* --surface-raised sits above the --surface-2 track in both themes (--surface is darker than the track in dark mode),
+   and the segment keeps it under the pointer. */
+.annot-tool.is-default.is-active,
+.annot-tool.is-default.is-active:hover:not(:disabled) {
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-sm);
+  color: var(--text);
+}
+
 .annot-tool:disabled {
   opacity: 0.4;
 }
 
 .annot-tool-icon {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 16px;
-  text-align: center;
-  font-weight: 700;
+  height: 16px;
+}
+
+.tool-icon,
+.eye-icon {
+  display: block;
+  width: 16px;
+  height: 16px;
+  flex: none;
 }
 
 .annot-tool-label {
@@ -6084,6 +6088,12 @@ kbd {
 .annot-pop-btn.is-open {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+.annot-tools-compact.is-drawing {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-contrast);
 }
 
 .annot-menu-btn.is-active {
@@ -6187,13 +6197,21 @@ kbd {
   stroke: none;
 }
 
-/* A transparent fill (not none): a tap inside the shape selects it, a 2.5 px stroke alone is no touch target. */
+/* A transparent fill (not none): in the default state a tap inside the shape selects it, a 3 px stroke alone is no
+   touch target. */
 .annot-shape.kind-rect,
 .annot-shape.kind-ellipse {
   fill: transparent;
   stroke: var(--annot-color);
   stroke-width: 3;
   vector-effect: non-scaling-stroke;
+}
+
+/* With a drawing tool an unselected outline shape is hit on its ring only (gesture.ts outlineOnly), so its inside
+   shows the tool's crosshair and only the stroke the pointer. */
+.viewer.is-annot-tool .annot-shape.kind-rect:not(.is-selected),
+.viewer.is-annot-tool .annot-shape.kind-ellipse:not(.is-selected) {
+  pointer-events: visibleStroke;
 }
 
 .annot-shape.is-selected {
@@ -6206,6 +6224,12 @@ kbd {
 .annot-shape.kind-rect.is-selected,
 .annot-shape.kind-ellipse.is-selected {
   stroke-width: 3;
+}
+
+/* A selected item is dragged by its body (with any tool active). */
+.annot-shape.is-selected:not(.kind-text-highlight),
+.annot-text.is-selected:not(.is-editing) {
+  cursor: move;
 }
 
 .annot-draft-shape {
@@ -6317,17 +6341,11 @@ kbd {
   cursor: nesw-resize;
 }
 
-/* A drawing tool is active: the slide draws instead of scrolling (touch) or selecting; items let the press through. */
+/* A drawing tool is active: empty slide area draws instead of scrolling (touch) or selecting a region; existing
+   items, handles and markers keep their pointer events, so they are selected, moved and resized with any tool. */
 .viewer.is-annot-tool .slide-box {
   touch-action: none;
   cursor: crosshair;
-}
-
-.viewer.is-annot-tool .annot-shape,
-.viewer.is-annot-tool .annot-text,
-.viewer.is-annot-tool .annot-handle,
-.viewer.is-annot-tool .qa-marker-wrap {
-  pointer-events: none;
 }
 
 .annot-unsaved {
@@ -6363,8 +6381,12 @@ kbd {
   color: var(--danger);
 }
 
+.region-menu-btn.is-icon {
+  padding: 0 7px;
+}
+
 .region-menu-btn.is-off {
-  opacity: 0.6;
+  color: var(--muted);
 }
 
 /* Sticky memos: UI-sized cards, draggable by the header; a pill when collapsed. */
@@ -6442,8 +6464,18 @@ kbd {
 }
 
 .memo-head-hidden,
-.memo-pill-hidden {
-  font-size: 11px;
+.memo-pill-hidden,
+.memo-row-hidden {
+  display: inline-flex;
+  flex: none;
+  color: var(--muted);
+}
+
+.memo-pill-hidden .eye-icon,
+.memo-head-hidden .eye-icon,
+.memo-row-hidden .eye-icon {
+  width: 14px;
+  height: 14px;
 }
 
 .memo-head .menu-btn {
@@ -6532,24 +6564,41 @@ kbd {
 
 .memo-foot {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 4px;
   padding: 0 6px 0 8px;
 }
 
 .memo-eye {
-  padding: 1px 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px 0 6px;
   border: 0;
   border-radius: 999px;
   background: none;
   color: var(--muted);
   font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
   cursor: pointer;
+}
+
+.memo-eye .eye-icon {
+  width: 14px;
+  height: 14px;
 }
 
 .memo-eye.is-on {
   background: var(--ok-soft);
   color: var(--ok);
+}
+
+.memo-eye.is-off:hover {
+  background: var(--surface-2);
+  color: var(--text-2);
 }
 
 .memo-card.is-collapsed {
@@ -6988,7 +7037,7 @@ kbd {
   transform: translate(-50%, -100%);
 }
 
-/* A phone: the toolbar keeps one row (page jump · tools · ⋯ · ✂ 영역 · zoom). */
+/* A phone: the toolbar keeps one row (page jump · tools · ⋯ · zoom). */
 @media (max-width: 480px) {
   .viewer-toolbar {
     gap: 6px;
