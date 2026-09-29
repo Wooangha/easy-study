@@ -866,10 +866,15 @@ async function convert(docId: string): Promise<void> {
     images = startImageRun(docId, { docDir: paths.dir, slides: slideFileNames(info.pageCount), sheets: { aspectRatio }, derived: true });
     await images.sheets;
 
+    // From here on only the derived images are still written: the document is deletable the moment doc.json says
+    // 'ready' (a deletion stops the image worker and waits for this ingest; isIngestRunning must not be true in the
+    // gap between the write and the next line, which a slow machine can hit).
+    derivingDocs.add(docId);
     // `error: undefined` drops the message of a failed attempt that another process may have left.
     await updateMeta(docId, { status: 'ready', progress: info.pageCount, pageCount: info.pageCount, aspectRatio, error: undefined });
     console.log(`[library] ${docId}: ready (${info.pageCount} slides)`);
   } catch (err) {
+    derivingDocs.delete(docId);
     images?.kill();
     await recordIngestFailure(docId, err);
     return;
@@ -877,7 +882,6 @@ async function convert(docId: string): Promise<void> {
 
   // The document is ready; the view renditions, thumbnails and inline JPEGs are a convenience that the
   // backfill makes later when this part fails (the routes fall back to the slide PNGs meanwhile).
-  derivingDocs.add(docId);
   try {
     logDerivedResult(docId, await images.done);
   } catch (err) {
