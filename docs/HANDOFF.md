@@ -89,10 +89,12 @@ macOS has no `timeout` command.
   `arch-x64` (AppImage + pacman package on Arch) → draft release in the PRIVATE repo with all installers,
   `easy-study-bin-*.pkg.tar.zst`, a PKGBUILD and the FFmpeg source. Manual run: `gh workflow run desktop.yml --ref main`.
   CI never signs anything for the updater and never sees the updater key.
-  Keep the tag run fast (~12 min instead of ~25): CI caches are per git ref and a tag run can only restore main's, so
-  verify a feature by running CI ON MAIN after the ff-merge (`gh workflow run desktop.yml --ref main`), not on the
-  branch, then bump + tag; only main's runs save the Rust caches (`save-if`). Delete stale caches when the quota
-  (10 GB, `gh cache list`) fills.
+  Fast releases: tag directly (one CI run, ~11 min; the tests run beside the builds and only the release waits for
+  them). CI caches are per git ref and a tag run restores main's, and only main's runs save them (`save-if`), so run
+  CI ON MAIN first (`gh workflow run desktop.yml --ref main`) only when a cache input changed since the last main run:
+  Cargo.lock / Cargo.toml, desktop/scripts/whisper.mjs / binaries.mjs, the ffmpeg scripts, package-lock.json. A tag
+  run that fails before publishing is not precious: delete the private draft and the tag, fix, and tag the same version
+  again. Delete stale caches when the quota (10 GB, `gh cache list`) fills.
 - Publishing (DESIGN §24; from 0.5.0 on, the first version with the in-app updater): users download from the PUBLIC
   repo `Wooangha/easy-study-releases` (installers only, no source), and the apps poll its
   `releases/latest/download/latest.json`. `desktop/scripts/publish-release.mjs` does it, on this Mac, only on the

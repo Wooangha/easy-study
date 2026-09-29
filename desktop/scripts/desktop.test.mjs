@@ -251,7 +251,7 @@ test('Linux builds finish the AppImage (appimage.mjs) and CI checks it and runs 
   assert.match(arch, /makepkg -f/);
   assert.match(arch, /pacman -U --noconfirm/);
   assert.match(arch, /pacman -R --noconfirm easy-study-bin/);
-  assert.match(workflow, /release:\n[^\n]*\n\s+needs: \[build, arch\]/);
+  assert.match(workflow, /release:\n[^\n]*\n\s+needs: \[test, build, arch\]/);
 });
 
 test('packaging/arch/PKGBUILD installs the .deb of the version CI sets', () => {
@@ -724,7 +724,7 @@ test('CI builds the recording tools for every target, ships them and checks them
   assert.match(wf, /release:[\s\S]*download-artifact@[0-9a-f]{40} # v[4-9][.\d]*\n\s+with:\n\s+pattern: easy-study-\*/);
   const build = /\n {2}build:\n([\s\S]*?)\n {2}arch:/.exec(wf)?.[1];
   assert.ok(build, 'job build');
-  assert.match(build, /needs: \[test, ffmpeg\]/);
+  assert.match(build, /needs: \[ffmpeg\]/);
   assert.match(build, /name: ffmpeg-\$\{\{ matrix\.target \}\}\n\s+path: \.cache\/ffmpeg\/\$\{\{ matrix\.target \}\}/);
   assert.match(build, /hashFiles\('desktop\/scripts\/whisper\.mjs', 'desktop\/scripts\/binaries\.mjs'\)/);
   assert.match(build, /node desktop\/scripts\/whisper\.mjs --target \$\{\{ matrix\.target \}\}/);

@@ -51,6 +51,23 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run desktop:test # desktop/ configuration invariants (IPC only for the chooser, targets, bundles)
+      # The shell's Rust unit tests, here beside the builds (not on their critical path): the Linux build
+      # dependencies of the Tauri crate, then cargo test in the dev profile (its own cache key).
+      - name: Linux build dependencies (Tauri crate)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: desktop/src-tauri -> target
+          key: unit-tests
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Rust unit tests
+        run: cargo test --manifest-path desktop/src-tauri/Cargo.toml
 
   # The minimal LGPL ffmpeg of the recording tools (DESIGN §22; desktop/scripts/ffmpeg.mjs, build-ffmpeg.sh) for every
   # target, cached until its sources, flags or scripts change: macOS on macOS; Linux in alpine containers of the
@@ -108,7 +125,8 @@ jobs:
           if-no-files-found: error
 
   build:
-    needs: [test, ffmpeg]
+    # Only the ffmpeg artifacts: the repo tests run beside the builds, and the release waits for both.
+    needs: [ffmpeg]
     strategy:
       fail-fast: false
       matrix:
@@ -355,10 +373,6 @@ jobs:
           node desktop/scripts/asr-smoke.mjs --whisper "$release\whisper\whisper-cli.exe" --ffmpeg "$release\ffmpeg\ffmpeg.exe"
           if ($LASTEXITCODE -ne 0) { throw "ASR smoke failed" }
 
-      - name: Rust unit tests
-        if: matrix.name == 'linux-x64'
-        run: cargo test --manifest-path desktop/src-tauri/Cargo.toml
-
   # The Linux bundles are built on Ubuntu 22.04, where the libraries inside the AppImage are the system's own. On a
   # rolling distribution they meet a newer Mesa, Wayland… (v0.2.1's AppImage opened a blank window on Arch:
   # appimage.mjs). So this build's x86_64 AppImage runs here on current Arch Linux (--appimage-extract-and-run: no
@@ -446,7 +460,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, arch]
+    needs: [test, build, arch]
     runs-on: ubuntu-latest
     permissions:
       contents: write
