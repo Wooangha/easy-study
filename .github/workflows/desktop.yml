@@ -66,7 +66,11 @@ jobs:
           workspaces: desktop/src-tauri -> target
           key: unit-tests
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # tauri-build checks that the bundle's resources and sidecars exist; the unit tests need none of them
+      # (prepare.mjs makes them in the build jobs), so the bundle lists are emptied for this compile only.
       - name: Rust unit tests
+        env:
+          TAURI_CONFIG: '{"bundle":{"externalBin":[],"resources":[]}}'
         run: cargo test --manifest-path desktop/src-tauri/Cargo.toml
 
   # The minimal LGPL ffmpeg of the recording tools (DESIGN §22; desktop/scripts/ffmpeg.mjs, build-ffmpeg.sh) for every
