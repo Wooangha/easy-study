@@ -323,7 +323,10 @@ async function extract(file: string, dir: string, cancel: AbortSignal): Promise<
     const [pipeResult, code] = await Promise.allSettled([piped, exited]);
     if (code.status === 'rejected') throw new Error(`tar를 실행할 수 없어요: ${errorText(code.reason)}`);
     if (code.value !== 0) throw new Error(`tar 종료 코드 ${code.value}${stderr.trim() ? `: ${stderr.trim()}` : ''}`);
-    if (pipeResult.status === 'rejected') throw pipeResult.reason;
+    // GNU tar stops reading at the archive's end marker and exits 0 while the zero padding after it is still being
+    // written: the pipe then fails with EPIPE / "Premature close". The archive was verified before and tar read all of it,
+    // so only a stop by the user (or a tar failure, above) counts; the sanity checks after this read the result anyway.
+    if (pipeResult.status === 'rejected' && cancel.aborted) throw pipeResult.reason;
   } catch (err) {
     throw new UpdateError(`업데이트 파일을 풀지 못했어요: ${errorText(err)}`);
   } finally {
