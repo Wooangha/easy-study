@@ -55,6 +55,7 @@ export interface CourseCardProps {
   onDelete: () => void;
   onMoveLecture: (docId: string, courseId: string | null) => void;
   onRetryDoc: (docId: string) => void;
+  onRenameDoc: (docId: string, title: string) => void;
   onDeleteDoc: (doc: DocMeta) => void;
   canDigest: boolean;
   onDigestLectures: (docs: DocMeta[]) => void;
@@ -248,6 +249,7 @@ export function CourseCard(props: CourseCardProps) {
                   onOpen={props.onOpen}
                   onMove={(to) => props.onMoveLecture(d.id, to)}
                   onRetry={props.onRetryDoc}
+                  onRename={(title) => props.onRenameDoc(d.id, title)}
                   onDelete={props.onDeleteDoc}
                 />
               ))}

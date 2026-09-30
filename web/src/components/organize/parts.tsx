@@ -174,10 +174,15 @@ export function RenameInput({
   initial,
   label,
   onDone,
+  maxLength = 120,
+  className = 'course-title-input',
 }: {
   initial: string;
   label: string;
   onDone: (title: string | null) => void;
+  /** 120 for courses and groups; lectures allow 200. */
+  maxLength?: number;
+  className?: string;
 }) {
   const [value, setValue] = useState(initial);
   const done = useRef(false);
@@ -197,11 +202,11 @@ export function RenameInput({
   };
   return (
     <input
-      className="course-title-input"
+      className={className}
       autoFocus
       aria-label={label}
       value={value}
-      maxLength={120}
+      maxLength={maxLength}
       onChange={(e) => setValue(e.target.value)}
       onFocus={(e) => e.currentTarget.select()}
       onKeyDown={onKeyDown}

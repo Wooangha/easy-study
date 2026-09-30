@@ -3055,6 +3055,28 @@ details[open] > summary::before {
   border-color: var(--border);
 }
 
+/* 이름 바꾸기: the row keeps its look, the title becomes an input (nothing opens meanwhile). */
+.lecture-open.is-renaming,
+.lecture-open.is-renaming:hover {
+  background: none;
+  border-color: transparent;
+}
+
+.lecture-open.is-renaming .lecture-main {
+  flex: 1;
+  gap: 3px;
+}
+
+.doc-title-input {
+  width: 100%;
+  font-size: 14px;
+}
+
+.doc-card-rename {
+  display: flex;
+  padding: 10px 12px 0;
+}
+
 .lecture-thumb {
   flex: none;
   width: 72px;

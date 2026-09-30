@@ -93,6 +93,7 @@ import {
   createGroup,
   deleteCourse,
   deleteGroup,
+  courseOf,
   getCourse,
   getLayout,
   listCourses,
@@ -111,6 +112,7 @@ import {
   isDigestRunning,
   readDigestMarkdown,
   recoverInterruptedDigests,
+  rewriteDigestMarkdown,
   startDigest,
   waitForDigestsIdle,
 } from './digest.ts';
@@ -128,6 +130,7 @@ import {
   listDocs,
   readStoredDoc,
   removeDeletedLeftovers,
+  renameDoc,
   requestDerivedImages,
   resumePendingIngests,
   retryIngest,
@@ -631,6 +634,22 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
 
   api.get('/docs/:docId', async (req, res) => {
     res.json(await requireDoc(req.params.docId));
+  });
+
+  /**
+   * Renames a lecture: `{ title }` → the DocMeta (400 for an empty or too long title, 404 when missing). The files that
+   * show the title follow: the course's COURSE.md, STUDY_NOTES.md and DIGEST.md (failures are logged: the rename holds).
+   */
+  api.patch('/docs/:docId', async (req, res) => {
+    const docId = req.params.docId;
+    const doc = await renameDoc(docId, jsonBody(req).title);
+    const log = (what: string) => (err: unknown) => console.error(`[library] could not rewrite ${what} of ${docId} after a rename:`, err);
+    await Promise.all([
+      courseOf(docId).then((course) => (course ? writeCourseMarkdown(course.id) : undefined)).catch(log('COURSE.md')),
+      writeNotes(docId).catch(log('STUDY_NOTES.md')),
+      rewriteDigestMarkdown(docId).catch(log('DIGEST.md')),
+    ]);
+    res.json(doc);
   });
 
   /**

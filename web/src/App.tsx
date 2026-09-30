@@ -89,6 +89,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
     upload,
     patchDoc,
     retry: retryDoc,
+    rename: renameDoc,
     remove: removeDoc,
   } = useDocs();
   const coursesState = useCourses();
@@ -827,6 +828,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
         onDropFiles={(files) => dropFiles(files, uploadTarget?.id ?? null, true)}
         onUploadToCourse={(courseId, files) => dropFiles(files, courseId, false)}
         onRetryDoc={(id) => void retryDoc(id)}
+        onRenameDoc={(id, title) => void renameDoc(id, title)}
         onDeleteDoc={(d) => void deleteDoc(d)}
         canDigest={choice !== null}
         onDigestLectures={onDigestLectures}

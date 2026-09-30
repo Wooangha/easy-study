@@ -667,6 +667,17 @@ export function digestMarkdown(title: string, pageCount: number, record: DigestR
   return `${lines.join('\n').trimEnd()}\n`;
 }
 
+/**
+ * DIGEST.md again from digest.json, with the lecture's current title (after a rename). Nothing without a digest; a
+ * digest being made writes it with the new title when it saves.
+ */
+export async function rewriteDigestMarkdown(docId: string): Promise<void> {
+  if (jobs.has(docId)) return;
+  const [doc, record] = await Promise.all([readStoredDoc(docId), readDigestRecord(docId)]);
+  if (!doc || !record) return;
+  await persistQueue(docId, () => writeFileAtomic(docPaths(docId).digestMd, digestMarkdown(doc.title, doc.pageCount, record)));
+}
+
 /** Writes digest.json + DIGEST.md, then the course's COURSE.md (its summaries may have changed). */
 async function persist(docId: string, assets: DocAssets, record: DigestRecord): Promise<void> {
   const paths = docPaths(docId);
@@ -674,7 +685,9 @@ async function persist(docId: string, assets: DocAssets, record: DigestRecord): 
   await persistQueue(docId, async () => {
     await fs.mkdir(paths.digestDir, { recursive: true });
     await writeJsonAtomic(paths.digestJson, record);
-    await writeFileAtomic(paths.digestMd, digestMarkdown(assets.meta.title, assets.meta.pageCount, record));
+    // The title as it is now: the lecture may have been renamed while the digest ran.
+    const title = (await readStoredDoc(docId))?.title ?? assets.meta.title;
+    await writeFileAtomic(paths.digestMd, digestMarkdown(title, assets.meta.pageCount, record));
   });
   try {
     const course = await courseOf(docId);

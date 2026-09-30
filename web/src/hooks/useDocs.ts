@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DocMeta } from '../../../shared/types.ts';
-import { ApiError, deleteDoc, errorMessage, getDoc, listDocs, retryDoc, uploadPdf } from '../api.ts';
+import { ApiError, deleteDoc, errorMessage, getDoc, listDocs, renameDoc, retryDoc, uploadPdf } from '../api.ts';
 import { toast } from '../lib/toast.ts';
 
 export interface UploadItem {
@@ -124,6 +124,18 @@ export function useDocs() {
     }
   }, [refresh]);
 
+  /** Rename a lecture. Resolves true when the server took the new title. */
+  const rename = useCallback(async (docId: string, title: string): Promise<boolean> => {
+    try {
+      const doc = await renameDoc(docId, title);
+      setDocs((prev) => prev && prev.map((d) => (d.id === docId ? doc : d)));
+      return true;
+    } catch (e) {
+      toast(`이름을 바꾸지 못했어요: ${errorMessage(e)}`, 'error');
+      return false;
+    }
+  }, []);
+
   /** Delete a document (after the caller confirmed). Resolves true when it is gone. */
   const remove = useCallback(async (docId: string): Promise<boolean> => {
     try {
@@ -147,5 +159,5 @@ export function useDocs() {
     setDocs((prev) => prev && prev.map((d) => (d.id === docId ? { ...d, ...patch } : d)));
   }, []);
 
-  return { docs, loadError, uploads, refresh, upload, patchDoc, retry, remove };
+  return { docs, loadError, uploads, refresh, upload, patchDoc, retry, rename, remove };
 }

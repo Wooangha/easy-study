@@ -41,6 +41,8 @@ interface LibraryViewProps {
   onRetryLoad: () => void;
   /** Re-run the conversion of a document whose conversion failed. */
   onRetryDoc: (docId: string) => void;
+  /** Rename a lecture (its ⋯ menu's 이름 바꾸기). */
+  onRenameDoc: (docId: string, title: string) => void;
   /** Delete a document (asks for confirmation). */
   onDeleteDoc: (doc: DocMeta) => void;
   /** A provider is available for making 정리본. */
@@ -218,6 +220,7 @@ export function LibraryView(props: LibraryViewProps) {
       }}
       onMoveLecture={moveLecture}
       onRetryDoc={props.onRetryDoc}
+      onRenameDoc={props.onRenameDoc}
       onDeleteDoc={props.onDeleteDoc}
       canDigest={props.canDigest}
       onDigestLectures={props.onDigestLectures}
@@ -422,6 +425,7 @@ export function LibraryView(props: LibraryViewProps) {
               onOpen={props.onOpen}
               onMove={moveLecture}
               onRetry={props.onRetryDoc}
+              onRename={props.onRenameDoc}
               onDelete={props.onDeleteDoc}
             />
           </LibraryDnd>
@@ -464,6 +468,7 @@ function UncategorizedSection({
   onOpen,
   onMove,
   onRetry,
+  onRename,
   onDelete,
 }: {
   docs: DocMeta[];
@@ -472,6 +477,7 @@ function UncategorizedSection({
   onOpen: (docId: string) => void;
   onMove: (docId: string, courseId: string | null) => void;
   onRetry: (docId: string) => void;
+  onRename: (docId: string, title: string) => void;
   onDelete: (doc: DocMeta) => void;
 }) {
   const { active } = useDragState();
@@ -513,6 +519,7 @@ function UncategorizedSection({
               onOpen={onOpen}
               onMove={onMove}
               onRetry={onRetry}
+              onRename={onRename}
               onDelete={onDelete}
             />
           ))}

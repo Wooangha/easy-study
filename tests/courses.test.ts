@@ -372,6 +372,36 @@ describe('HTTP routes', () => {
     return body.error;
   }
 
+  test('PATCH /docs/:id renames a lecture; COURSE.md, STUDY_NOTES.md and DIGEST.md follow', async () => {
+    const lecture = await makeDoc('Old Lecture Name');
+    await writeSummary(lecture, 'A short summary.');
+    const course = (await (await sendJson('POST', '/courses', { title: 'Rename course' })).json()) as Course;
+    assert.equal((await sendJson('PATCH', `/courses/${course.id}`, { docIds: [lecture] })).status, 200);
+
+    const res = await sendJson('PATCH', `/docs/${lecture}`, { title: '  New\n  Lecture   Name ' });
+    assert.equal(res.status, 200);
+    const doc = (await res.json()) as DocMeta;
+    assert.equal(doc.title, 'New Lecture Name', 'one line, trimmed');
+    assert.equal(doc.id, lecture, 'the id stays');
+    assert.equal(doc.courseId, course.id);
+    assert.equal(((await (await api(`/docs/${lecture}`)).json()) as DocMeta).title, 'New Lecture Name');
+    const paths = docPaths(lecture);
+    assert.match(await fs.readFile(coursePaths(course.id).courseMd, 'utf8'), /New Lecture Name/);
+    assert.doesNotMatch(await fs.readFile(coursePaths(course.id).courseMd, 'utf8'), /Old Lecture Name/);
+    assert.match(await fs.readFile(paths.studyNotes, 'utf8'), /^# New Lecture Name — study notes/);
+    assert.match(await fs.readFile(paths.digestMd, 'utf8'), /^# New Lecture Name — 정리본/);
+
+    await expectError(await sendJson('PATCH', `/docs/${lecture}`, { title: '   ' }), 400);
+    await expectError(await sendJson('PATCH', `/docs/${lecture}`, {}), 400);
+    await expectError(await sendJson('PATCH', `/docs/${lecture}`, { title: 42 }), 400);
+    await expectError(await sendJson('PATCH', `/docs/${lecture}`, { title: 'x'.repeat(201) }), 400);
+    assert.equal((await sendJson('PATCH', `/docs/${lecture}`, { title: 'y'.repeat(200) })).status, 200);
+    await expectError(await sendJson('PATCH', '/docs/missing-000000', { title: 'x' }), 404);
+    // A lecture without a course or a digest renames all the same.
+    const loose = await makeDoc('Loose');
+    assert.equal(((await (await sendJson('PATCH', `/docs/${loose}`, { title: '미분류 강의' })).json()) as DocMeta).title, '미분류 강의');
+  });
+
   test('CRUD with validation', async () => {
     await expectError(await sendJson('POST', '/courses', {}), 400);
     await expectError(await sendJson('POST', '/courses', { title: '   ' }), 400);

@@ -273,6 +273,31 @@ export async function readStoredDoc(docId: string): Promise<StoredDocMeta | null
   return typeof meta === 'object' && meta !== null ? toStoredMeta(meta, docId) : null;
 }
 
+/**
+ * A lecture's title as the user typed it: one line (every run of whitespace, line breaks included, becomes one space),
+ * trimmed, 1–MAX_TITLE_CHARS characters; 400 otherwise.
+ */
+export function cleanDocTitle(value: unknown): string {
+  const title = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
+  if (!title) throw new HttpError(400, '강의 이름을 입력해 주세요');
+  if (title.length > MAX_TITLE_CHARS) throw new HttpError(400, `강의 이름이 너무 깁니다 (최대 ${MAX_TITLE_CHARS}자)`);
+  return title;
+}
+
+/**
+ * Renames a lecture (DESIGN §14): doc.json's title, in any state (a conversion writes doc.json through the same
+ * per-document queue). The id, the folder and everything made from the lecture stay; the caller rewrites the files
+ * that show the title. 404 when the lecture does not exist.
+ */
+export async function renameDoc(docId: string, title: unknown): Promise<DocMeta> {
+  const cleaned = cleanDocTitle(title);
+  if (!(await readStoredDoc(docId))) throw new HttpError(404, '문서를 찾을 수 없습니다');
+  await updateMeta(docId, { title: cleaned });
+  const doc = await getDoc(docId);
+  if (!doc) throw new HttpError(404, '문서를 찾을 수 없습니다');
+  return doc;
+}
+
 /** Metadata of a document, or null when the id is invalid or the document does not exist. */
 export async function getDoc(docId: string): Promise<DocMeta | null> {
   const stored = await readStoredDoc(docId);

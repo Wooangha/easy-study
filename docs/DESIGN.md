@@ -649,6 +649,13 @@ Recap/rollover behaviour is unchanged.
 - New document routes: `DELETE /api/docs/:docId` → 204 (refuses 409 while an ingest, digest job or turn runs; removes
   the doc from its course, rewrites COURSE.md, deletes library/<docId>), `POST /api/docs/:docId/retry` → 202 `DocMeta`
   (re-runs the ingest for a doc whose status is 'error'; 409 otherwise).
+- `PATCH /api/docs/:docId` `{ title }` → `DocMeta` (0.6.5; the user: "지금 이름을 못바꾸거든?"): renames a lecture in any
+  state (library.ts `renameDoc`: one line — every whitespace run becomes a space —, trimmed, 1–200 characters, 400 otherwise,
+  404 when missing; doc.json through the per-document meta queue). The id, the folder and everything made from the lecture
+  stay; the files that show the title follow: the course's COURSE.md, STUDY_NOTES.md (`writeNotes`) and DIGEST.md
+  (`rewriteDigestMarkdown`: from digest.json; a digest being made writes the current title when it saves). Web: the lecture
+  row's and the 미분류 card's ⋯ menu › 이름 바꾸기 turns the title into an input (Enter saves, Esc or an unchanged title
+  cancels; outside the opening button, which cannot hold an input).
 - Single-instance guard: `library/.server.lock` with `{pid, port, startedAt}`; startup refuses (clear message) when the
   lock's pid is alive, and replaces a stale lock; removed on shutdown.
 

@@ -294,6 +294,9 @@ export const getDoc = (docId: string) => request<DocMeta>(docPath(docId)).then(n
  */
 export const deleteDoc = (docId: string) => request<void>(docPath(docId), { method: 'DELETE' });
 
+/** Rename a lecture (one line, 1–200 characters); its COURSE.md, STUDY_NOTES.md and DIGEST.md follow on the server. */
+export const renameDoc = (docId: string, title: string) => sendJSON<DocMeta>('PATCH', docPath(docId), { title }).then(normalizeDoc);
+
 /** Run the PDF conversion again for a document whose conversion failed (status 'error'); 409 otherwise. */
 export const retryDoc = (docId: string) => postJSON<DocMeta>(`${docPath(docId)}/retry`).then(normalizeDoc);
 
