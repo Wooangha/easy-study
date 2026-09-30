@@ -1,6 +1,6 @@
 [package]
 name = "easy-study"
-version = "0.6.5"
+version = "0.6.6"
 description = "easy-study desktop app: the bundled server or another computer's (DESIGN §19)"
 edition = "2021"
 rust-version = "1.88"
