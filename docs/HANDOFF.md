@@ -28,10 +28,10 @@ The user writes short casual Korean. Keep replies in Korean, short, plain; lead 
 
 ## Repository state (at the time of writing)
 
-- `main`: released up to **v0.6.3** (slide annotations; question markers show their region) (in-app updates from 0.5.0; LAN sharing + the loopback relay in 0.5.1). Pushed; no
-  other branches. Tags v0.1.0 … v0.6.3. Releases up to v0.4.2 are drafts in the private repo (the user may publish
-  them); v0.5.0 … v0.6.3 are published there AND in the public repo `Wooangha/easy-study-releases` (installers +
-  latest.json, signed on this Mac with `publish-release.mjs`). `packaging/arch/PKGBUILD` + `.SRCINFO` are at 0.6.3.
+- `main`: released up to **v0.6.4** (Vulkan GPU transcription on Windows/Linux x64; Lucide icons; a one-line top bar) (in-app updates from 0.5.0; LAN sharing + the loopback relay in 0.5.1). Pushed; no
+  other branches. Tags v0.1.0 … v0.6.4. Releases up to v0.4.2 are drafts in the private repo (the user may publish
+  them); v0.5.0 … v0.6.4 are published there AND in the public repo `Wooangha/easy-study-releases` (installers +
+  latest.json, signed on this Mac with `publish-release.mjs`). `packaging/arch/PKGBUILD` + `.SRCINFO` are at 0.6.4.
 - `gh` is installed and logged in. SSH push to origin works.
 
 ## Commands
@@ -92,7 +92,10 @@ macOS has no `timeout` command.
   Fast releases: tag directly (one CI run, ~11 min; the tests run beside the builds and only the release waits for
   them). CI caches are per git ref and a tag run restores main's, and only main's runs save them (`save-if`), so run
   CI ON MAIN first (`gh workflow run desktop.yml --ref main`) only when a cache input changed since the last main run:
-  Cargo.lock / Cargo.toml, desktop/scripts/whisper.mjs / binaries.mjs, the ffmpeg scripts, package-lock.json. A tag
+  Cargo.lock / Cargo.toml, desktop/scripts/whisper.mjs / binaries.mjs / targets.mjs, the ffmpeg scripts, package-lock.json.
+  A whisper cache miss on the x64 Windows/Linux jobs installs the pinned LunarG Vulkan SDK (~300 MB) and compiles the
+  Vulkan shaders (a few minutes more); the Linux x64 job then transcribes on Mesa's lavapipe (~50 s) to prove the GPU
+  build, and the Windows job checks the CPU fallback (its runner has no GPU). A tag
   run that fails before publishing is not precious: delete the private draft and the tag, fix, and tag the same version
   again. Delete stale caches when the quota (10 GB, `gh cache list`) fills.
 - Publishing (DESIGN §24; from 0.5.0 on, the first version with the in-app updater): users download from the PUBLIC
