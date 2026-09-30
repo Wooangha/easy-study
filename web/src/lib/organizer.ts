@@ -12,7 +12,7 @@
 // the lists are loaded again and the same move — anchored, so it still means the same place — is made once
 // more on top of them, instead of silently undoing the other change.
 //
-// No DOM or React here (unit-tested with a fake API).
+// No DOM or React code here (unit-tested with a fake API); its texts come from msg() (web/src/i18n).
 import { layoutRevision } from '../../../shared/layoutRevision.ts';
 import type {
   Course,
@@ -43,6 +43,7 @@ import {
   withoutGroup,
   type Move,
 } from './libraryLayout.ts';
+import { msg } from '../i18n/index.ts';
 
 export interface OrganizerApi {
   listCourses(): Promise<Course[]>;
@@ -66,8 +67,6 @@ export interface OrganizerDeps {
   isConflict: (e: unknown) => boolean;
 }
 
-/** Shown when a change still conflicts after the lists were loaded again. */
-const CONFLICT_MESSAGE = '다른 탭이나 기기에서 먼저 바뀌었어요. 새로 불러왔으니 다시 해 주세요';
 
 export interface OrganizerSnapshot {
   /** Courses as shown (waiting changes applied), createdAt order. null until the first load. */
@@ -122,26 +121,25 @@ function applyOp(state: State, op: Op): State {
 }
 
 function failMessage(op: Op): string {
+  const m = msg().shell.organizer.failed;
   switch (op.type) {
     case 'move':
-      if (op.move.kind === 'lecture') {
-        return op.move.courseId === null ? '강의를 과목에서 빼지 못해 원래대로 되돌렸어요' : '강의를 옮기지 못해 원래대로 되돌렸어요';
-      }
-      return op.move.kind === 'course' ? '과목을 옮기지 못해 원래대로 되돌렸어요' : '그룹을 옮기지 못해 원래대로 되돌렸어요';
+      if (op.move.kind === 'lecture') return op.move.courseId === null ? m.uncategorizeLecture : m.moveLecture;
+      return op.move.kind === 'course' ? m.moveCourse : m.moveGroup;
     case 'renameCourse':
-      return '과목 이름을 바꾸지 못했어요';
+      return m.renameCourse;
     case 'renameGroup':
-      return '그룹 이름을 바꾸지 못했어요';
+      return m.renameGroup;
     case 'deleteCourse':
-      return '과목을 삭제하지 못했어요';
+      return m.deleteCourse;
     case 'deleteGroup':
-      return '그룹을 삭제하지 못했어요';
+      return m.deleteGroup;
     case 'createCourse':
-      return '과목을 만들지 못했어요';
+      return m.createCourse;
     case 'createGroup':
-      return '그룹을 만들지 못했어요';
+      return m.createGroup;
     case 'refresh':
-      return '과목 목록을 불러오지 못했어요';
+      return m.refresh;
   }
 }
 
@@ -273,13 +271,14 @@ export function createOrganizer(deps: OrganizerDeps) {
   /** A move into (or of) a course or group that is gone cannot be made: say so instead of doing nothing. */
   function checkStillThere(move: Move, state: State): void {
     const hasCourse = (id: string) => state.courses.some((c) => c.id === id);
+    const gone = msg().shell.organizer.gone;
     if (move.kind === 'lecture') {
-      if (move.courseId !== null && !hasCourse(move.courseId)) throw new Error('옮길 과목이 다른 곳에서 삭제됐어요');
+      if (move.courseId !== null && !hasCourse(move.courseId)) throw new Error(gone.targetCourse);
     } else if (move.kind === 'course') {
-      if (!hasCourse(move.courseId)) throw new Error('이 과목은 다른 곳에서 삭제됐어요');
-      if (move.groupId !== null && !findGroup(state.layout, move.groupId)) throw new Error('옮길 그룹이 다른 곳에서 삭제됐어요');
+      if (!hasCourse(move.courseId)) throw new Error(gone.course);
+      if (move.groupId !== null && !findGroup(state.layout, move.groupId)) throw new Error(gone.targetGroup);
     } else if (!findGroup(state.layout, move.groupId)) {
-      throw new Error('이 그룹은 다른 곳에서 삭제됐어요');
+      throw new Error(gone.group);
     }
   }
 
@@ -299,7 +298,8 @@ export function createOrganizer(deps: OrganizerDeps) {
   }
 
   function reason(e: unknown): string {
-    return deps.isConflict(e) ? CONFLICT_MESSAGE : deps.errorMessage(e);
+    // Shown when a change still conflicts after the lists were loaded again.
+    return deps.isConflict(e) ? msg().shell.organizer.conflict : deps.errorMessage(e);
   }
 
   /** Queues a change; resolves with the server's answer (a created course/group) or null when it failed. */

@@ -5,6 +5,7 @@ import type { Course, DocMeta, LayoutItem, LibraryLayout } from '../../../shared
 import type { CoursesState } from '../hooks/useCourses.ts';
 import { useCollapsed } from '../hooks/useCollapsed.ts';
 import type { UploadItem } from '../hooks/useDocs.ts';
+import { msg } from '../i18n/index.ts';
 import { dndId, type DragItem, type DropData } from '../lib/libraryDnd.ts';
 import {
   allCollapseKeys,
@@ -181,9 +182,10 @@ export function LibraryView(props: LibraryViewProps) {
   const canDragCourses = !org.layoutError;
 
   const nameOf = (item: DragItem): string => {
-    if (item.kind === 'lecture') return `‘${byId.get(item.docId)?.title ?? '강의'}’ 강의`;
-    if (item.kind === 'course') return `‘${courseList.find((c) => c.id === item.courseId)?.title ?? '과목'}’ 과목`;
-    return `‘${layout.groups.find((g) => g.id === item.groupId)?.title ?? '그룹'}’ 그룹`;
+    const d = msg().shell.dnd;
+    if (item.kind === 'lecture') return d.lectureName(byId.get(item.docId)?.title ?? d.lectureFallback);
+    if (item.kind === 'course') return d.courseName(courseList.find((c) => c.id === item.courseId)?.title ?? d.courseFallback);
+    return d.groupName(layout.groups.find((g) => g.id === item.groupId)?.title ?? d.groupFallback);
   };
 
   const renderOverlay = (item: DragItem) => {
@@ -227,6 +229,7 @@ export function LibraryView(props: LibraryViewProps) {
     />
   );
 
+  const m = msg().shell.library;
   return (
     <div className="library">
       <div className="library-inner">
@@ -243,29 +246,26 @@ export function LibraryView(props: LibraryViewProps) {
             onDrop={onDrop}
           >
             <FileText className="dropzone-icon" strokeWidth={1.5} />
-            <span className="dropzone-title">PDF를 끌어다 놓거나 클릭해서 업로드</span>
+            <span className="dropzone-title">{m.dropzoneTitle}</span>
             <span className="dropzone-sub">
-              {uploadTarget ? (
-                <>
-                  <b>
-                    <Folder /> {uploadTarget.title}
-                  </b>{' '}
-                  과목에 강의로 추가돼요
-                </>
-              ) : (
-                '슬라이드를 이미지로 변환해 두고, 질문할 때 LLM이 그림·도표까지 볼 수 있게 해요'
-              )}
+              {uploadTarget
+                ? m.dropzoneToCourse(
+                    <b>
+                      <Folder /> {uploadTarget.title}
+                    </b>,
+                  )
+                : m.dropzoneSub}
             </span>
           </button>
           {courseList.length > 0 && (
             <label className="upload-target">
-              <span className="muted">업로드할 곳</span>
+              <span className="muted">{m.uploadTarget}</span>
               <select
                 className="picker"
                 value={uploadTarget?.id ?? ''}
                 onChange={(e) => props.onUploadCourseChange(e.target.value || null)}
               >
-                <option value="">미분류</option>
+                <option value="">{m.uncategorized}</option>
                 <CourseOptions courses={courseList} layout={layout} />
               </select>
             </label>
@@ -278,14 +278,14 @@ export function LibraryView(props: LibraryViewProps) {
 
         {loadError && (
           <div className="inline-error">
-            <TriangleAlert /> 문서 목록을 불러오지 못했어요: {loadError}{' '}
+            <TriangleAlert /> {m.docsLoadFailed(loadError)}{' '}
             <button type="button" className="ghost-btn small" onClick={props.onRetryLoad}>
-              다시 시도
+              {msg().common.retry}
             </button>
           </div>
         )}
 
-        {docs === null && !loadError && <p className="muted center">불러오는 중…</p>}
+        {docs === null && !loadError && <p className="muted center">{msg().common.loading}</p>}
 
         {/* ---- Courses (rendered once the documents are known, so lectures don't flash as missing) --- */}
         {docs !== null && (
@@ -300,26 +300,22 @@ export function LibraryView(props: LibraryViewProps) {
           >
             <div className="library-section-head">
               <h2 className="library-heading" tabIndex={-1} data-org-key={HEADING_KEY}>
-                과목
+                {m.courses}
               </h2>
-              {courseList.length > 1 && !saving && (
-                <span className="muted small section-tip">
-                  <GripVertical /> 를 끌어서 순서·위치를 바꿔요
-                </span>
-              )}
+              {courseList.length > 1 && !saving && <span className="muted small section-tip">{m.dragTip(<GripVertical />)}</span>}
               {saving && (
                 <span className="muted small section-tip" role="status">
-                  저장 중…
+                  {m.saving}
                 </span>
               )}
               <span className="spacer" />
               {allKeys.length > 0 && (
                 <span className="section-tools">
                   <button type="button" className="ghost-btn small" onClick={() => setAll(allKeys, true)} disabled={allCollapsed}>
-                    모두 접기
+                    {m.collapseAll}
                   </button>
                   <button type="button" className="ghost-btn small" onClick={() => setAll(allKeys, false)} disabled={!anyCollapsed}>
-                    모두 펼치기
+                    {m.expandAll}
                   </button>
                 </span>
               )}
@@ -329,33 +325,33 @@ export function LibraryView(props: LibraryViewProps) {
                   className="ghost-btn small"
                   onClick={() => setCreating('group')}
                   disabled={!coursesKnown || !!org.layoutError}
-                  title="과목을 묶는 그룹 (예: 학기)"
+                  title={m.newGroupTitle}
                 >
-                  ＋ 새 그룹
+                  {m.newGroup}
                 </button>
                 <button type="button" className="ghost-btn small" onClick={() => setCreating('course')} disabled={!coursesKnown}>
-                  ＋ 새 과목
+                  {m.newCourse}
                 </button>
               </span>
             </div>
             {org.loadError && (
               <div className="inline-error">
-                <TriangleAlert /> 과목 목록을 불러오지 못했어요: {org.loadError}
+                <TriangleAlert /> {m.coursesLoadFailed(org.loadError)}
               </div>
             )}
             {!org.loadError && org.layoutError && (
               <div className="inline-error">
-                <TriangleAlert /> 과목 배치(그룹·순서)를 불러오지 못해서 과목을 만든 순서대로 보여 줘요: {org.layoutError}{' '}
+                <TriangleAlert /> {m.layoutLoadFailed(org.layoutError)}{' '}
                 <button type="button" className="ghost-btn small" onClick={() => void org.refresh()}>
-                  다시 시도
+                  {msg().common.retry}
                 </button>
               </div>
             )}
             {creating === 'group' && (
               <NewTitleForm
                 icon={Folders}
-                placeholder="그룹 이름 (예: 2026-2학기)"
-                label="새 그룹 이름"
+                placeholder={m.groupPlaceholder}
+                label={m.newGroupName}
                 onCancel={() => setCreating(null)}
                 onCreate={async (title) => {
                   const group = await org.createGroup(title);
@@ -369,8 +365,8 @@ export function LibraryView(props: LibraryViewProps) {
             {creating === 'course' && (
               <NewTitleForm
                 icon={Folder}
-                placeholder="과목 이름 (예: Compiler)"
-                label="새 과목 이름"
+                placeholder={m.coursePlaceholder}
+                label={m.newCourseName}
                 onCancel={() => setCreating(null)}
                 onCreate={async (title) => {
                   const course = await org.create(title);
@@ -382,11 +378,7 @@ export function LibraryView(props: LibraryViewProps) {
               />
             )}
             {org.courses !== null && courseList.length === 0 && layout.groups.length === 0 && !creating && !org.loadError && (
-              <p className="course-hint muted small">
-                강의를 과목으로 묶어 두면 LLM이 이전 강의들을 알고 설명해요. 예: ‘Compiler’ 과목에 Lecture 1, 2, 3 … 을
-                순서대로 넣어 두면, Lecture 8을 공부할 때 1–7강 중 정리본이 있는 강의의 요약을 함께 받고, Claude Code·Codex는
-                필요하면 그 강의 파일도 열어 봐요. 과목이 많아지면 ‘새 그룹’으로 학기별로 묶을 수 있어요.
-              </p>
+              <p className="course-hint muted small">{m.courseHint}</p>
             )}
 
             {rows.map((row) =>
@@ -432,13 +424,11 @@ export function LibraryView(props: LibraryViewProps) {
         )}
 
         {docs && docs.length === 0 && uploads.length === 0 && !loadError && (
-          <p className="muted center">아직 문서가 없어요. 강의 자료 PDF를 올려 보세요.</p>
+          <p className="muted center">{m.noDocsYet}</p>
         )}
 
         {libraryDir && (
-          <p className="library-path muted small">
-            저장 위치: <code>{libraryDir}</code>
-          </p>
+          <p className="library-path muted small">{m.storedAt(<code>{libraryDir}</code>)}</p>
         )}
       </div>
 
@@ -488,24 +478,17 @@ function UncategorizedSection({
   /** A lecture of a course is being dragged (dropping it here takes it out of its course). */
   const draggingFromCourse = active?.kind === 'lecture' && !docs.some((d) => d.id === active.docId);
   if (docs.length === 0 && !(draggingFromCourse && hasCourses)) return null;
+  const m = msg().shell.library;
   return (
     <section
       ref={setNodeRef}
       className={`uncategorized${mark === 'into' ? ' drop-into' : ''}`}
-      aria-label={hasCourses ? '미분류 문서' : '내 문서'}
+      aria-label={hasCourses ? m.uncategorizedLabel : m.myDocs}
     >
       <div className="library-section-head">
-        <h2 className="library-heading">{hasCourses ? '미분류' : '내 문서'}</h2>
+        <h2 className="library-heading">{hasCourses ? m.uncategorized : m.myDocs}</h2>
         {hasCourses && (
-          <span className="muted small">
-            {draggingFromCourse ? (
-              '여기에 놓으면 과목에서 빠져요'
-            ) : (
-              <>
-                과목에 넣으려면 <GripVertical /> 를 끌어다 과목에 놓거나 ‘과목으로 이동’을 고르세요
-              </>
-            )}
-          </span>
+          <span className="muted small">{draggingFromCourse ? m.dropToUncategorize : m.uncategorizedTip(<GripVertical />)}</span>
         )}
       </div>
       {docs.length > 0 ? (
@@ -525,7 +508,7 @@ function UncategorizedSection({
           ))}
         </div>
       ) : (
-        <div className="uncategorized-empty">여기에 놓으면 과목에서 빠져요</div>
+        <div className="uncategorized-empty">{m.dropToUncategorize}</div>
       )}
     </section>
   );
@@ -543,6 +526,7 @@ export function DocStatusView({
   onRetry: () => void;
   onDelete: () => void;
 }) {
+  const m = msg().shell.library;
   return (
     <div className="library">
       <div className="library-inner status-view">
@@ -555,29 +539,24 @@ export function DocStatusView({
           {doc.status === 'processing' ? (
             <>
               <DocProgress doc={doc} />
-              <p className="muted small">
-                슬라이드 이미지·텍스트·개요 이미지를 만드는 중이에요. 끝나면 자동으로 열려요.
-              </p>
+              <p className="muted small">{m.processing}</p>
             </>
           ) : (
             <>
-              <div className="doc-error">{doc.error ?? '처리 중 오류가 발생했어요'}</div>
-              <p className="muted small">
-                업로드한 PDF는 남아 있어요. 일시적인 문제였다면 다시 변환해 보세요. 암호가 걸렸거나 손상된 PDF라면 암호를 풀거나
-                다시 내보낸 PDF를 새로 올려 주세요.
-              </p>
+              <div className="doc-error">{doc.error ?? m.processingError}</div>
+              <p className="muted small">{m.failedHelp}</p>
               <div className="status-actions">
                 <button type="button" className="primary-btn small" onClick={onRetry}>
-                  <RefreshCw /> 다시 변환
+                  <RefreshCw /> {m.convertAgain}
                 </button>
                 <button type="button" className="ghost-btn danger" onClick={onDelete}>
-                  삭제
+                  {msg().common.delete}
                 </button>
               </div>
             </>
           )}
           <button type="button" className="ghost-btn" onClick={onBack}>
-            <ArrowLeft /> 라이브러리
+            <ArrowLeft /> {m.backToLibrary}
           </button>
         </div>
       </div>

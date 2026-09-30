@@ -5,6 +5,7 @@ import { Bot, ChevronDown } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ProviderInfo } from '../../../shared/types.ts';
 import type { ProviderChoice, ProviderChoiceUpdate } from '../hooks/useProviderChoice.ts';
+import { msg } from '../i18n/index.ts';
 import { providerWithModel } from '../lib/format.ts';
 import { Floating } from './annotations/Floating.tsx';
 import { ProviderPicker } from './ProviderPicker.tsx';
@@ -36,12 +37,13 @@ export function NewSessionLlm({ providers, loading, choice, onChange }: NewSessi
     return () => document.removeEventListener('pointerdown', onDown, true);
   }, [open, button]);
 
-  if (!providers) return <span className="muted small">{loading ? 'LLM 확인 중…' : 'LLM 정보 없음'}</span>;
+  const m = msg().shell.llm;
+  if (!providers) return <span className="muted small">{loading ? m.checking : m.noInfo}</span>;
 
   const current = providers.find((p) => p.id === choice?.provider);
-  const model = current?.models.find((m) => m.id === (choice?.model ?? ''));
+  const model = current?.models.find((x) => x.id === (choice?.model ?? ''));
   const modelText = model?.label ?? choice?.model ?? '';
-  const full = choice ? providerWithModel(providers, choice.provider, choice.model, choice.effort) : '사용 가능한 LLM 없음';
+  const full = choice ? providerWithModel(providers, choice.provider, choice.model, choice.effort) : m.noneAvailable;
 
   return (
     <>
@@ -51,13 +53,13 @@ export function NewSessionLlm({ providers, loading, choice, onChange }: NewSessi
         className={open ? 'llm-chip is-open' : 'llm-chip'}
         aria-haspopup="dialog"
         aria-expanded={open}
-        aria-label={`새 세션에 쓸 LLM: ${full}`}
-        title={`새 세션에 쓸 LLM: ${full}`}
+        aria-label={m.newSessionLlmIs(full)}
+        title={m.newSessionLlmIs(full)}
         onClick={() => setOpen((o) => !o)}
       >
         <Bot className="llm-chip-icon" />
         <span className="llm-chip-text">
-          {current ? shortProviderLabel(current.label) : 'LLM 없음'}
+          {current ? shortProviderLabel(current.label) : m.noLlm}
           {modelText && <span className="llm-chip-model"> · {modelText}</span>}
         </span>
         <ChevronDown className="llm-chip-caret" />
@@ -70,7 +72,7 @@ export function NewSessionLlm({ providers, loading, choice, onChange }: NewSessi
           height={230}
           className="llm-pop"
           role="dialog"
-          label="새 세션에 쓸 LLM"
+          label={m.newSessionLlm}
           onScrollAway={close}
           onKeyDown={(e) => {
             if (e.key !== 'Escape') return;
@@ -79,9 +81,9 @@ export function NewSessionLlm({ providers, loading, choice, onChange }: NewSessi
             button?.focus({ preventScroll: true });
           }}
         >
-          <div className="llm-pop-head">새 세션에 쓸 LLM</div>
+          <div className="llm-pop-head">{m.newSessionLlm}</div>
           <ProviderPicker providers={providers} loading={loading} choice={choice} onChange={onChange} className="is-stacked" />
-          <p className="llm-pop-hint">지금 세션의 LLM은 채팅 위의 LLM 이름을 눌러 바꿔요.</p>
+          <p className="llm-pop-hint">{m.popHint}</p>
         </Floating>
       )}
     </>

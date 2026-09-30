@@ -7,9 +7,9 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { Ellipsis, Mic } from 'lucide-react';
 import { ANNOTATION_COLORS, type AnnotationColor } from '../../../../shared/types.ts';
+import { msg } from '../../i18n/index.ts';
 import { ANNOTATION_TOOLS, CLICK_TOOLS, type AnnotationTool } from '../../lib/annotations/geometry.ts';
 import { ToolIcon } from './icons.tsx';
-import { COLOR_NAMES } from './ItemMenu.tsx';
 
 export interface SlideFilter {
   /** 표시 있는 슬라이드만. */
@@ -20,35 +20,12 @@ export interface SlideFilter {
 
 export const NO_FILTER: SlideFilter = { onlyAnnotated: false, tag: null };
 
-export const TOOL_LABELS: Record<AnnotationTool, string> = {
-  select: '선택·첨부',
-  marquee: '범위 선택',
-  highlight: '형광펜',
-  textHighlight: '텍스트 형광',
-  rect: '사각형',
-  ellipse: '동그라미',
-  text: '텍스트',
-  memo: '메모',
-};
-
-const OFF_HINT = '(다시 누르거나 Esc로 끔)';
-
-const TOOL_TITLES: Record<AnnotationTool, string> = {
-  select: '선택·첨부: 필기를 클릭해 옮기거나 지우고, 빈 곳을 끌면 그 영역을 질문에 첨부해요',
-  marquee: `범위 선택: 빈 곳에서 끌어 여러 필기를 한꺼번에 골라요 · Shift+클릭으로 더하고 빼요 ${OFF_HINT}`,
-  highlight: `형광펜: 글줄 위에서 끌면 그 줄에 맞춰 칠해요 ${OFF_HINT}`,
-  textHighlight: `텍스트 형광: 글자 위에서 끌면 단어에 맞춰 칠하고, 칠한 글 위를 다시 끌면 범위가 바뀌어요 ${OFF_HINT}`,
-  rect: `사각형: 끌어서 그려요 ${OFF_HINT}`,
-  ellipse: `동그라미: 끌어서 그려요 ${OFF_HINT}`,
-  text: `텍스트 상자: 클릭하거나 끌어서 만들고 글을 써요 ${OFF_HINT}`,
-  memo: `메모: 클릭한 자리에 스티커 메모를 붙여요 ${OFF_HINT}`,
-};
-
 /** The one-line hint of the viewer's toolbar for the state (hidden on narrow panes; the titles say the same). */
 export function toolHint(tool: AnnotationTool): string {
-  if (tool === 'select') return 'j/k · ↑/↓ · 빈 곳을 끌면 영역 첨부';
-  if (tool === 'marquee') return '범위 선택: 빈 곳에서 끌어 여러 개 고르기 · Shift+클릭 더하기·빼기 · Esc';
-  return `${TOOL_LABELS[tool]}: 빈 곳에서 ${CLICK_TOOLS.has(tool) ? '클릭' : '끌기'} · 필기는 클릭해 옮기기 · Esc`;
+  const m = msg().viewer.tools;
+  if (tool === 'select') return m.hintSelect;
+  if (tool === 'marquee') return m.hintMarquee;
+  return m.hintDraw(m.labels[tool], CLICK_TOOLS.has(tool));
 }
 
 interface AnnotationToolsProps {
@@ -81,10 +58,14 @@ export function AnnotationTools(props: AnnotationToolsProps) {
   const { tool, onTool, color, onColor, layerShown, onLayerShown, markersShown, onMarkersShown, filter, onFilter, tags, shownCount, pageCount } = props;
   const { replayAvailable, replayOn, onReplayOn, replaying, compact } = props;
   const disabled = !layerShown;
+  const m = msg().viewer;
+  const labels = m.tools.labels;
+  const colorNames = m.colorNames;
+  const menu = m.layerMenu;
 
   // The default state is a quiet "raised" segment, a drawing tool the accent: at a glance, is something being drawn?
   const tools = (vertical: boolean) => (
-    <div className={vertical ? 'annot-tools is-vertical' : 'annot-tools'} role="group" aria-label="필기 도구">
+    <div className={vertical ? 'annot-tools is-vertical' : 'annot-tools'} role="group" aria-label={m.tools.group}>
       {ANNOTATION_TOOLS.map((t) => (
         <button
           key={t}
@@ -93,19 +74,19 @@ export function AnnotationTools(props: AnnotationToolsProps) {
           aria-pressed={t === tool}
           disabled={disabled && t !== 'select'}
           onClick={() => onTool(t === tool ? 'select' : t)}
-          title={disabled && t !== 'select' ? '필기가 숨겨져 있어요 (⋯ 필기 메뉴에서 보이기)' : TOOL_TITLES[t]}
+          title={disabled && t !== 'select' ? m.tools.hiddenTitle : m.tools.titles[t]}
         >
           <span className="annot-tool-icon" aria-hidden>
             <ToolIcon tool={t} />
           </span>
-          {vertical && <span className="annot-tool-label">{TOOL_LABELS[t]}</span>}
+          {vertical && <span className="annot-tool-label">{labels[t]}</span>}
         </button>
       ))}
     </div>
   );
 
   const dots = (
-    <span className="annot-color-dots" role="group" aria-label="새 필기의 색">
+    <span className="annot-color-dots" role="group" aria-label={m.tools.colorGroup}>
       {ANNOTATION_COLORS.map((c) => (
         <button
           key={c}
@@ -114,8 +95,8 @@ export function AnnotationTools(props: AnnotationToolsProps) {
           aria-pressed={c === color}
           disabled={disabled}
           onClick={() => onColor(c)}
-          aria-label={COLOR_NAMES[c]}
-          title={`새 필기의 색: ${COLOR_NAMES[c]}`}
+          aria-label={colorNames[c]}
+          title={m.tools.colorTitle(colorNames[c])}
         />
       ))}
     </span>
@@ -128,7 +109,7 @@ export function AnnotationTools(props: AnnotationToolsProps) {
       {compact ? (
         <ToolPopover
           className={tool === 'select' ? 'annot-tools-compact' : 'annot-tools-compact is-drawing'}
-          label="필기 도구"
+          label={m.tools.group}
           button={
             <>
               <span className="annot-tool-icon" aria-hidden>
@@ -137,7 +118,7 @@ export function AnnotationTools(props: AnnotationToolsProps) {
               <span className={`annot-dot is-${color} is-mini`} aria-hidden />
             </>
           }
-          title={`필기 도구: ${TOOL_LABELS[tool]} · ${COLOR_NAMES[color]}`}
+          title={m.tools.compactTitle(labels[tool], colorNames[color])}
         >
           {tools(true)}
           <div className="annot-pop-dots">{dots}</div>
@@ -150,25 +131,25 @@ export function AnnotationTools(props: AnnotationToolsProps) {
       )}
       <ToolPopover
         className={filterOn || !layerShown ? 'annot-menu-btn is-active' : 'annot-menu-btn'}
-        label="필기 메뉴"
+        label={menu.label}
         button={
           <>
             <Ellipsis />
-            <span className="annot-menu-text">{layerShown ? '필기' : '필기 숨김'}</span>
+            <span className="annot-menu-text">{layerShown ? menu.button : menu.buttonHidden}</span>
           </>
         }
-        title="필기 보기/숨기기 · 표시 있는 슬라이드만 · 태그 · 질문 표시 · 그때 필기 재생"
+        title={menu.title}
       >
         <label className="annot-menu-row">
           <input type="checkbox" checked={layerShown} onChange={(e) => onLayerShown(e.target.checked)} />
-          <span>필기 보기</span>
+          <span>{menu.showLayer}</span>
         </label>
         <label className="annot-menu-row">
           <input type="checkbox" checked={filter.onlyAnnotated || filter.tag !== null} onChange={(e) => onFilter({ onlyAnnotated: e.target.checked, tag: e.target.checked ? filter.tag : null })} />
-          <span>표시 있는 슬라이드만</span>
+          <span>{menu.onlyMarked}</span>
         </label>
         <label className="annot-menu-row">
-          <span>태그</span>
+          <span>{menu.tag}</span>
           <select
             className="picker small"
             value={filter.tag ?? ''}
@@ -176,9 +157,9 @@ export function AnnotationTools(props: AnnotationToolsProps) {
               const tag = e.target.value || null;
               onFilter({ onlyAnnotated: tag !== null || filter.onlyAnnotated, tag });
             }}
-            aria-label="태그로 슬라이드 거르기"
+            aria-label={menu.tagFilter}
           >
-            <option value="">모든 태그</option>
+            <option value="">{menu.allTags}</option>
             {tags.map((t) => (
               <option key={t.tag} value={t.tag}>
                 #{t.tag} ({t.count})
@@ -188,31 +169,31 @@ export function AnnotationTools(props: AnnotationToolsProps) {
         </label>
         <label className="annot-menu-row">
           <input type="checkbox" checked={markersShown} onChange={(e) => onMarkersShown(e.target.checked)} />
-          <span>질문 표시 보기</span>
+          <span>{menu.showMarkers}</span>
         </label>
         {replayAvailable && (
-          <label className="annot-menu-row" title="녹음 탭에서 재생하는 동안, 그때까지 쓴 필기만 보여요">
+          <label className="annot-menu-row" title={menu.replayTitle}>
             <input type="checkbox" checked={replayOn} onChange={(e) => onReplayOn(e.target.checked)} />
-            <span>그때 필기 재생</span>
+            <span>{menu.replay}</span>
           </label>
         )}
         {filterOn && shownCount !== null && (
           <div className="annot-menu-note">
-            표시 {shownCount}/{pageCount}
+            {menu.shownCount(shownCount, pageCount)}
             <button type="button" className="ghost-btn tiny" onClick={() => onFilter(NO_FILTER)}>
-              모두 보기
+              {menu.showAll}
             </button>
           </div>
         )}
       </ToolPopover>
       {filterOn && shownCount !== null && (
-        <span className="annot-shown-count" title="표시 있는 슬라이드만 보는 중 (⋯ 필기 메뉴에서 해제)">
-          표시 {shownCount}/{pageCount}
+        <span className="annot-shown-count" title={menu.shownCountTitle}>
+          {menu.shownCount(shownCount, pageCount)}
         </span>
       )}
       {replaying && (
-        <span className="annot-replay-badge" title="녹음 탭의 재생 위치까지 쓴 필기만 보여요 (⋯ 필기 메뉴에서 끌 수 있어요)">
-          <Mic /> 그때 필기 재생 중
+        <span className="annot-replay-badge" title={menu.replayingTitle}>
+          <Mic /> {menu.replaying}
         </span>
       )}
     </>

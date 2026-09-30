@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type ReactNode } from 'react';
+import { msg } from '../i18n/index.ts';
 import { clamp } from '../lib/format.ts';
 import { isNumber, readStorage, storageKeys, writeStorage } from '../lib/storage.ts';
 
@@ -49,6 +50,7 @@ export function SplitPane({ left, right }: { left: ReactNode; right: ReactNode }
     e.stopPropagation();
   };
 
+  const m = msg().shell.splitPane;
   return (
     <div
       ref={containerRef}
@@ -60,12 +62,12 @@ export function SplitPane({ left, right }: { left: ReactNode; right: ReactNode }
         className="split-divider"
         role="separator"
         aria-orientation="vertical"
-        aria-label="패널 크기 조절"
+        aria-label={m.label}
         aria-valuemin={MIN_RATIO * 100}
         aria-valuemax={MAX_RATIO * 100}
         aria-valuenow={Math.round(ratio * 100)}
         tabIndex={0}
-        title="드래그해서 크기 조절 · 더블클릭하면 기본값"
+        title={m.title}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={endDrag}

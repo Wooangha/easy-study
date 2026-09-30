@@ -4,10 +4,10 @@
 import {
   MAX_ATTACHMENT_BYTES,
   MAX_ATTACHMENTS,
-  type AnnotationItem,
   type Attachment,
   type RegionRect,
 } from '../../../shared/types.ts';
+import { msg } from '../i18n/index.ts';
 
 // ---------------------------------------------------------------------------
 // Selection geometry
@@ -241,7 +241,7 @@ export function classifyDragTypes(itemTypes: readonly string[]): DragKinds {
 }
 
 /** An image dropped where no lecture is open (the library): the overlay says it (with the image icon), and so does the toast. */
-export const IMAGE_NEEDS_LECTURE = '이미지는 강의를 연 뒤 놓으면 질문에 첨부돼요';
+const imageNeedsLecture = (): string => msg().chat.attachments.imageNeedsLecture;
 
 export interface DropPlan<T> {
   /** PDFs to upload as new lectures. */
@@ -260,15 +260,11 @@ export interface DropPlan<T> {
 export function planDrop<T extends FileLike>(files: readonly T[], attachOpen: boolean): DropPlan<T> {
   const { pdfs, images, others } = classifyFiles(files);
   const notices: DropPlan<T>['notices'] = [];
-  if (images.length > 0 && !attachOpen) notices.push({ message: IMAGE_NEEDS_LECTURE, kind: 'info' });
+  if (images.length > 0 && !attachOpen) notices.push({ message: imageNeedsLecture(), kind: 'info' });
   if (others.length > 0) {
+    const m = msg().chat.attachments;
     const names = others.map((f) => f.name).join(', ');
-    notices.push({
-      message: attachOpen
-        ? `PDF(강의 추가)나 이미지(${SUPPORTED_IMAGE_FORMATS}, 질문에 첨부)만 놓을 수 있어요: ${names}`
-        : `PDF 파일만 올릴 수 있어요: ${names}`,
-      kind: 'error',
-    });
+    notices.push({ message: attachOpen ? m.dropRefused(SUPPORTED_IMAGE_FORMATS, names) : m.pdfOnly(names), kind: 'error' });
   }
   return { pdfs, images: attachOpen ? images : [], notices };
 }
@@ -286,15 +282,15 @@ export interface DropOverlayCopy<P> {
  * icons). `attachOpen` = a lecture is open, so images can be attached to a question.
  */
 export function dropOverlayCopy<P = string>(kinds: DragKinds, pdfTarget: P, attachOpen: boolean): DropOverlayCopy<P> {
-  const image = '이미지를 놓으면 질문에 첨부해요';
+  const m = msg().chat.attachments;
   if (kinds.image && !kinds.pdf && !kinds.unknown) {
-    return { title: attachOpen ? image : IMAGE_NEEDS_LECTURE, titleIcon: 'image', sub: null, subIcon: null };
+    return { title: attachOpen ? m.dropImage : m.imageNeedsLecture, titleIcon: 'image', sub: null, subIcon: null };
   }
   // PDFs and images together: the images go with this lecture's question, so the new lecture is not opened.
   if (kinds.image && attachOpen) {
-    return { title: pdfTarget, titleIcon: null, sub: `${image} (PDF는 강의 목록에 추가만 해요)`, subIcon: 'image' };
+    return { title: pdfTarget, titleIcon: null, sub: m.dropImageWithPdf, subIcon: 'image' };
   }
-  return { title: pdfTarget, titleIcon: null, sub: attachOpen && kinds.unknown ? '이미지는 질문에 첨부돼요' : null, subIcon: null };
+  return { title: pdfTarget, titleIcon: null, sub: attachOpen && kinds.unknown ? m.dropMaybeImage : null, subIcon: null };
 }
 
 /** Names browsers give a pasted screenshot: not worth showing. */
@@ -317,52 +313,37 @@ export function clipboardImages<T extends FileLike>(text: string, files: readonl
 
 type Labelled = Pick<Attachment, 'kind' | 'slide' | 'name' | 'annotation'>;
 
-/** What a region made from a 필기 (Attachment.annotation, DESIGN §25) is called in its chip. */
-const ANNOTATION_KIND_LABELS: Record<AnnotationItem['type'], string> = {
-  memo: '메모',
-  highlight: '형광',
-  textHighlight: '형광',
-  text: '텍스트',
-  rect: '사각형',
-  ellipse: '동그라미',
-};
-
-/** …and in the longer description. */
-const ANNOTATION_KIND_TITLES: Record<AnnotationItem['type'], string> = {
-  memo: '붙인 메모',
-  highlight: '형광펜으로 칠한 부분',
-  textHighlight: '형광펜으로 칠한 글',
-  text: '쓴 텍스트 상자',
-  rect: '사각형으로 표시한 부분',
-  ellipse: '동그라미로 표시한 부분',
-};
-
-/** "p.12 영역" / "p.12 메모" (a region made from a 필기) / the file name / "이미지". */
+/**
+ * "p.12 영역" / "p.12 메모" (a region made from a 필기, Attachment.annotation, DESIGN §25) / the file name / "이미지".
+ * The kinds are named by chat.attachments.kinds (and kindTitles in attachmentTitle).
+ */
 export function attachmentLabel(a: Labelled): string {
+  const m = msg().chat.attachments;
   if (a.kind === 'region') {
-    const what = a.annotation ? ANNOTATION_KIND_LABELS[a.annotation.type] : '영역';
-    return a.slide ? `p.${a.slide} ${what}` : a.annotation ? what : '선택 영역';
+    const what = a.annotation ? m.kinds[a.annotation.type] : m.region;
+    return a.slide ? m.onPage(a.slide, what) : a.annotation ? what : m.selectedRegion;
   }
-  return a.name?.trim() || '이미지';
+  return a.name?.trim() || m.image;
 }
 
 /** Longer description (tooltips, alt text). */
 export function attachmentTitle(a: Labelled): string {
+  const m = msg().chat.attachments;
   if (a.kind === 'region') {
-    const where = a.slide ? `슬라이드 ${a.slide}` : '슬라이드';
-    return a.annotation ? `${where}에 ${ANNOTATION_KIND_TITLES[a.annotation.type]}` : `${where}에서 선택한 영역`;
+    const where = a.slide ? m.onSlide(a.slide) : m.someSlide;
+    return a.annotation ? m.kindTitles[a.annotation.type](where) : m.regionTitle(where);
   }
-  return a.name?.trim() ? `첨부한 이미지: ${a.name.trim()}` : '첨부한 이미지';
+  return a.name?.trim() ? m.imageTitleNamed(a.name.trim()) : m.imageTitle;
 }
 
 /** The question sent when only attachments were given (Enter on an empty composer). */
 export function defaultQuestion(attachments: ReadonlyArray<Pick<Attachment, 'kind'>>): string {
-  return attachments.length > 0 && attachments.every((a) => a.kind === 'region')
-    ? '이 부분 설명해줘'
-    : '첨부한 이미지 설명해줘';
+  const m = msg().chat.attachments;
+  return attachments.length > 0 && attachments.every((a) => a.kind === 'region') ? m.explainRegion : m.explainImage;
 }
 
-export const EXPLAIN_REGION_PROMPT = '이 부분 설명해줘';
+/** The question sent by the region menu's "이 부분 설명해줘" (a function: it is in the page's language). */
+export const explainRegionPrompt = (): string => msg().chat.attachments.explainRegion;
 
 export function formatMegabytes(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
@@ -370,26 +351,33 @@ export function formatMegabytes(bytes: number): string {
 
 export const MAX_ATTACHMENT_MB = Math.round(MAX_ATTACHMENT_BYTES / 1024 / 1024);
 
-export const limitMessage = (refused: number) =>
-  `한 질문에 최대 ${MAX_ATTACHMENTS}개까지 첨부할 수 있어요${refused > 0 ? ` (${refused}개는 첨부하지 않았어요)` : ''}`;
+export const limitMessage = (refused: number) => msg().chat.attachments.limit(MAX_ATTACHMENTS, refused);
 
-/** A message the server wrote (Korean), not a fallback such as "첨부 실패 (HTTP 413)" or a proxy's status text. */
-const fromServer = (message: string) => /[가-힣]/.test(message) && !/\(HTTP \d{3}\)$/.test(message);
+/**
+ * A message the server wrote (in any language), not a fallback: "첨부 실패 (HTTP 413)" (api.ts), "HTTP 413 Payload Too
+ * Large", a proxy's status text ("Request Entity Too Large") or its HTML error page.
+ */
+function fromServer(message: string): boolean {
+  const text = message.trim();
+  if (text === '' || text.startsWith('<') || /\(HTTP \d{3}\)$/.test(text) || /^HTTP \d{3}\b/.test(text)) return false;
+  return /[가-힣]/.test(text) || !/^(\d{3}\s+)?(payload|request entity|content) too large\.?$/i.test(text);
+}
 
 /** Readable reason an upload / region was refused, from the HTTP status and the server's message. */
 export function attachErrorMessage(status: number, serverMessage: string): string {
+  const m = msg().chat.attachments;
   switch (status) {
     case 0:
-      return serverMessage || '서버에 연결할 수 없어요';
+      return serverMessage || msg().common.api.cannotConnect;
     case 413:
       // The server says why (the file's size, or its resolution); a proxy's own 413 page does not.
-      return fromServer(serverMessage) ? serverMessage : `이미지가 너무 커요 (최대 ${MAX_ATTACHMENT_MB} MB)`;
+      return fromServer(serverMessage) ? serverMessage : m.tooLarge(MAX_ATTACHMENT_MB);
     case 415:
-      return serverMessage || `지원하지 않는 이미지 형식이에요 (${SUPPORTED_IMAGE_FORMATS})`;
+      return serverMessage || m.unsupported(SUPPORTED_IMAGE_FORMATS);
     case 409:
-      return serverMessage || '문서가 아직 준비되지 않았어요';
+      return serverMessage || m.docNotReady;
     case 404:
-      return serverMessage || '문서를 찾을 수 없어요';
+      return serverMessage || m.docNotFound;
     default:
       return serverMessage || `HTTP ${status}`;
   }
@@ -502,9 +490,9 @@ export function withoutAttachments(chips: readonly Chip[], ids: readonly string[
 
 /** Why a question was not sent when some of its attachments are gone from the server (swept, deleted). */
 export function missingAttachmentsMessage(attachments: ReadonlyArray<Labelled & Pick<Attachment, 'id'>>, missing: readonly string[]): string {
+  const m = msg().chat.attachments;
   const labels = attachments.filter((a) => missing.includes(a.id)).map(attachmentLabel);
-  const what = labels.length > 0 ? labels.join(', ') : `${missing.length}개`;
-  return `첨부(${what})를 서버에서 찾을 수 없어서 질문을 보내지 않았어요. 질문에 쓰지 않은 첨부는 24시간 뒤에 지워져요 — 그 첨부 없이 다시 보내 주세요.`;
+  return labels.length > 0 ? m.missing(labels.join(', ')) : m.missingCount(missing.length);
 }
 
 export function readyAttachments(items: readonly Chip[]): Attachment[] {

@@ -20,13 +20,16 @@ export interface ModelOption {
 export interface EffortOption {
   /** Value passed to the CLI, e.g. 'high'. */
   id: string;
-  /** Korean name, e.g. '높음' (EFFORT_LABELS). */
+  /** Its name in the request's language, e.g. '높음' / 'high' (the server's texts, DESIGN §27). */
   label: string;
   /** Longer explanation (tooltip). */
   description?: string;
 }
 
-/** Korean names of the reasoning-effort levels; an unknown level is shown by its id. */
+/**
+ * Korean names of the reasoning-effort levels; an unknown level is shown by its id. The server sends each level's name
+ * in the request's language (EffortOption.label); these are the Korean fallback for a level a provider does not list.
+ */
 export const EFFORT_LABELS: Readonly<Record<string, string>> = {
   none: '없음',
   minimal: '최소',

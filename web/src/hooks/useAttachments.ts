@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react';
 import { MAX_ATTACHMENT_BYTES, type AnnotationItem, type Attachment, type RegionRect } from '../../../shared/types.ts';
 import * as api from '../api.ts';
+import { msg } from '../i18n/index.ts';
 import { itemBounds } from '../lib/annotations/geometry.ts';
 import {
   annotationAttachPlan,
@@ -123,11 +124,11 @@ export function useAttachments(docId: string | null): AttachmentsApi {
       const { images, pdfs, others } = classifyFiles(files);
       const refused = [...pdfs, ...others];
       if (refused.length > 0) {
-        toast(`${SUPPORTED_IMAGE_FORMATS} 이미지만 첨부할 수 있어요: ${refused.map((f) => f.name).join(', ')}`, 'error');
+        toast(msg().chat.attachments.onlyImages(SUPPORTED_IMAGE_FORMATS, refused.map((f) => f.name).join(', ')), 'error');
       }
       const tooBig = images.filter((f) => f.size > MAX_ATTACHMENT_BYTES);
       for (const f of tooBig) {
-        toast(`이미지가 너무 커요 (최대 ${MAX_ATTACHMENT_MB} MB): ${f.name} (${formatMegabytes(f.size)})`, 'error');
+        toast(msg().chat.attachments.tooLargeFile(MAX_ATTACHMENT_MB, f.name, formatMegabytes(f.size)), 'error');
       }
       const wanted = images.filter((f) => f.size <= MAX_ATTACHMENT_BYTES);
       const free = freeSlots(current());
@@ -142,7 +143,7 @@ export function useAttachments(docId: string | null): AttachmentsApi {
         } catch {
           localUrl = undefined;
         }
-        const label = name ?? (options.pasted ? '붙여넣은 이미지' : '이미지');
+        const label = name ?? (options.pasted ? msg().chat.attachments.pastedImage : msg().chat.attachments.image);
         dispatch({
           type: 'add',
           item: {
@@ -174,7 +175,7 @@ export function useAttachments(docId: string | null): AttachmentsApi {
             if (api.isAbortError(e)) return;
             const status = e instanceof api.ApiError ? e.status : -1;
             const message = status === -1 ? api.errorMessage(e) : attachErrorMessage(status, api.errorMessage(e));
-            if (stateRef.current.docId === forDoc) toast(`첨부하지 못했어요 (${label}): ${message}`, 'error');
+            if (stateRef.current.docId === forDoc) toast(msg().chat.attachments.attachFailed(label, message), 'error');
             dispatch({ type: 'remove', keys: [key] });
           })
           .finally(() => {
@@ -197,7 +198,7 @@ export function useAttachments(docId: string | null): AttachmentsApi {
       }
       // The same item twice would be two chips of one region: the first one stands.
       if (item && current().some((c) => chipOfItem(c, item.id))) {
-        toast('이미 입력창에 첨부되어 있어요', 'info', 2500);
+        toast(msg().chat.attachments.alreadyAttached, 'info', 2500);
         return null;
       }
       const key = item ? `region-${++chipSeq}:${item.id}` : `region-${++chipSeq}`;
@@ -225,7 +226,10 @@ export function useAttachments(docId: string | null): AttachmentsApi {
         .catch((e: unknown) => {
           const status = e instanceof api.ApiError ? e.status : -1;
           const message = status === -1 ? api.errorMessage(e) : attachErrorMessage(status, api.errorMessage(e));
-          if (stateRef.current.docId === forDoc) toast(`${item ? '필기를' : '영역을'} 첨부하지 못했어요: ${message}`, 'error');
+          if (stateRef.current.docId === forDoc) {
+            const m = msg().chat.attachments;
+            toast(item ? m.annotationFailed(message) : m.regionFailed(message), 'error');
+          }
           dispatch({ type: 'remove', keys: [key] });
           return null;
         })
@@ -244,7 +248,10 @@ export function useAttachments(docId: string | null): AttachmentsApi {
     (slide: number, items: readonly AnnotationItem[]): Promise<Array<Attachment | null>> => {
       const { take, refused, attached } = annotationAttachPlan(current(), items);
       if (refused > 0) toast(limitMessage(refused), 'error');
-      else if (attached > 0) toast(attached === items.length ? '이미 입력창에 첨부되어 있어요' : `${attached}개는 이미 첨부되어 있어요`, 'info', 2500);
+      else if (attached > 0) {
+        const m = msg().chat.attachments;
+        toast(attached === items.length ? m.alreadyAttached : m.someAlreadyAttached(attached), 'info', 2500);
+      }
       // Each one passes addRegionOf's own checks (the plan left room for all of them, none is attached yet).
       return Promise.all(take.map((item) => addRegionOf(slide, itemBounds(item), item)));
     },

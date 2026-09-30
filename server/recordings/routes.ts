@@ -9,6 +9,7 @@ import { DOC_ID_RE, RECORDING_ID_RE } from '../../shared/types.ts';
 import type { ProviderId, ProviderInfo } from '../../shared/types.ts';
 import type { AcquireCliSlot } from '../cliBudget.ts';
 import { HttpError } from '../config.ts';
+import { smsg } from '../i18n.ts';
 import { docPaths, isNotFound } from '../library.ts';
 import type { Provider } from '../providers/types.ts';
 import { AI_ALIGN_SYSTEM_PROMPT } from './aiPrompt.ts';
@@ -65,7 +66,7 @@ function decodeFileName(header: string | undefined, fallback: string): string {
 
 /** ENOSPC → 507 with a readable message (the client keeps the audio and retries later). */
 function diskFull(err: unknown): unknown {
-  return (err as NodeJS.ErrnoException | null)?.code === 'ENOSPC' ? new HttpError(507, '디스크 공간이 부족합니다. 공간을 확보한 뒤 다시 시도해 주세요') : err;
+  return (err as NodeJS.ErrnoException | null)?.code === 'ENOSPC' ? new HttpError(507, smsg().recordings.diskFull) : err;
 }
 
 function jsonObject(req: Request): Record<string, unknown> {
@@ -85,6 +86,8 @@ function receiveBody(
   max: number,
   idleMs: number,
 ): Promise<{ bytes: number; head: Buffer } | { tooLarge: true }> {
+  // Read now: the stream's events and the idle timer (armed from them) should not depend on the request's context.
+  const m = smsg().recordings.upload;
   return new Promise((resolve, reject) => {
     const out = createWriteStream(file);
     let received = 0;
@@ -96,7 +99,7 @@ function receiveBody(
       if (settled) return;
       idle = setTimeout(() => {
         const seconds = Math.max(1, Math.round(idleMs / 1000));
-        fail(new HttpError(408, `업로드가 ${seconds}초 넘게 멈춰 있어서 중단했습니다. 다시 올려 주세요`));
+        fail(new HttpError(408, m.stalled(seconds)));
       }, idleMs);
       idle.unref?.();
     };
@@ -140,7 +143,7 @@ function receiveBody(
     });
     req.once('error', (err) => fail(err));
     req.once('close', () => {
-      if (!req.complete) fail(new Error('업로드가 중간에 끊겼습니다'));
+      if (!req.complete) fail(new Error(m.interrupted));
     });
     out.once('error', (err) => fail(err));
     arm();
@@ -228,13 +231,13 @@ function sendLiveWav(req: Request, res: Response, file: string, bytes: number): 
 export function createRecordingsRouter(deps: RecordingRouteDeps): express.Router {
   const router = express.Router();
   router.param('docId', (_req, _res, next, value: string) => {
-    next(DOC_ID_RE.test(value) ? undefined : new HttpError(404, '문서를 찾을 수 없습니다'));
+    next(DOC_ID_RE.test(value) ? undefined : new HttpError(404, smsg().common.notFound.doc));
   });
   router.param('rid', (_req, _res, next, value: string) => {
-    next(RECORDING_ID_RE.test(value) ? undefined : new HttpError(404, '녹음을 찾을 수 없습니다'));
+    next(RECORDING_ID_RE.test(value) ? undefined : new HttpError(404, smsg().recordings.notFound.recording));
   });
   router.param('modelId', (_req, _res, next, value: string) => {
-    next(MODEL_ID_RE.test(value) ? undefined : new HttpError(404, '모델을 찾을 수 없습니다'));
+    next(MODEL_ID_RE.test(value) ? undefined : new HttpError(404, smsg().recordings.notFound.model));
   });
 
   // --- engine and models ----------------------------------------------------------------------------------------
@@ -282,7 +285,7 @@ export function createRecordingsRouter(deps: RecordingRouteDeps): express.Router
     };
     const tooLarge = () => {
       const limit = max >= 1024 ** 3 ? `${(max / 1024 ** 3).toFixed(0)} GB` : `${Math.ceil(max / 1024 ** 2)} MB`;
-      return refuse(new HttpError(413, `녹음 파일이 너무 큽니다 (최대 ${limit})`, { maxBytes: max }));
+      return refuse(new HttpError(413, smsg().recordings.upload.tooLarge(limit), { maxBytes: max }));
     };
     const declared = Number(req.get('Content-Length'));
     if (Number.isFinite(declared) && declared > max) throw await tooLarge();
@@ -304,7 +307,7 @@ export function createRecordingsRouter(deps: RecordingRouteDeps): express.Router
       // A stalled sender: answer, then close the connection (the rest of its body is not read).
       if (err instanceof HttpError && err.status === 408) res.set('Connection', 'close');
       const mapped = diskFull(err);
-      throw mapped instanceof HttpError ? mapped : new HttpError(400, err instanceof Error ? err.message : '업로드가 중간에 끊겼습니다');
+      throw mapped instanceof HttpError ? mapped : new HttpError(400, err instanceof Error ? err.message : smsg().recordings.upload.interrupted);
     }
     if ('tooLarge' in received) {
       await abortUpload(upload.dir);
@@ -312,12 +315,12 @@ export function createRecordingsRouter(deps: RecordingRouteDeps): express.Router
     }
     if (received.bytes === 0) {
       await abortUpload(upload.dir);
-      throw new HttpError(400, '녹음 파일 내용이 비어 있습니다');
+      throw new HttpError(400, smsg().recordings.upload.empty);
     }
     const kind = sniffMedia(received.head, fileName);
     if (!kind) {
       await abortUpload(upload.dir);
-      throw new HttpError(415, `오디오·동영상 파일이 아닙니다 (지원: ${SUPPORTED_UPLOADS})`);
+      throw new HttpError(415, smsg().recordings.upload.notMedia(SUPPORTED_UPLOADS));
     }
     res.status(201).json(await finishUpload(docId, upload.id, kind.ext, path.basename(fileName), options));
   });
@@ -340,7 +343,7 @@ export function createRecordingsRouter(deps: RecordingRouteDeps): express.Router
       rawAudio(req, res, (err?: unknown) => {
         next(
           (err as { type?: string } | undefined)?.type === 'entity.too.large'
-            ? new HttpError(413, `오디오 조각이 너무 큽니다 (최대 ${MAX_AUDIO_CHUNK_BYTES} 바이트)`, { maxBytes: MAX_AUDIO_CHUNK_BYTES })
+            ? new HttpError(413, smsg().recordings.live.chunkTooLarge(MAX_AUDIO_CHUNK_BYTES), { maxBytes: MAX_AUDIO_CHUNK_BYTES })
             : err,
         );
       });
@@ -348,10 +351,10 @@ export function createRecordingsRouter(deps: RecordingRouteDeps): express.Router
     async (req, res) => {
       const raw = String(req.query.offset ?? '');
       const offset = /^\d{1,15}$/.test(raw) ? Number(raw) : NaN;
-      if (!Number.isSafeInteger(offset)) throw new HttpError(400, 'offset(0 이상의 정수)이 필요합니다');
+      if (!Number.isSafeInteger(offset)) throw new HttpError(400, smsg().recordings.live.offsetRequired);
       const body: unknown = req.body;
-      if (!Buffer.isBuffer(body) || body.length === 0) throw new HttpError(400, '오디오 내용이 비어 있습니다');
-      if (offset % 2 !== 0 || body.length % 2 !== 0) throw new HttpError(400, 'PCM 16비트 샘플 단위(짝수 바이트)로 보내 주세요');
+      if (!Buffer.isBuffer(body) || body.length === 0) throw new HttpError(400, smsg().recordings.live.emptyAudio);
+      if (offset % 2 !== 0 || body.length % 2 !== 0) throw new HttpError(400, smsg().recordings.live.oddBytes);
       try {
         res.json(await appendLiveAudio(req.params.docId as string, req.params.rid as string, offset, body));
       } catch (err) {
@@ -385,7 +388,7 @@ export function createRecordingsRouter(deps: RecordingRouteDeps): express.Router
           } else if (typeof status === 'number' && status >= 400 && status < 500 && status !== 404) {
             res.status(status).end();
             resolve();
-          } else if (status === 404 || isNotFound(err)) reject(new HttpError(404, '재생할 오디오가 아직 없습니다'));
+          } else if (status === 404 || isNotFound(err)) reject(new HttpError(404, smsg().recordings.notFound.playbackAudio));
           else reject(err);
         },
       );
@@ -450,7 +453,7 @@ export function createRecordingsRouter(deps: RecordingRouteDeps): express.Router
     // DESIGN §22: haiku unless the request names a model.
     if (body.model === undefined || body.model === '') model = info.models.find((m) => /haiku/i.test(m.id))?.id ?? model;
     const provider = deps.getProvider(info.id);
-    if (!provider) throw new HttpError(400, `알 수 없는 제공자입니다: ${info.id}`);
+    if (!provider) throw new HttpError(400, smsg().recordings.unknownProvider(info.id));
     const cwd = docPaths(docId).dir;
     await startAiAlignment(docId, rid, {
       provider: info.id,

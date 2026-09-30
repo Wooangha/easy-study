@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, Url};
 
 use crate::config::{self, lock};
-use crate::{pathenv, remote, AppState};
+use crate::{i18n, pathenv, remote, AppState};
 
 /// The local server's preferred ports (not 5180, which `npm start` uses); the last one used is remembered.
 const PREFERRED_PORTS: std::ops::RangeInclusive<u16> = 5350..=5359;
@@ -110,7 +110,7 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
     }
     *lock(&st.error) = None;
     lock(&st.tail).clear();
-    *lock(&st.busy) = Some("이 컴퓨터에서 easy-study 서버를 시작하는 중…".into());
+    *lock(&st.busy) = Some(i18n::msg().server.starting.into());
     let h = app.clone();
     std::thread::spawn(move || {
         if let Err(e) = spawn_server(&h) {
@@ -134,20 +134,21 @@ fn spawn_server(app: &AppHandle) -> Result<(), String> {
         st.start_ended(); // cancelled meanwhile (another computer was chosen, the library changed)
         return Ok(());
     }
-    let res = app.path().resource_dir().map_err(|e| format!("앱의 리소스 폴더를 찾지 못했어요: {e}"))?;
+    let m = i18n::msg();
+    let res = app.path().resource_dir().map_err(|e| (m.common.no_resource_dir)(&e.to_string()))?;
     let node = node_path(&res);
     if !node.is_file() {
-        return Err(format!("앱에 들어 있는 Node.js를 찾지 못했어요: {}. 앱을 다시 설치해 보세요.", node.display()));
+        return Err((m.common.no_node)(&node.display().to_string()));
     }
     let server_dir = res.join("server");
     let entry = server_dir.join("dist-server").join("server").join("index.js");
     if !entry.is_file() {
-        return Err(format!("앱에 들어 있는 easy-study 서버를 찾지 못했어요: {}. 앱을 다시 설치해 보세요.", entry.display()));
+        return Err((m.server.no_entry)(&entry.display().to_string()));
     }
     let cfg = config::load(app);
     let library = config::library(app, &cfg);
     fs::create_dir_all(&library.path)
-        .map_err(|e| format!("라이브러리 폴더를 만들 수 없어요: {} ({e})", library.path.display()))?;
+        .map_err(|e| (m.server.no_library)(&library.path.display().to_string(), &e.to_string()))?;
     let tools = Tools::find(&res, config::data_dir(app).join("models"));
     let _ = fs::create_dir_all(&tools.models);
     let port = pick_port(cfg.port, *lock(&st.failed_port));
@@ -176,7 +177,7 @@ fn spawn_server(app: &AppHandle) -> Result<(), String> {
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: no console window for node.exe
     }
     let t = Instant::now();
-    let mut child = spawn(cmd).map_err(|e| format!("서버를 시작하지 못했어요: {e} ({})", node.display()))?;
+    let mut child = spawn(cmd).map_err(|e| (m.server.spawn_failed)(&e.to_string(), &node.display().to_string()))?;
     #[cfg(windows)]
     winjob::kill_with_parent(&child);
     let generation = st.generation.fetch_add(1, SeqCst) + 1;
@@ -246,10 +247,7 @@ fn spawn_server(app: &AppHandle) -> Result<(), String> {
         }
         let st = h.state::<AppState>();
         if st.generation.load(SeqCst) == generation && st.starting.load(SeqCst) {
-            *lock(&st.error) = Some(format!(
-                "이 컴퓨터의 easy-study 서버가 {}초 안에 준비되지 않아 멈췄어요.",
-                READY_TIMEOUT.as_secs()
-            ));
+            *lock(&st.error) = Some((i18n::msg().server.not_ready)(READY_TIMEOUT.as_secs()));
             stop(&h);
             crate::show_chooser(&h);
             crate::smoke_fail(&h, 2, "server not ready in time");
@@ -411,11 +409,8 @@ fn on_exit(app: &AppHandle, generation: u64, was_ready: bool) {
             crate::smoke_fail(app, 2, "server did not start");
         });
     }
-    *lock(&st.error) = Some(if was_ready {
-        format!("이 컴퓨터의 easy-study 서버가 예기치 않게 종료됐어요 ({how}). \"연결\"을 누르면 다시 시작해요.")
-    } else {
-        format!("이 컴퓨터에서 easy-study 서버를 시작하지 못했어요 ({how}).")
-    });
+    let texts = &i18n::msg().server;
+    *lock(&st.error) = Some(if was_ready { (texts.exited)(&how) } else { (texts.not_started)(&how) });
     drop(life);
     crate::show_chooser(app);
     crate::smoke_fail(app, 2, "server exited");
@@ -478,22 +473,24 @@ pub(crate) fn kill_group(child: &Child) {
     }
 }
 
+/// How a process ended, in the shell's language (it goes into the chooser's errors; shell.log has it too).
 pub(crate) fn describe(status: Option<ExitStatus>) -> String {
+    let common = &i18n::msg().common;
     match status {
         Some(s) => match s.code() {
-            Some(code) => format!("종료 코드 {code}"),
+            Some(code) => (common.exit_code)(code),
             None => {
                 #[cfg(unix)]
                 {
                     use std::os::unix::process::ExitStatusExt;
                     if let Some(sig) = s.signal() {
-                        return format!("신호 {sig}");
+                        return (common.exit_signal)(sig);
                     }
                 }
                 s.to_string()
             }
         },
-        None => "종료 상태를 알 수 없음".into(),
+        None => common.exit_unknown.into(),
     }
 }
 
@@ -633,10 +630,13 @@ fn child_env(cmd: &mut Command, path_env: &str, port: u16, library: &Path, tools
     base_env(cmd, path_env);
     // EASY_STUDY_HOST stays 127.0.0.1 in every mode: only the dedicated variable turns sharing on (never the
     // user's environment, and the server's "ignored settings" warning stays quiet).
+    // EASY_STUDY_LANG: the shell's language (the OS's, i18n.rs), for the startup errors the chooser shows
+    // (server/desktop.ts desktopLang). A taken port is still told by EXIT_PORT_IN_USE in either language.
     cmd.env("PORT", port.to_string())
         .env("EASY_STUDY_HOST", "127.0.0.1")
         .env("EASY_STUDY_LIBRARY", library)
-        .env("EASY_STUDY_DESKTOP", "1");
+        .env("EASY_STUDY_DESKTOP", "1")
+        .env("EASY_STUDY_LANG", crate::i18n::lang().id());
     if sharing.on {
         cmd.env(ENV_SHARE, "1");
     }
@@ -867,6 +867,9 @@ mod tests {
         let get = |vars: &[(String, Option<String>)], k: &str| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
         assert_eq!(get(&local, "EASY_STUDY_HOST"), Some(Some("127.0.0.1".into())));
         assert_eq!(get(&local, "EASY_STUDY_DESKTOP"), Some(Some("1".into())));
+        assert_eq!(get(&local, "EASY_STUDY_LANG"), Some(Some("ko".into())), "the shell's language (Korean in tests)");
+        let english = crate::i18n::with_lang(crate::i18n::Lang::En, || env_of(Sharing { on: false, reset_code: false }));
+        assert_eq!(get(&english, "EASY_STUDY_LANG"), Some(Some("en".into())));
         assert_eq!(get(&local, ENV_SHARE), Some(None), "removed (STRIP_ENV), never set in local mode");
         assert_eq!(get(&local, ENV_RESET_CODE), Some(None));
         let shared = env_of(Sharing { on: true, reset_code: true });

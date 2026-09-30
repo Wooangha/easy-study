@@ -19,6 +19,7 @@ import type { QuestionMarker } from '../../lib/annotations/markers.ts';
 import { textBoxVars } from '../../lib/annotations/text.ts';
 import { percentStyle, type Frame, type Point } from '../../lib/attachments.ts';
 import { useLatest } from '../../hooks/useLatest.ts';
+import { msg } from '../../i18n/index.ts';
 import { useLayerEnv } from './context.ts';
 import { MemoCard } from './MemoCard.tsx';
 import { QuestionMarkers, QuestionRegions, type LightMarker } from './QuestionMarkers.tsx';
@@ -288,8 +289,8 @@ function TextBox({ slide, item, rect, selected, editing }: { slide: number; item
           ref={ref}
           className="annot-text-input"
           value={text}
-          placeholder="텍스트…"
-          aria-label="텍스트 상자"
+          placeholder={msg().viewer.textBox.placeholder}
+          aria-label={msg().viewer.textBox.label}
           onChange={(e) => {
             setText(e.target.value);
             pending.current = e.target.value;
@@ -300,7 +301,7 @@ function TextBox({ slide, item, rect, selected, editing }: { slide: number; item
         />
       ) : (
         <div ref={bodyRef} className="annot-text-body">
-          {item.text || <span className="annot-text-empty">텍스트…</span>}
+          {item.text || <span className="annot-text-empty">{msg().viewer.textBox.placeholder}</span>}
         </div>
       )}
     </div>

@@ -9,6 +9,7 @@ import { NEIGHBOR_OPTIONS } from '../hooks/useNeighbors.ts';
 import type { ProviderChoice } from '../hooks/useProviderChoice.ts';
 import { PENDING_ASSISTANT_ID, type StudySession } from '../hooks/useStudySession.ts';
 import type { Chip } from '../lib/attachments.ts';
+import { msg } from '../i18n/index.ts';
 import { canOpenFiles, courseBadgeTitle, courseContextSentence, type EarlierLectures } from '../lib/courseContext.ts';
 import { effortName, llmSwitchNotice, providerLabel, providerWithModel } from '../lib/format.ts';
 import { sessionChoice } from '../lib/providerChoice.ts';
@@ -82,13 +83,14 @@ interface ChatPanelProps {
 
 /** "Codex (gpt-5.5, 추론 높음)" for the session badge's tooltip. */
 function sessionLlmDetails(providers: ProviderInfo[] | undefined, session: SessionSummary): string {
-  const details = [session.model, session.effort ? `추론 ${effortName(providers, session.provider, session.effort)}` : ''];
+  const details = [session.model, session.effort ? msg().chat.llm.reasoning(effortName(providers, session.provider, session.effort)) : ''];
   const shown = details.filter(Boolean);
   return `${providerLabel(providers, session.provider)}${shown.length > 0 ? ` (${shown.join(', ')})` : ''}`;
 }
 
 function DigestTabBadge({ info }: { info: DigestInfo | null }) {
   if (!info) return null;
+  const m = msg().chat.panel.tabs;
   switch (info.status) {
     case 'running':
       return (
@@ -98,13 +100,13 @@ function DigestTabBadge({ info }: { info: DigestInfo | null }) {
       );
     case 'ready':
       return (
-        <span className="tab-count is-ok" role="img" aria-label="완성">
+        <span className="tab-count is-ok" role="img" aria-label={m.digestDone}>
           <Check />
         </span>
       );
     case 'aborted':
     case 'error':
-      return info.slides.length > 0 ? <span className="tab-count is-warn">일부</span> : null;
+      return info.slides.length > 0 ? <span className="tab-count is-warn">{m.digestPartial}</span> : null;
     default:
       return null;
   }
@@ -142,6 +144,8 @@ export function ChatPanel({
   memoCount,
   scrollTo = null,
 }: ChatPanelProps) {
+  const m = msg().chat.panel;
+  const shared = msg().chat.shared;
   const { session, messages, liveTurn, running, creating } = study;
   const targetSlide = pinnedSlide ?? focusedSlide;
   const targetRef = useLatest(targetSlide);
@@ -179,21 +183,22 @@ export function ChatPanel({
 
   // "LLM 바꾸기" (DESIGN §5 "LLM switch"): the header badge opens the dialog. The notice stays until the next turn
   // starts or another session is shown (scrollKey changes then); the message list shows where the switch happened.
+  // It keeps the new LLM, not its text, so it follows a change of the language.
   const [switchOpen, setSwitchOpen] = useState(false);
-  const [notice, setNotice] = useState<{ key: string; text: string } | null>(null);
+  const [notice, setNotice] = useState<{ key: string; llm: ProviderChoice } | null>(null);
   const { switchLlm, scrollKey } = study;
   const applySwitch = useCallback(
     async (next: ProviderChoice) => {
       const updated = await switchLlm(next);
       if (!updated) return false;
-      setNotice({ key: scrollKey, text: llmSwitchNotice(providerWithModel(providers, updated.provider, updated.model, updated.effort)) });
+      setNotice({ key: scrollKey, llm: sessionChoice(updated) });
       return true;
     },
-    [switchLlm, scrollKey, providers],
+    [switchLlm, scrollKey],
   );
 
   // Without a session a question creates one, which needs an available provider.
-  const disabledReason = !session && !running && !choice ? (providerProblem ?? '사용 가능한 LLM이 없어요') : null;
+  const disabledReason = !session && !running && !choice ? (providerProblem ?? shared.noLlm) : null;
 
   const liveAssistantId = liveTurn
     ? liveTurn.phase === 'pending' || !liveTurn.assistantMessage
@@ -204,19 +209,21 @@ export function ChatPanel({
   const empty = creating ? (
     <div className="chat-empty">
       <div className="spinner" aria-hidden />
-      <p>새 세션을 만드는 중…</p>
+      <p>{m.creating}</p>
     </div>
   ) : !study.sessionId ? (
     <div className="chat-empty">
       <div className="chat-empty-icon" aria-hidden>
         <GraduationCap strokeWidth={1.5} />
       </div>
-      <h3>무엇이든 물어보세요</h3>
+      <h3>{m.emptyTitle}</h3>
       <p>
-        질문을 보내면 {choice ? <b>{providerWithModel(providers, choice.provider, choice.model, choice.effort)}</b> : 'LLM'}(으)로 새
-        세션을 만들고, <b>전체 슬라이드 {doc.pageCount}장</b>
-        {digestReady ? '(정리본 텍스트)' : ''}을 먼저 전달한 뒤 지금 보고 있는 슬라이드
-        {neighbors > 0 ? `(앞뒤 ${neighbors}장 포함)` : ''}를 기준으로 설명해요.
+        {m.emptyIntro(
+          choice ? <b>{providerWithModel(providers, choice.provider, choice.model, choice.effort)}</b> : m.llmFallback,
+          <b>{m.deck(doc.pageCount)}</b>,
+          digestReady,
+          neighbors,
+        )}
       </p>
       {course && earlier && earlier.total > 0 && (
         <div className="course-context-note">
@@ -231,50 +238,48 @@ export function ChatPanel({
           </p>
           {earlier.missing.length > 0 && choice && (
             <button type="button" className="ghost-btn small" onClick={() => onDigestLectures(earlier.missing)}>
-              <NotebookPen /> 이전 강의 {earlier.missing.length}개 정리본 만들기
+              <NotebookPen /> {m.digestEarlier(earlier.missing.length)}
             </button>
           )}
         </div>
       )}
       {choice ? (
         <button type="button" className="primary-btn" onClick={() => void study.newSession(targetSlide)}>
-          ＋ 새 세션 시작 (슬라이드 전달)
+          {m.startSession}
         </button>
       ) : (
         <p className="warn-text">
-          <TriangleAlert /> {providerProblem ?? '사용 가능한 LLM이 없어요.'}
+          <TriangleAlert /> {providerProblem ?? shared.noLlmSentence}
         </p>
       )}
       <ul className="tips">
+        <li>{m.tipKeys(<kbd>j</kbd>, <kbd>k</kbd>, <kbd>↑</kbd>, <kbd>↓</kbd>, <kbd>/</kbd>)}</li>
         <li>
-          <kbd>j</kbd>/<kbd>k</kbd> 또는 <kbd>↑</kbd>/<kbd>↓</kbd> 로 슬라이드 이동, <kbd>/</kbd> 로 입력창 포커스
+          <Pin /> {m.tipPin}
         </li>
-        <li>
-          <Pin /> 고정하면 스크롤해도 같은 슬라이드에 대해 계속 질문해요
-        </li>
-        <li>모든 Q&amp;A는 파일로 저장되고 ‘노트’ 탭에서 슬라이드별로 다시 볼 수 있어요</li>
-        <li>‘정리본’ 탭에서 LLM이 슬라이드를 옮겨 적고 설명한 정리본을 슬라이드별로 읽을 수 있어요</li>
+        <li>{m.tipNotes}</li>
+        <li>{m.tipDigest}</li>
       </ul>
     </div>
   ) : !session ? (
     <div className="chat-empty">
       <div className="spinner" aria-hidden />
-      <p>세션을 불러오는 중…</p>
+      <p>{m.loadingSession}</p>
     </div>
   ) : !session.primed && !running ? (
     <div className="chat-empty">
       <div className="chat-empty-icon" aria-hidden>
         <Library strokeWidth={1.5} />
       </div>
-      <p>이 세션은 아직 슬라이드를 전달받지 않았어요.</p>
+      <p>{m.notPrimed}</p>
       <button type="button" className="primary-btn" onClick={() => void study.primeCurrent(targetSlide)}>
-        <Library /> 전체 슬라이드 전달하기
+        <Library /> {m.primeAll}
       </button>
-      <p className="muted small">바로 질문해도 괜찮아요 — 첫 질문과 함께 전달돼요.</p>
+      <p className="muted small">{m.primeLater}</p>
     </div>
   ) : (
     <div className="chat-empty">
-      <p className="muted">질문을 입력해 보세요.</p>
+      <p className="muted">{m.typeQuestion}</p>
     </div>
   );
 
@@ -288,7 +293,7 @@ export function ChatPanel({
           className={tab === 'chat' ? 'panel-tab is-active' : 'panel-tab'}
           onClick={() => onTabChange('chat')}
         >
-          채팅
+          {m.tabs.chat}
         </button>
         <button
           type="button"
@@ -297,7 +302,7 @@ export function ChatPanel({
           className={tab === 'digest' ? 'panel-tab is-active' : 'panel-tab'}
           onClick={() => onTabChange('digest')}
         >
-          정리본
+          {m.tabs.digest}
           <DigestTabBadge info={digestInfo} />
         </button>
         <button
@@ -307,7 +312,8 @@ export function ChatPanel({
           className={tab === 'notes' ? 'panel-tab is-active' : 'panel-tab'}
           onClick={() => onTabChange('notes')}
         >
-          노트{notesCount > 0 && <span className="tab-count">{notesCount}</span>}
+          {m.tabs.notes}
+          {notesCount > 0 && <span className="tab-count">{notesCount}</span>}
         </button>
         <button
           type="button"
@@ -315,9 +321,10 @@ export function ChatPanel({
           aria-selected={tab === 'memos'}
           className={tab === 'memos' ? 'panel-tab is-active' : 'panel-tab'}
           onClick={() => onTabChange('memos')}
-          title="슬라이드에 붙인 메모"
+          title={m.tabs.memosTitle}
         >
-          메모{memoCount > 0 && <span className="tab-count">{memoCount}</span>}
+          {m.tabs.memos}
+          {memoCount > 0 && <span className="tab-count">{memoCount}</span>}
         </button>
         <button
           type="button"
@@ -325,9 +332,9 @@ export function ChatPanel({
           aria-selected={tab === 'recordings'}
           className={tab === 'recordings' ? 'panel-tab is-active' : 'panel-tab'}
           onClick={() => onTabChange('recordings')}
-          title="강의 녹음과 받아쓴 글"
+          title={m.tabs.recordingsTitle}
         >
-          녹음
+          {m.tabs.recordings}
           <RecordingTabBadge docId={doc.id} count={recordingCount} />
         </button>
       </div>
@@ -338,7 +345,7 @@ export function ChatPanel({
             type="button"
             className="page-indicator"
             onClick={() => onGoToSlide(focusedSlide)}
-            title="보고 있는 슬라이드"
+            title={m.viewedSlide}
           >
             p.{focusedSlide} <span className="muted">/ {doc.pageCount}</span>
           </button>
@@ -347,22 +354,15 @@ export function ChatPanel({
             className={pinnedSlide !== null ? 'pin-btn is-active' : 'pin-btn'}
             onClick={onTogglePin}
             aria-pressed={pinnedSlide !== null}
-            title={
-              pinnedSlide !== null
-                ? '고정 해제 — 다시 보고 있는 슬라이드에 대해 질문해요'
-                : '지금 슬라이드를 고정 — 스크롤해도 이 슬라이드에 대해 질문해요'
-            }
+            title={pinnedSlide !== null ? m.unpinTitle : m.pinTitle}
           >
-            <Pin /> {pinnedSlide !== null ? `p.${pinnedSlide} 고정됨` : '고정'}
+            <Pin /> {pinnedSlide !== null ? m.pinned(pinnedSlide) : m.pin}
           </button>
-          <label
-            className="neighbor-picker"
-            title="질문할 때 지금 슬라이드와 함께 앞뒤 슬라이드도 LLM에게 전달해요 (슬라이드 내용이 여러 장에 이어질 때 유용해요)"
-          >
-            <span className="neighbor-label">앞뒤</span>
+          <label className="neighbor-picker" title={m.neighborsTitle}>
+            <span className="neighbor-label">{m.neighbors}</span>
             <select
               className="picker small"
-              aria-label="함께 전달할 앞뒤 슬라이드 수"
+              aria-label={m.neighborsLabel}
               value={neighbors}
               onChange={(e) => onNeighborsChange(Number(e.target.value))}
             >
@@ -383,10 +383,10 @@ export function ChatPanel({
               title={
                 earlier
                   ? courseBadgeTitle(course.course.title, course.index, earlier)
-                  : `과목 ‘${course.course.title}’의 ${course.index}번째 강의 (클릭하면 COURSE.md)`
+                  : msg().chat.course.badgeTitle(course.course.title, course.index)
               }
             >
-              <Folder /> {course.course.title} · {course.index}/{course.total}강
+              <Folder /> {course.course.title} · {msg().chat.course.badge(course.index, course.total)}
             </a>
           )}
           {session && (
@@ -395,11 +395,11 @@ export function ChatPanel({
               className="provider-badge"
               disabled={running}
               onClick={() => setSwitchOpen(true)}
-              aria-label={`LLM 바꾸기 (지금: ${sessionLlmDetails(providers, session)})`}
+              aria-label={m.switchLabel(sessionLlmDetails(providers, session))}
               title={
                 running
-                  ? `이 세션의 LLM: ${sessionLlmDetails(providers, session)} — 답변이 끝난 뒤에 바꿀 수 있어요`
-                  : `이 세션의 LLM: ${sessionLlmDetails(providers, session)} — 클릭하면 다른 LLM으로 바꿀 수 있어요`
+                  ? m.switchTitleRunning(sessionLlmDetails(providers, session))
+                  : m.switchTitle(sessionLlmDetails(providers, session))
               }
             >
               {providerWithModel(providers, session.provider, session.model, session.effort)}
@@ -412,8 +412,8 @@ export function ChatPanel({
 
         {notice && notice.key === scrollKey && (
           <div className="chat-notice" role="status">
-            <span>{notice.text}</span>
-            <button type="button" className="ghost-btn tiny" onClick={() => setNotice(null)} aria-label="알림 닫기" title="알림 닫기">
+            <span>{llmSwitchNotice(providerWithModel(providers, notice.llm.provider, notice.llm.model, notice.llm.effort))}</span>
+            <button type="button" className="ghost-btn tiny" onClick={() => setNotice(null)} aria-label={m.closeNotice} title={m.closeNotice}>
               <X />
             </button>
           </div>

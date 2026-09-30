@@ -7,6 +7,7 @@
 // resume and the final stop travel through the same loop, in order. Pure logic: the HTTP call, the waits and the
 // login wait are injected (tests drive it with a fake server).
 import type { RecordingInfo } from '../../../../shared/types.ts';
+import { msg } from '../../i18n/index.ts';
 import { BYTES_PER_SECOND } from './pcm.ts';
 import type { LocalRecording, RecordingStore } from './store.ts';
 
@@ -349,7 +350,7 @@ export class LiveUploader {
     } catch (e) {
       const name = e instanceof Error ? e.name : '';
       throw new RetryableError(
-        name === 'TimeoutError' || name === 'AbortError' ? '서버 응답이 없어요 (시간 초과)' : '서버에 연결할 수 없어요',
+        name === 'TimeoutError' || name === 'AbortError' ? msg().recording.uploader.timeout : msg().common.api.cannotConnect,
       );
     }
     if (res.status === 429 || res.status >= 500) {
@@ -369,7 +370,7 @@ export class LiveUploader {
   /** One unit of work; 'idle' when there is nothing to send right now. */
   private async step(): Promise<'work' | 'idle' | 'done'> {
     const st = await this.o.store.load();
-    if (!st) throw new FatalError('local-missing', '이 기기에 저장된 녹음 정보가 없어요');
+    if (!st) throw new FatalError('local-missing', msg().recording.uploader.localMissing);
     if (this.status.acked !== st.acked || this.status.captured !== st.captured) {
       this.setStatus({ acked: st.acked, captured: st.captured });
     }
@@ -388,7 +389,7 @@ export class LiveUploader {
       const body = JSON.stringify(events.map((e) => ({ t: e.t, slide: e.slide })));
       const r = await this.send('/slides', body, 'application/json');
       if (r.status === 401) return this.auth();
-      if (r.status === 404) throw new FatalError('gone', '녹음이 서버에서 지워졌어요');
+      if (r.status === 404) throw new FatalError('gone', msg().recording.uploader.gone);
       if (r.status === 409) return this.checkLive();
       if (r.status >= 400 && r.status < 500) {
         // Refused for good (400: malformed or out of range). The events are only a hint for the alignment: drop
@@ -407,11 +408,11 @@ export class LiveUploader {
       this.preferEvents = events.length > 0;
       const body = await this.o.store.read(st.acked, Math.min(backlog, this.maxBatch));
       if (body.byteLength === 0) {
-        throw new FatalError('data-lost', `이 기기에 ${st.acked}바이트 이후의 녹음이 남아 있지 않아요`);
+        throw new FatalError('data-lost', msg().recording.uploader.dataLostAt(st.acked));
       }
       const r = await this.send(`/audio?offset=${st.acked}`, body, 'application/octet-stream');
       if (r.status === 401) return this.auth();
-      if (r.status === 404) throw new FatalError('gone', '녹음이 서버에서 지워졌어요');
+      if (r.status === 404) throw new FatalError('gone', msg().recording.uploader.gone);
       if (r.status === 413) {
         this.maxBatch = Math.max(MIN_BATCH_FLOOR, Math.floor(this.maxBatch / 2));
         return 'work';
@@ -438,7 +439,7 @@ export class LiveUploader {
       // `bytes`: everything captured (the server finishes once that much is stored).
       const r = await this.send('/stop', JSON.stringify({ bytes: st.stopBytes }), 'application/json');
       if (r.status === 401) return this.auth();
-      if (r.status === 404) throw new FatalError('gone', '녹음이 서버에서 지워졌어요');
+      if (r.status === 404) throw new FatalError('gone', msg().recording.uploader.gone);
       if (r.status === 409) {
         // Already stopped (a lost answer, or another tab): nothing left to do.
         await this.o.store.update({ stopAcked: true });
@@ -458,7 +459,7 @@ export class LiveUploader {
   private async control(action: 'pause' | 'resume'): Promise<'work'> {
     const r = await this.send(`/${action}`, null, null);
     if (r.status === 401) return this.auth();
-    if (r.status === 404) throw new FatalError('gone', '녹음이 서버에서 지워졌어요');
+    if (r.status === 404) throw new FatalError('gone', msg().recording.uploader.gone);
     if (r.status === 409) return this.checkLive();
     if (r.status < 200 || r.status >= 300) throw new RetryableError(errorText(r.json, r.status));
     const info = isRecordingInfo(r.json) ? r.json : null;
@@ -474,18 +475,18 @@ export class LiveUploader {
   private async checkLive(): Promise<'work'> {
     if (++this.conflicts > 2) {
       this.conflicts = 0;
-      throw new RetryableError('서버와 녹음 상태가 맞지 않아요. 잠시 후 다시 시도해요');
+      throw new RetryableError(msg().recording.uploader.outOfSync);
     }
     const r = await this.send('', null, null, 'GET');
     if (r.status === 401) return this.auth();
-    if (r.status === 404) throw new FatalError('gone', '녹음이 서버에서 지워졌어요');
+    if (r.status === 404) throw new FatalError('gone', msg().recording.uploader.gone);
     if (r.status < 200 || r.status >= 300 || !isRecordingInfo(r.json)) {
       throw new RetryableError(errorText(r.json, r.status));
     }
     const info = r.json;
     this.o.onInfo?.(info);
     if (info.status !== 'recording' && info.status !== 'paused') {
-      throw new FatalError('not-live', '이 녹음은 이미 끝났어요 (다른 곳에서 멈췄을 수 있어요)');
+      throw new FatalError('not-live', msg().recording.uploader.notLive);
     }
     await this.o.store.update({ serverPaused: info.status === 'paused' });
     return 'work';
@@ -494,13 +495,13 @@ export class LiveUploader {
   /** The server's offset differs from ours: continue from its offset if the bytes are still here. */
   private async reconcile(serverOffset: number, st: LocalRecording): Promise<void> {
     if (serverOffset > st.captured) {
-      throw new FatalError('server-ahead', `서버의 녹음(${serverOffset}바이트)이 이 기기에서 녹음한 것보다 길어요`);
+      throw new FatalError('server-ahead', msg().recording.uploader.serverAhead(serverOffset));
     }
     if (serverOffset < st.acked) {
       // The server lost acknowledged audio (torn write, restored library): heal it from the kept tail.
       const have = await this.o.store.read(serverOffset, 1);
       if (have.byteLength === 0) {
-        throw new FatalError('data-lost', '서버가 받은 녹음 일부를 잃었고, 이 기기에도 더 이상 남아 있지 않아요');
+        throw new FatalError('data-lost', msg().recording.uploader.dataLost);
       }
     }
     await this.o.store.setAcked(serverOffset);

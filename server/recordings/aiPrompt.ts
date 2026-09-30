@@ -2,6 +2,8 @@
 // draft: the spike's haiku copied a draft unchanged), in chunks of ≤ 150 segments, with a rich deck (title, 핵심
 // line, the start of the slide text). Its labels are then fused into the local DP as soft votes (align.ts).
 // Prompts and parsing as verified in the alignment spike (llm.ts). Pure functions.
+import { DEFAULT_LANG, smsg } from '../i18n.ts';
+import type { Lang } from '../i18n.ts';
 import type { Part } from '../providers/types.ts';
 import type { Label } from './align/align.ts';
 import { stripMarkdown } from './align/text.ts';
@@ -24,27 +26,44 @@ export interface DeckSlide {
 const oneLine = (s: string) => s.replace(/\s+/g, ' ').trim();
 const mmss = (t: number) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
 
-/** "S<n> | title | 핵심 | slide text: <first 250 chars>" per slide. */
-export function deckLines(deck: DeckSlide[]): string {
+/**
+ * The takeaway line of a digest entry in `lang` (digestPrompt.ts, DESIGN §27): "핵심:" in a Korean digest, "Key point:" in
+ * an English one, also decorated ("**핵심:**", "- **Key point**: …"). Only the digest's own label, with its colon: a
+ * transcribed slide bullet such as "Key points of …" in a Korean digest is not one.
+ */
+const KEY_LINE: Record<Lang, RegExp> = {
+  ko: /^\s*(?:[-*]\s*)?(?:\*\*)?핵심\s*(?:\*\*)?\s*[:：]/,
+  en: /^\s*(?:[-*]\s*)?(?:\*\*)?[Kk]ey [Pp]oint\s*(?:\*\*)?\s*[:：]/,
+};
+const KEY_LABEL: Record<Lang, RegExp> = { ko: /^\s*핵심\s*[:：]\s*/, en: /^\s*[Kk]ey [Pp]oint\s*[:：]\s*/ };
+
+/**
+ * "S<n> | title | 핵심 | slide text: <first 250 chars>" per slide. The takeaway is the last takeaway line of the digest
+ * entry in `digestLang`, the language the digest was made in (the block ends with it).
+ */
+export function deckLines(deck: DeckSlide[], digestLang: Lang = DEFAULT_LANG): string {
   return deck
     .map((s) => {
-      const keyLine = s.digest.split('\n').find((l) => /^\s*(?:[-*]\s*)?(?:\*\*)?핵심/.test(l)) ?? '';
-      const key = oneLine(stripMarkdown(keyLine).replace(/^\s*핵심\s*[:：]\s*/, '')) || oneLine(stripMarkdown(s.digest)).slice(0, KEY_CHARS);
+      const keyLine = s.digest.split('\n').findLast((l) => KEY_LINE[digestLang].test(l)) ?? '';
+      const key =
+        oneLine(stripMarkdown(keyLine).replace(KEY_LABEL[digestLang], '')) || oneLine(stripMarkdown(s.digest)).slice(0, KEY_CHARS);
       const text = oneLine(s.text).slice(0, RICH_TEXT_CHARS);
       return `S${s.slide} | ${oneLine(s.title) || '(title slide)'} | ${key.slice(0, KEY_CHARS)} | slide text: ${text}`;
     })
     .join('\n');
 }
 
+/** `digestLang`: the language the deck's digest was made in (its one-line summaries). */
 export function buildAlignPrompt(
   deck: DeckSlide[],
   segments: Array<{ start: number; text: string }>,
   offset: number,
   previousSlide?: Label,
+  digestLang: Lang = DEFAULT_LANG,
 ): Part[] {
   const lines = segments.map((s, i) => `[${offset + i}] ${mmss(s.start)} ${oneLine(s.text)}`).join('\n');
-  const text = `Slides of the deck (S<number> | title | one-line summary in Korean | start of the slide's own text):
-${deckLines(deck)}
+  const text = `Slides of the deck (S<number> | title | one-line summary in ${digestLang === 'en' ? 'English' : 'Korean'} | start of the slide's own text):
+${deckLines(deck, digestLang)}
 
 Transcript segments from automatic speech recognition (Korean with English technical terms, or English; expect recognition errors and English terms written in Hangul, e.g. "퍼스트 셋" = FIRST set, "팔로우" = FOLLOW):
 ${lines}
@@ -61,15 +80,16 @@ Output a JSON array of runs covering segments ${offset}..${offset + segments.len
 
 /** The runs of a reply → one label per segment (holes filled forward); slides outside 1..pageCount become null. */
 export function parseAlignRuns(reply: string, offset: number, count: number, pageCount: number): Label[] {
+  const m = smsg().recordings.aiAlign;
   const match = reply.match(/\[[\s\S]*\]/);
-  if (!match) throw new Error('AI 정렬 결과에서 JSON 배열을 찾을 수 없습니다');
+  if (!match) throw new Error(m.noJsonArray);
   let runs: unknown;
   try {
     runs = JSON.parse(match[0]);
   } catch {
-    throw new Error('AI 정렬 결과를 읽을 수 없습니다');
+    throw new Error(m.unreadable);
   }
-  if (!Array.isArray(runs)) throw new Error('AI 정렬 결과가 배열이 아닙니다');
+  if (!Array.isArray(runs)) throw new Error(m.notArray);
   const out = new Array<Label | undefined>(count).fill(undefined);
   for (const run of runs as Array<{ from?: unknown; to?: unknown; slide?: unknown }>) {
     if (!run || typeof run.from !== 'number' || typeof run.to !== 'number') continue;
@@ -81,6 +101,6 @@ export function parseAlignRuns(reply: string, offset: number, count: number, pag
     if (out[i] === undefined) out[i] = i > 0 ? out[i - 1] : null;
     else filled++;
   }
-  if (filled === 0) throw new Error('AI 정렬 결과에 구간이 없습니다');
+  if (filled === 0) throw new Error(m.noRuns);
   return out as Label[];
 }

@@ -12,6 +12,7 @@
 // the Q&A itself stays.
 import { Fragment, useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { X } from 'lucide-react';
+import { msg } from '../../i18n/index.ts';
 import { markerId, regionLabelPlace, type QuestionMarker } from '../../lib/annotations/markers.ts';
 import { percentStyle, type Frame } from '../../lib/attachments.ts';
 import { formatTime } from '../../lib/format.ts';
@@ -158,6 +159,7 @@ export function MarkerButton({ slide, marker, className, style, children, onLit 
   }, [open, inside]);
 
   const hide = () => actions.hideMarkers(slide, marker.questions.map((q) => q.key));
+  const m = msg().viewer.markers;
 
   return (
     <>
@@ -205,8 +207,8 @@ export function MarkerButton({ slide, marker, className, style, children, onLit 
             tipRef.current?.querySelector<HTMLButtonElement>('button')?.focus();
           }
         }}
-        aria-label={`질문 ${marker.count}개: ${marker.label}`}
-        title={marker.count > 1 ? `이 부분으로 물어본 질문 ${marker.count}개` : undefined}
+        aria-label={m.label(marker.count, marker.label)}
+        title={marker.count > 1 ? m.title(marker.count) : undefined}
       >
         {children}
       </button>
@@ -218,7 +220,7 @@ export function MarkerButton({ slide, marker, className, style, children, onLit 
           height={tipHeight(marker.questions.length)}
           className="qa-marker-tip"
           role="group"
-          label="이 부분으로 물어본 질문"
+          label={m.tipLabel}
           onScrollAway={close}
           onPointerEnter={(e) => {
             if (e.pointerType !== 'touch') show();
@@ -245,20 +247,20 @@ export function MarkerButton({ slide, marker, className, style, children, onLit 
               className="qa-marker-q"
               onPointerDown={(e) => e.stopPropagation()}
               onClick={() => actions.openQa(q.sessionId, q.messageId)}
-              title="이 질문으로 이동"
+              title={m.goToQuestion}
             >
               <span className="qa-marker-q-text">{q.label}</span>
               <span className="qa-marker-q-time">{formatTime(q.createdAt)}</span>
             </button>
           ))}
-          {marker.questions.length > MAX_LISTED && <div className="qa-marker-more muted">외 {marker.questions.length - MAX_LISTED}개</div>}
+          {marker.questions.length > MAX_LISTED && <div className="qa-marker-more muted">{m.more(marker.questions.length - MAX_LISTED)}</div>}
           <div className="qa-marker-tip-foot">
             <button type="button" className="ghost-btn tiny" onPointerDown={(e) => e.stopPropagation()} onClick={() => actions.openNotes(slide)}>
-              노트에서 보기
+              {m.openNotes}
             </button>
             <span className="spacer" />
-            <button type="button" className="ghost-btn tiny" onPointerDown={(e) => e.stopPropagation()} onClick={hide} title="이 표시를 슬라이드에서 지워요 (질문과 답은 그대로예요)">
-              <X /> 이 표시 지우기
+            <button type="button" className="ghost-btn tiny" onPointerDown={(e) => e.stopPropagation()} onClick={hide} title={m.hideTitle}>
+              <X /> {m.hide}
             </button>
           </div>
         </Floating>

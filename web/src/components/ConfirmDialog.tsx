@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useSyncExternalStore } from 'react';
+import { msg } from '../i18n/index.ts';
 import { answerConfirm, cancelAllConfirms, getConfirmRequest, subscribeConfirm } from '../lib/confirm.ts';
 
 /**
@@ -40,6 +41,7 @@ export function ConfirmHost({ suspended = false }: { suspended?: boolean }) {
   }, [request]);
 
   const paragraphs = (request?.message ?? '').split(/\n+/).filter((p) => p.trim() !== '');
+  const { common } = msg();
   return (
     <dialog
       ref={dialogRef}
@@ -75,7 +77,7 @@ export function ConfirmHost({ suspended = false }: { suspended?: boolean }) {
                 className="ghost-btn"
                 onClick={() => answerConfirm(request.id, false)}
               >
-                {request.cancelLabel ?? '취소'}
+                {request.cancelLabel ?? common.cancel}
               </button>
             )}
             <button
@@ -84,7 +86,7 @@ export function ConfirmHost({ suspended = false }: { suspended?: boolean }) {
               className={request.danger ? 'primary-btn is-danger' : 'primary-btn'}
               onClick={() => answerConfirm(request.id, true)}
             >
-              {request.confirmLabel ?? '확인'}
+              {request.confirmLabel ?? common.ok}
             </button>
           </div>
         </div>

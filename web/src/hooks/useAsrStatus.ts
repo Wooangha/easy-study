@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { AsrStatus } from '../../../shared/types.ts';
 import * as api from '../api.ts';
+import { getLang, keepAnswer, msg, useLang } from '../i18n/index.ts';
 import { toast } from '../lib/toast.ts';
 
 const DOWNLOAD_POLL_MS = 1000;
@@ -12,18 +13,24 @@ export function useAsrStatus(enabled: boolean) {
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<string | null>(null);
 
+  // An answer made for a language no longer shown (the model labels, the engine's reasons) is dropped once the
+  // answer for the new one is there (keepAnswer).
   const refresh = useCallback(async () => {
+    const asked = getLang();
     try {
-      setStatus(await api.getAsrStatus());
-      setError(null);
+      const next = await api.getAsrStatus();
+      setStatus((shown) => (keepAnswer(asked, shown) ? next : shown));
+      if (asked === getLang()) setError(null);
     } catch (e) {
-      setError(api.recordingErrorMessage(e));
+      if (asked === getLang()) setError(api.recordingErrorMessage(e));
     }
   }, []);
 
+  // Again when the language changes: the model labels and the engine's reasons are in the request's (DESIGN §27).
+  const lang = useLang();
   useEffect(() => {
     if (enabled) void refresh();
-  }, [enabled, refresh]);
+  }, [enabled, refresh, lang]);
 
   const downloading = !!status?.models.some((m) => m.downloading);
   useEffect(() => {
@@ -47,7 +54,7 @@ export function useAsrStatus(enabled: boolean) {
       try {
         await api.downloadAsrModel(modelId);
       } catch (e) {
-        toast(`음성 인식 모델을 내려받지 못했어요: ${api.recordingErrorMessage(e)}`, 'error');
+        toast(msg().recording.asrSettings.modelDownloadFailed(api.recordingErrorMessage(e)), 'error');
       } finally {
         setPending(null);
       }
@@ -61,9 +68,9 @@ export function useAsrStatus(enabled: boolean) {
       setPending(modelId);
       try {
         await api.deleteAsrModel(modelId);
-        toast('음성 인식 모델을 지웠어요.', 'success');
+        toast(msg().recording.asrSettings.modelRemoved, 'success');
       } catch (e) {
-        toast(`모델을 지우지 못했어요: ${api.recordingErrorMessage(e)}`, 'error');
+        toast(msg().recording.asrSettings.modelRemoveFailed(api.recordingErrorMessage(e)), 'error');
       } finally {
         setPending(null);
       }

@@ -2,6 +2,7 @@
 // time t on, the lecture is on slide N" (null = off-slide); the server re-aligns with them as hard constraints
 // (PUT …/markers answers the re-aligned transcript). The list is edited here and always sent whole. Pure helpers.
 import type { AlignmentMarker, TranscriptSegment } from '../../../../shared/types.ts';
+import { msg } from '../../i18n/index.ts';
 
 /** Two markers closer than this (seconds) are the same place: the newer one replaces the older. */
 export const MARKER_SAME_PLACE_SEC = 0.5;
@@ -79,9 +80,16 @@ export function markerAtSegment(markers: readonly AlignmentMarker[], segment: Tr
   return markers.find((m) => Math.abs(m.t - segment.start) < MARKER_SAME_PLACE_SEC) ?? null;
 }
 
-/** "p.7부터" / "슬라이드 밖" for a marker. */
+/** "여기부터 p.7" / "여기부터 슬라이드 밖" for a marker. */
 export function markerLabel(marker: AlignmentMarker): string {
-  return marker.slide === null ? '여기부터 슬라이드 밖' : `여기부터 p.${marker.slide}`;
+  const m = msg().recording.markers;
+  return marker.slide === null ? m.fromHereOff : m.fromSlide(marker.slide);
+}
+
+/** "→ p.7" / "→ 슬라이드 밖": the short form on a marker chip. */
+export function markerShortLabel(marker: AlignmentMarker): string {
+  const m = msg().recording.markers;
+  return marker.slide === null ? m.toOff : m.toSlide(marker.slide);
 }
 
 /**

@@ -638,7 +638,7 @@ describe('lecture recordings over HTTP (fake whisper-cli / ffmpeg)', () => {
     const wav = Buffer.concat([Buffer.from(riffHeader(pcm.length)), pcm]);
     const res = await client.api(`/docs/${DOC}/recordings/upload`, {
       method: 'POST',
-      headers: { 'Content-Type': 'audio/wav', 'X-Filename': encodeURIComponent('7강 녹음.wav') },
+      headers: { 'Content-Type': 'audio/wav', 'X-Filename': encodeURIComponent('7강 녹음.wav'), 'X-Language': 'auto' },
       body: wav,
     });
     const created = (await res.json()) as RecordingInfo;
@@ -1002,7 +1002,12 @@ describe('transcription on the GPU (Vulkan) and its CPU fallback', () => {
 
   async function transcribedUpload(client: Client, tones: Array<{ start: number; end: number; hz: number }>): Promise<RecordingInfo> {
     const pcm = tonesPcm(12, tones);
-    const res = await client.api(`/docs/${OTHER_DOC}/recordings/upload`, { method: 'POST', body: Buffer.concat([Buffer.from(riffHeader(pcm.length)), pcm]) });
+    // 'auto': the language is detected first (a run of its own), then transcribed.
+    const res = await client.api(`/docs/${OTHER_DOC}/recordings/upload`, {
+      method: 'POST',
+      headers: { 'X-Language': 'auto' },
+      body: Buffer.concat([Buffer.from(riffHeader(pcm.length)), pcm]),
+    });
     const created = (await res.json()) as RecordingInfo;
     assert.equal(res.status, 201, JSON.stringify(created));
     await waitFor(async () => (await client.recording(OTHER_DOC, created.id)).transcriptStatus === 'ready', 20_000, 'transcription');

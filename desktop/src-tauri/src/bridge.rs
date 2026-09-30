@@ -19,15 +19,17 @@ use tauri::{AppHandle, Manager, Url};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 use crate::config::{self, lock};
+use crate::i18n;
 use crate::update::{self, UpdateState};
 use crate::{server, share, AppState};
 
 /// The reserved path. The server answers it with 204, so a navigation that is not caught leaves the page alone.
 pub const PREFIX: &str = "/__easy-study-desktop/";
 
-/// The static marker (main window, main frame only): the page knows it is inside the app, which version and OS.
-/// __VERSION__ and __OS__ are replaced with JSON strings (init_script).
-pub const INIT_SCRIPT: &str = "window.__EASY_STUDY_DESKTOP__ = Object.freeze({ v: 1, version: __VERSION__, os: __OS__ });";
+/// The static marker (main window, main frame only): the page knows it is inside the app, which version and OS, and
+/// the shell's language (i18n.rs: the chooser speaks it from its first paint; a page may follow it or not).
+/// __VERSION__, __OS__ and __LANG__ are replaced with JSON strings (init_script).
+pub const INIT_SCRIPT: &str = "window.__EASY_STUDY_DESKTOP__ = Object.freeze({ v: 1, version: __VERSION__, os: __OS__, lang: __LANG__ });";
 
 /// What the page is doing (null: a page without the hook, e.g. an older remote server's UI).
 pub const BUSY_JS: &str = "JSON.stringify(typeof window.__easyStudyBusy === 'function' ? window.__easyStudyBusy() : null)";
@@ -65,12 +67,9 @@ const LOG_LINES: u32 = 20;
 /// How long the access code stays in the local page's pushed state after its share/reveal (the page holds an
 /// HttpOnly session; the code, which lets any device in, is only there while the user looks at it).
 const REVEAL_FOR: Duration = Duration::from_secs(60);
-/// share/reveal: the user confirms in a dialog no page can draw before the code goes into the page's state.
-const CONFIRM_REVEAL: &str = "접속 코드를 이 화면에 보여 줄까요?\n\n코드를 아는 사람은 같은 네트워크에서 이 컴퓨터의 easy-study에 로그인할 수 있어요.";
-
-pub fn init_script(version: &str, os: &str) -> String {
+pub fn init_script(version: &str, os: &str, lang: &str) -> String {
     let json = |s: &str| serde_json::Value::String(s.to_string()).to_string();
-    INIT_SCRIPT.replace("__VERSION__", &json(version)).replace("__OS__", &json(os))
+    INIT_SCRIPT.replace("__VERSION__", &json(version)).replace("__OS__", &json(os)).replace("__LANG__", &json(lang))
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -160,10 +159,11 @@ fn page_asked_for(app: &AppHandle, action: Action) -> Asked {
 /// From a page without the hook, the actions that change something by themselves get a dialog (text, yes, no); the
 /// others are reversible or rate-limited (theme/*, dismiss-update, check-update) or ask anyway (install-update, share/*).
 fn unasked_confirm(action: Action) -> Option<(&'static str, &'static str, &'static str)> {
+    let m = i18n::msg();
     Some(match action {
-        Action::Choose => ("서버 선택 화면으로 돌아갈까요?\n\n지금 보고 있는 페이지가 요청했어요.", "돌아가기", "취소"),
-        Action::ForgetChoice => ("다음 실행부터 서버 선택 화면을 먼저 보여 줄까요?\n\n지금 보고 있는 페이지가 요청했어요.", "그렇게 하기", "취소"),
-        Action::CancelUpdate => ("새 버전 내려받기를 취소할까요?\n\n지금 보고 있는 페이지가 요청했어요.", "내려받기 취소", "계속 받기"),
+        Action::Choose => (m.page.confirm_choose, m.page.choose, m.common.cancel),
+        Action::ForgetChoice => (m.page.confirm_forget, m.page.forget, m.common.cancel),
+        Action::CancelUpdate => (m.page.confirm_cancel_download, m.page.cancel_download, m.page.keep_downloading),
         _ => return None,
     })
 }
@@ -270,7 +270,9 @@ fn reveal_code(app: &AppHandle, origin: &str) {
         log_limited(app, "page-share", &format!("share/reveal from {origin} ignored (asked too recently)"));
         return push_state(app);
     }
-    let ok = confirm(app, CONFIRM_REVEAL, "보기", "취소");
+    // The user confirms in a dialog no page can draw before the code goes into the page's state.
+    let m = i18n::msg();
+    let ok = confirm(app, m.page.confirm_reveal, m.page.reveal, m.common.cancel);
     page_asked(app, origin, true, ok);
     if !ok {
         return push_state(app);
@@ -664,11 +666,6 @@ pub enum Gate {
     Block(String),
 }
 
-const BLOCK_RECORDING: &str = "강의를 녹음하는 중이에요. 녹음을 끝낸 뒤 다시 설치해 주세요.";
-const BLOCK_UNSENT: &str = "녹음한 소리를 아직 서버로 보내는 중이에요. 다 보낸 뒤 다시 설치해 주세요.";
-const BLOCK_RECORDING_SHARE: &str = "강의를 녹음하는 중이에요. 녹음을 끝낸 뒤 다시 바꿔 주세요.";
-const BLOCK_UNSENT_SHARE: &str = "녹음한 소리를 아직 서버로 보내는 중이에요. 다 보낸 뒤 다시 바꿔 주세요.";
-
 /// What the restart behind a busy check is for: the texts name it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Restart {
@@ -680,23 +677,26 @@ pub enum Restart {
 
 impl Restart {
     fn block_recording(self) -> &'static str {
+        let busy = &i18n::msg().busy;
         match self {
-            Restart::Install => BLOCK_RECORDING,
-            Restart::Share => BLOCK_RECORDING_SHARE,
+            Restart::Install => busy.block_recording,
+            Restart::Share => busy.block_recording_share,
         }
     }
 
     fn block_unsent(self) -> &'static str {
+        let busy = &i18n::msg().busy;
         match self {
-            Restart::Install => BLOCK_UNSENT,
-            Restart::Share => BLOCK_UNSENT_SHARE,
+            Restart::Install => busy.block_unsent,
+            Restart::Share => busy.block_unsent_share,
         }
     }
 
     fn warn_tail(self) -> &'static str {
+        let busy = &i18n::msg().busy;
         match self {
-            Restart::Install => "다시 시작하면 이 작업이 멈춰요. 그래도 설치하고 다시 시작할까요?",
-            Restart::Share => "다시 시작하면 이 작업이 멈춰요. 그래도 서버를 다시 시작할까요?",
+            Restart::Install => busy.warn_install,
+            Restart::Share => busy.warn_share,
         }
     }
 }
@@ -704,6 +704,7 @@ impl Restart {
 /// Whether a restart may go on now. `page_asked`: the page started it and has asked the user about its own work
 /// (answers, uploads) already; what could lose audio blocks whatever the page says.
 pub fn decide_for(page: &PageAnswer, server: &ServerAnswer, page_asked: bool, restart: Restart) -> Gate {
+    let busy = &i18n::msg().busy;
     let mut warn: Vec<String> = Vec::new();
     // The server counts the answer this page is making too (a page makes one at a time): named once, as the page's.
     let own_answer = matches!(page, PageAnswer::Busy(p) if p.answering);
@@ -712,14 +713,14 @@ pub fn decide_for(page: &PageAnswer, server: &ServerAnswer, page_asked: bool, re
         PageAnswer::Busy(p) if p.holds_audio() => return Gate::Block(restart.block_unsent().into()),
         PageAnswer::Busy(p) if !page_asked => {
             if p.answering {
-                warn.push("답변을 만드는 중이에요.".into());
+                warn.push(busy.answering.into());
             }
             if p.uploads > 0 {
-                warn.push("파일을 올리는 중이에요.".into());
+                warn.push(busy.uploading.into());
             }
         }
         PageAnswer::Busy(_) | PageAnswer::NotShown => {}
-        PageAnswer::NoAnswer => warn.push("이 화면이 녹음이나 다른 작업을 하는 중인지 확인하지 못했어요.".into()),
+        PageAnswer::NoAnswer => warn.push(busy.page_unknown.into()),
     }
     match server {
         ServerAnswer::Busy(s) => {
@@ -727,29 +728,25 @@ pub fn decide_for(page: &PageAnswer, server: &ServerAnswer, page_asked: bool, re
             // unsent audio in the page: a warning, not a block (a forgotten, paused recording would block forever).
             if let Some(r) = &s.recording {
                 warn.push(match (&r.doc, &r.title) {
-                    (Some(doc), Some(title)) => format!("‘{doc}’의 ‘{title}’ 녹음이 아직 끝나지 않았어요 (다시 시작한 뒤 이어서 할 수 있어요)."),
-                    _ => "끝나지 않은 녹음이 있어요 (다시 시작한 뒤 이어서 할 수 있어요).".into(),
+                    (Some(doc), Some(title)) => (busy.recording_named)(doc, title),
+                    _ => busy.recording.into(),
                 });
             }
             if s.transcriptions > 0 {
-                warn.push(format!("녹음 {}개를 받아쓰는 중이에요.", s.transcriptions));
+                warn.push((busy.transcribing)(s.transcriptions));
             }
             if s.digests > 0 {
-                warn.push("강의 정리를 만드는 중이에요.".into());
+                warn.push(busy.digesting.into());
             }
             let others = s.chat_turns.saturating_sub(own_answer as u64);
             if others > 0 {
-                warn.push(if own_answer {
-                    format!("다른 창에서 답변 {others}개를 만드는 중이에요.")
-                } else {
-                    format!("답변 {others}개를 만드는 중이에요.")
-                });
+                warn.push(if own_answer { (busy.answers_elsewhere)(others) } else { (busy.answers)(others) });
             }
             if s.model_downloads > 0 {
-                warn.push("음성 인식 모델을 내려받는 중이에요.".into());
+                warn.push(busy.model_download.into());
             }
         }
-        ServerAnswer::NoAnswer => warn.push("이 컴퓨터의 서버가 작업 중인지 확인하지 못했어요.".into()),
+        ServerAnswer::NoAnswer => warn.push(busy.server_unknown.into()),
         ServerAnswer::NotRunning => {}
     }
     if warn.is_empty() {
@@ -852,7 +849,8 @@ pub fn confirm(app: &AppHandle, text: &str, ok: &str, cancel: &str) -> bool {
 
 /// A message with an OK button.
 pub fn tell(app: &AppHandle, text: &str) {
-    let _ = message(app, text).kind(MessageDialogKind::Info).buttons(MessageDialogButtons::OkCustom("확인".into())).blocking_show();
+    let ok = i18n::msg().common.ok;
+    let _ = message(app, text).kind(MessageDialogKind::Info).buttons(MessageDialogButtons::OkCustom(ok.into())).blocking_show();
 }
 
 #[cfg(test)]
@@ -937,9 +935,10 @@ mod tests {
 
     #[test]
     fn the_marker_is_static_and_quoted() {
-        let script = init_script("0.5.0", "macos");
-        assert_eq!(script, r#"window.__EASY_STUDY_DESKTOP__ = Object.freeze({ v: 1, version: "0.5.0", os: "macos" });"#);
-        assert!(init_script("1\"; alert(1); \"", "linux").contains(r#"version: "1\"; alert(1); \"""#));
+        let script = init_script("0.5.0", "macos", "ko");
+        assert_eq!(script, r#"window.__EASY_STUDY_DESKTOP__ = Object.freeze({ v: 1, version: "0.5.0", os: "macos", lang: "ko" });"#);
+        assert!(init_script("1\"; alert(1); \"", "linux", "en").contains(r#"version: "1\"; alert(1); \"""#));
+        assert!(init_script("0.5.0", "linux", "en").ends_with(r#"lang: "en" });"#));
     }
 
     fn page(v: serde_json::Value) -> PageAnswer {
@@ -969,7 +968,8 @@ mod tests {
                 assert!(matches!(decide(&page(p.clone()), &idle_server, asked), Gate::Block(_)), "{p} {asked}");
             }
         }
-        assert_eq!(decide(&page(json!({ "recording": true })), &ServerAnswer::NotRunning, false), Gate::Block(BLOCK_RECORDING.into()));
+        let busy = &i18n::msg().busy;
+        assert_eq!(decide(&page(json!({ "recording": true })), &ServerAnswer::NotRunning, false), Gate::Block(busy.block_recording.into()));
 
         // The page's own work: a warning, unless the page asked the user itself.
         let answering = page(json!({ "answering": true, "uploads": 1 }));
@@ -1012,16 +1012,42 @@ mod tests {
     fn the_share_restart_has_its_own_texts() {
         let idle_server = server(json!({}));
         let recording = page(json!({ "recording": true }));
-        assert_eq!(decide_for(&recording, &idle_server, true, Restart::Share), Gate::Block(BLOCK_RECORDING_SHARE.into()));
-        assert_eq!(decide_for(&page(json!({ "unsentSeconds": 2 })), &idle_server, false, Restart::Share), Gate::Block(BLOCK_UNSENT_SHARE.into()));
-        assert!(BLOCK_RECORDING_SHARE.contains("다시 바꿔") && !BLOCK_RECORDING_SHARE.contains("설치"));
+        let busy = &i18n::msg().busy;
+        assert_eq!(decide_for(&recording, &idle_server, true, Restart::Share), Gate::Block(busy.block_recording_share.into()));
+        assert_eq!(decide_for(&page(json!({ "unsentSeconds": 2 })), &idle_server, false, Restart::Share), Gate::Block(busy.block_unsent_share.into()));
+        assert!(busy.block_recording_share.contains("다시 바꿔") && !busy.block_recording_share.contains("설치"));
         let Gate::Warn(text) = decide_for(&PageAnswer::NotShown, &server(json!({ "chatTurns": 1 })), false, Restart::Share) else { panic!() };
         assert!(text.ends_with("그래도 서버를 다시 시작할까요?") && !text.contains("설치"), "{text}");
         let Gate::Warn(text) = decide_for(&PageAnswer::NotShown, &server(json!({ "chatTurns": 1 })), false, Restart::Install) else { panic!() };
         assert!(text.ends_with("그래도 설치하고 다시 시작할까요?"), "{text}");
         // The install's wrappers keep the install texts.
-        assert_eq!(decide(&recording, &idle_server, false), Gate::Block(BLOCK_RECORDING.into()));
+        assert_eq!(decide(&recording, &idle_server, false), Gate::Block(busy.block_recording.into()));
         assert_eq!(decide_for(&PageAnswer::NotShown, &ServerAnswer::NotRunning, false, Restart::Share), Gate::Go);
+    }
+
+    #[test]
+    fn busy_texts_and_dialogs_speak_the_shells_language() {
+        i18n::with_lang(i18n::Lang::En, || {
+            let work = server(json!({ "recording": { "docTitle": "OS week 3", "title": "Monday" }, "transcriptions": 1, "chatTurns": 3 }));
+            let Gate::Warn(text) = decide(&page(json!({ "answering": true })), &work, false) else { panic!() };
+            assert_eq!(
+                text,
+                "• Writing an answer.\n• The recording ‘Monday’ in ‘OS week 3’ isn't finished yet (you can continue it after the restart).\n\
+                 • Transcribing 1 recording.\n• Writing 2 answers in other windows.\n\nRestarting stops this work. Install and restart anyway?"
+            );
+            let recording = page(json!({ "recording": true }));
+            assert_eq!(
+                decide_for(&recording, &server(json!({})), true, Restart::Share),
+                Gate::Block("A lecture is being recorded. Try again after the recording ends.".into())
+            );
+            assert_eq!(
+                unasked_confirm(Action::CancelUpdate),
+                Some(("Cancel downloading the new version?\n\nThe page you're viewing asked for this.", "Cancel download", "Keep downloading"))
+            );
+            assert_eq!(unasked_confirm(Action::Choose).map(|(_, yes, no)| (yes, no)), Some(("Go back", "Cancel")));
+        });
+        // Korean again outside (the language is per thread in tests).
+        assert_eq!(unasked_confirm(Action::Choose).map(|(_, yes, _)| yes), Some("돌아가기"));
     }
 
     #[test]

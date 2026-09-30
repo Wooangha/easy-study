@@ -11,6 +11,9 @@
 // Every call's token usage (DESIGN §23), failed calls included, is added to the record's `usage`, which
 // describes the latest run like its provider / model / startedAt do.
 //
+// A run is made in the language of the request that started it (DESIGN §27), stored as the record's `lang`: the
+// model's figure descriptions, takeaways and summary, the notes of the record and the headings of DIGEST.md.
+//
 // One job per document at a time. Provider calls are one-shot (resume: null, ephemeral, no tools) and
 // never touch the study sessions. All jobs together run at most EASY_STUDY_DIGEST_CONCURRENCY calls at
 // a time (a process-wide limit), so opening several lectures does not multiply the load; with a CLI
@@ -33,6 +36,8 @@ import {
   lectureSummarySystemPrompt,
   parseDigestOutput,
 } from './digestPrompt.ts';
+import { DEFAULT_LANG, runInLang, slang, smsg } from './i18n.ts';
+import type { Lang } from './i18n.ts';
 import type { DocAssets, DigestRecord } from './internal-types.ts';
 import {
   createKeyedQueue,
@@ -123,6 +128,8 @@ interface DigestJob {
    * redo is counted from this set, since every slide keeps an entry the whole time.
    */
   redo: Set<number> | null;
+  /** The language the job runs in (DigestRecord.lang). */
+  lang: Lang;
 }
 
 const jobs = new Map<string, DigestJob>();
@@ -162,7 +169,7 @@ function acquireCallSlot(limit: number, signal: AbortSignal): Promise<() => void
     callsInFlight--;
     pumpCallSlots();
   };
-  const aborted = () => (signal.reason instanceof Error ? signal.reason : new Error('정리본 만들기가 중단되었습니다'));
+  const aborted = () => (signal.reason instanceof Error ? signal.reason : new Error(smsg().chat.digest.aborted));
   if (signal.aborted) return Promise.reject(aborted());
   if (slotWaiters.length === 0 && callsInFlight < max) {
     callsInFlight++;
@@ -223,7 +230,7 @@ function toInfo(docId: string, pageCount: number, record: DigestRecord | null, j
 /** Digest state of a document (status 'none' when there is none). Throws 404 for unknown documents. */
 export async function getDigestInfo(docId: string): Promise<DigestInfo> {
   const doc = await readStoredDoc(docId);
-  if (!doc) throw new HttpError(404, '문서를 찾을 수 없습니다');
+  if (!doc) throw new HttpError(404, smsg().common.notFound.doc);
   const job = jobs.get(docId);
   const record = job?.record ?? (await readDigestRecord(docId));
   return toInfo(docId, doc.pageCount, record, job);
@@ -247,21 +254,21 @@ export async function startDigest(
   options: StartDigestOptions,
   deps: DigestDeps = defaultDigestDeps(),
 ): Promise<DigestInfo> {
+  const m = smsg();
   const provider = deps.getProvider(options.provider);
-  if (!provider) throw new HttpError(400, `알 수 없는 제공자입니다: ${String(options.provider)}`);
+  if (!provider) throw new HttpError(400, m.chat.providers.unknownProvider(String(options.provider)));
   const assets = await loadDocAssets(docId);
   const check = await deps.checkProvider(provider.id);
-  if (!check.available) {
-    throw new HttpError(400, `${provider.label}을(를) 사용할 수 없습니다${check.reason ? `: ${check.reason}` : ''}`);
-  }
+  if (!check.available) throw new HttpError(400, m.chat.providers.unavailable(provider.label, check.reason ?? ''));
 
   // Check-and-reserve without an await in between, so concurrent requests cannot both start a job.
-  if (jobs.has(docId)) throw new HttpError(409, '이미 정리본을 만들고 있습니다');
+  if (jobs.has(docId)) throw new HttpError(409, m.chat.digest.alreadyRunning);
   let markFinished = () => {};
   const job: DigestJob = {
     controller: new AbortController(),
     record: null,
     redo: null,
+    lang: slang(), // settled below, once the previous record is read
     finished: new Promise<void>((resolve) => {
       markFinished = resolve;
     }),
@@ -281,6 +288,10 @@ export async function startDigest(
     const now = deps.now().toISOString();
     // Even a forced redo starts from the previous entries and summary: each is kept until a new one
     // replaces it, so an aborted or failed redo leaves a complete digest behind.
+    const slides = (previous?.slides ?? []).filter((entry) => entry.slide <= pageCount);
+    // A run that continues earlier entries fills in the rest in their language (older records: Korean), so one
+    // digest never mixes two; only a redo, or a first run, takes the language of the request.
+    if (!options.force && previous && slides.length > 0) job.lang = previous.lang ?? DEFAULT_LANG;
     const record: DigestRecord = {
       version: 1,
       status: 'running',
@@ -288,8 +299,9 @@ export async function startDigest(
       model: (options.model ?? '').trim() || provider.defaultModel,
       startedAt: now,
       updatedAt: now,
-      slides: (previous?.slides ?? []).filter((entry) => entry.slide <= pageCount),
+      slides,
       summary: previous?.summary ?? null,
+      lang: job.lang,
     };
     const effort = (options.effort ?? '').trim();
     if (effort) record.effort = effort;
@@ -307,7 +319,8 @@ export async function startDigest(
     `[digest] ${docId}: ${options.force ? 'redo ' : ''}started with ${provider.id}${job.record.model ? ` (${job.record.model})` : ''}` +
       (job.record.effort ? `, effort ${job.record.effort}` : ''),
   );
-  void runJob(docId, job, job.record, { assets, provider, courseTitle, deps }).finally(release);
+  const record = job.record;
+  void runInLang(job.lang, () => runJob(docId, job, record, { assets, provider, courseTitle, deps })).finally(release);
   return info;
 }
 
@@ -324,13 +337,13 @@ function summaryFailedLastTime(record: DigestRecord): boolean {
 export function abortDigest(docId: string): boolean {
   const job = jobs.get(docId);
   if (!job) return false;
-  job.controller.abort(new Error('사용자가 정리본 만들기를 중단했습니다'));
+  job.controller.abort(new Error(smsg().chat.digest.abortedByUser));
   return true;
 }
 
 /** Aborts every running digest job (server shutdown). Returns how many were aborted. */
 export function abortAllDigests(): number {
-  for (const job of jobs.values()) job.controller.abort(new Error('서버가 종료되어 정리본 만들기가 중단되었습니다'));
+  for (const job of jobs.values()) job.controller.abort(new Error(smsg(job.lang).chat.digest.abortedByShutdown));
   return jobs.size;
 }
 
@@ -366,7 +379,8 @@ export async function recoverInterruptedDigests(): Promise<number> {
     const record = await readDigestRecord(doc.id);
     if (record?.status !== 'running') continue;
     record.status = 'aborted';
-    record.error = '서버가 중단되어 정리본 만들기가 멈췄습니다. 이어서 만들 수 있습니다';
+    // In the language the run was made in (there is no request at startup).
+    record.error = smsg(record.lang ?? 'ko').chat.digest.interrupted;
     await persistQueue(doc.id, () => writeJsonAtomic(docPaths(doc.id).digestJson, record));
     recovered++;
   }
@@ -392,7 +406,7 @@ function errorText(err: unknown): string {
 function abortReason(signal: AbortSignal): string {
   const reason: unknown = signal.reason;
   if (reason instanceof Error && reason.name !== 'AbortError' && reason.message) return reason.message;
-  return '정리본 만들기가 중단되었습니다';
+  return smsg().chat.digest.aborted;
 }
 
 /** Slides in runs of consecutive numbers, each run cut into batches of at most `size`. */
@@ -542,7 +556,7 @@ async function runJob(docId: string, job: DigestJob, record: DigestRecord, ctx: 
     const parsed = prompts.parseOutput(output, slides).filter((entry) => wanted.has(entry.slide));
     const good = parsed.filter((entry) => !entry.failed && entry.markdown.trim() !== '');
     const failed = new Map(parsed.filter((entry) => entry.failed).map((entry) => [entry.slide, entry] as const));
-    noteCall(good.length > 0, `모델 출력에서 슬라이드 ${slides.join(', ')}의 정리를 찾지 못했습니다`);
+    noteCall(good.length > 0, smsg().chat.digest.notInOutput(slides));
     return { good, failed, error: null };
   };
 
@@ -565,7 +579,7 @@ async function runJob(docId: string, job: DigestJob, record: DigestRecord, ctx: 
         parsedFailure ?? {
           slide,
           title: '',
-          markdown: `_(이 슬라이드의 정리본을 만들지 못했습니다${reason ? `: ${reason.replace(/\s+/g, ' ')}` : ''})_`,
+          markdown: `_(${smsg().chat.digest.slideFailed(reason ? reason.replace(/\s+/g, ' ') : '')})_`,
           failed: true,
         },
       ]);
@@ -602,7 +616,7 @@ async function runJob(docId: string, job: DigestJob, record: DigestRecord, ctx: 
           record.summary = text.trim();
           delete record.summaryStale;
         } else {
-          summaryError = '모델이 빈 요약을 돌려주었습니다';
+          summaryError = smsg().chat.digest.emptySummary;
         }
       } catch (err) {
         if (!signal.aborted) summaryError = errorText(err);
@@ -617,15 +631,15 @@ async function runJob(docId: string, job: DigestJob, record: DigestRecord, ctx: 
       record.error = fatal;
     } else if (attempted > 0 && succeeded === 0) {
       record.status = 'error';
-      record.error = firstError ?? '정리본을 만들지 못했습니다';
+      record.error = firstError ?? smsg().chat.digest.failed;
     } else {
       record.status = 'ready';
       const notes: string[] = [];
       const failedSlides = record.slides.filter((entry) => entry.failed).map((entry) => entry.slide);
       if (failedSlides.length > 0) {
-        notes.push(`슬라이드 ${failedSlides.join(', ')}의 정리본을 만들지 못했습니다 (이어서 만들기로 다시 시도할 수 있습니다)`);
+        notes.push(smsg().chat.digest.slidesFailed(failedSlides));
       }
-      if (summaryError) notes.push(`강의 요약을 만들지 못했습니다: ${summaryError}`);
+      if (summaryError) notes.push(smsg().chat.digest.summaryFailed(summaryError));
       if (notes.length > 0) record.error = notes.join(' / ');
       else delete record.error;
     }
@@ -648,12 +662,16 @@ async function runJob(docId: string, job: DigestJob, record: DigestRecord, ctx: 
 // Files
 // ---------------------------------------------------------------------------
 
-/** DIGEST.md: `# <title> — 정리본`, the lecture summary, then every slide's entry (DESIGN §11). */
+/**
+ * DIGEST.md: `# <title> — 정리본`, the lecture summary, then every slide's entry (DESIGN §11). Its headings are in the
+ * language the digest was made in (DigestRecord.lang, Korean for older records).
+ */
 export function digestMarkdown(title: string, pageCount: number, record: DigestRecord): string {
+  const m = smsg(record.lang ?? 'ko').chat.digest.markdown;
   const slides = record.slides.filter((entry) => entry.slide <= pageCount);
-  const lines: string[] = [`# ${title} — 정리본`, ''];
-  if (slides.length < pageCount) lines.push(`_(미완성 정리본: ${slides.length}/${pageCount} 슬라이드)_`, '');
-  if (record.summary?.trim()) lines.push('## 강의 요약', '', demoteHeadings(record.summary.trim(), 2), '');
+  const lines: string[] = [`# ${m.title(title)}`, ''];
+  if (slides.length < pageCount) lines.push(`_(${m.incomplete(slides.length, pageCount)})_`, '');
+  if (record.summary?.trim()) lines.push(`## ${m.summary}`, '', demoteHeadings(record.summary.trim(), 2), '');
   for (const entry of slides) {
     lines.push(
       entry.title ? `## Slide ${entry.slide} · ${entry.title}` : `## Slide ${entry.slide}`,
@@ -661,7 +679,7 @@ export function digestMarkdown(title: string, pageCount: number, record: DigestR
       `![slide ${entry.slide}](slides/${slideFileName(entry.slide, pageCount)})`,
       '',
     );
-    if (entry.failed) lines.push('> 이 슬라이드는 자동 정리에 실패했습니다.', '');
+    if (entry.failed) lines.push(`> ${m.slideFailed}`, '');
     lines.push(demoteHeadings(entry.markdown.trim(), 2), '');
   }
   return `${lines.join('\n').trimEnd()}\n`;
@@ -700,7 +718,7 @@ async function persist(docId: string, assets: DocAssets, record: DigestRecord): 
 /** DIGEST.md of a document, regenerated from digest.json when missing. Null when there is no digest. */
 export async function readDigestMarkdown(docId: string): Promise<string | null> {
   const doc = await readStoredDoc(docId);
-  if (!doc) throw new HttpError(404, '문서를 찾을 수 없습니다');
+  if (!doc) throw new HttpError(404, smsg().common.notFound.doc);
   const paths = docPaths(docId);
   try {
     return await fs.readFile(paths.digestMd, 'utf8');

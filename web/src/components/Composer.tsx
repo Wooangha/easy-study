@@ -4,14 +4,13 @@ import { MAX_ATTACHMENTS } from '../../../shared/types.ts';
 import { useAnnotations } from '../hooks/useAnnotations.ts';
 import type { AttachmentsApi } from '../hooks/useAttachments.ts';
 import { useLatest } from '../hooks/useLatest.ts';
+import { msg } from '../i18n/index.ts';
 import { useMemosToTutor } from '../lib/annotations/settings.ts';
 import { clipboardImages, defaultQuestion, readyAttachments, type Chip } from '../lib/attachments.ts';
 import { toast } from '../lib/toast.ts';
 import { AttachmentChips } from './Attachments.tsx';
 import { LectureSpeechChip } from './recording/LectureSpeech.tsx';
 import { isTypingTarget } from './SlideViewer.tsx';
-
-export const QUICK_PROMPTS = ['이 슬라이드 설명해줘', '핵심만 요약', '예시로 설명', '시험 문제 내줘'] as const;
 
 interface ComposerProps {
   docId: string;
@@ -71,10 +70,11 @@ function StudentMemosChip({ docId, targetSlide, neighbors, pageCount }: { docId:
   const to = Math.min(pageCount, targetSlide + neighbors);
   const count = (snapshot.summary?.memos ?? []).filter((m) => m.tutor && m.slide >= from && m.slide <= to && m.text.trim() !== '').length;
   if (count === 0) return null;
+  const m = msg().chat.composer;
   return (
     <div className="composer-context">
-      <span className="speech-chip memo-chip" title="이 슬라이드와 앞뒤 슬라이드의 메모를 튜터에게 함께 보내요 (설정 › 공부에서 끌 수 있어요)">
-        <NotebookPen /> 메모 {count}개 포함
+      <span className="speech-chip memo-chip" title={m.memosIncludedTitle}>
+        <NotebookPen /> {m.memosIncluded(count)}
       </span>
     </div>
   );
@@ -158,7 +158,7 @@ export function Composer({
   const send = async (value: string, fromComposer: boolean) => {
     if (blocked) return;
     if (uploading) {
-      toast('첨부한 이미지를 올리는 중이에요. 끝나면 보내 주세요.', 'info', 3000);
+      toast(msg().chat.composer.stillUploading, 'info', 3000);
       return;
     }
     // Only attachments: ask about them.
@@ -178,19 +178,20 @@ export function Composer({
     void send(text, true);
   };
 
+  const m = msg().chat.composer;
   const from = Math.max(1, targetSlide - neighbors);
   const to = Math.min(pageCount, targetSlide + neighbors);
-  const withNeighbors = to > from ? ` (p.${from}–${to}도 함께 전달)` : '';
+  const withNeighbors = to > from ? m.withNeighbors(from, to) : '';
 
   const placeholder = disabledReason
     ? disabledReason
     : running
-      ? '답변을 기다리는 중… (다음 질문을 미리 써 둘 수 있어요)'
+      ? m.placeholderRunning
       : chips.length > 0
-        ? `첨부 ${chips.length}개 · 비워 두면 “${defaultQuestion(chips)}”`
+        ? m.placeholderAttachments(chips.length, defaultQuestion(chips))
         : touch
-          ? `p.${targetSlide}에 대해 질문하세요`
-          : `p.${targetSlide}에 대해 질문하세요 · Enter 전송 · Shift+Enter 줄바꿈`;
+          ? m.placeholderTouch(targetSlide)
+          : m.placeholder(targetSlide);
 
   // Auto-grow the textarea up to a max height: with its text, its placeholder, and when its width changes.
   useLayoutEffect(() => {
@@ -212,15 +213,15 @@ export function Composer({
 
   return (
     <div className="composer">
-      <div className="quick-prompts" role="group" aria-label="빠른 질문">
-        {QUICK_PROMPTS.map((q) => (
+      <div className="quick-prompts" role="group" aria-label={m.quickPromptsLabel}>
+        {m.quickPrompts.map((q) => (
           <button
             key={q}
             type="button"
             className="quick-prompt"
             disabled={blocked}
             onClick={() => void send(q, false)}
-            title={chips.length > 0 ? `첨부 ${chips.length}개와 함께 보내요` : undefined}
+            title={chips.length > 0 ? m.sendWithAttachments(chips.length) : undefined}
           >
             {q}
           </button>
@@ -240,12 +241,8 @@ export function Composer({
           className="attach-btn"
           onClick={() => fileInputRef.current?.click()}
           disabled={disabledReason !== null || full}
-          aria-label="이미지 첨부"
-          title={
-            full
-              ? `한 질문에 최대 ${MAX_ATTACHMENTS}개까지 첨부할 수 있어요`
-              : '이미지 첨부 — 붙여넣기(⌘/Ctrl+V)나 끌어다 놓기도 돼요. 슬라이드에서 끌면 그 영역을 첨부해요'
-          }
+          aria-label={m.attachLabel}
+          title={full ? msg().chat.attachments.limit(MAX_ATTACHMENTS, 0) : m.attachTitle}
         >
           <Paperclip />
         </button>
@@ -253,10 +250,7 @@ export function Composer({
           type="button"
           className={pinned ? 'target-chip is-pinned' : 'target-chip'}
           onClick={() => onGoToSlide(targetSlide)}
-          title={
-            (pinned ? '고정된 슬라이드에 대해 질문해요 (클릭하면 이동)' : '보고 있는 슬라이드에 대해 질문해요') +
-            withNeighbors
-          }
+          title={(pinned ? m.targetPinned : m.targetFocused) + withNeighbors}
         >
           {pinned ? <Pin /> : <FileText />} p.{targetSlide}
           {to > from && <span className="target-neighbors">±{neighbors}</span>}
@@ -267,15 +261,15 @@ export function Composer({
           rows={1}
           value={text}
           placeholder={placeholder}
-          aria-label="질문 입력"
+          aria-label={m.inputLabel}
           disabled={disabledReason !== null}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
         />
         {running ? (
-          <button type="button" className="send-btn stop" onClick={onStop} disabled={!canStop} title="답변 중지">
-            <Square fill="currentColor" /> 중지
+          <button type="button" className="send-btn stop" onClick={onStop} disabled={!canStop} title={m.stopTitle}>
+            <Square fill="currentColor" /> {msg().chat.shared.stop}
           </button>
         ) : (
           <button
@@ -283,9 +277,9 @@ export function Composer({
             className="send-btn"
             onClick={() => void send(text, true)}
             disabled={blocked || uploading || (text.trim() === '' && ready.length === 0)}
-            title={uploading ? '첨부한 이미지를 올리는 중…' : '전송 (Enter)'}
+            title={uploading ? m.uploadingTitle : m.sendTitle}
           >
-            {uploading ? '첨부 중…' : '전송'}
+            {uploading ? m.attaching : m.send}
           </button>
         )}
       </div>

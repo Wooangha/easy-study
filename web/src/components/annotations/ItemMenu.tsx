@@ -23,18 +23,12 @@ import {
   type TextItem,
 } from '../../../../shared/types.ts';
 import { useLatest } from '../../hooks/useLatest.ts';
+import { msg } from '../../i18n/index.ts';
 import { menuMaxWidth, placeItemMenu, unionPx, type MenuSide, type PxRect } from '../../lib/annotations/menu.ts';
-import { FONT_LABELS, clampPt, memoSizePt, ptToSize, sizeToPt, textSizeOf, type MemoShown } from '../../lib/annotations/text.ts';
+import { clampPt, memoSizePt, ptToSize, sizeToPt, textSizeOf, type MemoShown } from '../../lib/annotations/text.ts';
 import { useLayerEnv } from './context.ts';
 import { Floating } from './Floating.tsx';
 import { ChatIcon, EyeIcon } from './icons.tsx';
-
-export const COLOR_NAMES: Record<(typeof ANNOTATION_COLORS)[number], string> = {
-  yellow: '노랑',
-  green: '초록',
-  pink: '분홍',
-  blue: '파랑',
-};
 
 interface ItemMenuProps {
   slide: number;
@@ -135,6 +129,9 @@ export function ItemMenu({ slide, items, questions }: ItemMenuProps) {
   const commonColor = items.every((it) => it.color === items[0].color) ? items[0].color : null;
   const update = (patch: Patchable<AnnotationItem>) => (single ? actions.update(slide, single.id, patch) : actions.updateMany(slide, ids, patch));
   const many = items.length > 1;
+  const m = msg().viewer.itemMenu;
+  const memoTexts = msg().viewer.memo;
+  const colorNames = msg().viewer.colorNames;
 
   return (
     <div
@@ -142,19 +139,19 @@ export function ItemMenu({ slide, items, questions }: ItemMenuProps) {
       className={`region-menu annot-item-menu is-${placed?.side ?? 'below'}${compact ? ' is-compact' : ''}`}
       style={style}
       role="toolbar"
-      aria-label={many ? `슬라이드 ${slide}의 선택한 필기 ${items.length}개` : `슬라이드 ${slide}의 선택한 필기`}
+      aria-label={many ? m.labelMany(slide, items.length) : m.label(slide)}
       onPointerDown={(e) => e.stopPropagation()}
     >
-      {many && <span className="annot-menu-count">{items.length}개</span>}
-      <span className="annot-color-dots" role="group" aria-label="색">
+      {many && <span className="annot-menu-count">{m.count(items.length)}</span>}
+      <span className="annot-color-dots" role="group" aria-label={m.colors}>
         {ANNOTATION_COLORS.map((color) => (
           <button
             key={color}
             type="button"
             className={`annot-dot is-${color}${commonColor === color ? ' is-active' : ''}`}
             aria-pressed={commonColor === color}
-            aria-label={COLOR_NAMES[color]}
-            title={many ? `선택한 필기 모두 ${COLOR_NAMES[color]}` : COLOR_NAMES[color]}
+            aria-label={colorNames[color]}
+            title={many ? m.colorAllTitle(colorNames[color]) : colorNames[color]}
             onClick={() => update({ color })}
           />
         ))}
@@ -166,9 +163,9 @@ export function ItemMenu({ slide, items, questions }: ItemMenuProps) {
         type="button"
         className="region-menu-btn"
         onClick={() => (single ? actions.attach(slide, single.id) : actions.attachMany(slide, ids))}
-        title={many ? '선택한 필기를 하나씩 질문에 첨부해요 (입력창 위에 표시돼요)' : '이 필기를 질문에 첨부해요 (입력창 위에 표시돼요)'}
+        title={many ? m.attachManyTitle : m.attachTitle}
       >
-        <Paperclip /> 첨부
+        <Paperclip /> {m.attach}
       </button>
       {memo && (
         <>
@@ -176,24 +173,24 @@ export function ItemMenu({ slide, items, questions }: ItemMenuProps) {
             type="button"
             className={memo.tutor ? 'region-menu-btn is-icon' : 'region-menu-btn is-icon is-off'}
             aria-pressed={memo.tutor}
-            aria-label="튜터에게 보이기"
+            aria-label={memoTexts.tutorShow}
             onClick={() => actions.update(slide, memo.id, { tutor: !memo.tutor })}
-            title={memo.tutor ? '튜터에게 보이기 — 질문할 때 이 메모도 함께 가요 (클릭하면 숨김)' : '튜터에게 숨김 — 이 메모는 튜터가 보지 않아요 (클릭하면 보이기)'}
+            title={memo.tutor ? memoTexts.tutorShownTitle : memoTexts.tutorHiddenTitle}
           >
             <EyeIcon off={!memo.tutor} />
           </button>
           {compact ? (
-            <button type="button" className="region-menu-btn" onClick={() => actions.openSheet(slide, memo.id)} title="메모 펴기 (아래 시트에서 편집)">
-              펴기
+            <button type="button" className="region-menu-btn" onClick={() => actions.openSheet(slide, memo.id)} title={m.expandSheetTitle}>
+              {m.expand}
             </button>
           ) : (
             <button
               type="button"
               className="region-menu-btn"
               onClick={() => actions.update(slide, memo.id, { collapsed: !memo.collapsed })}
-              title={memo.collapsed ? '메모 펴기' : '메모 접기'}
+              title={memo.collapsed ? m.expandTitle : m.collapseTitle}
             >
-              {memo.collapsed ? '펴기' : '접기'}
+              {memo.collapsed ? m.expand : m.collapse}
             </button>
           )}
         </>
@@ -202,17 +199,17 @@ export function ItemMenu({ slide, items, questions }: ItemMenuProps) {
         type="button"
         className="region-menu-btn is-danger"
         onClick={() => (single ? actions.remove(slide, single.id) : actions.removeMany(slide, ids))}
-        title={many ? `선택한 필기 ${items.length}개 삭제 (Delete)` : '이 필기 삭제 (Delete)'}
+        title={many ? m.deleteManyTitle(items.length) : m.deleteTitle}
       >
-        <Trash /> 삭제
+        <Trash /> {msg().common.delete}
       </button>
       {!many && questions > 0 && (
-        <span className="annot-menu-note" role="img" aria-label={`질문 ${questions}개`} title={`이 필기를 첨부해서 물어본 질문 ${questions}개 (선택을 풀면 모서리의 파란 점)`}>
+        <span className="annot-menu-note" role="img" aria-label={m.questions(questions)} title={m.questionsTitle(questions)}>
           <ChatIcon className="annot-menu-note-icon" />
           {questions}
         </span>
       )}
-      <button type="button" className="region-menu-btn is-close" onClick={() => actions.select(slide, null)} aria-label="선택 해제" title="선택 해제 (Esc)">
+      <button type="button" className="region-menu-btn is-close" onClick={() => actions.select(slide, null)} aria-label={m.deselect} title={m.deselectTitle}>
         <X />
       </button>
     </div>
@@ -228,7 +225,7 @@ export function ItemMenu({ slide, items, questions }: ItemMenuProps) {
  * slider: the user found it fiddly). Typing commits as soon as the number is valid (so "24" is applied when the 4 lands,
  * not "2" clamped); blur / Enter clamps what is left; ↑ / ↓ in the field step by one like the buttons.
  */
-function SizeField({ pt, label, onPt }: { pt: number; label: string; onPt: (pt: number) => void }) {
+function SizeField({ pt, label, decrease, increase, onPt }: { pt: number; label: string; decrease: string; increase: string; onPt: (pt: number) => void }) {
   const [typed, setTyped] = useState<string | null>(null);
   const shown = typed ?? String(pt);
   const commit = (raw: string, clampIt: boolean) => {
@@ -269,8 +266,8 @@ function SizeField({ pt, label, onPt }: { pt: number; label: string; onPt: (pt: 
         className="annot-size-step"
         onClick={() => step(-1)}
         disabled={pt <= MIN_TEXT_SIZE_PT}
-        aria-label={`${label} 줄이기`}
-        title={`${label} 줄이기`}
+        aria-label={decrease}
+        title={decrease}
       >
         −
       </button>
@@ -280,7 +277,7 @@ function SizeField({ pt, label, onPt }: { pt: number; label: string; onPt: (pt: 
         className="annot-size-input"
         value={shown}
         aria-label={`${label} (pt)`}
-        title={`${label}: ${MIN_TEXT_SIZE_PT}–${MAX_TEXT_SIZE_PT} pt (슬라이드 기준)`}
+        title={msg().viewer.textStyle.sizeTitle(label, MIN_TEXT_SIZE_PT, MAX_TEXT_SIZE_PT)}
         onChange={(e: ChangeEvent<HTMLInputElement>) => {
           const raw = e.target.value.replace(/[^0-9]/g, '').slice(0, 2);
           setTyped(raw);
@@ -295,8 +292,8 @@ function SizeField({ pt, label, onPt }: { pt: number; label: string; onPt: (pt: 
         className="annot-size-step"
         onClick={() => step(1)}
         disabled={pt >= MAX_TEXT_SIZE_PT}
-        aria-label={`${label} 키우기`}
-        title={`${label} 키우기`}
+        aria-label={increase}
+        title={increase}
       >
         +
       </button>
@@ -357,17 +354,18 @@ function TextStyleControls({ item, compact, onChange }: { item: TextItem; compac
   const pt = sizeToPt(textSizeOf(item));
   const font = item.font ?? 'sans';
   const bold = item.bold === true;
+  const m = msg().viewer.textStyle;
   return (
-    <StyleControls summary={`가 ${pt}${bold ? ' B' : ''}`} label="글자 모양 (크기 · 글꼴 · 굵게)" compact={compact}>
-      <SizeField pt={pt} label="글자 크기" onPt={(next) => onChange({ size: ptToSize(next) })} />
-      <select className="picker small annot-font-select" value={font} aria-label="글꼴" title="글꼴" onChange={(e) => onChange({ font: e.target.value as TextFont })} onKeyDown={(e) => e.stopPropagation()}>
+    <StyleControls summary={`${m.summary(pt)}${bold ? ' B' : ''}`} label={m.label} compact={compact}>
+      <SizeField pt={pt} label={m.size} decrease={m.sizeDown} increase={m.sizeUp} onPt={(next) => onChange({ size: ptToSize(next) })} />
+      <select className="picker small annot-font-select" value={font} aria-label={m.font} title={m.font} onChange={(e) => onChange({ font: e.target.value as TextFont })} onKeyDown={(e) => e.stopPropagation()}>
         {TEXT_FONTS.map((f) => (
           <option key={f} value={f}>
-            {FONT_LABELS[f]}
+            {m.fonts[f]}
           </option>
         ))}
       </select>
-      <button type="button" className={`region-menu-btn annot-bold-btn${bold ? ' is-active' : ''}`} aria-pressed={bold} aria-label="굵게" title="굵게" onClick={() => onChange({ bold: !bold })}>
+      <button type="button" className={`region-menu-btn annot-bold-btn${bold ? ' is-active' : ''}`} aria-pressed={bold} aria-label={m.bold} title={m.bold} onClick={() => onChange({ bold: !bold })}>
         B
       </button>
     </StyleControls>
@@ -377,9 +375,10 @@ function TextStyleControls({ item, compact, onChange }: { item: TextItem; compac
 /** A memo's text size; the field of a memo without one starts at the points its UI-sized text amounts to where it is shown (text.ts memoSizePt). */
 function MemoSizeControls({ item, compact, shown, onChange }: { item: MemoItem; compact: boolean; shown: MemoShown; onChange: (patch: Patchable<MemoItem>) => void }) {
   const pt = memoSizePt(item, shown);
+  const m = msg().viewer.textStyle;
   return (
-    <StyleControls summary={`가 ${pt}`} label="메모 글자 크기" compact={compact}>
-      <SizeField pt={pt} label="메모 글자 크기" onPt={(next) => onChange({ size: ptToSize(next) })} />
+    <StyleControls summary={m.summary(pt)} label={m.memoSize} compact={compact}>
+      <SizeField pt={pt} label={m.memoSize} decrease={m.memoSizeDown} increase={m.memoSizeUp} onPt={(next) => onChange({ size: ptToSize(next) })} />
     </StyleControls>
   );
 }

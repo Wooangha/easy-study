@@ -10,7 +10,6 @@ import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import sharp from 'sharp';
 import type { Attachment, NotesResponse, ProviderInfo, Session, SlideAnnotations, StreamEvent } from '../shared/types.ts';
-import { ANNOTATION_NOT_FOUND } from '../server/attachments.ts';
 import { defaultChatDeps } from '../server/chat.ts';
 import type { ChatDeps } from '../server/chat.ts';
 import { repoRoot } from '../server/config.ts';
@@ -18,6 +17,10 @@ import { startServer } from '../server/index.ts';
 import type { RunningServer } from '../server/index.ts';
 import { docPaths, slideFileName, textFileName } from '../server/library.ts';
 import type { StoredDocMeta } from '../server/library.ts';
+import { smsg } from '../server/i18n.ts';
+
+/** 400 of POST …/regions for an annotation the slide does not have (Korean: the tests send no language). */
+const ANNOTATION_NOT_FOUND = smsg('ko').library.attachments.annotationNotFound;
 
 const PAGES = 4;
 const DOC = 'note-deck-aaa111';

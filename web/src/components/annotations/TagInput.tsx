@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 import { X } from 'lucide-react';
 import { MAX_MEMO_TAGS } from '../../../../shared/types.ts';
+import { msg } from '../../i18n/index.ts';
 import { normalizeTag, suggestTags } from '../../lib/annotations/geometry.ts';
 import { fetchLibraryTags } from '../../lib/annotations/store.ts';
 import { Floating } from './Floating.tsx';
@@ -80,13 +81,14 @@ export function TagInput({ tags, onChange, lectureTags, disabled = false }: TagI
     }
   };
 
+  const m = msg().viewer.tags;
   return (
     <div className={focused ? 'tag-input is-focused' : 'tag-input'} onClick={() => inputRef.current?.focus()}>
       {tags.map((tag) => (
         <span key={tag} className="memo-tag">
           #{tag}
           {!disabled && (
-            <button type="button" className="memo-tag-x" onClick={() => remove(tag)} aria-label={`태그 ${tag} 빼기`} title="태그 빼기">
+            <button type="button" className="memo-tag-x" onClick={() => remove(tag)} aria-label={m.remove(tag)} title={m.removeTitle}>
               <X size="1em" />
             </button>
           )}
@@ -97,8 +99,8 @@ export function TagInput({ tags, onChange, lectureTags, disabled = false }: TagI
           ref={setInputRef}
           className="tag-input-field"
           value={typed}
-          placeholder={tags.length === 0 ? '태그 추가…' : ''}
-          aria-label="태그 추가"
+          placeholder={tags.length === 0 ? m.placeholder : ''}
+          aria-label={m.add}
           aria-autocomplete="list"
           aria-controls={suggestions.length > 0 ? listId : undefined}
           aria-expanded={suggestions.length > 0}

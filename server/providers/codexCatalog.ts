@@ -15,6 +15,7 @@ import { EFFORT_ID_RE, MODEL_ID_RE } from '../../shared/types.ts';
 import type { EffortOption, ModelOption } from '../../shared/types.ts';
 import { trackChild } from '../children.ts';
 import { childEnv } from './proc.ts';
+import { smsg } from '../i18n.ts';
 import { effortOption } from './types.ts';
 
 /** How long a read catalog is used before it is refreshed (in the background). */
@@ -22,8 +23,6 @@ export const CODEX_CATALOG_TTL_MS = 30 * 60_000;
 /** Timeouts of `codex debug models` (it may wait for the network) and of the offline `--bundled` fallback. */
 export const CODEX_CATALOG_TIMEOUT_MS = 4_000;
 export const CODEX_BUNDLED_CATALOG_TIMEOUT_MS = 3_000;
-/** The default-model option, with the model of config.toml in parentheses when known. */
-export const CODEX_DEFAULT_MODEL_LABEL = 'Codex 설정 기본값';
 
 /** Effort levels in this order (weakest first); levels the app does not know follow in catalog order. */
 const EFFORT_ORDER = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
@@ -95,9 +94,11 @@ export function codexModelChoices(
 ): { models: ModelOption[]; efforts: EffortOption[] } {
   const listed = (catalog ?? []).filter((m) => m.visible).sort((a, b) => a.priority - b.priority);
   const configured = configModel ? catalog?.find((m) => m.slug === configModel) : undefined;
+  // The default-model option (in the current language), with the model of config.toml in parentheses when known.
+  const m = smsg().chat.providers;
   const fallback: ModelOption = {
     id: '',
-    label: configModel ? `${CODEX_DEFAULT_MODEL_LABEL} (${configured?.displayName ?? configModel})` : CODEX_DEFAULT_MODEL_LABEL,
+    label: configModel ? m.codexDefaultModelOf(configured?.displayName ?? configModel) : m.codexDefaultModel,
   };
   if (configured || listed.length > 0) {
     fallback.efforts = configured

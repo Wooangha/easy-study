@@ -4,9 +4,9 @@ import { FileText, Folder, GripVertical, NotebookPen, Pencil, Trash } from 'luci
 import type { Course, DocMeta } from '../../../../shared/types.ts';
 import { courseSummaryUrl } from '../../api.ts';
 import type { UploadItem } from '../../hooks/useDocs.ts';
+import { msg } from '../../i18n/index.ts';
 import { confirmDialog } from '../../lib/confirm.ts';
 import { formatBytes } from '../../lib/format.ts';
-import { withParticle } from '../../lib/korean.ts';
 import { dndId, type DropData } from '../../lib/libraryDnd.ts';
 import { collapseKey, type LayoutEntry } from '../../lib/libraryLayout.ts';
 import { LectureRow } from './LectureRow.tsx';
@@ -71,6 +71,7 @@ export function CourseCard(props: CourseCardProps) {
   const [over, setOver] = useState(false);
   const [editing, setEditing] = useState(false);
   const bodyId = useId();
+  const m = msg().shell.course;
   const drag = useDragState();
   const key = collapseKey.course(course.id);
   // While a course is dragged every course shows only its header, so that the list is short.
@@ -78,7 +79,7 @@ export function CourseCard(props: CourseCardProps) {
   const shownCollapsed = compact || (collapsed && !drag.springOpen.has(key));
 
   const data: DropData = { role: 'course', courseId: course.id, groupId };
-  const item = useOrgItem({ id: dndId.course(course.id), data, roleDescription: '옮길 수 있는 과목', canDrag: props.canDrag });
+  const item = useOrgItem({ id: dndId.course(course.id), data, roleDescription: m.roleDescription, canDrag: props.canDrag });
   const headData: DropData = { role: 'course-head', courseId: course.id };
   const head = useDroppable({ id: dndId.courseHead(course.id), data: headData });
   const bodyData: DropData = { role: 'course-body', courseId: course.id };
@@ -94,11 +95,11 @@ export function CourseCard(props: CourseCardProps) {
   };
 
   const confirmDelete = async () => {
+    const c = msg().shell.course.deleteConfirm;
     const ok = await confirmDialog({
-      title: `과목 ${withParticle(`‘${course.title}’`, '을', '를')} 삭제할까요?`,
-      message:
-        lectures.length > 0 ? `강의 ${lectures.length}개는 지워지지 않고 ‘미분류’로 옮겨져요.` : '비어 있는 과목이에요.',
-      confirmLabel: '과목 삭제',
+      title: c.title(course.title),
+      message: lectures.length > 0 ? c.lecturesKept(lectures.length) : c.empty,
+      confirmLabel: c.confirmLabel,
       danger: true,
     });
     if (ok) props.onDelete();
@@ -117,7 +118,7 @@ export function CourseCard(props: CourseCardProps) {
       data-drag-node=""
       data-org-key={dndId.course(course.id)}
       className={className}
-      aria-label={`과목 ${course.title}`}
+      aria-label={m.label(course.title)}
       onDragOver={(e) => {
         if (!hasFiles(e)) return;
         e.preventDefault();
@@ -136,7 +137,7 @@ export function CourseCard(props: CourseCardProps) {
         }}
       >
         <DragHandle
-          label={`‘${course.title}’ 과목 옮기기`}
+          label={m.move(course.title)}
           setRef={item.setActivatorNodeRef}
           listeners={item.listeners}
           attributes={item.attributes}
@@ -148,7 +149,7 @@ export function CourseCard(props: CourseCardProps) {
             <Folder className="course-icon" />
             <RenameInput
               initial={course.title}
-              label="과목 이름"
+              label={m.nameLabel}
               onDone={(title) => {
                 setEditing(false);
                 if (title && title !== course.title) props.onRename(title);
@@ -176,19 +177,19 @@ export function CourseCard(props: CourseCardProps) {
                 type="button"
                 className="icon-btn tiny rename-btn"
                 onClick={() => setEditing(true)}
-                title="과목 이름 바꾸기"
-                aria-label={`‘${course.title}’ 과목 이름 바꾸기`}
+                title={m.rename}
+                aria-label={m.renameLabel(course.title)}
               >
                 <Pencil />
               </button>
             )}
           </>
         )}
-        <span className="course-count">강의 {lectures.length}개</span>
+        <span className="course-count">{m.lectureCount(lectures.length)}</span>
         {shownCollapsed && !compact && <CourseSummaryBadges lectures={lectures} uploads={uploads.length} />}
         {mark === 'into' && shownCollapsed && (
           <span className="drop-into-label" aria-hidden>
-            놓으면 이 과목 끝에 추가
+            {m.dropAtEnd}
           </span>
         )}
         <span className="spacer" />
@@ -200,14 +201,10 @@ export function CourseCard(props: CourseCardProps) {
                 className="ghost-btn small"
                 onClick={() => props.onDigestLectures(withoutDigest)}
                 disabled={!props.canDigest}
-                title={
-                  props.canDigest
-                    ? '정리본이 있는 강의만 요약이 다음 강의를 공부할 때 LLM에게 전달돼요 — 없는 강의의 정리본을 한 번에 만들어요'
-                    : '사용할 수 있는 LLM이 없어요'
-                }
+                title={props.canDigest ? m.makeDigestsTitle : m.noLlm}
               >
-                <NotebookPen /> 정리본 <span className="hide-narrow">없는 강의 </span>
-                {withoutDigest.length}개 만들기
+                <NotebookPen />{' '}
+                {m.makeDigests(<span className="hide-narrow">{m.makeDigestsWide}</span>, withoutDigest.length)}
               </button>
             )}
             <a
@@ -215,19 +212,19 @@ export function CourseCard(props: CourseCardProps) {
               href={courseSummaryUrl(course.id)}
               target="_blank"
               rel="noreferrer"
-              title="과목 정리 파일(COURSE.md) 열기 — 강의별 요약과 정리본 링크"
+              title={m.summaryTitle}
             >
               <FileText /> COURSE.md
             </a>
-            <button type="button" className="ghost-btn small" onClick={props.onPickFiles} title="이 과목에 강의 PDF 추가">
-              ＋ 강의 추가
+            <button type="button" className="ghost-btn small" onClick={props.onPickFiles} title={m.addLectureTitle}>
+              {m.addLecture}
             </button>
             <button
               type="button"
               className="icon-btn small"
               onClick={() => void confirmDelete()}
-              title="과목 삭제 (강의는 남아요)"
-              aria-label={`‘${course.title}’ 과목 삭제`}
+              title={m.deleteTitle}
+              aria-label={m.deleteLabel(course.title)}
             >
               <Trash />
             </button>
@@ -258,9 +255,7 @@ export function CourseCard(props: CourseCardProps) {
                   <span className="lecture-index">…</span>
                   <div className="lecture-main">
                     <div className="doc-title">{u.name}</div>
-                    <div className="doc-sub">
-                      업로드 중 {Math.round(u.fraction * 100)}% · {formatBytes(u.size)}
-                    </div>
+                    <div className="doc-sub">{msg().shell.library.uploading(Math.round(u.fraction * 100), formatBytes(u.size))}</div>
                     <ProgressBar fraction={u.fraction} />
                   </div>
                 </li>
@@ -268,9 +263,7 @@ export function CourseCard(props: CourseCardProps) {
             </ol>
           ) : (
             <button type="button" className="course-empty" onClick={props.onPickFiles}>
-              {drag.active?.kind === 'lecture'
-                ? '여기에 놓으면 이 과목의 강의가 돼요'
-                : '아직 강의가 없어요 — PDF를 이 카드에 끌어다 놓거나 클릭해서 추가하세요'}
+              {drag.active?.kind === 'lecture' ? m.dropToJoin : m.empty}
             </button>
           )}
         </div>
@@ -279,7 +272,7 @@ export function CourseCard(props: CourseCardProps) {
       {over && (
         <div className="course-drop-hint" aria-hidden>
           <span>
-            <FileText /> 놓으면 ‘{course.title}’에 강의로 추가해요
+            <FileText /> {m.dropPdf(course.title)}
           </span>
         </div>
       )}
@@ -296,7 +289,7 @@ export function CourseGhost({ course, lectures }: { course: Course; lectures: nu
       </span>
       <Folder className="course-icon" />
       <span className="drag-ghost-title">{course.title}</span>
-      <span className="course-count">강의 {lectures}개</span>
+      <span className="course-count">{msg().shell.course.lectureCount(lectures)}</span>
     </div>
   );
 }

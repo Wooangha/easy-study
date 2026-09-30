@@ -5,6 +5,7 @@ import { CircleSmall, Mic, Pause } from 'lucide-react';
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { LIVE_SPEECH_IDLE_MS } from '../../../../shared/types.ts';
 import { useRecordingFeed } from '../../hooks/useRecordingFeed.ts';
+import { msg } from '../../i18n/index.ts';
 import { recorder } from '../../lib/recording/recorder.ts';
 import { recentMinutes } from '../../lib/recording/timeline.ts';
 
@@ -42,13 +43,12 @@ function useSpeechMinutes(docId: string): { minutes: number; paused: boolean } |
 export function LectureSpeechChip({ docId }: { docId: string }) {
   const speech = useSpeechMinutes(docId);
   if (!speech) return null;
+  const m = msg().recording.speech;
   return (
     <div className="composer-context">
-      <span
-        className="speech-chip"
-        title="녹음 중인 강의에서 교수님이 최근에 한 말(받아쓴 글)을 질문과 함께 튜터에게 전달해요. 받아쓰기에는 오류가 있을 수 있어요."
-      >
-        <Mic /> 최근 {Math.max(1, speech.minutes)}분 포함{speech.paused ? ' · 녹음 일시정지' : ''}
+      <span className="speech-chip" title={m.chipTitle}>
+        <Mic /> {m.recentMinutes(Math.max(1, speech.minutes))}
+        {speech.paused ? ` · ${m.recordingPaused}` : ''}
       </span>
     </div>
   );
@@ -60,16 +60,17 @@ export function RecordingTabBadge({ docId, count }: { docId: string; count: numb
     const s = recorder.getSnapshot();
     return s.docId === docId && s.phase !== 'idle' ? s.phase : null;
   });
+  const m = msg().recording.status;
   if (live === 'recording' || live === 'starting') {
     return (
-      <span className="tab-count is-live" title="녹음 중">
+      <span className="tab-count is-live" title={m.recording}>
         <CircleSmall fill="currentColor" /> REC
       </span>
     );
   }
   if (live === 'paused') {
     return (
-      <span className="tab-count is-warn" role="img" aria-label="일시정지" title="일시정지">
+      <span className="tab-count is-warn" role="img" aria-label={m.paused} title={m.paused}>
         <Pause fill="currentColor" />
       </span>
     );

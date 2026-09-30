@@ -6,6 +6,7 @@ import { layoutRevision } from '../shared/layoutRevision.ts';
 import { COURSE_ID_RE } from '../shared/types.ts';
 import type { CourseGroup, LayoutItem, LibraryLayout } from '../shared/types.ts';
 import { HttpError } from './config.ts';
+import { smsg } from './i18n.ts';
 
 /** How many ids an error message lists before "…". */
 const MAX_IDS_IN_MESSAGE = 5;
@@ -16,13 +17,15 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/** "a, b, c 외 2개": each id once (an id can be found wrong in several places, e.g. `groups` and `order`). */
+/** "a, b, c 외 2개" ("a, b, c and 2 more"): each id once (an id can be found wrong in several places, e.g. `groups` and `order`). */
 export function listIds(ids: readonly string[]): string {
   const unique = [...new Set(ids)];
   const shown = unique
     .slice(0, MAX_IDS_IN_MESSAGE)
     .map((id) => (id.length > MAX_ID_CHARS_IN_MESSAGE ? `${id.slice(0, MAX_ID_CHARS_IN_MESSAGE)}…` : id));
-  return unique.length > MAX_IDS_IN_MESSAGE ? `${shown.join(', ')} 외 ${unique.length - MAX_IDS_IN_MESSAGE}개` : shown.join(', ');
+  return unique.length > MAX_IDS_IN_MESSAGE
+    ? smsg().library.layout.moreIds(shown.join(', '), unique.length - MAX_IDS_IN_MESSAGE)
+    : shown.join(', ');
 }
 
 /** A stored group, or null when the entry is unusable (bad id, no title). Invalid course ids are dropped. */
@@ -114,12 +117,13 @@ export function normalizeLayout(stored: unknown, courseIds: readonly string[]): 
  * kept; `groups` of the result follows the new top-level order.
  */
 export function validateLayoutRequest(body: unknown, current: LibraryLayout, courseIds: readonly string[]): LibraryLayout {
-  const malformed = () => new HttpError(400, '배치 정보가 올바르지 않습니다');
+  const m = smsg().library.layout;
+  const malformed = () => new HttpError(400, m.malformed);
   if (!isObject(body) || !Array.isArray(body.groups) || !Array.isArray(body.order)) throw malformed();
   if (body.baseRevision !== undefined) {
     if (typeof body.baseRevision !== 'string') throw malformed();
     if (body.baseRevision !== layoutRevision(current)) {
-      throw new HttpError(409, '다른 곳에서 과목 배치가 바뀌었습니다. 새로 불러온 뒤 다시 시도해 주세요');
+      throw new HttpError(409, m.changedElsewhere);
     }
   }
 
@@ -181,17 +185,14 @@ export function validateLayoutRequest(body: unknown, current: LibraryLayout, cou
     if (!orderedGroups.has(id)) courseIdsOfGroup.forEach(placeCourse);
   }
 
-  if (unknownGroups.length > 0) {
-    throw new HttpError(400, `알 수 없는 그룹입니다 (다른 곳에서 삭제되었을 수 있습니다): ${listIds(unknownGroups)}`);
-  }
-  if (unknownCourses.length > 0) throw new HttpError(400, `알 수 없는 과목입니다: ${listIds(unknownCourses)}`);
-  if (duplicateGroups.length > 0) throw new HttpError(400, `같은 그룹이 두 번 들어 있습니다: ${listIds(duplicateGroups)}`);
-  if (duplicateCourses.length > 0) throw new HttpError(400, `같은 과목이 두 번 들어 있습니다: ${listIds(duplicateCourses)}`);
-  const refresh = '다른 곳에서 바뀌었을 수 있으니 새로 고친 뒤 다시 시도해 주세요';
+  if (unknownGroups.length > 0) throw new HttpError(400, m.unknownGroups(listIds(unknownGroups)));
+  if (unknownCourses.length > 0) throw new HttpError(400, m.unknownCourses(listIds(unknownCourses)));
+  if (duplicateGroups.length > 0) throw new HttpError(400, m.duplicateGroups(listIds(duplicateGroups)));
+  if (duplicateCourses.length > 0) throw new HttpError(400, m.duplicateCourses(listIds(duplicateCourses)));
   const missingGroups = current.groups.map((group) => group.id).filter((id) => !listed.has(id) || !orderedGroups.has(id));
-  if (missingGroups.length > 0) throw new HttpError(400, `배치에 빠진 그룹이 있습니다 (${refresh}): ${listIds(missingGroups)}`);
+  if (missingGroups.length > 0) throw new HttpError(400, m.missingGroups(listIds(missingGroups)));
   const missingCourses = courseIds.filter((id) => !placedCourses.has(id));
-  if (missingCourses.length > 0) throw new HttpError(400, `배치에 빠진 과목이 있습니다 (${refresh}): ${listIds(missingCourses)}`);
+  if (missingCourses.length > 0) throw new HttpError(400, m.missingCourses(listIds(missingCourses)));
   return { groups, order };
 }
 
@@ -202,18 +203,18 @@ export function validateLayoutRequest(body: unknown, current: LibraryLayout, cou
 export function validateGroupCourseIds(value: unknown, courseIds: readonly string[]): string[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value) || value.some((id) => typeof id !== 'string')) {
-    throw new HttpError(400, 'courseIds는 과목 id 목록이어야 합니다');
+    throw new HttpError(400, smsg().library.layout.courseIdsInvalid);
   }
   const known = new Set(courseIds);
   const unknown = (value as string[]).filter((id) => !known.has(id));
-  if (unknown.length > 0) throw new HttpError(400, `알 수 없는 과목입니다: ${listIds(unknown)}`);
+  if (unknown.length > 0) throw new HttpError(400, smsg().library.layout.unknownCourses(listIds(unknown)));
   const seen = new Set<string>();
   const duplicates: string[] = [];
   for (const id of value as string[]) {
     if (seen.has(id)) duplicates.push(id);
     seen.add(id);
   }
-  if (duplicates.length > 0) throw new HttpError(400, `같은 과목이 두 번 들어 있습니다: ${listIds(duplicates)}`);
+  if (duplicates.length > 0) throw new HttpError(400, smsg().library.layout.duplicateCourses(listIds(duplicates)));
   return [...(value as string[])];
 }
 

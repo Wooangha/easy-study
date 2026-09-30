@@ -10,6 +10,7 @@
 
 mod bridge;
 mod config;
+mod i18n;
 mod media;
 mod pathenv;
 mod proxy;
@@ -337,6 +338,8 @@ struct StateDto {
     version: String,
     /// "system" | "light" | "dark".
     theme: &'static str,
+    /// The shell's language ("ko" | "en", i18n.rs): the chooser speaks it, like the menus and dialogs.
+    lang: &'static str,
     /// Automatic update checks are on.
     update_check: bool,
     update: update::UpdateState,
@@ -381,6 +384,7 @@ fn get_state(app: AppHandle, state: State<'_, AppState>) -> StateDto {
             "dark" => "dark",
             _ => "system",
         },
+        lang: i18n::lang().id(),
         update_check: cfg.update_check != Some(false),
         update: lock(&state.update.state).clone(),
         focus: lock(&state.chooser_focus).take(),
@@ -410,7 +414,7 @@ fn cancel_update(app: AppHandle) {
 #[tauri::command]
 fn set_theme(app: AppHandle, theme: String) -> Result<(), String> {
     if !matches!(theme.as_str(), "system" | "light" | "dark") {
-        return Err(format!("알 수 없는 테마예요: {theme}"));
+        return Err((i18n::msg().common.unknown_theme)(&theme));
     }
     bridge::set_theme(&app, &theme);
     Ok(())
@@ -450,7 +454,7 @@ fn open_logs(app: AppHandle) -> Result<(), String> {
 /// Nothing connects while an update replaces the app (the chooser shows it as busy; this is the backstop).
 fn not_installing(app: &AppHandle) -> Result<(), String> {
     if update::replacing(app) {
-        return Err("업데이트를 설치하는 중이에요. 끝나면 앱이 다시 시작돼요.".into());
+        return Err(i18n::msg().common.installing_update.into());
     }
     Ok(())
 }
@@ -519,7 +523,7 @@ struct Picked {
 async fn pick_library(app: AppHandle) -> Result<Option<Picked>, String> {
     let current = config::library(&app, &config::load(&app)).path;
     let (tx, rx) = std::sync::mpsc::channel();
-    let mut dialog = app.dialog().file().set_title("라이브러리 폴더 선택");
+    let mut dialog = app.dialog().file().set_title(i18n::msg().library.pick_title);
     if current.is_dir() {
         dialog = dialog.set_directory(&current);
     }
@@ -539,17 +543,15 @@ async fn pick_library(app: AppHandle) -> Result<Option<Picked>, String> {
 fn library_warning(dir: &Path) -> Option<String> {
     let entries: Vec<_> = match std::fs::read_dir(dir) {
         Ok(entries) => entries.flatten().take(500).collect(),
-        Err(e) => return Some(format!("이 폴더를 읽을 수 없어요 ({e}). 그래도 쓸까요?")),
+        Err(e) => return Some((i18n::msg().library.unreadable)(&e.to_string())),
     };
     let names: Vec<String> = entries.iter().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
     let visible = names.iter().filter(|n| !matches!(n.as_str(), ".DS_Store" | "desktop.ini" | "Thumbs.db")).count();
     let markers = ["layout.json", "courses", ".server.lock", ".auth.json"];
     let is_library = names.iter().any(|n| markers.contains(&n.as_str())) || entries.iter().any(|e| e.path().join("doc.json").is_file());
     (visible > 0 && !is_library).then(|| {
-        format!(
-            "'{}' 폴더는 비어 있지 않고 easy-study 라이브러리처럼 보이지 않아요. 강의마다 폴더가 이 안에 만들어져요. 그래도 이 폴더를 쓸까요?",
-            dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| dir.display().to_string())
-        )
+        let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| dir.display().to_string());
+        (i18n::msg().library.not_a_library)(&name)
     })
 }
 
@@ -564,17 +566,17 @@ struct LibraryChange {
 #[tauri::command]
 fn set_library(app: AppHandle, path: Option<String>) -> Result<LibraryChange, String> {
     if std::env::var_os(config::ENV_LIBRARY).is_some_and(|v| !v.is_empty()) {
-        return Err(format!("{} 환경 변수가 라이브러리 폴더를 정하고 있어요.", config::ENV_LIBRARY));
+        return Err((i18n::msg().library.from_env)(config::ENV_LIBRARY));
     }
     let chosen = match path.filter(|p| !p.trim().is_empty()) {
         None => None,
         Some(p) => {
             let dir = PathBuf::from(p.trim());
             if !dir.is_absolute() || !dir.is_dir() {
-                return Err(format!("폴더가 아니에요: {}", dir.display()));
+                return Err((i18n::msg().library.not_a_folder)(&dir.display().to_string()));
             }
             let probe = dir.join(format!(".easy-study-write-test-{}", std::process::id()));
-            std::fs::write(&probe, b"").map_err(|e| format!("이 폴더에 쓸 수 없어요: {} ({e})", dir.display()))?;
+            std::fs::write(&probe, b"").map_err(|e| (i18n::msg().library.not_writable)(&dir.display().to_string(), &e.to_string()))?;
             let _ = std::fs::remove_file(&probe);
             (dir != config::default_library(&app)).then(|| dir.to_string_lossy().into_owned())
         }
@@ -587,9 +589,9 @@ fn set_library(app: AppHandle, path: Option<String>) -> Result<LibraryChange, St
         Some(old) if old != library.path => {
             let h = app.clone();
             std::thread::spawn(move || server::stop(&h));
-            "라이브러리 폴더를 바꿨어요. 실행 중이던 서버를 끄고 있어요 — \"연결\"을 누르면 새 폴더로 시작해요."
+            i18n::msg().library.changed_stopping
         }
-        _ => "라이브러리 폴더를 바꿨어요.",
+        _ => i18n::msg().library.changed,
     };
     config::log(&app, &format!("library set to {}", library.path.display()));
     Ok(LibraryChange { library, message: Some(message.into()) })
@@ -611,13 +613,14 @@ fn open_library_folder(app: &AppHandle) -> Result<(), String> {
 // ---------------------------------------------------------------------------------------------------------
 
 fn build_menu(h: &AppHandle) -> tauri::Result<Menu<Wry>> {
-    let choose = MenuItem::with_id(h, "choose", "연결 대상 바꾸기…", true, Some("CmdOrCtrl+Shift+K"))?;
-    let reload = MenuItem::with_id(h, "reload", "새로 고침", true, Some("CmdOrCtrl+R"))?;
-    let browser = MenuItem::with_id(h, "open-browser", "브라우저에서 열기", true, None::<&str>)?;
-    let library = MenuItem::with_id(h, "open-library", "라이브러리 폴더 열기", true, None::<&str>)?;
-    let settings = MenuItem::with_id(h, "settings", "설정…", true, Some("CmdOrCtrl+,"))?;
+    let m = &i18n::msg().menu;
+    let choose = MenuItem::with_id(h, "choose", m.choose, true, Some("CmdOrCtrl+Shift+K"))?;
+    let reload = MenuItem::with_id(h, "reload", m.reload, true, Some("CmdOrCtrl+R"))?;
+    let browser = MenuItem::with_id(h, "open-browser", m.open_browser, true, None::<&str>)?;
+    let library = MenuItem::with_id(h, "open-library", m.open_library, true, None::<&str>)?;
+    let settings = MenuItem::with_id(h, "settings", m.settings, true, Some("CmdOrCtrl+,"))?;
     // Its text names a found version ("업데이트 설치 (0.5.1)…"): the way in when the page ignores the pushed state.
-    let check_update = MenuItem::with_id(h, "check-update", "업데이트 확인…", true, None::<&str>)?;
+    let check_update = MenuItem::with_id(h, "check-update", m.check_update, true, None::<&str>)?;
     if let Some(st) = h.try_state::<AppState>() {
         *lock(&st.update.menu) = Some(check_update.clone());
     }
@@ -626,22 +629,22 @@ fn build_menu(h: &AppHandle) -> tauri::Result<Menu<Wry>> {
         let name = h.package_info().name.clone();
         // The app's own quit item (not the predefined one, whose terminate: cannot be held off): it goes through
         // ExitRequested, which waits while an update replaces the app.
-        let quit = MenuItem::with_id(h, "quit", format!("{name} 종료"), true, Some("CmdOrCtrl+Q"))?;
+        let quit = MenuItem::with_id(h, "quit", (m.quit_app)(&name), true, Some("CmdOrCtrl+Q"))?;
         let app_menu = Submenu::with_items(
             h,
             &name,
             true,
             &[
-                &PredefinedMenuItem::about(h, Some(&format!("{name}에 관하여")), None)?,
+                &PredefinedMenuItem::about(h, Some(&(m.about)(&name)), None)?,
                 &PredefinedMenuItem::separator(h)?,
                 &settings,
                 &check_update,
                 &PredefinedMenuItem::separator(h)?,
-                &PredefinedMenuItem::services(h, Some("서비스"))?,
+                &PredefinedMenuItem::services(h, Some(m.services))?,
                 &PredefinedMenuItem::separator(h)?,
-                &PredefinedMenuItem::hide(h, Some(&format!("{name} 가리기")))?,
-                &PredefinedMenuItem::hide_others(h, Some("기타 가리기"))?,
-                &PredefinedMenuItem::show_all(h, Some("모두 보기"))?,
+                &PredefinedMenuItem::hide(h, Some(&(m.hide)(&name)))?,
+                &PredefinedMenuItem::hide_others(h, Some(m.hide_others))?,
+                &PredefinedMenuItem::show_all(h, Some(m.show_all))?,
                 &PredefinedMenuItem::separator(h)?,
                 &quit,
             ],
@@ -649,44 +652,44 @@ fn build_menu(h: &AppHandle) -> tauri::Result<Menu<Wry>> {
         // The Edit menu is what makes ⌘C / ⌘V / ⌘A work in a WKWebView.
         let edit = Submenu::with_items(
             h,
-            "편집",
+            m.edit,
             true,
             &[
-                &PredefinedMenuItem::undo(h, Some("실행 취소"))?,
-                &PredefinedMenuItem::redo(h, Some("실행 복귀"))?,
+                &PredefinedMenuItem::undo(h, Some(m.undo))?,
+                &PredefinedMenuItem::redo(h, Some(m.redo))?,
                 &PredefinedMenuItem::separator(h)?,
-                &PredefinedMenuItem::cut(h, Some("오려두기"))?,
-                &PredefinedMenuItem::copy(h, Some("복사하기"))?,
-                &PredefinedMenuItem::paste(h, Some("붙여넣기"))?,
-                &PredefinedMenuItem::select_all(h, Some("전체 선택"))?,
+                &PredefinedMenuItem::cut(h, Some(m.cut))?,
+                &PredefinedMenuItem::copy(h, Some(m.copy))?,
+                &PredefinedMenuItem::paste(h, Some(m.paste))?,
+                &PredefinedMenuItem::select_all(h, Some(m.select_all))?,
             ],
         )?;
         let connect = Submenu::with_items(
             h,
-            "연결",
+            m.connection,
             true,
             &[&choose, &reload, &PredefinedMenuItem::separator(h)?, &browser, &library],
         )?;
         let window = Submenu::with_items(
             h,
-            "윈도우",
+            m.window,
             true,
             &[
-                &PredefinedMenuItem::minimize(h, Some("최소화"))?,
-                &PredefinedMenuItem::maximize(h, Some("확대/축소"))?,
-                &PredefinedMenuItem::fullscreen(h, Some("전체 화면"))?,
+                &PredefinedMenuItem::minimize(h, Some(m.minimize))?,
+                &PredefinedMenuItem::maximize(h, Some(m.zoom))?,
+                &PredefinedMenuItem::fullscreen(h, Some(m.fullscreen))?,
                 &PredefinedMenuItem::separator(h)?,
-                &PredefinedMenuItem::close_window(h, Some("윈도우 닫기"))?,
+                &PredefinedMenuItem::close_window(h, Some(m.close_window))?,
             ],
         )?;
         Menu::with_items(h, &[&app_menu, &edit, &connect, &window])
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let quit = MenuItem::with_id(h, "quit", "종료", true, Some("CmdOrCtrl+Q"))?;
+        let quit = MenuItem::with_id(h, "quit", m.quit, true, Some("CmdOrCtrl+Q"))?;
         let connect = Submenu::with_items(
             h,
-            "연결",
+            m.connection,
             true,
             &[
                 &choose,
@@ -736,14 +739,12 @@ fn menu_thread(app: &AppHandle, flow: &'static AtomicBool, f: impl FnOnce(&AppHa
 fn leave_page(app: &AppHandle, how: Leave) {
     if let bridge::PageAnswer::Busy(busy) = bridge::page_answer(app) {
         if busy.holds_audio() {
+            let m = i18n::msg();
             let (text, ok) = match how {
-                Leave::Choose => (
-                    "강의를 녹음하는 중이에요. 바꾸면 녹음이 멈춰요 (녹음한 부분은 저장돼 있어서 같은 서버에 다시 연결하면 마저 올라가요).",
-                    "바꾸기",
-                ),
-                Leave::Reload => ("강의를 녹음하는 중이에요. 새로 고치면 녹음이 멈춰요 (녹음한 부분은 저장돼 있어서 다시 열면 마저 올라가요).", "다시 고침"),
+                Leave::Choose => (m.leave.choose_recording, m.leave.choose),
+                Leave::Reload => (m.leave.reload_recording, m.leave.reload),
             };
-            if !bridge::confirm(app, text, ok, "취소") {
+            if !bridge::confirm(app, text, ok, m.common.cancel) {
                 return;
             }
             bridge::allow_leave(app);
@@ -1046,7 +1047,8 @@ fn smoke_chooser_loaded(app: &AppHandle) {
         let page = eval_json(
             &h,
             "JSON.stringify({ library: document.getElementById('library-path')?.textContent, \
-             styled: getComputedStyle(document.querySelector('.option')).borderRadius, status: document.getElementById('status-text')?.textContent })",
+             styled: getComputedStyle(document.querySelector('.option')).borderRadius, status: document.getElementById('status-text')?.textContent, \
+             lang: document.documentElement.lang })",
         );
         smoke_say(&h, &format!("chooser {page}"));
         let want = config::library(&h, &config::load(&h)).path.to_string_lossy().into_owned();
@@ -1262,7 +1264,10 @@ fn main() {
         .setup(move |app| {
             let h = app.handle().clone();
             config::rotate(&config::log_dir(&h).join("shell.log"), 1024 * 1024);
-            config::log(&h, &format!("start {} {} ({})", h.package_info().name, h.package_info().version, std::env::consts::ARCH));
+            config::log(
+                &h,
+                &format!("start {} {} ({}), language {}", h.package_info().name, h.package_info().version, std::env::consts::ARCH, i18n::describe()),
+            );
             pathenv::use_cache(config::config_dir(&h).join("path-cache.txt"));
             config::data_dir(&h); // created with owner-only permissions (Linux keeps the WebView's cookies there)
             let cfg = config::load(&h);
@@ -1293,7 +1298,7 @@ fn main() {
             let window = WebviewWindowBuilder::new(app, MAIN, WebviewUrl::App("index.html".into()))
                 .title("easy-study")
                 // The pages know they are inside the app (main frame only; no IPC: bridge.rs).
-                .initialization_script(bridge::init_script(&version, std::env::consts::OS))
+                .initialization_script(bridge::init_script(&version, std::env::consts::OS, i18n::lang().id()))
                 .inner_size(1280.0, 840.0)
                 .min_inner_size(480.0, 400.0)
                 .center()
@@ -1350,8 +1355,7 @@ fn main() {
             }
             let saved = if crashed && !cfg.mode.is_empty() {
                 config::log(&h, "the app closed right after its last automatic connection: the chooser comes first");
-                *lock(&st.notice) =
-                    Some("지난번에 연결한 직후 앱이 닫혀서 이번에는 연결 선택 화면을 먼저 보여 드려요. 연결할 곳을 골라 주세요.".into());
+                *lock(&st.notice) = Some(i18n::msg().launch.crashed.into());
                 ""
             } else {
                 cfg.mode.as_str()
@@ -1371,7 +1375,7 @@ fn main() {
                 "remote" => {
                     if let Some(saved) = cfg.remote_url.clone() {
                         let st = h.state::<AppState>();
-                        *lock(&st.busy) = Some(format!("{saved} 에 연결하는 중…"));
+                        *lock(&st.busy) = Some((i18n::msg().launch.connecting)(&saved));
                         let hr = h.clone();
                         std::thread::spawn(move || {
                             let result = remote::parse(&saved)
@@ -1380,7 +1384,7 @@ fn main() {
                             let st = hr.state::<AppState>();
                             *lock(&st.busy) = None;
                             if let Err(e) = result {
-                                *lock(&st.error) = Some(format!("저장된 연결 대상에 연결하지 못했어요. {e}"));
+                                *lock(&st.error) = Some((i18n::msg().launch.saved_failed)(&e));
                                 show_chooser(&hr);
                             }
                         });

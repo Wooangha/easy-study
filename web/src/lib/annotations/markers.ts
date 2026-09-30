@@ -2,6 +2,7 @@
 // notes the app already loads per document (every Q&A grouped by slide) and the loaded slide documents (items and
 // hidden markers) — nothing is stored for a marker but its hidden key. Pure: one linear pass over the notes.
 import type { AnnotationItem, MarkerKey, NotesResponse, RegionRect, SlideAnnotations } from '../../../../shared/types.ts';
+import { msg } from '../../i18n/index.ts';
 import { firstLine } from '../format.ts';
 import { itemBounds, sameMarkerKey } from './geometry.ts';
 
@@ -31,7 +32,8 @@ export interface QuestionMarker {
   questions: MarkerQuestion[];
 }
 
-export const NO_TEXT_LABEL = '(첨부만 보냄)';
+/** The label of a question sent with attachments only, in the current language. */
+export const noTextLabel = (): string => msg().viewer.markers.noText;
 export const MARKER_LABEL_CHARS = 80;
 
 const rectKey = (r: RegionRect) => `${r.x},${r.y},${r.w},${r.h}`;
@@ -51,6 +53,7 @@ export function deriveMarkers(
   const out = new Map<number, QuestionMarker[]>();
   if (!enabled || !notes) return out;
   const groups = new Map<number, Map<string, QuestionMarker>>();
+  const noText = noTextLabel();
   for (const group of notes.slides) {
     for (const entry of group.entries) {
       const question = entry.question;
@@ -65,7 +68,7 @@ export function deriveMarkers(
         const anchor = item ? `item:${item.id}` : `rect:${rectKey(rect)}`;
         const q: MarkerQuestion = {
           key,
-          label: firstLine(question.text, MARKER_LABEL_CHARS) || NO_TEXT_LABEL,
+          label: firstLine(question.text, MARKER_LABEL_CHARS) || noText,
           createdAt: question.createdAt,
           sessionId: entry.sessionId,
           messageId: question.id,

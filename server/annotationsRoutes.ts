@@ -11,13 +11,9 @@ import { ANNOTATION_CLIENT_HEADER, ANNOTATION_CLIENT_ID_RE, DOC_ID_RE } from '..
 import type { TextLayoutMissingResponse } from '../shared/types.ts';
 import { listAnnotationTags, patchSlideAnnotations, putSlideAnnotations, readSlideAnnotations, readSummary, subscribeAnnotations } from './annotations.ts';
 import { HttpError } from './config.ts';
-import { docPaths, readStoredDoc, requestTextBackfill, textExtractionPending } from './library.ts';
+import { smsg } from './i18n.ts';
+import { docPaths, notReadyError, readStoredDoc, requestTextBackfill, textExtractionPending } from './library.ts';
 import { layoutFileName } from './pageNames.ts';
-
-const NOT_FOUND_SLIDE = '슬라이드를 찾을 수 없습니다';
-/** 404 bodies of GET …/text-layout/:slide (TextLayoutMissingResponse). */
-export const LAYOUT_PENDING = '이 슬라이드의 글자 위치를 아직 준비하지 못했어요';
-export const LAYOUT_NEVER = '이 슬라이드에는 글자 위치 정보가 없어요';
 
 /** The writer's client id of a PUT / PATCH (its own events are not echoed to it), when the header carries a valid one. */
 function clientOf(req: Request): string | undefined {
@@ -41,11 +37,11 @@ function sendFile(res: Response, file: string, options: Parameters<Response['sen
 export function createAnnotationsRouter(): express.Router {
   const router = express.Router();
   router.param('docId', (_req, _res, next, value: string) => {
-    next(DOC_ID_RE.test(value) ? undefined : new HttpError(404, '문서를 찾을 수 없습니다'));
+    next(DOC_ID_RE.test(value) ? undefined : new HttpError(404, smsg().common.notFound.doc));
   });
   // An integer ≥ 1; the range (1..pageCount) is checked by the store.
   router.param('slide', (_req, _res, next, value: string) => {
-    next(/^[1-9]\d{0,5}$/.test(value) ? undefined : new HttpError(404, NOT_FOUND_SLIDE));
+    next(/^[1-9]\d{0,5}$/.test(value) ? undefined : new HttpError(404, smsg().common.notFound.slide));
   });
 
   /** Library-wide tag counts, for autocomplete. */
@@ -64,7 +60,7 @@ export function createAnnotationsRouter(): express.Router {
   /** SSE: slide (ops) / slide-reset / summary / qa / ping; no replay (clients refetch what they hold on reconnect). */
   router.get(`${base}/events`, async (req, res) => {
     const docId = req.params.docId as string;
-    if ((await readStoredDoc(docId)) === null) throw new HttpError(404, '문서를 찾을 수 없습니다'); // as JSON, before the stream opens
+    if ((await readStoredDoc(docId)) === null) throw new HttpError(404, smsg().common.notFound.doc); // as JSON, before the stream opens
     res.status(200);
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
@@ -108,12 +104,10 @@ export function createAnnotationsRouter(): express.Router {
   router.get('/docs/:docId/text-layout/:slide', async (req, res) => {
     const docId = req.params.docId as string;
     const doc = await readStoredDoc(docId);
-    if (!doc) throw new HttpError(404, '문서를 찾을 수 없습니다');
-    if (doc.status !== 'ready') {
-      throw new HttpError(409, doc.status === 'error' ? `문서 처리에 실패했습니다: ${doc.error ?? '알 수 없는 오류'}` : '문서를 아직 처리하는 중입니다');
-    }
+    if (!doc) throw new HttpError(404, smsg().common.notFound.doc);
+    if (doc.status !== 'ready') throw notReadyError(doc);
     const slide = Number(req.params.slide);
-    if (slide > doc.pageCount) throw new HttpError(404, NOT_FOUND_SLIDE);
+    if (slide > doc.pageCount) throw new HttpError(404, smsg().common.notFound.slide);
     const file = path.join(docPaths(docId).textDir, layoutFileName(slide, doc.pageCount));
     try {
       await sendFile(res, file, { cacheControl: false, headers: { 'Cache-Control': 'no-cache', 'Content-Type': 'application/json; charset=utf-8' } });
@@ -127,7 +121,9 @@ export function createAnnotationsRouter(): express.Router {
     const pending = await textExtractionPending(docId);
     if (pending) requestTextBackfill(docId);
     const body: Omit<TextLayoutMissingResponse, 'error'> = { pending };
-    throw new HttpError(404, pending ? LAYOUT_PENDING : LAYOUT_NEVER, body);
+    // 404 bodies (TextLayoutMissingResponse): the layout is still to come, or it never will be.
+    const m = smsg().library.annotations;
+    throw new HttpError(404, pending ? m.layoutPending : m.layoutNever, body);
   });
 
   return router;

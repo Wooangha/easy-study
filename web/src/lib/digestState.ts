@@ -1,6 +1,7 @@
 // What the 정리본 (digest) panel shows and offers, derived from DigestInfo (DESIGN §11). Pure, so it is
 // unit-tested in web/tests.
 import type { DigestInfo } from '../../../shared/types.ts';
+import { msg } from '../i18n/index.ts';
 import { clamp } from './format.ts';
 
 export interface DigestView {
@@ -51,30 +52,32 @@ export interface DigestLabel {
 /** Label of the non-force start button, or null when there is nothing to continue (only "다시 만들기"). */
 export function digestContinueLabel(info: DigestInfo, v: DigestView): DigestLabel | null {
   if (v.running || (v.complete && !v.summaryPending)) return null;
-  if (v.done < v.total || info.status !== 'ready') return { icon: 'continue', text: '이어서 만들기' };
-  if (v.failed > 0) return { icon: 'retry', text: '실패한 슬라이드 다시' };
-  return { icon: 'summary', text: v.summaryOutdated ? '강의 요약 다시 만들기' : '강의 요약 만들기' };
+  const m = msg().chat.digest;
+  if (v.done < v.total || info.status !== 'ready') return { icon: 'continue', text: m.continue };
+  if (v.failed > 0) return { icon: 'retry', text: m.retryFailed };
+  return { icon: 'summary', text: v.summaryOutdated ? m.redoSummary : m.makeSummary };
 }
 
 /** Status headline; counts are left to the progress bar whenever it is shown (i.e. not complete). */
 export function digestStatusLabel(info: DigestInfo, v: DigestView): DigestLabel {
+  const m = msg().chat.digest;
   switch (info.status) {
     case 'running':
-      return { icon: 'running', text: '정리하는 중' };
+      return { icon: 'running', text: m.statusRunning };
     case 'ready': {
       let text: string;
-      if (v.failed > 0) text = `정리본 · 실패 ${v.failed}장`;
-      else if (!v.complete) text = '정리본 (일부)';
-      else if (v.summaryOutdated) text = `정리본 완성 · ${v.total}장 · 요약 갱신 필요`;
-      else text = v.summaryPending ? `정리본 완성 · ${v.total}장 · 요약 없음` : `정리본 완성 · ${v.total}장`;
+      if (v.failed > 0) text = m.statusFailed(v.failed);
+      else if (!v.complete) text = m.statusPartial;
+      else if (v.summaryOutdated) text = m.statusSummaryOutdated(v.total);
+      else text = v.summaryPending ? m.statusNoSummary(v.total) : m.statusComplete(v.total);
       return { icon: 'ready', text };
     }
     case 'aborted':
-      return { icon: 'paused', text: '중지됨' };
+      return { icon: 'paused', text: m.statusAborted };
     case 'error':
-      return { icon: 'error', text: '오류로 멈춤' };
+      return { icon: 'error', text: m.statusError };
     default:
-      return { icon: null, text: '정리본' };
+      return { icon: null, text: m.statusNone };
   }
 }
 
@@ -85,11 +88,9 @@ export function digestStatusLabel(info: DigestInfo, v: DigestView): DigestLabel 
  */
 export function digestNote(info: DigestInfo, v: DigestView): { message: string; hint: string | null } | null {
   if (!info.error || v.running) return null;
+  const m = msg().chat.digest;
   let hint: string | null = null;
-  if (v.summaryOutdated) {
-    hint = '지금 보이는 강의 요약은 슬라이드 정리가 바뀌기 전에 만든 거예요. ‘강의 요약 다시 만들기’로 요약만 다시 만들 수 있어요.';
-  } else if (v.summaryPending) {
-    hint = '‘강의 요약 만들기’로 요약만 다시 만들 수 있어요.';
-  }
+  if (v.summaryOutdated) hint = m.hintOutdated;
+  else if (v.summaryPending) hint = m.hintMissing;
   return { message: info.error, hint };
 }

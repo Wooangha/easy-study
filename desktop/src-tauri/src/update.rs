@@ -8,8 +8,8 @@
 //! - An install runs on a worker thread, never while a recording could lose audio (bridge::busy_gate), stops the
 //!   local server first, and the app cannot quit while its files are replaced. deb, rpm and Arch installs only
 //!   check (through the AppImage's key) and link to the release page.
-//! - Every error a page or dialog shows is one of the fixed Korean texts below: raw errors (paths, user names) only
-//!   go to shell.log.
+//! - Every error a page or dialog shows is one of the fixed texts of i18n.rs (`Update`, in the shell's language): raw
+//!   errors (paths, user names) only go to shell.log.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
@@ -27,7 +27,7 @@ use tauri_plugin_updater::{Error, Update, UpdaterExt};
 
 use crate::bridge::{self, Gate};
 use crate::config::{self, lock};
-use crate::AppState;
+use crate::{i18n, AppState};
 
 pub const RELEASES_URL: &str = "https://github.com/Wooangha/easy-study-releases/releases";
 /// latest.json: the whole request.
@@ -41,23 +41,6 @@ const MANUAL_EVERY: Duration = Duration::from_secs(30);
 const FIRST_CHECK: Duration = Duration::from_secs(15);
 const CHECK_EVERY: Duration = Duration::from_secs(6 * 3600);
 const NOTES_MAX: usize = 2000;
-
-pub const MSG_NETWORK: &str = "업데이트 서버에 연결하지 못했어요. 인터넷 연결을 확인해 주세요.";
-pub const MSG_NO_FILE: &str = "이 컴퓨터용 업데이트 파일이 아직 없어요.";
-pub const MSG_SIGNATURE: &str = "내려받은 파일의 서명이 맞지 않아 설치하지 않았어요.";
-pub const MSG_WRONG_FILE: &str = "내려받은 파일이 이 컴퓨터용이 아니라서 설치하지 않았어요.";
-pub const MSG_MAC_PERMISSION: &str = "앱 폴더를 바꿀 권한이 없어요. 새 버전을 내려받아 직접 설치해 주세요.";
-pub const MSG_APPIMAGE_PERMISSION: &str = "이 AppImage 파일을 바꿀 권한이 없어요. 새 AppImage를 내려받아 주세요.";
-pub const MSG_INSTALLER: &str = "설치 프로그램을 시작하지 못했어요. 다운로드 페이지에서 새 버전을 받아 설치해 주세요.";
-pub const MSG_OTHER: &str = "업데이트하지 못했어요. 잠시 뒤 다시 시도하거나 다운로드 페이지에서 새 버전을 받아 주세요.";
-
-const REASON_MOVE_APP: &str = "앱을 ‘응용 프로그램’ 폴더로 옮긴 뒤 다시 열면 업데이트할 수 있어요.";
-const REASON_EXTRACTED: &str = "압축을 푼 AppImage는 앱 안에서 업데이트할 수 없어요. 새 AppImage를 내려받아 주세요.";
-const REASON_DEB: &str = "deb 패키지로 설치한 앱은 새 패키지를 받아 설치해 주세요.";
-const REASON_RPM: &str = "rpm 패키지로 설치한 앱은 새 패키지를 받아 설치해 주세요.";
-const REASON_ARCH: &str = "Arch 패키지로 설치한 앱은 릴리스의 PKGBUILD로 다시 설치해 주세요 (makepkg -si).";
-const REASON_INSTALLER: &str = "이 설치 방식에서는 앱 안에서 업데이트할 수 없어요. 새 설치 파일을 받아 주세요.";
-const REASON_DEV: &str = "개발용 빌드는 앱 안에서 업데이트하지 않아요.";
 
 // ---------------------------------------------------------------------------------------------------------
 // State (the same DTO goes to the chooser and, for this computer's server, to the page)
@@ -141,12 +124,11 @@ impl UpdateState {
     /// The chooser's "in progress" line while installing (every control waits; it outlives server::stop, which
     /// clears the shell's own busy line).
     pub fn busy_line(&self) -> Option<String> {
-        (self.phase == Phase::Installing)
-            .then(|| format!("easy-study {} 버전을 설치하는 중… 끝나면 앱이 다시 시작돼요.", self.version.as_deref().unwrap_or_default()))
+        (self.phase == Phase::Installing).then(|| (i18n::msg().update.installing)(self.version.as_deref().unwrap_or_default()))
     }
 
     /// What a page of another computer's server gets: no notes, dates or check history. The texts that remain are
-    /// the fixed ones above, never an error's own text.
+    /// the fixed ones (i18n.rs), never an error's own text.
     pub fn for_remote(&self) -> UpdateState {
         UpdateState { notes: None, date: None, checked_at: None, last_error: None, last_error_at: None, ..self.clone() }
     }
@@ -229,6 +211,7 @@ pub fn install_kind(
     exe: &Path,
     arch_package: bool,
 ) -> (Kind, Install, Option<&'static str>) {
+    let u = &i18n::msg().update;
     match os {
         "macos" => {
             // bundle_type() says App for every macOS build, `cargo run` too: only a real bundle counts (the plugin
@@ -238,7 +221,7 @@ pub fn install_kind(
             }
             let path = exe.to_string_lossy();
             if path.contains("/AppTranslocation/") || path.starts_with("/Volumes/") {
-                (Kind::App, Install::Download, Some(REASON_MOVE_APP))
+                (Kind::App, Install::Download, Some(u.reason_move_app))
             } else {
                 (Kind::App, Install::InApp, None)
             }
@@ -246,16 +229,16 @@ pub fn install_kind(
         "windows" => match bundle {
             Some(BundleType::Nsis) => (Kind::Nsis, Install::InApp, None),
             None => (Kind::None, Install::None, None),
-            Some(_) => (Kind::None, Install::Download, Some(REASON_INSTALLER)),
+            Some(_) => (Kind::None, Install::Download, Some(u.reason_installer)),
         },
         "linux" => match bundle {
             Some(BundleType::AppImage) if appimage.is_some_and(|p| !p.as_os_str().is_empty()) => (Kind::Appimage, Install::InApp, None),
             // An extracted AppImage (squashfs-root, as in CI): there is no file to replace.
-            Some(BundleType::AppImage) => (Kind::Appimage, Install::Download, Some(REASON_EXTRACTED)),
+            Some(BundleType::AppImage) => (Kind::Appimage, Install::Download, Some(u.reason_extracted)),
             // The Arch package repackages the .deb, so its binary says Deb.
-            Some(BundleType::Deb) if arch_package => (Kind::Arch, Install::Download, Some(REASON_ARCH)),
-            Some(BundleType::Deb) => (Kind::Deb, Install::Download, Some(REASON_DEB)),
-            Some(BundleType::Rpm) => (Kind::Rpm, Install::Download, Some(REASON_RPM)),
+            Some(BundleType::Deb) if arch_package => (Kind::Arch, Install::Download, Some(u.reason_arch)),
+            Some(BundleType::Deb) => (Kind::Deb, Install::Download, Some(u.reason_deb)),
+            Some(BundleType::Rpm) => (Kind::Rpm, Install::Download, Some(u.reason_rpm)),
             _ => (Kind::None, Install::None, None),
         },
         _ => (Kind::None, Install::None, None),
@@ -316,25 +299,26 @@ pub fn signed_for(signature: &str, suffix: &str, version: &str) -> bool {
 
 /// The fixed text for an updater error (`os`: std::env::consts::OS).
 pub fn describe(err: &Error, os: &str) -> &'static str {
+    let u = &i18n::msg().update;
     let permission = match os {
-        "macos" => MSG_MAC_PERMISSION,
-        "linux" => MSG_APPIMAGE_PERMISSION,
-        _ => MSG_INSTALLER,
+        "macos" => u.mac_permission,
+        "linux" => u.appimage_permission,
+        _ => u.installer,
     };
     match err {
-        Error::TargetNotFound(_) | Error::TargetsNotFound(_) => MSG_NO_FILE,
+        Error::TargetNotFound(_) | Error::TargetsNotFound(_) => u.no_file,
         Error::Minisign(_)
         | Error::Base64(_)
         | Error::SignatureUtf8(_)
         | Error::SignedVersionMismatch { .. }
-        | Error::MissingSignedVersion => MSG_SIGNATURE,
-        Error::InvalidUpdaterFormat | Error::BinaryNotFoundInArchive => MSG_WRONG_FILE,
-        Error::Reqwest(_) | Error::Network(_) | Error::ReleaseNotFound => MSG_NETWORK,
+        | Error::MissingSignedVersion => u.signature,
+        Error::InvalidUpdaterFormat | Error::BinaryNotFoundInArchive => u.wrong_file,
+        Error::Reqwest(_) | Error::Network(_) | Error::ReleaseNotFound => u.network,
         Error::AuthenticationFailed => permission,
         Error::Io(e) if e.kind() == std::io::ErrorKind::PermissionDenied => permission,
         // Windows: ShellExecuteW could not start the installer (quarantined, blocked by policy).
-        Error::Io(_) if os == "windows" => MSG_INSTALLER,
-        _ => MSG_OTHER,
+        Error::Io(_) if os == "windows" => u.installer,
+        _ => u.other,
     }
 }
 
@@ -396,7 +380,7 @@ pub fn setup(app: &AppHandle, smoke: bool) {
     let (kind, mut install, mut reason) =
         install_kind(std::env::consts::OS, tauri::utils::platform::bundle_type(), appimage.as_deref(), &exe, arch_package());
     if cfg!(debug_assertions) && install == Install::InApp {
-        (install, reason) = (Install::Download, Some(REASON_DEV));
+        (install, reason) = (Install::Download, Some(i18n::msg().update.reason_dev));
     }
     let cfg = config::load(app);
     {
@@ -416,7 +400,7 @@ pub fn setup(app: &AppHandle, smoke: bool) {
             // The new version did not come up (the installer failed or was stopped, the old copy was started again):
             // offering the same one-click install again would loop.
             config::log(app, &format!("updates: the update from {from} did not take; this is still {current}"));
-            let text = format!("업데이트가 끝나지 않았어요 (지금 {current}). 다운로드 페이지에서 직접 설치해 주세요.");
+            let text = (i18n::msg().update.did_not_take)(&current);
             *lock(&up.did_not_take) = Some(text.clone());
             let mut s = lock(&up.state);
             s.phase = Phase::Error;
@@ -690,9 +674,10 @@ fn after_failure(how: How, before: Phase, held: Option<bool>, text: &str, stuck:
 pub fn set_menu_text(app: &AppHandle) {
     let up = updates(app);
     let version = lock(&up.held).as_ref().map(|h| h.update.version.clone());
+    let menu = &i18n::msg().menu;
     let text = match version {
-        Some(v) => format!("업데이트 설치 ({v})…"),
-        None => "업데이트 확인…".to_string(),
+        Some(v) => (menu.install_update)(&v),
+        None => menu.check_update.to_string(),
     };
     let item = lock(&up.menu).clone();
     if let Some(item) = item {
@@ -767,6 +752,7 @@ fn set_phase(app: &AppHandle, phase: Phase, error: Option<&str>) {
 pub fn request_install(app: &AppHandle, trigger: Trigger) {
     let st = app.state::<AppState>();
     let up = &st.update;
+    let m = i18n::msg();
     let Some(_flow) = Flag::take(&up.flow) else {
         // A page may ask again while the first flow's dialog is open.
         return bridge::log_limited(app, "install-busy", "updates: an install is already on its way");
@@ -805,12 +791,7 @@ pub fn request_install(app: &AppHandle, trigger: Trigger) {
 
     // 2. Another computer's page asked: the user confirms in a dialog no page can draw.
     if let Some((_, false)) = &page {
-        let ok = bridge::confirm(
-            app,
-            &format!("easy-study {version} 버전을 설치하고 앱을 다시 시작할까요?"),
-            "설치하고 다시 시작",
-            "취소",
-        );
+        let ok = bridge::confirm(app, &(m.update.confirm_install)(&version), m.update.install_restart, m.common.cancel);
         asked(ok);
         if !ok {
             return;
@@ -827,7 +808,7 @@ pub fn request_install(app: &AppHandle, trigger: Trigger) {
             return;
         }
         Gate::Warn(msg) => {
-            let ok = bridge::confirm(app, &msg, "설치하고 다시 시작", "취소");
+            let ok = bridge::confirm(app, &msg, m.update.install_restart, m.common.cancel);
             asked(ok);
             if !ok {
                 return;
@@ -853,14 +834,14 @@ pub fn request_install(app: &AppHandle, trigger: Trigger) {
             Fetch::Failed(text) => {
                 set_phase(app, Phase::Error, Some(text));
                 if trigger == Trigger::Menu {
-                    bridge::tell(app, &format!("업데이트하지 못했어요: {text}"));
+                    bridge::tell(app, &(m.update.failed)(text));
                 }
                 return;
             }
         };
         if !suffix.is_some_and(|s| signed_for(&update.signature, s, &update.version)) {
             config::log(app, &format!("updates: the signature of {} names another file or version: {:?}", update.version, signed_file(&update.signature)));
-            return set_phase(app, Phase::Error, Some(MSG_WRONG_FILE));
+            return set_phase(app, Phase::Error, Some(m.update.wrong_file));
         }
         let mut held = lock(&up.held);
         match held.as_mut() {
@@ -877,12 +858,12 @@ pub fn request_install(app: &AppHandle, trigger: Trigger) {
     match bridge::busy_gate(app, page_asked_itself) {
         Gate::Block(msg) => {
             if page.is_none() {
-                bridge::tell(app, &format!("{msg}\n\n새 버전은 받아 두었어요. 녹음이 끝나면 다시 설치해 주세요."));
+                bridge::tell(app, &(m.update.kept_download)(&msg));
             }
             return; // stays "downloaded": the page says so
         }
         Gate::Warn(msg) if accepted.as_deref() != Some(msg.as_str()) => {
-            let ok = bridge::confirm(app, &msg, "설치하고 다시 시작", "취소");
+            let ok = bridge::confirm(app, &msg, m.update.install_restart, m.common.cancel);
             asked(ok);
             if !ok {
                 return;
@@ -946,7 +927,7 @@ pub fn request_install(app: &AppHandle, trigger: Trigger) {
                 let _ = w.set_focus();
             }
             if trigger == Trigger::Menu {
-                bridge::tell(app, &format!("업데이트하지 못했어요: {text}"));
+                bridge::tell(app, &(m.update.failed)(text));
             }
         }
     }
@@ -1001,10 +982,10 @@ fn download(app: &AppHandle, update: Update) -> Fetch {
                 if idle > STALL {
                     task.abort();
                     config::log(app, &format!("updates: download stalled for {} s", idle.as_secs()));
-                    return Fetch::Failed(MSG_NETWORK);
+                    return Fetch::Failed(i18n::msg().update.network);
                 }
             }
-            Err(RecvTimeoutError::Disconnected) => return Fetch::Failed(MSG_OTHER),
+            Err(RecvTimeoutError::Disconnected) => return Fetch::Failed(i18n::msg().update.other),
         }
     }
 }
@@ -1013,10 +994,10 @@ fn download(app: &AppHandle, update: Update) -> Fetch {
 // Menu "업데이트 확인…"
 // ---------------------------------------------------------------------------------------------------------
 
-/// Whether a fixed text is a whole sentence about the update itself ("업데이트가 끝나지 않았어요…", MSG_OTHER), which
-/// needs no "…하지 못했어요:" in front.
+/// Whether a fixed text is a whole sentence about the update itself ("업데이트가 끝나지 않았어요…", `other`), which
+/// needs no "…하지 못했어요:" in front (`failed_prefixes`, any language's: the text may be older than a change of it).
 pub fn says_update_failed(text: &str) -> bool {
-    text.starts_with("업데이트가 ") || text.starts_with("업데이트하지 ")
+    [i18n::Lang::Ko, i18n::Lang::En].iter().any(|&l| i18n::texts(l).update.failed_prefixes.iter().any(|p| text.starts_with(p)))
 }
 
 /// "업데이트를 확인하지 못했어요: {text}", or the text alone when it says so itself.
@@ -1024,27 +1005,29 @@ fn could_not_check(text: &str) -> String {
     if says_update_failed(text) {
         text.to_string()
     } else {
-        format!("업데이트를 확인하지 못했어요: {text}")
+        (i18n::msg().update.could_not_check)(text)
     }
 }
 
 /// The menu's answer when no newer version is held after its check: "최신" only when a check said so.
 fn nothing_found(s: &UpdateState) -> String {
+    let u = &i18n::msg().update;
     match s.phase {
-        Phase::Latest => format!("최신 버전을 쓰고 있어요 (easy-study {}).", s.current),
-        Phase::Checking => "아직 확인하는 중이에요. 잠시 뒤 다시 확인해 주세요.".to_string(),
-        _ => could_not_check(s.error.as_deref().or(s.last_error.as_deref()).unwrap_or(MSG_OTHER)),
+        Phase::Latest => (u.latest)(&s.current),
+        Phase::Checking => u.still_checking.to_string(),
+        _ => could_not_check(s.error.as_deref().or(s.last_error.as_deref()).unwrap_or(u.other)),
     }
 }
 
 /// Checks (unless a version is already found) and answers in a native dialog: the way in whatever the window shows.
 pub fn menu_check(app: &AppHandle) {
     let up = updates(app);
+    let m = i18n::msg();
     if up.flow.load(SeqCst) {
         let s = lock(&up.state).clone();
         let text = match s.phase {
-            Phase::Downloading => format!("easy-study {} 버전을 내려받는 중이에요.", s.version.unwrap_or_default()),
-            _ => "업데이트를 준비하는 중이에요.".to_string(),
+            Phase::Downloading => (m.update.downloading)(&s.version.unwrap_or_default()),
+            _ => m.update.preparing.to_string(),
         };
         return bridge::tell(app, &text);
     }
@@ -1060,16 +1043,16 @@ pub fn menu_check(app: &AppHandle) {
     }
     let version = s.version.clone().unwrap_or_default();
     let notes = s.notes.as_deref().map(|n| format!("\n\n{}", n.chars().take(400).collect::<String>())).unwrap_or_default();
-    let head = format!("easy-study {version} 버전이 나왔어요 (지금 {}).{notes}", s.current);
+    let head = format!("{}{notes}", (m.update.available)(&version, &s.current));
     if s.install == Install::InApp {
-        if bridge::confirm(app, &format!("{head}\n\n지금 설치하고 앱을 다시 시작할까요?"), "설치하고 다시 시작", "나중에") {
+        if bridge::confirm(app, &format!("{head}\n\n{}", m.update.install_now), m.update.install_restart, m.update.later) {
             // On its own thread: the menu stays usable during the download.
             let h = app.clone();
             std::thread::spawn(move || request_install(&h, Trigger::Menu));
         }
     } else {
         let reason = s.reason.as_deref().map(|r| format!("\n\n{r}")).unwrap_or_default();
-        if bridge::confirm(app, &format!("{head}{reason}"), "다운로드 페이지 열기", "닫기") {
+        if bridge::confirm(app, &format!("{head}{reason}"), m.update.open_download, m.common.close) {
             open_release(app, &s.release_url, false);
         }
     }
@@ -1081,11 +1064,12 @@ mod tests {
 
     #[test]
     fn install_kinds() {
+        let u = &i18n::msg().update;
         let p = Path::new;
         let app = p("/Applications/easy-study.app/Contents/MacOS/easy-study");
         assert_eq!(install_kind("macos", Some(BundleType::App), None, app, false), (Kind::App, Install::InApp, None));
         let translocated = p("/private/var/folders/x/T/AppTranslocation/1234/d/easy-study.app/Contents/MacOS/easy-study");
-        assert_eq!(install_kind("macos", Some(BundleType::App), None, translocated, false), (Kind::App, Install::Download, Some(REASON_MOVE_APP)));
+        assert_eq!(install_kind("macos", Some(BundleType::App), None, translocated, false), (Kind::App, Install::Download, Some(u.reason_move_app)));
         let dmg = p("/Volumes/easy-study/easy-study.app/Contents/MacOS/easy-study");
         assert_eq!(install_kind("macos", Some(BundleType::App), None, dmg, false).1, Install::Download);
         // `cargo run` / `tauri dev`: bundle_type() says App there too, but there is no bundle to replace.
@@ -1101,17 +1085,18 @@ mod tests {
         let bin = p("/tmp/.mount_easyXYZ/usr/bin/easy-study");
         let image = p("/home/me/Apps/easy-study_0.5.0_amd64.AppImage");
         assert_eq!(install_kind("linux", Some(BundleType::AppImage), Some(image), bin, false), (Kind::Appimage, Install::InApp, None));
-        assert_eq!(install_kind("linux", Some(BundleType::AppImage), None, p("/ci/squashfs-root/usr/bin/easy-study"), false), (Kind::Appimage, Install::Download, Some(REASON_EXTRACTED)));
+        assert_eq!(install_kind("linux", Some(BundleType::AppImage), None, p("/ci/squashfs-root/usr/bin/easy-study"), false), (Kind::Appimage, Install::Download, Some(u.reason_extracted)));
         assert_eq!(install_kind("linux", Some(BundleType::AppImage), Some(p("")), bin, false).1, Install::Download);
         let usr = p("/usr/bin/easy-study");
-        assert_eq!(install_kind("linux", Some(BundleType::Deb), None, usr, true), (Kind::Arch, Install::Download, Some(REASON_ARCH)));
-        assert_eq!(install_kind("linux", Some(BundleType::Deb), None, usr, false), (Kind::Deb, Install::Download, Some(REASON_DEB)));
-        assert_eq!(install_kind("linux", Some(BundleType::Rpm), None, usr, false), (Kind::Rpm, Install::Download, Some(REASON_RPM)));
+        assert_eq!(install_kind("linux", Some(BundleType::Deb), None, usr, true), (Kind::Arch, Install::Download, Some(u.reason_arch)));
+        assert_eq!(install_kind("linux", Some(BundleType::Deb), None, usr, false), (Kind::Deb, Install::Download, Some(u.reason_deb)));
+        assert_eq!(install_kind("linux", Some(BundleType::Rpm), None, usr, false), (Kind::Rpm, Install::Download, Some(u.reason_rpm)));
         assert_eq!(install_kind("linux", None, None, p("/home/me/easy-study/target/debug/easy-study"), false), (Kind::None, Install::None, None));
     }
 
     #[test]
     fn state_json_uses_the_contract_names() {
+        let u = &i18n::msg().update;
         let s = UpdateState {
             phase: Phase::Downloading,
             current: "0.5.0".into(),
@@ -1121,14 +1106,14 @@ mod tests {
             release_url: release_url(Some("0.5.1")),
             received: 10,
             total: Some(100),
-            error: Some(MSG_NETWORK.into()),
+            error: Some(u.network.into()),
             install: Install::InApp,
-            reason: Some(REASON_DEB.into()),
+            reason: Some(u.reason_deb.into()),
             kind: Kind::Appimage,
             checked_at: Some("2026-10-05T09:01:00Z".into()),
             auto: true,
             dismissed: false,
-            last_error: Some(MSG_NETWORK.into()),
+            last_error: Some(u.network.into()),
             last_error_at: Some("2026-10-05T09:02:00Z".into()),
         };
         let v = serde_json::to_value(&s).unwrap();
@@ -1160,27 +1145,36 @@ mod tests {
 
     #[test]
     fn errors_map_to_fixed_texts() {
+        let u = &i18n::msg().update;
         let io = |kind| Error::Io(std::io::Error::new(kind, "/Users/someone/private/path"));
-        assert_eq!(describe(&Error::TargetNotFound("linux-x86_64-appimage".into()), "linux"), MSG_NO_FILE);
-        assert_eq!(describe(&Error::TargetsNotFound(vec!["darwin-aarch64-app".into()]), "macos"), MSG_NO_FILE);
-        assert_eq!(describe(&Error::SignedVersionMismatch { signed: "0.5.1".into(), announced: "0.5.2".into() }, "macos"), MSG_SIGNATURE);
-        assert_eq!(describe(&Error::MissingSignedVersion, "macos"), MSG_SIGNATURE);
-        assert_eq!(describe(&Error::SignatureUtf8("x".into()), "macos"), MSG_SIGNATURE);
-        assert_eq!(describe(&Error::Base64(base64::DecodeError::InvalidLength(3)), "windows"), MSG_SIGNATURE);
-        assert_eq!(describe(&Error::Network("Download request failed with status: 404".into()), "linux"), MSG_NETWORK);
-        assert_eq!(describe(&Error::ReleaseNotFound, "linux"), MSG_NETWORK);
-        assert_eq!(describe(&Error::AuthenticationFailed, "macos"), MSG_MAC_PERMISSION);
-        assert_eq!(describe(&io(std::io::ErrorKind::PermissionDenied), "macos"), MSG_MAC_PERMISSION);
-        assert_eq!(describe(&io(std::io::ErrorKind::PermissionDenied), "linux"), MSG_APPIMAGE_PERMISSION);
-        assert_eq!(describe(&io(std::io::ErrorKind::Other), "windows"), MSG_INSTALLER);
-        assert_eq!(describe(&io(std::io::ErrorKind::Other), "macos"), MSG_OTHER);
-        assert_eq!(describe(&Error::EmptyEndpoints, "macos"), MSG_OTHER);
+        assert_eq!(describe(&Error::TargetNotFound("linux-x86_64-appimage".into()), "linux"), u.no_file);
+        assert_eq!(describe(&Error::TargetsNotFound(vec!["darwin-aarch64-app".into()]), "macos"), u.no_file);
+        assert_eq!(describe(&Error::SignedVersionMismatch { signed: "0.5.1".into(), announced: "0.5.2".into() }, "macos"), u.signature);
+        assert_eq!(describe(&Error::MissingSignedVersion, "macos"), u.signature);
+        assert_eq!(describe(&Error::SignatureUtf8("x".into()), "macos"), u.signature);
+        assert_eq!(describe(&Error::Base64(base64::DecodeError::InvalidLength(3)), "windows"), u.signature);
+        assert_eq!(describe(&Error::Network("Download request failed with status: 404".into()), "linux"), u.network);
+        assert_eq!(describe(&Error::ReleaseNotFound, "linux"), u.network);
+        assert_eq!(describe(&Error::AuthenticationFailed, "macos"), u.mac_permission);
+        assert_eq!(describe(&io(std::io::ErrorKind::PermissionDenied), "macos"), u.mac_permission);
+        assert_eq!(describe(&io(std::io::ErrorKind::PermissionDenied), "linux"), u.appimage_permission);
+        assert_eq!(describe(&io(std::io::ErrorKind::Other), "windows"), u.installer);
+        assert_eq!(describe(&io(std::io::ErrorKind::Other), "macos"), u.other);
+        assert_eq!(describe(&Error::EmptyEndpoints, "macos"), u.other);
         let json = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
-        assert_eq!(describe(&Error::Serialization(json), "macos"), MSG_OTHER);
-        // None of them carries a path.
-        for text in [MSG_NETWORK, MSG_NO_FILE, MSG_SIGNATURE, MSG_WRONG_FILE, MSG_MAC_PERMISSION, MSG_APPIMAGE_PERMISSION, MSG_INSTALLER, MSG_OTHER] {
-            assert!(!text.contains('/'), "{text}");
+        assert_eq!(describe(&Error::Serialization(json), "macos"), u.other);
+        // None of them carries a path, in any language.
+        for lang in i18n::ALL {
+            let u = &i18n::texts(lang).update;
+            for text in [u.network, u.no_file, u.signature, u.wrong_file, u.mac_permission, u.appimage_permission, u.installer, u.other] {
+                assert!(!text.contains('/'), "{text}");
+            }
         }
+        // The shell's language: English texts in English.
+        i18n::with_lang(i18n::Lang::En, || {
+            assert_eq!(describe(&Error::ReleaseNotFound, "linux"), "Couldn't connect to the update server. Check your internet connection.");
+            assert_eq!(install_kind("linux", Some(BundleType::Deb), None, Path::new("/usr/bin/easy-study"), false).2, Some(i18n::texts(i18n::Lang::En).update.reason_deb));
+        });
     }
 
     /// A .sig in minisign's layout, base64 as in latest.json (the bytes are no real signature: signed_file only reads,
@@ -1229,24 +1223,26 @@ mod tests {
 
     #[test]
     fn failed_checks() {
+        let u = &i18n::msg().update;
         let stuck = "업데이트가 끝나지 않았어요 (지금 0.5.0). 다운로드 페이지에서 직접 설치해 주세요.";
         // Automatic: silent (back to idle, or where it was); a found version stays.
-        assert_eq!(after_failure(How::Auto, Phase::Idle, None, MSG_NETWORK, None), (Phase::Idle, None));
-        assert_eq!(after_failure(How::Auto, Phase::Error, None, MSG_NETWORK, None), (Phase::Idle, None));
-        assert_eq!(after_failure(How::Auto, Phase::Latest, None, MSG_NETWORK, None), (Phase::Latest, None));
-        assert_eq!(after_failure(How::Auto, Phase::Available, Some(false), MSG_NETWORK, None), (Phase::Available, None));
-        assert_eq!(after_failure(How::Manual, Phase::Error, Some(true), MSG_NETWORK, None), (Phase::Downloaded, None));
+        assert_eq!(after_failure(How::Auto, Phase::Idle, None, u.network, None), (Phase::Idle, None));
+        assert_eq!(after_failure(How::Auto, Phase::Error, None, u.network, None), (Phase::Idle, None));
+        assert_eq!(after_failure(How::Auto, Phase::Latest, None, u.network, None), (Phase::Latest, None));
+        assert_eq!(after_failure(How::Auto, Phase::Available, Some(false), u.network, None), (Phase::Available, None));
+        assert_eq!(after_failure(How::Manual, Phase::Error, Some(true), u.network, None), (Phase::Downloaded, None));
         // Asked for: the error shows.
-        assert_eq!(after_failure(How::Manual, Phase::Latest, None, MSG_NETWORK, None), (Phase::Error, Some(MSG_NETWORK.into())));
-        assert_eq!(after_failure(How::ForInstall, Phase::Idle, None, MSG_NO_FILE, None), (Phase::Error, Some(MSG_NO_FILE.into())));
+        assert_eq!(after_failure(How::Manual, Phase::Latest, None, u.network, None), (Phase::Error, Some(u.network.into())));
+        assert_eq!(after_failure(How::ForInstall, Phase::Idle, None, u.no_file, None), (Phase::Error, Some(u.no_file.into())));
         // An update that did not take: an automatic failure does not wipe the notice (nor the download link with it).
-        assert_eq!(after_failure(How::Auto, Phase::Error, None, MSG_NETWORK, Some(stuck)), (Phase::Error, Some(stuck.into())));
-        assert_eq!(after_failure(How::Auto, Phase::Idle, None, MSG_NETWORK, Some(stuck)), (Phase::Error, Some(stuck.into())));
-        assert_eq!(after_failure(How::Auto, Phase::Error, Some(false), MSG_NETWORK, Some(stuck)), (Phase::Available, None));
+        assert_eq!(after_failure(How::Auto, Phase::Error, None, u.network, Some(stuck)), (Phase::Error, Some(stuck.into())));
+        assert_eq!(after_failure(How::Auto, Phase::Idle, None, u.network, Some(stuck)), (Phase::Error, Some(stuck.into())));
+        assert_eq!(after_failure(How::Auto, Phase::Error, Some(false), u.network, Some(stuck)), (Phase::Available, None));
     }
 
     #[test]
     fn the_menu_says_latest_only_after_a_check_said_so() {
+        let u = &i18n::msg().update;
         let s = |phase, error: Option<&str>, last_error: Option<&str>| UpdateState {
             phase,
             current: "0.5.0".into(),
@@ -1256,13 +1252,25 @@ mod tests {
         };
         assert_eq!(nothing_found(&s(Phase::Latest, None, None)), "최신 버전을 쓰고 있어요 (easy-study 0.5.0).");
         assert!(nothing_found(&s(Phase::Checking, None, None)).contains("확인하는 중"));
-        assert_eq!(nothing_found(&s(Phase::Error, Some(MSG_NETWORK), None)), format!("업데이트를 확인하지 못했어요: {MSG_NETWORK}"));
+        assert_eq!(nothing_found(&s(Phase::Error, Some(u.network), None)), format!("업데이트를 확인하지 못했어요: {}", u.network));
         // The automatic check the menu waited for failed (silently: idle, lastError).
-        assert_eq!(nothing_found(&s(Phase::Idle, None, Some(MSG_NETWORK))), format!("업데이트를 확인하지 못했어요: {MSG_NETWORK}"));
-        assert_eq!(nothing_found(&s(Phase::Idle, None, None)), MSG_OTHER);
+        assert_eq!(nothing_found(&s(Phase::Idle, None, Some(u.network))), format!("업데이트를 확인하지 못했어요: {}", u.network));
+        assert_eq!(nothing_found(&s(Phase::Idle, None, None)), u.other);
         // A text that says it itself is not prefixed again.
         let stuck = "업데이트가 끝나지 않았어요 (지금 0.5.0). 다운로드 페이지에서 직접 설치해 주세요.";
-        assert_eq!(nothing_found(&s(Phase::Error, Some(stuck), Some(MSG_NETWORK))), stuck);
+        assert_eq!(nothing_found(&s(Phase::Error, Some(stuck), Some(u.network))), stuck);
+        // In English: the same answers, the same rule for the texts that say it themselves.
+        i18n::with_lang(i18n::Lang::En, || {
+            let en = &i18n::texts(i18n::Lang::En).update;
+            assert_eq!(nothing_found(&s(Phase::Latest, None, None)), "You're on the latest version (easy-study 0.5.0).");
+            assert_eq!(nothing_found(&s(Phase::Error, Some(en.network), None)), format!("Couldn't check for updates: {}", en.network));
+            assert_eq!(nothing_found(&s(Phase::Idle, None, None)), en.other);
+            let stuck = (en.did_not_take)("0.5.0");
+            assert_eq!(stuck, "The update didn't finish (this is still 0.5.0). Install it yourself from the download page.");
+            assert_eq!(nothing_found(&s(Phase::Error, Some(&stuck), Some(en.network))), stuck);
+        });
+        assert!(says_update_failed("업데이트하지 못했어요. 잠시 뒤") && says_update_failed("Couldn't update. Try again later"));
+        assert!(!says_update_failed(u.network) && !says_update_failed(i18n::texts(i18n::Lang::En).update.network));
     }
 
     #[test]

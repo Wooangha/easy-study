@@ -4,6 +4,7 @@ import { useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { Check, ChevronRight, GripVertical, Hourglass, RefreshCw, TriangleAlert, type LucideIcon } from 'lucide-react';
 import type { Course, DigestStatus, DocMeta, LibraryLayout } from '../../../../shared/types.ts';
 import type { UploadItem } from '../../hooks/useDocs.ts';
+import { msg } from '../../i18n/index.ts';
 import { formatBytes } from '../../lib/format.ts';
 import { layoutRows } from '../../lib/libraryLayout.ts';
 
@@ -30,7 +31,7 @@ export function DragHandle({
       {...attributes}
       {...listeners}
       aria-label={label}
-      title={`${label} — 끌어서 옮기기 (터치: 길게 누른 채 끌기, 키보드: 스페이스 후 화살표)`}
+      title={msg().shell.library.dragHandleTitle(label)}
     >
       <GripVertical />
     </button>
@@ -45,24 +46,25 @@ export function Chevron({ className = 'collapse-chevron' }: { className?: string
 
 /** "정리본" (a check) / "정리 중" (an hourglass) / "정리본 일부" badge (nothing when there is no digest). */
 export function DigestBadge({ status }: { status: DigestStatus | undefined }) {
+  const m = msg().shell.library.digestBadge;
   switch (status) {
     case 'ready':
       return (
         <span className="digest-badge is-ready">
-          <Check strokeWidth={2.5} /> 정리본
+          <Check strokeWidth={2.5} /> {m.ready}
         </span>
       );
     case 'running':
       return (
         <span className="digest-badge is-running">
-          <Hourglass strokeWidth={2.5} /> 정리 중
+          <Hourglass strokeWidth={2.5} /> {m.running}
         </span>
       );
     case 'aborted':
     case 'error':
       return (
-        <span className="digest-badge is-partial" title="정리본을 만들다 멈췄어요 — 정리본 탭에서 이어서 만들 수 있어요">
-          정리본 일부
+        <span className="digest-badge is-partial" title={m.partialTitle}>
+          {m.partial}
         </span>
       );
     default:
@@ -77,33 +79,34 @@ export function CourseSummaryBadges({ lectures, uploads }: { lectures: DocMeta[]
   const running = lectures.filter((d) => d.digestStatus === 'running').length;
   const processing = lectures.filter((d) => d.status === 'processing').length;
   const failed = lectures.filter((d) => d.status === 'error').length;
+  const m = msg().shell.library.summary;
   return (
     <span className="course-badges">
       {lectures.length > 0 && (
         <span
           className={ready === lectures.length ? 'digest-badge is-ready' : 'digest-badge is-muted'}
-          title={`정리본이 있는 강의 ${ready}개 / 전체 ${lectures.length}개`}
+          title={m.digestsTitle(ready, lectures.length)}
         >
           {ready === lectures.length && (
             <>
               <Check strokeWidth={2.5} />{' '}
             </>
           )}
-          정리본 {ready}/{lectures.length}
+          {m.digests(ready, lectures.length)}
         </span>
       )}
       {running > 0 && (
         <span className="digest-badge is-running">
-          <Hourglass strokeWidth={2.5} /> 정리 중 {running}
+          <Hourglass strokeWidth={2.5} /> {m.running(running)}
         </span>
       )}
-      {processing > 0 && <span className="digest-badge is-running">변환 중 {processing}</span>}
+      {processing > 0 && <span className="digest-badge is-running">{m.converting(processing)}</span>}
       {failed > 0 && (
         <span className="digest-badge is-partial">
-          <TriangleAlert strokeWidth={2.5} /> 실패 {failed}
+          <TriangleAlert strokeWidth={2.5} /> {m.failed(failed)}
         </span>
       )}
-      {uploads > 0 && <span className="digest-badge is-running">업로드 중 {uploads}</span>}
+      {uploads > 0 && <span className="digest-badge is-running">{m.uploading(uploads)}</span>}
     </span>
   );
 }
@@ -122,7 +125,7 @@ export function DocProgress({ doc, compact = false }: { doc: DocMeta; compact?: 
     <div className={compact ? 'doc-progress compact' : 'doc-progress'}>
       <ProgressBar fraction={fraction} />
       <span className="doc-progress-text">
-        {doc.pageCount > 0 ? `슬라이드 변환 중 ${doc.progress} / ${doc.pageCount}` : 'PDF 분석 중…'}
+        {doc.pageCount > 0 ? msg().shell.library.convertingSlides(doc.progress, doc.pageCount) : msg().shell.library.analyzingPdf}
       </span>
     </div>
   );
@@ -133,9 +136,7 @@ export function UploadCard({ upload: u }: { upload: UploadItem }) {
     <div className="doc-card is-uploading">
       <div className="doc-card-body">
         <div className="doc-title">{u.name}</div>
-        <div className="doc-sub">
-          업로드 중 {Math.round(u.fraction * 100)}% · {formatBytes(u.size)}
-        </div>
+        <div className="doc-sub">{msg().shell.library.uploading(Math.round(u.fraction * 100), formatBytes(u.size))}</div>
         <ProgressBar fraction={u.fraction} />
       </div>
     </div>
@@ -152,18 +153,14 @@ export function FailedDocActions({
   onRetry: (docId: string) => void;
   onDelete: (doc: DocMeta) => void;
 }) {
+  const m = msg().shell.library;
   return (
     <>
-      <button
-        type="button"
-        className="ghost-btn small"
-        onClick={() => onRetry(doc.id)}
-        title="업로드한 PDF로 변환을 다시 해요"
-      >
-        <RefreshCw /> 다시 변환
+      <button type="button" className="ghost-btn small" onClick={() => onRetry(doc.id)} title={m.convertAgainTitle}>
+        <RefreshCw /> {m.convertAgain}
       </button>
-      <button type="button" className="ghost-btn small danger" onClick={() => onDelete(doc)} title="이 문서를 삭제해요">
-        삭제
+      <button type="button" className="ghost-btn small danger" onClick={() => onDelete(doc)} title={m.deleteDocTitle}>
+        {msg().common.delete}
       </button>
     </>
   );
@@ -258,10 +255,10 @@ export function NewTitleForm({
         }}
       />
       <button type="submit" className="primary-btn small" disabled={!title.trim() || busy}>
-        만들기
+        {msg().shell.library.create}
       </button>
       <button type="button" className="ghost-btn small" onClick={onCancel}>
-        취소
+        {msg().common.cancel}
       </button>
     </form>
   );

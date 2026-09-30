@@ -419,8 +419,8 @@ test('sharing: one dedicated variable the user cannot set, the code never in a l
   assert.match(serverRs, /let shared = lock\(&st\.share_urls\)\.is_some\(\);\n\s+crate::go_to\(app, &page_url\(app, &url, shared\)\);/);
   assert.match(shareRs, /st\.stay_on_chooser\.store\(matches!\(from, From::Chooser\), SeqCst\);\n\s+if let Err\(e\) = server::start\(app\)/);
   // A page's share/on and share/reveal go through a native dialog (the page's own session must not be enough).
-  assert.match(shareRs, /if let \(Some\(origin\), Change::Share\(true\)\) = \(&page, change\) \{[\s\S]*?bridge::confirm\(app, CONFIRM_SHARE_ON, "허용", "취소"\)/);
-  assert.match(bridgeRs, /fn reveal_code\(app: &AppHandle, origin: &str\) \{[\s\S]*?let ok = confirm\(app, CONFIRM_REVEAL, "보기", "취소"\);/);
+  assert.match(shareRs, /if let \(Some\(origin\), Change::Share\(true\)\) = \(&page, change\) \{[\s\S]*?bridge::confirm\(app, m\.share\.confirm_on, m\.share\.allow, m\.common\.cancel\)/);
+  assert.match(bridgeRs, /fn reveal_code\(app: &AppHandle, origin: &str\) \{[\s\S]*?let ok = confirm\(app, m\.page\.confirm_reveal, m\.page\.reveal, m\.common\.cancel\);/);
   // Page URLs in the log without their query (the login link carries the code).
   assert.match(mainRs, /"page loaded \{\}", without_query\(payload\.url\(\)\)/);
   // The pushed state carries sharing only into this computer's own page, and the code only after share/reveal.

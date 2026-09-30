@@ -18,6 +18,7 @@
 // Pure helpers and a tiny store; no React state of the app and no recorder (they are passed in), so the tests can run
 // it in Node.
 import { useSyncExternalStore } from 'react';
+import { msg } from '../i18n/index.ts';
 import type { ConfirmOptions } from './confirm.ts';
 
 export type DesktopOs = 'macos' | 'windows' | 'linux';
@@ -50,10 +51,10 @@ export interface UpdateState {
   /** Bytes downloaded so far, and the size when known. */
   received: number;
   total?: number;
-  /** What went wrong, in Korean (phase 'error'). */
+  /** What went wrong, in the shell's language (the computer's: Korean or English; phase 'error'). */
   error?: string;
   install: InstallMode;
-  /** Why the update is not installed in the app, in Korean (install 'download'). */
+  /** Why the update is not installed in the app, in the shell's language (install 'download'). */
   reason?: string;
   kind?: InstallKind;
   checkedAt?: string;
@@ -478,36 +479,30 @@ export function recordingAtRisk(b: PageBusy): boolean {
 /** The confirmation before "연결 대상 바꾸기" (the chooser replaces this page), or null when nothing is lost. */
 export function leaveConfirm(b: PageBusy | null): ConfirmOptions | null {
   if (!b) return null;
-  const base = { title: '연결 대상을 바꿀까요?', confirmLabel: '바꾸기' };
-  if (b.recording) {
-    return {
-      ...base,
-      message: '강의를 녹음하는 중이에요. 바꾸면 녹음이 멈춰요 (녹음한 부분은 저장돼 있어서 같은 서버에 다시 연결하면 마저 올라가요).',
-    };
-  }
-  if (b.unsentSeconds > 0 || b.finishing > 0) {
-    return {
-      ...base,
-      message: '녹음한 소리를 아직 서버로 보내는 중이에요. 바꾸면 멈춰요 (이 기기에 저장돼 있어서 같은 서버에 다시 연결하면 마저 올라가요).',
-    };
-  }
-  if (b.answering || b.uploads > 0 || b.recordingUploads > 0) {
-    return { ...base, message: '답변을 만들거나 파일을 올리는 중이에요. 지금 바꾸면 이 화면에서는 결과를 볼 수 없어요.' };
-  }
+  const m = msg().settings.bridge.leave;
+  const base = { title: m.title, confirmLabel: m.confirmLabel };
+  if (b.recording) return { ...base, message: m.recording };
+  if (b.unsentSeconds > 0 || b.finishing > 0) return { ...base, message: m.unsent };
+  if (b.answering || b.uploads > 0 || b.recordingUploads > 0) return { ...base, message: m.busy };
   return null;
 }
 
 /** Why the update cannot be installed now (the shell refuses it too), or null. */
 export function installBlockReason(b: PageBusy): string | null {
-  if (b.recording) return '녹음 중에는 설치할 수 없어요 — 녹음을 끝낸 뒤 눌러 주세요.';
-  if (b.unsentSeconds > 0 || b.finishing > 0) return '녹음한 소리를 서버로 보내는 중이에요 — 다 보낸 뒤 설치할 수 있어요.';
-  if (b.recordingUploads > 0) return '녹음 파일을 올리는 중이에요 — 다 올린 뒤 설치할 수 있어요.';
+  return blockReason(b, msg().settings.bridge.installBlocked);
+}
+
+/** The reason of `texts` for what could cut audio off, or null. */
+function blockReason(b: PageBusy, texts: { recording: string; unsent: string; uploads: string }): string | null {
+  if (b.recording) return texts.recording;
+  if (b.unsentSeconds > 0 || b.finishing > 0) return texts.unsent;
+  if (b.recordingUploads > 0) return texts.uploads;
   return null;
 }
 
 /** What a restart would stop that the user may accept (asked first), or null. */
 export function installWarning(b: PageBusy): string | null {
-  return b.answering || b.uploads > 0 ? '답변을 만들거나 파일을 올리는 중이에요. 다시 시작하면 멈춰요. 그래도 설치할까요?' : null;
+  return b.answering || b.uploads > 0 ? msg().settings.bridge.installWarning : null;
 }
 
 /**
@@ -515,26 +510,22 @@ export function installWarning(b: PageBusy): string | null {
  * gate as an update (the shell refuses these too). Why it cannot be changed now, or null.
  */
 export function shareBlockReason(b: PageBusy): string | null {
-  if (b.recording) return '녹음 중에는 바꿀 수 없어요 — 녹음을 끝낸 뒤 눌러 주세요.';
-  if (b.unsentSeconds > 0 || b.finishing > 0) return '녹음한 소리를 서버로 보내는 중이에요 — 다 보낸 뒤 바꿀 수 있어요.';
-  if (b.recordingUploads > 0) return '녹음 파일을 올리는 중이에요 — 다 올린 뒤 바꿀 수 있어요.';
-  return null;
+  return blockReason(b, msg().settings.bridge.shareBlocked);
 }
 
 /** What the restart for a share change would stop that the user may accept (asked first), or null. */
 export function shareWarning(b: PageBusy): string | null {
-  return b.answering || b.uploads > 0 ? '답변을 만들거나 파일을 올리는 중이에요. 서버를 다시 시작하면 멈춰요. 그래도 바꿀까요?' : null;
+  return b.answering || b.uploads > 0 ? msg().settings.bridge.shareWarning : null;
 }
 
 /** The confirmation before "접속 코드 새로 만들기" (every device is logged out; the server restarts once). */
 export function resetCodeConfirm(b: PageBusy): ConfirmOptions {
-  const warning = shareWarning(b);
+  const m = msg().settings.bridge.resetCode;
   return {
-    title: '접속 코드를 새로 만들까요?',
-    message:
-      '지금 코드로 로그인한 다른 기기는 모두 로그아웃돼요. 새 코드를 만들려고 이 컴퓨터의 서버를 한 번 다시 시작해요.' +
-      (warning ? ` ${warning.replace(/ 그래도 바꿀까요\?$/, '')}` : ''),
-    confirmLabel: '새로 만들기',
+    title: m.title,
+    // What would stop, without shareWarning's question (the dialog asks it).
+    message: shareWarning(b) ? `${m.message} ${m.busy}` : m.message,
+    confirmLabel: m.confirmLabel,
   };
 }
 
@@ -597,25 +588,26 @@ export function updatePending(u: UpdateState | null | undefined): boolean {
 /** The status line of Settings › 데스크톱 앱. */
 export function updateStatusLine(u: UpdateState): string {
   const v = u.version ?? '';
+  const m = msg().settings.bridge.status;
   switch (u.phase) {
     case 'checking':
-      return '확인하는 중…';
+      return m.checking;
     case 'available':
-      return `easy-study ${v} 버전이 나왔어요`;
+      return m.available(v);
     case 'downloading': {
       const pct = downloadPercent(u);
-      return pct === null ? '내려받는 중…' : `내려받는 중… ${pct}%`;
+      return pct === null ? m.downloading : m.downloadingPercent(pct);
     }
     case 'downloaded':
-      return `easy-study ${v} 버전을 받아 두었어요`;
+      return m.downloaded(v);
     case 'installing':
-      return `easy-study ${v} 버전을 설치하는 중…`;
+      return m.installing(v);
     case 'error':
       return updateErrorText(u);
     case 'latest':
-      return '최신 버전이에요';
+      return m.latest;
     default:
-      return u.lastError ? `마지막 확인 실패: ${u.lastError}` : u.checkedAt ? '최신 버전이에요' : '아직 확인하지 않았어요';
+      return u.lastError ? m.lastCheckFailed(u.lastError) : u.checkedAt ? m.latest : m.notChecked;
   }
 }
 
@@ -624,23 +616,22 @@ const PACKAGE_KINDS: Partial<Record<InstallKind, string>> = { deb: 'deb', rpm: '
 /** Why this install takes the new version from the download page (install 'download'). */
 export function downloadHint(u: UpdateState): string {
   if (u.reason) return u.reason;
+  const m = msg().settings.bridge;
   const pkg = u.kind ? PACKAGE_KINDS[u.kind] : undefined;
-  if (pkg) {
-    return `이 설치 방식(${pkg})에서는 새 패키지를 받아 설치해 주세요.${u.kind === 'arch' ? ' (릴리스의 PKGBUILD로 makepkg -si)' : ''}`;
-  }
-  return '다운로드 페이지에서 새 버전을 받아 설치해 주세요.';
+  return pkg ? m.downloadPackage(pkg, u.kind === 'arch') : m.downloadPage;
 }
 
 /**
  * macOS keeps the microphone permission per signature, and an app signed without a developer ID gets a new one with
  * every version: it may ask again, or silently record nothing while System Settings still shows it allowed.
  */
-export const MAC_MIC_FIX = '녹음이 안 되면 시스템 설정 › 개인정보 보호 및 보안 › 마이크에서 easy-study를 껐다 켜 주세요.';
-export const MAC_MIC_HINT = `macOS에서는 업데이트 뒤 처음 녹음할 때 마이크 권한을 다시 물을 수 있어요. ${MAC_MIC_FIX}`;
+export const macMicFix = (): string => msg().settings.bridge.macMicFix;
+export const macMicHint = (): string => `${msg().settings.bridge.macMicHint} ${macMicFix()}`;
 
 /** The toast after an update (the shell pushes justUpdated during the whole launch after it). */
 export function updatedToast(version: string, os: DesktopOs | undefined): string {
-  return `easy-study ${version} 버전으로 업데이트했어요.${os === 'macos' ? ` ${MAC_MIC_FIX}` : ''}`;
+  const updated = msg().settings.bridge.updated(version);
+  return os === 'macos' ? `${updated} ${macMicFix()}` : updated;
 }
 
 /** sessionStorage item: the version the "updated" toast was shown for in this tab. */
@@ -678,10 +669,15 @@ export function firstUpdatedToast(version: string, storage = tabStorage()): bool
 }
 
 /**
- * An error of the update state as a sentence: "업데이트하지 못했어요: …", unless the shell's text says so itself
- * ("업데이트가 끝나지 않았어요…", "업데이트하지 못했어요. …"; update.rs says_update_failed).
+ * The shell's text says itself that the update failed (update.rs says_update_failed): "업데이트가 끝나지 않았어요…",
+ * "업데이트하지 못했어요. …", or the same in English. The shell speaks the computer's language, which need not be the
+ * page's, so both are recognized whatever the page's language.
  */
+const SAYS_UPDATE_FAILED = /^(업데이트(가|하지) |(The update|Couldn['’]t update|Could not update)\b)/;
+
+/** An error of the update state as a sentence: "업데이트하지 못했어요: …", unless the shell's text says so itself. */
 export function updateErrorText(u: UpdateState): string {
-  const error = u.error ?? '알 수 없는 오류';
-  return /^업데이트(가|하지) /.test(error) ? error : `업데이트하지 못했어요: ${error}`;
+  const m = msg();
+  const error = u.error ?? m.common.unknownError;
+  return SAYS_UPDATE_FAILED.test(error) ? error : m.settings.bridge.updateFailed(error);
 }

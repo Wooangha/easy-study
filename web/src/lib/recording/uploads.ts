@@ -3,6 +3,7 @@
 // user moves around the app.
 import type { RecordingInfo } from '../../../../shared/types.ts';
 import { ApiError, isAbortError, recordingErrorMessage, uploadRecording } from '../../api.ts';
+import { msg } from '../../i18n/index.ts';
 import { toast } from '../toast.ts';
 import { recordingFileProblem, titleFromFileName } from './labels.ts';
 import { notifyRecordingsChanged } from './bus.ts';
@@ -79,19 +80,16 @@ export async function uploadRecordingFiles(docId: string, docTitle: string, file
         signal: controller.signal,
       });
       created.push(info);
-      toast(
-        `‘${titleFromFileName(file.name)}’ 녹음을 ‘${docTitle}’에 올렸어요. 변환과 받아쓰기가 끝나면 녹음 탭에서 볼 수 있어요.`,
-        'success',
-        6000,
-      );
+      toast(msg().recording.uploads.uploaded(titleFromFileName(file.name), docTitle), 'success', 6000);
       notifyRecordingsChanged(docId);
     } catch (e) {
+      const m = msg().recording.uploads;
       if (isAbortError(e)) {
-        toast(`‘${file.name}’ 올리기를 취소했어요.`, 'info');
+        toast(m.canceled(file.name), 'info');
       } else if (e instanceof ApiError && e.status === 413) {
-        toast(`‘${file.name}’이(가) 너무 커서 올리지 못했어요.`, 'error');
+        toast(m.tooLarge(file.name), 'error');
       } else {
-        toast(`‘${file.name}’을(를) 올리지 못했어요: ${recordingErrorMessage(e)}`, 'error');
+        toast(m.failed(file.name, recordingErrorMessage(e)), 'error');
       }
     } finally {
       controllers.delete(item.id);

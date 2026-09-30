@@ -2,15 +2,16 @@
 // shell checks, downloads and installs; the page shows its pushed state and asks it for actions (web/src/lib/desktop.ts).
 import { useState } from 'react';
 import { ExternalLink, PartyPopper, TriangleAlert } from 'lucide-react';
+import { msg } from '../i18n/index.ts';
 import { confirmDialog } from '../lib/confirm.ts';
 import {
-  MAC_MIC_HINT,
   desktopAction,
   desktopMarker,
   downloadHint,
   downloadPercent,
   installBlockReason,
   installWarning,
+  macMicHint,
   updateErrorText,
   type PageBusy,
   type UpdateState,
@@ -23,7 +24,8 @@ import {
 export async function startInstall(busy: PageBusy): Promise<void> {
   if (installBlockReason(busy)) return;
   const warning = installWarning(busy);
-  if (warning && !(await confirmDialog({ title: '업데이트하고 다시 시작할까요?', message: warning, confirmLabel: '설치하고 다시 시작' }))) {
+  const m = msg().shell.update.installConfirm;
+  if (warning && !(await confirmDialog({ title: m.title, message: warning, confirmLabel: m.confirmLabel }))) {
     return;
   }
   desktopAction('install-update');
@@ -31,7 +33,7 @@ export async function startInstall(busy: PageBusy): Promise<void> {
 
 export function UpdateProgress({ update }: { update: UpdateState }) {
   const pct = downloadPercent(update);
-  return <progress className="update-progress" max={100} value={pct ?? undefined} aria-label="새 버전 내려받기" />;
+  return <progress className="update-progress" max={100} value={pct ?? undefined} aria-label={msg().shell.update.downloadLabel} />;
 }
 
 /** A link to the release page (opened in the system browser: the app sends other sites there), with the ↗ icon. */
@@ -55,6 +57,7 @@ export function UpdateBanner({ update, busy }: UpdateBannerProps) {
   if (!update || update.dismissed) return null;
   const v = update.version ?? '';
   if (hiddenFor !== null && hiddenFor === `${v}:${update.phase}`) return null;
+  const m = msg().shell.update;
 
   const later = (
     <button
@@ -65,7 +68,7 @@ export function UpdateBanner({ update, busy }: UpdateBannerProps) {
         desktopAction('dismiss-update');
       }}
     >
-      {update.phase === 'error' ? '닫기' : '나중에'}
+      {update.phase === 'error' ? msg().common.close : m.later}
     </button>
   );
   const blocked = installBlockReason(busy);
@@ -88,9 +91,9 @@ export function UpdateBanner({ update, busy }: UpdateBannerProps) {
         return (
           <div className="banner banner-info update-banner" role="status">
             <span className="update-text">
-              <PartyPopper /> easy-study {v} 버전이 나왔어요. {update.install === 'download' ? downloadHint(update) : ''}
+              <PartyPopper /> {m.available(v)} {update.install === 'download' ? downloadHint(update) : ''}
             </span>
-            <ReleaseLink update={update}>{update.install === 'download' ? '다운로드 페이지 열기' : '변경 사항'}</ReleaseLink>
+            <ReleaseLink update={update}>{update.install === 'download' ? m.openDownloadPage : m.releaseNotes}</ReleaseLink>
             {later}
           </div>
         );
@@ -98,13 +101,13 @@ export function UpdateBanner({ update, busy }: UpdateBannerProps) {
       return (
         <div className="banner banner-info update-banner" role="status">
           <span className="update-text">
-            <PartyPopper /> easy-study {v} 버전이 나왔어요.
+            <PartyPopper /> {m.available(v)}
           </span>
-          {installButton('업데이트하고 다시 시작')}
-          <ReleaseLink update={update}>변경 사항</ReleaseLink>
+          {installButton(m.installAndRestart)}
+          <ReleaseLink update={update}>{m.releaseNotes}</ReleaseLink>
           {later}
           {blockedHint}
-          {desktopMarker()?.os === 'macos' && <span className="update-hint">{MAC_MIC_HINT}</span>}
+          {desktopMarker()?.os === 'macos' && <span className="update-hint">{macMicHint()}</span>}
         </div>
       );
     }
@@ -112,10 +115,13 @@ export function UpdateBanner({ update, busy }: UpdateBannerProps) {
       const pct = downloadPercent(update);
       return (
         <div className="banner banner-info update-banner" role="status">
-          <span className="update-text">새 버전을 내려받는 중…{pct === null ? '' : ` ${pct}%`}</span>
+          <span className="update-text">
+            {m.downloading}
+            {pct === null ? '' : ` ${pct}%`}
+          </span>
           <UpdateProgress update={update} />
           <button type="button" className="ghost-btn small" onClick={() => desktopAction('cancel-update')}>
-            취소
+            {msg().common.cancel}
           </button>
         </div>
       );
@@ -123,8 +129,8 @@ export function UpdateBanner({ update, busy }: UpdateBannerProps) {
     case 'downloaded':
       return (
         <div className="banner banner-info update-banner" role="status">
-          <span className="update-text">새 버전을 받아 두었어요. 녹음이 끝나면 다시 시작해서 설치할 수 있어요.</span>
-          {installButton('지금 다시 시작해서 설치')}
+          <span className="update-text">{m.downloaded}</span>
+          {installButton(m.restartNow)}
           {later}
           {blockedHint}
         </div>
@@ -132,7 +138,7 @@ export function UpdateBanner({ update, busy }: UpdateBannerProps) {
     case 'installing':
       return (
         <div className="banner banner-info update-banner" role="status">
-          <span className="update-text">easy-study {v} 버전을 설치하는 중… 끝나면 앱이 다시 시작돼요.</span>
+          <span className="update-text">{m.installing(v)}</span>
         </div>
       );
     case 'error': {
@@ -143,13 +149,13 @@ export function UpdateBanner({ update, busy }: UpdateBannerProps) {
             <TriangleAlert /> {updateErrorText(update)}
           </span>
           {retryInstall ? (
-            installButton('다시 시도')
+            installButton(msg().common.retry)
           ) : (
             <button type="button" className="ghost-btn small" onClick={() => desktopAction('check-update')}>
-              다시 시도
+              {msg().common.retry}
             </button>
           )}
-          {(update.version || update.install === 'download') && <ReleaseLink update={update}>다운로드 페이지 열기</ReleaseLink>}
+          {(update.version || update.install === 'download') && <ReleaseLink update={update}>{m.openDownloadPage}</ReleaseLink>}
           {later}
           {retryInstall && blockedHint}
         </div>

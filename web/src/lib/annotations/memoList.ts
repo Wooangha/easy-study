@@ -1,6 +1,7 @@
 // The 메모 tab (DESIGN §25): the lecture's memos from the summary (no per-slide loads), searched and filtered on the
 // client. Pure helpers, no DOM.
 import type { MemoSummary } from '../../../../shared/types.ts';
+import { msg } from '../../i18n/index.ts';
 
 export interface MemoListFilter {
   /** Case-insensitive, over the text and the tags; whitespace-separated words must all match. */
@@ -42,6 +43,6 @@ export function memoLines(text: string): [string, string | null] {
     .split('\n')
     .map((l) => l.trim())
     .filter(Boolean);
-  if (lines.length === 0) return ['(빈 메모)', null];
+  if (lines.length === 0) return [msg().viewer.memo.empty, null];
   return [lines[0], lines[1] ?? null];
 }

@@ -15,6 +15,8 @@ use std::time::Duration;
 
 use tauri::Url;
 
+use crate::i18n;
+
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 const IO_TIMEOUT: Duration = Duration::from_secs(6);
 const MAX_RESPONSE: usize = 256 * 1024;
@@ -23,20 +25,21 @@ pub const URL_EXAMPLE: &str = "http://192.168.0.10:5180";
 
 /// The origin (scheme://host:port/) of what the user typed. No scheme = http.
 pub fn parse(input: &str) -> Result<Url, String> {
+    let texts = &i18n::msg().remote;
     let input = input.trim();
     if input.is_empty() {
-        return Err(format!("연결할 컴퓨터의 주소를 입력하세요 (예: {URL_EXAMPLE})."));
+        return Err((texts.enter_address)(URL_EXAMPLE));
     }
     let with_scheme = if input.contains("://") { input.to_string() } else { format!("http://{input}") };
-    let mut url = Url::parse(&with_scheme).map_err(|_| format!("주소 형식이 올바르지 않아요 (예: {URL_EXAMPLE})."))?;
+    let mut url = Url::parse(&with_scheme).map_err(|_| (texts.bad_address)(URL_EXAMPLE))?;
     if url.scheme() != "http" && url.scheme() != "https" {
-        return Err("http:// 또는 https:// 주소만 쓸 수 있어요.".into());
+        return Err(texts.http_only.into());
     }
     if url.host_str().unwrap_or("").is_empty() {
-        return Err(format!("주소에 컴퓨터 이름이나 IP가 없어요 (예: {URL_EXAMPLE})."));
+        return Err((texts.no_host)(URL_EXAMPLE));
     }
     if !url.username().is_empty() || url.password().is_some() {
-        return Err("주소에 사용자 이름이나 비밀번호를 넣지 마세요. 접속 코드는 아래 칸에 입력하세요.".into());
+        return Err(texts.no_credentials.into());
     }
     url.set_path("/");
     url.set_query(None);
@@ -92,23 +95,21 @@ pub fn get(url: &Url) -> Result<Response, String> {
 /// `get` with extra request headers (`Authorization: Bearer <code>` for the shared local server's busy check).
 /// Names and values are the shell's own constants: a value with CR/LF would end the header block and is refused.
 pub fn get_with(url: &Url, extra: &[(&str, &str)]) -> Result<Response, String> {
+    let texts = &i18n::msg().remote;
     let host = url.host_str().unwrap_or_default().to_string();
     let port = url.port_or_known_default().unwrap_or(80);
     let addrs: Vec<SocketAddr> = url
         .socket_addrs(|| None)
-        .map_err(|_| format!("{host} 주소를 찾을 수 없어요. 컴퓨터 이름이나 IP 주소를 확인하세요."))?;
+        .map_err(|_| (texts.unresolved)(&host))?;
     if addrs.is_empty() {
-        return Err(format!("{host} 주소를 찾을 수 없어요."));
+        return Err((texts.unresolved_short)(&host));
     }
     let https = url.scheme() == "https";
     if !https {
         if let Some(public) = addrs.iter().find(|a| !is_private(a.ip())) {
             let ip = public.ip().to_string();
             let shown = if host.trim_matches(['[', ']']) == ip { host.clone() } else { format!("{host}({ip})") };
-            return Err(format!(
-                "{shown}은(는) 이 네트워크 밖의 주소예요. 암호화되지 않은 http:// 로는 같은 네트워크(집·학교 Wi-Fi, Tailscale)의 \
-                 컴퓨터에만 연결할 수 있어요. 인터넷을 거쳐 연결하려면 https:// 주소(예: tailscale serve)를 쓰세요."
-            ));
+            return Err((texts.public_http)(&shown));
         }
     }
     let mut failures: Vec<(IpAddr, Option<i32>)> = Vec::new();
@@ -126,7 +127,7 @@ pub fn get_with(url: &Url, extra: &[(&str, &str)]) -> Result<Response, String> {
     let _ = tcp.set_read_timeout(Some(IO_TIMEOUT));
     let _ = tcp.set_write_timeout(Some(IO_TIMEOUT));
     let mut stream: Box<dyn Stream> = if https {
-        let connector = native_tls::TlsConnector::new().map_err(|e| format!("HTTPS를 준비하지 못했어요: {e}"))?;
+        let connector = native_tls::TlsConnector::new().map_err(|e| (texts.no_tls)(&e.to_string()))?;
         Box::new(connector.connect(&host, tcp).map_err(|e| tls_failure_message(&host, port, &e.to_string()))?)
     } else {
         Box::new(tcp)
@@ -142,12 +143,12 @@ pub fn get_with(url: &Url, extra: &[(&str, &str)]) -> Result<Response, String> {
     let mut request = format!("GET {path} HTTP/1.1\r\nHost: {authority}\r\nAccept: application/json\r\nUser-Agent: easy-study-desktop\r\nConnection: close\r\n");
     for (name, value) in extra {
         if name.contains(['\r', '\n', ':']) || value.contains(['\r', '\n']) {
-            return Err(format!("요청 헤더 {name}의 값이 올바르지 않아요."));
+            return Err((texts.bad_header)(name));
         }
         request.push_str(&format!("{name}: {value}\r\n"));
     }
     request.push_str("\r\n");
-    stream.write_all(request.as_bytes()).map_err(|e| format!("{host}:{port}에 요청을 보내지 못했어요: {e}"))?;
+    stream.write_all(request.as_bytes()).map_err(|e| (texts.send_failed)(&host, port, &e.to_string()))?;
     let mut raw = Vec::new();
     let mut chunk = [0u8; 8192];
     loop {
@@ -161,7 +162,7 @@ pub fn get_with(url: &Url, extra: &[(&str, &str)]) -> Result<Response, String> {
             }
             // A TLS peer that closes without close_notify, or a read timeout after the answer: keep what came.
             Err(_) if !raw.is_empty() => break,
-            Err(e) => return Err(format!("{host}:{port}에서 응답을 받지 못했어요: {e}")),
+            Err(e) => return Err((texts.receive_failed)(&host, port, &e.to_string())),
         }
     }
     let text = String::from_utf8_lossy(&raw).into_owned();
@@ -171,7 +172,7 @@ pub fn get_with(url: &Url, extra: &[(&str, &str)]) -> Result<Response, String> {
         .next()
         .and_then(|l| l.split_whitespace().nth(1))
         .and_then(|s| s.parse::<u16>().ok())
-        .ok_or_else(|| format!("{host}:{port}은(는) HTTP 서버가 아닌 것 같아요."))?;
+        .ok_or_else(|| (texts.not_http)(&host, port))?;
     let location = lines.find_map(|l| {
         let (k, v) = l.split_once(':')?;
         k.trim().eq_ignore_ascii_case("location").then(|| v.trim().to_string())
@@ -185,18 +186,13 @@ const MACOS_UNREACHABLE: [i32; 2] = [65, 51];
 
 /// Why no address of `host` accepted the connection (`failures`: each address with its OS error code).
 fn connect_failure_message(host: &str, port: u16, failures: &[(IpAddr, Option<i32>)], macos: bool) -> String {
-    let mut msg = format!(
-        "{host}:{port}에 연결할 수 없어요. 그 컴퓨터에서 easy-study가 원격 모드로 실행 중인지 \
-         (npm run start:remote), 같은 네트워크에 있는지, 방화벽이 막고 있지 않은지 확인하세요."
-    );
+    let texts = &i18n::msg().remote;
+    let mut msg = (texts.connect_failed)(host, port);
     let local_network = failures
         .iter()
         .any(|(ip, code)| is_private(*ip) && !ip.is_loopback() && code.is_some_and(|c| MACOS_UNREACHABLE.contains(&c)));
     if macos && local_network {
-        msg.push_str(
-            " 이 Mac이 easy-study의 로컬 네트워크 접근을 막고 있을 수도 있어요: 시스템 설정 › 개인정보 보호 및 보안 › \
-             로컬 네트워크에서 easy-study를 켠 뒤 다시 연결하세요.",
-        );
+        msg.push_str(texts.local_network);
     }
     msg
 }
@@ -238,23 +234,14 @@ const CERTIFICATE: &[&str] = &[
 /// Why the TLS handshake with `host` failed. native-tls passes on the platform's own error text, so it is
 /// matched as text: a server that answers in plain http is not a certificate problem.
 fn tls_failure_message(host: &str, port: u16, err: &str) -> String {
+    let texts = &i18n::msg().remote;
     let lower = err.to_lowercase();
     if NOT_TLS.iter().any(|m| lower.contains(m)) {
-        format!(
-            "{host}:{port}은(는) HTTPS로 응답하지 않아요 ({err}). 인증서 없이 켠 easy-study 서버(npm run start:remote)는 \
-             http로 열려요: 같은 네트워크라면 주소를 http:// 로 바꿔 보세요."
-        )
+        (texts.not_https)(host, port, err)
     } else if CERTIFICATE.iter().any(|m| lower.contains(m)) {
-        format!(
-            "{host}의 HTTPS 인증서를 이 컴퓨터가 신뢰하지 않아요 ({err}). 앱 창은 자체 서명 인증서를 받아들일 수 없어요: \
-             tailscale serve / tailscale cert처럼 신뢰받는 인증서를 쓰거나, mkcert의 루트 인증서를 이 컴퓨터에 설치하세요. \
-             같은 네트워크라면 http:// 주소도 쓸 수 있어요."
-        )
+        (texts.untrusted)(host, err)
     } else {
-        format!(
-            "{host}:{port}와(과) HTTPS 연결을 맺지 못했어요 ({err}). 주소와 포트가 맞는지, 그 서버가 https로 열려 있는지 \
-             확인하세요. 같은 네트워크라면 http:// 주소도 쓸 수 있어요."
-        )
+        (texts.tls_failed)(host, port, err)
     }
 }
 
@@ -269,7 +256,7 @@ pub fn probe(origin: &Url) -> Result<Status, String> {
     let res = get(&url)?;
     if (300..400).contains(&res.status) {
         let to = res.location.unwrap_or_default();
-        return Err(format!("{origin} 은(는) 다른 주소({to})로 넘어가요. 그 주소로 연결해 보세요."));
+        return Err((i18n::msg().remote.redirected)(origin.as_str(), &to));
     }
     // The JSON object (also when the answer came chunked: take the outermost braces).
     let json = match (res.body.find('{'), res.body.rfind('}')) {
@@ -278,10 +265,7 @@ pub fn probe(origin: &Url) -> Result<Status, String> {
     };
     match json.as_ref().and_then(|v| v.get("authRequired")).and_then(|v| v.as_bool()) {
         Some(auth_required) if res.status == 200 => Ok(Status { auth_required }),
-        _ => Err(format!(
-            "{origin} 에서 easy-study 서버를 찾지 못했어요 (HTTP {}). 주소와 포트 번호를 확인하세요.",
-            res.status
-        )),
+        _ => Err((i18n::msg().remote.not_easy_study)(origin.as_str(), res.status)),
     }
 }
 
@@ -347,6 +331,20 @@ mod tests {
         assert!(!connect_failure_message("192.168.0.10", 5180, &[(lan, Some(61))], true).contains(hint)); // refused
         assert!(!connect_failure_message("127.0.0.1", 5180, &[(loopback, Some(65))], true).contains(hint));
         assert!(connect_failure_message("192.168.0.10", 5180, &[], true).contains("192.168.0.10:5180에 연결할 수 없어요"));
+    }
+
+    #[test]
+    fn messages_speak_the_shells_language() {
+        i18n::with_lang(i18n::Lang::En, || {
+            assert_eq!(parse("").unwrap_err(), "Enter the address of the computer to connect to (e.g. http://192.168.0.10:5180).");
+            assert_eq!(parse("ftp://host").unwrap_err(), "Only http:// or https:// addresses work.");
+            let msg = tls_failure_message("192.168.0.10", 5180, "record overflow");
+            assert!(msg.starts_with("192.168.0.10:5180 doesn't answer over HTTPS (record overflow).") && msg.contains("http://"), "{msg}");
+            assert!(tls_failure_message("mac.local", 443, "invalid certificate chain").starts_with("This computer doesn't trust the HTTPS certificate of mac.local"));
+            let lan: IpAddr = "192.168.0.10".parse().unwrap();
+            let msg = connect_failure_message("192.168.0.10", 5180, &[(lan, Some(65))], true);
+            assert!(msg.starts_with("Can't connect to 192.168.0.10:5180.") && msg.ends_with("Privacy & Security › Local Network, then connect again."), "{msg}");
+        });
     }
 
     #[test]

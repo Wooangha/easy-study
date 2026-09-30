@@ -3,6 +3,7 @@ import { BookOpen, NotebookPen, Settings, Trash } from 'lucide-react';
 import type { Course, DocMeta, LibraryLayout, ProviderInfo, SessionSummary } from '../../../shared/types.ts';
 import { notesMarkdownUrl } from '../api.ts';
 import { indexCourses } from '../hooks/useCourses.ts';
+import { msg } from '../i18n/index.ts';
 import type { ProviderChoice, ProviderChoiceUpdate } from '../hooks/useProviderChoice.ts';
 import { confirmDialog } from '../lib/confirm.ts';
 import { formatTime, providerWithModel } from '../lib/format.ts';
@@ -48,14 +49,15 @@ interface TopBarProps {
 }
 
 function docOptionLabel(d: DocMeta, index?: number): string {
+  const m = msg().shell.topBar;
   const name = index === undefined ? d.title : `${index}. ${d.title}`;
   if (d.status === 'processing') {
     const pct = d.pageCount > 0 ? Math.round((d.progress / d.pageCount) * 100) : 0;
-    return `${name} (처리 중 ${pct}%)`;
+    return m.docProcessing(name, pct);
   }
-  if (d.status === 'error') return `${name} (오류)`;
-  const badge = d.digestStatus === 'ready' ? ' · 정리본' : d.digestStatus === 'running' ? ' · 정리 중' : '';
-  return `${name} · ${d.pageCount}장${badge}`;
+  if (d.status === 'error') return m.docError(name);
+  const badge = d.digestStatus === 'ready' ? ` · ${m.digestReady}` : d.digestStatus === 'running' ? ` · ${m.digestRunning}` : '';
+  return `${name} · ${m.slideCount(d.pageCount)}${badge}`;
 }
 
 /**
@@ -63,6 +65,7 @@ function docOptionLabel(d: DocMeta, index?: number): string {
  * lectures in order, + "미분류" (only when courses exist).
  */
 function DocOptions({ docs, courses, layout }: { docs: DocMeta[]; courses: Course[]; layout: LibraryLayout }) {
+  const m = msg().shell.topBar;
   if (courses.length === 0) {
     return docs.map((d) => (
       <option key={d.id} value={d.id}>
@@ -85,7 +88,7 @@ function DocOptions({ docs, courses, layout }: { docs: DocMeta[]; courses: Cours
       <optgroup key={c.id} label={courseLabel(entry)}>
         {lectures.length === 0 ? (
           <option disabled value={`__empty:${c.id}`}>
-            (강의 없음)
+            {m.noLectures}
           </option>
         ) : (
           lectures.map((d, i) => (
@@ -102,7 +105,7 @@ function DocOptions({ docs, courses, layout }: { docs: DocMeta[]; courses: Cours
     <>
       {groups}
       {rest.length > 0 && (
-        <optgroup label="미분류">
+        <optgroup label={m.uncategorized}>
           {rest.map((d) => (
             <option key={d.id} value={d.id}>
               {docOptionLabel(d)}
@@ -117,16 +120,18 @@ function DocOptions({ docs, courses, layout }: { docs: DocMeta[]; courses: Cours
 export function TopBar(props: TopBarProps) {
   const { docs, doc, sessions, sessionId, providers } = props;
   const ready = doc?.status === 'ready';
+  const m = msg().shell.topBar;
+  const settings = msg().common.settings;
 
   return (
     <header className="topbar">
-      <button type="button" className="brand" onClick={() => props.onSelectDoc(null)} title="라이브러리로">
+      <button type="button" className="brand" onClick={() => props.onSelectDoc(null)} title={m.toLibrary}>
         <BookOpen /> easy-study
       </button>
 
       <select
         className="picker doc-picker"
-        aria-label="문서 선택"
+        aria-label={m.docPicker}
         value={doc?.id ?? ''}
         onChange={(e) => {
           const v = e.target.value;
@@ -134,16 +139,16 @@ export function TopBar(props: TopBarProps) {
           else props.onSelectDoc(v || null);
         }}
       >
-        <option value="">{docs && docs.length > 0 ? '문서 선택…' : '문서 없음'}</option>
+        <option value="">{docs && docs.length > 0 ? m.docPlaceholder : m.noDocs}</option>
         <DocOptions docs={docs ?? []} courses={props.courses ?? []} layout={props.layout} />
-        <option value={UPLOAD}>{props.uploadCourse ? `＋ PDF 추가 (${props.uploadCourse.title})` : '＋ PDF 추가'}</option>
+        <option value={UPLOAD}>{props.uploadCourse ? m.addPdfTo(props.uploadCourse.title) : m.addPdf}</option>
       </select>
 
       {ready && (
         <div className="session-controls">
           <select
             className="picker session-picker"
-            aria-label="세션 선택"
+            aria-label={m.sessionPicker}
             value={sessionId ?? ''}
             disabled={sessions === null}
             onChange={(e) => {
@@ -152,31 +157,26 @@ export function TopBar(props: TopBarProps) {
               else if (v) props.onSelectSession(v);
             }}
           >
-            {!sessionId && <option value="">{sessions === null ? '세션 불러오는 중…' : '세션 없음'}</option>}
+            {!sessionId && <option value="">{sessions === null ? m.sessionsLoading : m.noSessions}</option>}
             {(sessions ?? []).map((s) => (
               <option key={s.id} value={s.id}>
-                {s.title} · {providerWithModel(providers, s.provider, s.model, s.effort)} · 메시지 {s.messageCount}개 ·{' '}
+                {s.title} · {providerWithModel(providers, s.provider, s.model, s.effort)} · {m.messageCount(s.messageCount)} ·{' '}
                 {formatTime(s.updatedAt)}
               </option>
             ))}
             <option value={NEW_SESSION} disabled={props.sessionBusy || !props.choice}>
-              ＋ 새 세션
+              {m.newSession}
             </option>
           </select>
           {sessionId && (
             <button
               type="button"
               className="icon-btn"
-              title="이 세션 삭제"
-              aria-label="이 세션 삭제"
+              title={m.deleteSession}
+              aria-label={m.deleteSession}
               disabled={props.sessionBusy}
               onClick={() => {
-                void confirmDialog({
-                  title: '이 세션을 삭제할까요?',
-                  message: '세션과 대화 기록(노트 포함)이 지워지고 되돌릴 수 없어요.',
-                  confirmLabel: '세션 삭제',
-                  danger: true,
-                }).then((ok) => {
+                void confirmDialog({ ...m.deleteSessionConfirm, danger: true }).then((ok) => {
                   if (ok) props.onDeleteSession(sessionId);
                 });
               }}
@@ -204,23 +204,23 @@ export function TopBar(props: TopBarProps) {
           onClick={(e) => {
             if (!props.hasNotes) e.preventDefault();
           }}
-          title={props.hasNotes ? 'STUDY_NOTES.md 열기' : '아직 저장된 Q&A가 없어요'}
+          title={props.hasNotes ? m.openNotes : m.noNotesYet}
         >
-          <NotebookPen /> 노트 파일
+          <NotebookPen /> {m.notesFile}
         </a>
       )}
 
       {props.onLogout && (
-        <button type="button" className="ghost-btn logout-btn" onClick={props.onLogout} title="이 브라우저에서 로그아웃">
-          로그아웃
+        <button type="button" className="ghost-btn logout-btn" onClick={props.onLogout} title={m.logoutTitle}>
+          {m.logout}
         </button>
       )}
 
       <button
         type="button"
         className="icon-btn settings-btn"
-        aria-label={props.updatePending ? '설정 (새 버전 있음)' : '설정'}
-        title={props.updatePending ? '설정 · 새 버전 있음' : '설정'}
+        aria-label={props.updatePending ? m.settingsUpdateLabel : settings}
+        title={props.updatePending ? m.settingsUpdateTitle : settings}
         onClick={props.onOpenSettings}
       >
         <Settings />

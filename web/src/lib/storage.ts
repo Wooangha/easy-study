@@ -32,6 +32,8 @@ export const storageKeys = {
    * first paint, under this exact name: keep the two in sync.
    */
   theme: 'theme',
+  /** UI language 'ko' | 'en' (absent = 시스템 설정: the browser's language, DESIGN §27). */
+  lang: 'lang',
   /** Slide annotations (DESIGN §25): the color of new items, the layer toggle, 질문 표시, "학생의 메모" → 튜터, 그때 필기 재생. */
   annotColor: 'annotColor',
   annotLayer: 'annotLayer',

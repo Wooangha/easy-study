@@ -2,6 +2,7 @@ import { Folder, GripVertical, Hourglass, Mic, Pencil, TriangleAlert } from 'luc
 import { useState } from 'react';
 import type { DocMeta } from '../../../../shared/types.ts';
 import { thumbUrl } from '../../api.ts';
+import { msg } from '../../i18n/index.ts';
 import { formatDate } from '../../lib/format.ts';
 import { dndId, type DropData } from '../../lib/libraryDnd.ts';
 import type { LayoutEntry } from '../../lib/libraryLayout.ts';
@@ -30,11 +31,13 @@ interface LectureRowProps {
 /** One lecture of a course: ≡ handle, number, thumbnail + title (opens it; an input while it is renamed), "⋯" menu. */
 export function LectureRow({ doc, index, courseId, entries, onOpen, onMove, onRetry, onRename, onDelete }: LectureRowProps) {
   const [renaming, setRenaming] = useState(false);
+  const m = msg().shell.lecture;
+  const lib = msg().shell.library;
   const data: DropData = { role: 'lecture', docId: doc.id, courseId };
   const { setNodeRef, setActivatorNodeRef, listeners, attributes, isDragging } = useOrgItem({
     id: dndId.lecture(doc.id),
     data,
-    roleDescription: '옮길 수 있는 강의',
+    roleDescription: m.roleDescription,
   });
   const mark = useDropMark(dndId.lecture(doc.id));
   const ready = doc.status === 'ready';
@@ -45,7 +48,7 @@ export function LectureRow({ doc, index, courseId, entries, onOpen, onMove, onRe
       items: [
         {
           key: 'rename',
-          label: '이름 바꾸기',
+          label: msg().common.rename,
           icon: Pencil,
           onSelect: () => setRenaming(true),
         },
@@ -53,9 +56,9 @@ export function LectureRow({ doc, index, courseId, entries, onOpen, onMove, onRe
           ? [
               {
                 key: 'recording',
-                label: '녹음 파일 올리기',
+                label: m.uploadRecording,
                 icon: Mic,
-                hint: '음성·동영상',
+                hint: m.uploadRecordingHint,
                 onSelect: () => pickRecording(doc),
               },
             ]
@@ -66,14 +69,14 @@ export function LectureRow({ doc, index, courseId, entries, onOpen, onMove, onRe
       items: [
         {
           key: 'remove',
-          label: '과목에서 빼기',
-          hint: '미분류로',
+          label: m.removeFromCourse,
+          hint: m.removeFromCourseHint,
           onSelect: () => onMove(null),
         },
       ],
     },
     {
-      heading: '과목으로 이동',
+      heading: m.moveToCourse,
       items: entries
         .filter((e) => e.course.id !== courseId)
         .map((e) => ({
@@ -93,7 +96,7 @@ export function LectureRow({ doc, index, courseId, entries, onOpen, onMove, onRe
       data-org-key={dndId.lecture(doc.id)}
       className={`lecture-row status-${doc.status}${isDragging ? ' is-drag-source' : ''}${dropMarkClass(mark)}`}
     >
-      <DragHandle label={`‘${doc.title}’ 강의 옮기기`} setRef={setActivatorNodeRef} listeners={listeners} attributes={attributes} />
+      <DragHandle label={m.move(doc.title)} setRef={setActivatorNodeRef} listeners={listeners} attributes={attributes} />
       <span className="lecture-index">{index}</span>
       {renaming ? (
         // Not inside the opening button (an input cannot sit in a button): the same look, nothing opens.
@@ -102,7 +105,7 @@ export function LectureRow({ doc, index, courseId, entries, onOpen, onMove, onRe
           <span className="lecture-main">
             <RenameInput
               initial={doc.title}
-              label="강의 이름"
+              label={m.nameLabel}
               maxLength={200}
               className="course-title-input doc-title-input"
               onDone={(title) => {
@@ -110,27 +113,27 @@ export function LectureRow({ doc, index, courseId, entries, onOpen, onMove, onRe
                 if (title && title !== doc.title) onRename(title);
               }}
             />
-            <span className="doc-sub">Enter로 저장 · Esc로 취소</span>
+            <span className="doc-sub">{m.renameKeys}</span>
           </span>
         </div>
       ) : (
-        <button type="button" className="lecture-open" onClick={() => onOpen(doc.id)} title="이 강의 열기">
+        <button type="button" className="lecture-open" onClick={() => onOpen(doc.id)} title={m.open}>
           <LectureThumb doc={doc} />
           <span className="lecture-main">
             <span className="doc-title">{doc.title}</span>
             <span className="doc-sub">
-              {ready ? `${doc.pageCount}장` : doc.status === 'error' ? '처리 실패' : '변환 중'} · {formatDate(doc.createdAt)}
+              {ready ? lib.slideCount(doc.pageCount) : doc.status === 'error' ? m.failed : m.converting} · {formatDate(doc.createdAt)}
               <DigestBadge status={doc.digestStatus} />
               <RecordingUploadBadge docId={doc.id} />
             </span>
             {doc.status === 'processing' && <DocProgress doc={doc} compact />}
-            {doc.status === 'error' && <span className="doc-error">{doc.error ?? '처리 중 오류가 발생했어요'}</span>}
+            {doc.status === 'error' && <span className="doc-error">{doc.error ?? lib.processingError}</span>}
           </span>
         </button>
       )}
       <div className="lecture-actions">
         {doc.status === 'error' && <FailedDocActions doc={doc} onRetry={onRetry} onDelete={onDelete} />}
-        <PopoverMenu label={`‘${doc.title}’ 강의 메뉴`} sections={sections} />
+        <PopoverMenu label={m.menu(doc.title)} sections={sections} />
       </div>
     </li>
   );
@@ -160,7 +163,7 @@ export function LectureGhost({ doc }: { doc: DocMeta }) {
       <LectureThumb doc={doc} />
       <span className="lecture-main">
         <span className="doc-title">{doc.title}</span>
-        <span className="doc-sub">{doc.status === 'ready' ? `${doc.pageCount}장` : doc.fileName}</span>
+        <span className="doc-sub">{doc.status === 'ready' ? msg().shell.library.slideCount(doc.pageCount) : doc.fileName}</span>
       </span>
     </div>
   );

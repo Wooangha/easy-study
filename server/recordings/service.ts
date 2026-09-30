@@ -26,6 +26,8 @@ import type {
   TranscriptSegment,
 } from '../../shared/types.ts';
 import { HttpError, desktopMode, libraryDir } from '../config.ts';
+import { DEFAULT_LANG, isLang, runInLang, slang, smsg } from '../i18n.ts';
+import type { Lang } from '../i18n.ts';
 import { docPaths, isNotFound, loadDocAssets, readStoredDoc, renameWithRetry, rmWithRetry } from '../library.ts';
 import type { Label } from './align/align.ts';
 import { hasSlideText, timelinePrior } from './align/align.ts';
@@ -58,6 +60,7 @@ import type { AsrWindow, WindowPreset } from './segmenter.ts';
 import {
   cleanTitle,
   defaultLiveTitle,
+  defaultUploadTitle,
   emptyTranscript,
   isRecordingId,
   listRecordingIds,
@@ -248,6 +251,11 @@ class Rec {
     return recKey(this.docId, this.id);
   }
 
+  /** The language of the recording's background work (conversion, transcription): the one it was made in. */
+  get lang(): Lang {
+    return isLang(this.meta.lang) ? this.meta.lang : DEFAULT_LANG;
+  }
+
   get isLive(): boolean {
     return this.meta.source === 'live' && !this.meta.finalized && (this.meta.status === 'recording' || this.meta.status === 'paused');
   }
@@ -258,13 +266,13 @@ class Rec {
    */
   serial<T>(fn: Mutation<T>, limited = false): Promise<T> {
     if (limited && this.pending >= MAX_PENDING) {
-      throw new HttpError(429, '요청이 너무 많습니다. 잠시 뒤에 다시 보내 주세요', { retryAfterMs: 1000 });
+      throw new HttpError(429, smsg().recordings.tooManyRequests, { retryAfterMs: 1000 });
     }
     this.pending++;
     this.lastUsed = Date.now();
     const run = this.chain.then(() => {
-      if (this.deleted) throw new HttpError(404, '녹음을 찾을 수 없습니다');
-      if (this.closed) throw new HttpError(503, '서버가 종료되는 중입니다');
+      if (this.deleted) throw new HttpError(404, smsg().recordings.notFound.recording);
+      if (this.closed) throw new HttpError(503, smsg().recordings.shuttingDown);
       return fn();
     });
     this.chain = run.catch(() => {}).finally(() => this.pending--);
@@ -352,7 +360,8 @@ class Rec {
 
   private async initUpload(): Promise<void> {
     if (this.meta.status === 'converting') {
-      void this.track(this.convert());
+      // In the recording's language: this may be a restart resuming it, or another user's request loading it.
+      void this.track(runInLang(this.lang, () => this.convert()));
       return;
     }
     if (this.meta.status === 'ready' && this.windows.length === 0 && this.meta.transcriptStatus !== 'ready') {
@@ -438,14 +447,14 @@ class Rec {
   // --- live audio ----------------------------------------------------------------------------------------------
 
   async append(offset: number, body: Buffer): Promise<{ offset: number }> {
-    if (this.meta.source !== 'live') throw new HttpError(409, '업로드한 녹음에는 오디오를 이어 붙일 수 없습니다');
+    if (this.meta.source !== 'live') throw new HttpError(409, smsg().recordings.live.uploadCannotAppend);
     if (this.meta.finalized || !this.live) {
       // Stopped: bytes that are already stored are acknowledged again (a retry), anything else is refused.
       if (offset + body.length <= this.committed && offset >= 0) {
         const stored = await readRange(this.paths.audioPcm, offset, offset + body.length);
         if (stored.equals(body)) return { offset: this.committed };
       }
-      throw new HttpError(409, '녹음이 이미 끝났습니다', { offset: this.committed });
+      throw new HttpError(409, smsg().recordings.live.ended, { offset: this.committed });
     }
     this.lastActivity = Date.now();
     const result = await this.live.append(offset, body, false);
@@ -480,7 +489,7 @@ class Rec {
   }
 
   async pause(): Promise<RecordingInfo> {
-    if (!this.isLive) throw new HttpError(409, '녹음 중이 아닙니다');
+    if (!this.isLive) throw new HttpError(409, smsg().recordings.live.notRecording);
     this.lastActivity = Date.now();
     if (this.meta.status !== 'paused') {
       this.meta.status = 'paused';
@@ -493,7 +502,7 @@ class Rec {
   }
 
   async resume(): Promise<RecordingInfo> {
-    if (!this.isLive) throw new HttpError(409, '녹음 중이 아닙니다');
+    if (!this.isLive) throw new HttpError(409, smsg().recordings.live.notRecording);
     this.lastActivity = Date.now();
     if (this.meta.status !== 'recording') {
       this.meta.status = 'recording';
@@ -505,11 +514,11 @@ class Rec {
 
   /** Stop: `bytes` (optional) = everything the client captured; the recording ends once that much is stored. */
   async stop(bytes: number | undefined): Promise<RecordingInfo> {
-    if (this.meta.source !== 'live') throw new HttpError(409, '업로드한 녹음은 멈출 수 없습니다');
+    if (this.meta.source !== 'live') throw new HttpError(409, smsg().recordings.live.uploadCannotStop);
     if (this.meta.finalized) return this.info();
     this.lastActivity = Date.now();
     if (bytes !== undefined) {
-      if (bytes < this.committed) throw new HttpError(409, '종료 크기가 이미 저장된 오디오보다 작습니다', { offset: this.committed });
+      if (bytes < this.committed) throw new HttpError(409, smsg().recordings.live.stopBeforeStored, { offset: this.committed });
       this.meta.stopBytes = bytes;
     }
     this.meta.stoppedAt ??= new Date().toISOString();
@@ -701,7 +710,7 @@ class Rec {
         await fs.rm(wav, { force: true }).catch(() => {});
       }
     }
-    await this.serial(() => this.windowDone(w, [], `받아쓰기 실패: ${lastError}`));
+    await this.serial(() => this.windowDone(w, [], smsg().recordings.transcription.failed(lastError)));
   }
 
   /**
@@ -755,7 +764,7 @@ class Rec {
     const recent = room > 0 ? this.transcript.segments.slice(-room) : [];
     const ctx = [...recent.map((s) => ({ ...s, fresh: -1 })), ...segments.map((s, k) => ({ ...s, id: -1, fresh: k }))].sort((a, b) => a.start - b.start);
     // The deck is read once (alignOnce keeps it up to date); if it cannot be read the window is still labelled.
-    this.material ??= await deckOf(this.docId).then((deck) => deck.map(slideMaterial), () => null);
+    this.material ??= await deckOf(this.docId).then((deck) => deck.entries.map(slideMaterial), () => null);
     const material = this.material;
     const texts = ctx.map((s) => s.text);
     // Without any slide text there is no evidence to gate by (as in alignSegments): a look back needs BACK_SEC.
@@ -817,7 +826,7 @@ class Rec {
     this.lastAlignAt = Date.now();
     const snapshot = this.transcript.segments.map((s) => ({ id: s.id, start: s.start, end: s.end, text: s.text }));
     if (snapshot.length === 0 || this.deleted) return;
-    const material = (await deckOf(this.docId)).map(slideMaterial);
+    const material = (await deckOf(this.docId)).entries.map(slideMaterial);
     if (!this.material || !sameTexts(this.material, material)) this.material = material;
     const llm = this.llm;
     const labels = await alignInWorker({
@@ -1017,14 +1026,21 @@ export interface DeckEntry {
   text: string;
 }
 
+export interface Deck {
+  entries: DeckEntry[];
+  /** The language the digest was made in: its takeaway lines are "핵심:" (Korean, also older digests) or "Key point:". */
+  digestLang: Lang;
+}
+
 /** Per slide: digest title and markdown (when present and not failed) and the extracted text. */
-export async function deckOf(docId: string): Promise<DeckEntry[]> {
+export async function deckOf(docId: string): Promise<Deck> {
   const assets = await loadDocAssets(docId);
   const digest = new Map((assets.digest ?? []).filter((d) => !d.failed).map((d) => [d.slide, d]));
-  return Array.from({ length: assets.meta.pageCount }, (_, i) => {
+  const entries = Array.from({ length: assets.meta.pageCount }, (_, i) => {
     const d = digest.get(i + 1);
     return { slide: i + 1, title: d?.title ?? '', digest: d?.markdown ?? '', text: assets.texts[i] ?? '' };
   });
+  return { entries, digestLang: assets.digestLang ?? DEFAULT_LANG };
 }
 
 /** The spike's slide document: title twice + digest (markdown stripped) + extracted text. */
@@ -1052,16 +1068,16 @@ function recKey(docId: string, rid: string): string {
 }
 
 async function loadRec(docId: string, rid: string): Promise<Rec> {
-  if (!isRecordingId(rid)) throw new HttpError(404, '녹음을 찾을 수 없습니다');
+  if (!isRecordingId(rid)) throw new HttpError(404, smsg().recordings.notFound.recording);
   const key = recKey(docId, rid);
-  if (deleting.has(key)) throw new HttpError(404, '녹음을 찾을 수 없습니다');
+  if (deleting.has(key)) throw new HttpError(404, smsg().recordings.notFound.recording);
   let pending = recs.get(key);
   const known = loaded.get(key);
   if (known) known.lastUsed = Date.now();
   if (!pending) {
     const load = async (): Promise<Rec> => {
       const meta = await readMeta(docId, rid);
-      if (!meta) throw new HttpError(404, '녹음을 찾을 수 없습니다');
+      if (!meta) throw new HttpError(404, smsg().recordings.notFound.recording);
       const rec = new Rec(meta);
       await rec.init();
       if (rec.isLive && !liveKey) liveKey = rec.key;
@@ -1111,13 +1127,13 @@ export function loadedRecordings(): number {
 
 async function requireReadyDoc(docId: string): Promise<{ pageCount: number }> {
   const doc = await readStoredDoc(docId);
-  if (!doc) throw new HttpError(404, '문서를 찾을 수 없습니다');
-  if (doc.status !== 'ready') throw new HttpError(409, '문서를 아직 처리하는 중입니다');
+  if (!doc) throw new HttpError(404, smsg().common.notFound.doc);
+  if (doc.status !== 'ready') throw new HttpError(409, smsg().recordings.docNotReady);
   return { pageCount: doc.pageCount };
 }
 
 async function requireDocExists(docId: string): Promise<void> {
-  if (!(await readStoredDoc(docId))) throw new HttpError(404, '문서를 찾을 수 없습니다');
+  if (!(await readStoredDoc(docId))) throw new HttpError(404, smsg().common.notFound.doc);
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -1199,7 +1215,8 @@ export function pumpQueue(): void {
   pumping = true;
   void (async () => {
     try {
-      await job.rec.transcribeWindow(job.window, engine.path, model, controller.signal);
+      // In the recording's language (its errors are stored): the queue runs from whichever request pumped it.
+      await runInLang(job.rec.lang, () => job.rec.transcribeWindow(job.window, engine.path, model, controller.signal));
     } catch (err) {
       if (!controller.signal.aborted) console.warn(`[recordings] transcription job failed: ${errorText(err)}`);
     } finally {
@@ -1266,19 +1283,18 @@ export async function asrStatus(): Promise<AsrStatus> {
     ffmpegAvailable: false,
     models: [],
   };
+  const m = smsg().recordings.engine;
   if (engine?.source === 'env' && !existsSync(engine.path)) {
-    status.reason = `EASY_STUDY_WHISPER에 지정한 받아쓰기 엔진(whisper-cli)이 없습니다: ${engine.path}`;
+    status.reason = m.missingEnv(engine.path);
   } else if (!engine) {
-    status.reason = desktopMode(process.env, [])
-      ? '받아쓰기 엔진(whisper-cli)을 찾을 수 없습니다. 앱을 다시 설치하거나 EASY_STUDY_WHISPER에 whisper-cli 경로를 지정하세요'
-      : '받아쓰기 엔진(whisper-cli)이 없습니다. 저장소에서 `npm run setup:whisper`로 설치하거나 EASY_STUDY_WHISPER에 whisper-cli 경로를 지정하세요';
+    status.reason = desktopMode(process.env, []) ? m.notFoundDesktop : m.missing;
   } else {
     const probe = await probeVersion(engine.path, '--version', /whisper\.cpp version:\s*(\S+)/);
     if (probe.ok) {
       status.engineAvailable = true;
       if (probe.version) status.engineVersion = probe.version;
     } else {
-      status.reason = `받아쓰기 엔진을 실행할 수 없습니다 (${engine.path}): ${probe.error ?? '알 수 없는 오류'}`;
+      status.reason = m.cannotRun(engine.path, probe.error ?? m.unknownError);
     }
   }
   const ffmpeg = findFfmpeg();
@@ -1322,7 +1338,7 @@ export async function startModelDownload(modelId: string): Promise<void> {
 }
 
 export async function deleteModel(modelId: string): Promise<void> {
-  if (runningJob && runningJob.rec.meta.model === modelId) throw new HttpError(409, '이 모델로 받아쓰는 중에는 지울 수 없습니다');
+  if (runningJob && runningJob.rec.meta.model === modelId) throw new HttpError(409, smsg().recordings.models.inUse);
   await config.models.delete(modelId);
 }
 
@@ -1367,15 +1383,19 @@ async function liveRec(): Promise<Rec | null> {
   return rec && rec.isLive && !rec.deleted ? rec : null;
 }
 
+/** The lecture language of each UI language: what a client that names none gets (the web's default is the same). */
+const LECTURE_LANGUAGE: Record<Lang, RecordingLanguage> = { ko: 'ko', en: 'en' };
+
+/** A request's lecture language; none named = the request's language (a Korean UI records Korean lectures). */
 export function parseLanguage(value: unknown): RecordingLanguage {
-  if (value === undefined || value === null) return 'auto';
-  if (typeof value !== 'string' || !LANGUAGES.includes(value as RecordingLanguage)) throw new HttpError(400, 'language는 ko, en, auto 중 하나여야 합니다');
+  if (value === undefined || value === null) return LECTURE_LANGUAGE[slang()];
+  if (typeof value !== 'string' || !LANGUAGES.includes(value as RecordingLanguage)) throw new HttpError(400, smsg().recordings.request.badLanguage);
   return value as RecordingLanguage;
 }
 
 export function parseModel(value: unknown): string {
   if (value === undefined || value === null || value === '') return defaultModel();
-  if (typeof value !== 'string' || !config.models.model(value)) throw new HttpError(400, `알 수 없는 받아쓰기 모델입니다: ${String(value)}`);
+  if (typeof value !== 'string' || !config.models.model(value)) throw new HttpError(400, smsg().recordings.request.unknownAsrModel(String(value)));
   return value;
 }
 
@@ -1384,8 +1404,8 @@ export async function createLiveRecording(docId: string, body: Partial<Record<ke
   await requireReadyDoc(docId);
   const language = parseLanguage(body.language);
   const model = parseModel(body.model);
-  if (body.liveTranscribe !== undefined && typeof body.liveTranscribe !== 'boolean') throw new HttpError(400, 'liveTranscribe는 true/false 여야 합니다');
-  if (creatingLive) throw new HttpError(409, '이미 녹음을 시작하는 중입니다');
+  if (body.liveTranscribe !== undefined && typeof body.liveTranscribe !== 'boolean') throw new HttpError(400, smsg().recordings.request.badLiveTranscribe);
+  if (creatingLive) throw new HttpError(409, smsg().recordings.live.starting);
   creatingLive = true;
   try {
     const live = await liveRec();
@@ -1394,8 +1414,8 @@ export async function createLiveRecording(docId: string, body: Partial<Record<ke
     const running = await liveRec();
     if (running) {
       const doc = await readStoredDoc(running.docId).catch(() => null);
-      const where = doc && running.docId !== docId ? `‘${doc.title}’의 ` : '';
-      throw new HttpError(409, `이미 녹음 중인 강의가 있습니다 (${where}‘${running.meta.title}’). 그 녹음을 먼저 끝내 주세요`, {
+      const docTitle = doc && running.docId !== docId ? doc.title : null;
+      throw new HttpError(409, smsg().recordings.live.alreadyRecording(running.meta.title, docTitle), {
         recording: running.info(),
       });
     }
@@ -1430,6 +1450,7 @@ async function createLive(
     transcribedSec: 0,
     alignment: 'none',
     hasManualMarkers: false,
+    lang: slang(),
   };
   const paths = recordingPaths(docId, id);
   await fs.mkdir(paths.dir, { recursive: true });
@@ -1447,16 +1468,16 @@ export async function appendLiveAudio(docId: string, rid: string, offset: number
 
 export async function addSlideEvents(docId: string, rid: string, raw: unknown): Promise<void> {
   const { pageCount } = await requireReadyDoc(docId);
-  if (!Array.isArray(raw) || raw.length > 1000) throw new HttpError(400, '슬라이드 이벤트 배열(최대 1000개)이 필요합니다');
+  if (!Array.isArray(raw) || raw.length > 1000) throw new HttpError(400, smsg().recordings.request.slideEventsRequired);
   const events: SlideViewEvent[] = raw.map((e: unknown) => {
     const ev = e as Partial<SlideViewEvent> | null;
     if (!ev || typeof ev.t !== 'number' || !Number.isFinite(ev.t) || ev.t < 0 || !Number.isInteger(ev.slide) || (ev.slide as number) < 1 || (ev.slide as number) > pageCount) {
-      throw new HttpError(400, `잘못된 슬라이드 이벤트입니다: ${JSON.stringify(e).slice(0, 100)}`);
+      throw new HttpError(400, smsg().recordings.request.badSlideEvent(JSON.stringify(e).slice(0, 100)));
     }
     return { t: round3(ev.t), slide: ev.slide as number };
   });
   const rec = await loadRec(docId, rid);
-  if (rec.meta.source !== 'live') throw new HttpError(409, '업로드한 녹음에는 슬라이드 기록이 없습니다');
+  if (rec.meta.source !== 'live') throw new HttpError(409, smsg().recordings.request.uploadHasNoSlides);
   await rec.serial(() => rec.addSlideEvents(events), true);
 }
 
@@ -1472,7 +1493,7 @@ export async function resumeRecording(docId: string, rid: string): Promise<Recor
 
 export async function stopRecording(docId: string, rid: string, bytes: unknown): Promise<RecordingInfo> {
   if (bytes !== undefined && (typeof bytes !== 'number' || !Number.isSafeInteger(bytes) || bytes < 0)) {
-    throw new HttpError(400, 'bytes는 0 이상의 정수여야 합니다');
+    throw new HttpError(400, smsg().recordings.request.badBytes);
   }
   const rec = await loadRec(docId, rid);
   return rec.serial(() => rec.stop(bytes as number | undefined), true);
@@ -1480,7 +1501,7 @@ export async function stopRecording(docId: string, rid: string, bytes: unknown):
 
 export async function renameRecording(docId: string, rid: string, title: unknown): Promise<RecordingInfo> {
   const clean = cleanTitle(title);
-  if (!clean) throw new HttpError(400, '제목을 입력해 주세요');
+  if (!clean) throw new HttpError(400, smsg().recordings.request.titleRequired);
   const rec = await loadRec(docId, rid);
   return rec.serial(async () => {
     rec.meta.title = clean;
@@ -1493,13 +1514,13 @@ export async function renameRecording(docId: string, rid: string, title: unknown
 /** PUT …/markers: replaces the markers and re-aligns with them as hard constraints. */
 export async function putMarkers(docId: string, rid: string, raw: unknown): Promise<RecordingTranscript> {
   const { pageCount } = await requireReadyDoc(docId);
-  if (!Array.isArray(raw) || raw.length > 500) throw new HttpError(400, '마커 배열(최대 500개)이 필요합니다');
+  if (!Array.isArray(raw) || raw.length > 500) throw new HttpError(400, smsg().recordings.request.markersRequired);
   const byTime = new Map<number, AlignmentMarker>();
   for (const e of raw as unknown[]) {
     const m = e as Partial<AlignmentMarker> | null;
     const okSlide = m?.slide === null || (Number.isInteger(m?.slide) && (m?.slide as number) >= 1 && (m?.slide as number) <= pageCount);
     if (!m || typeof m.t !== 'number' || !Number.isFinite(m.t) || m.t < 0 || !okSlide) {
-      throw new HttpError(400, `잘못된 마커입니다: ${JSON.stringify(e).slice(0, 100)}`);
+      throw new HttpError(400, smsg().recordings.request.badMarker(JSON.stringify(e).slice(0, 100)));
     }
     byTime.set(round3(m.t), { t: round3(m.t), slide: m.slide as number | null });
   }
@@ -1566,7 +1587,7 @@ export async function playbackSource(
 ): Promise<{ kind: 'file'; file: string; mime: string } | { kind: 'live'; file: string; bytes: number }> {
   const rec = await loadRec(docId, rid);
   if (rec.meta.source === 'live') return { kind: 'live', file: rec.paths.audioPcm, bytes: rec.committed };
-  if (rec.meta.status !== 'ready') throw new HttpError(404, '재생할 오디오가 아직 없습니다');
+  if (rec.meta.status !== 'ready') throw new HttpError(404, smsg().recordings.notFound.playbackAudio);
   return { kind: 'file', file: rec.paths.playback, mime: 'audio/mp4' };
 }
 
@@ -1576,12 +1597,8 @@ export async function playbackSource(
 export async function beginUpload(docId: string): Promise<{ id: string; dir: string; partFile: string }> {
   await requireReadyDoc(docId);
   if (!findFfmpeg()) {
-    throw new HttpError(
-      503,
-      desktopMode(process.env, [])
-        ? '녹음 파일을 변환할 ffmpeg를 찾을 수 없습니다. 앱을 다시 설치하거나 EASY_STUDY_FFMPEG에 경로를 지정하세요'
-        : '녹음 파일을 변환할 ffmpeg가 없습니다. ffmpeg를 설치하거나 EASY_STUDY_FFMPEG에 경로를 지정하세요',
-    );
+    const m = smsg().recordings.upload;
+    throw new HttpError(503, desktopMode(process.env, []) ? m.ffmpegNotFoundDesktop : m.ffmpegMissing);
   }
   const id = newRecordingId();
   const dir = recordingPaths(docId, id).dir;
@@ -1601,7 +1618,7 @@ export interface UploadOptions {
 
 /**
  * Settings of an upload from the X-Language / X-Model headers (the recording settings of the web app), validated
- * like CreateLiveRecordingRequest; missing = 'auto' and the recommended installed model.
+ * like CreateLiveRecordingRequest; missing = the request's language (parseLanguage) and the recommended installed model.
  */
 export function uploadOptions(language: string | undefined, model: string | undefined): UploadOptions {
   return { language: parseLanguage(language?.trim() || undefined), model: parseModel(model?.trim() || undefined) };
@@ -1624,7 +1641,7 @@ export async function finishUpload(
     version: 1,
     id,
     docId,
-    title: cleanTitle(base) ?? `녹음 파일 ${defaultLiveTitle(now).slice(3)}`,
+    title: cleanTitle(base) ?? defaultUploadTitle(now),
     source: 'upload',
     status: 'converting',
     language: options.language,
@@ -1637,6 +1654,7 @@ export async function finishUpload(
     hasManualMarkers: false,
     sourceFile,
     originalName: cleanTitle(originalName) ?? sourceFile,
+    lang: slang(),
   };
   await writeMeta(meta);
   const rec = await loadRec(docId, id);
@@ -1656,9 +1674,10 @@ export interface AiAlignJob {
 export async function startAiAlignment(docId: string, rid: string, job: AiAlignJob): Promise<void> {
   const { pageCount } = await requireReadyDoc(docId);
   const rec = await loadRec(docId, rid);
-  if (rec.aiRunning) throw new HttpError(409, 'AI 정렬이 이미 진행 중입니다');
-  if (rec.transcript.segments.length === 0) throw new HttpError(409, '받아쓴 내용이 아직 없습니다');
-  if (rec.windowsLeft() > 0 || rec.isLive) throw new HttpError(409, '받아쓰기가 끝난 뒤에 AI 정렬을 할 수 있습니다');
+  const m = smsg().recordings.aiAlign;
+  if (rec.aiRunning) throw new HttpError(409, m.running);
+  if (rec.transcript.segments.length === 0) throw new HttpError(409, m.noTranscript);
+  if (rec.windowsLeft() > 0 || rec.isLive) throw new HttpError(409, m.notFinished);
   const { AI_CHUNK_SEGMENTS, buildAlignPrompt, parseAlignRuns } = await import('./aiPrompt.ts');
   const deck = await deckOf(docId);
   const controller = new AbortController();
@@ -1672,7 +1691,7 @@ export async function startAiAlignment(docId: string, rid: string, job: AiAlignJ
     try {
       for (let offset = 0; offset < segments.length; offset += AI_CHUNK_SEGMENTS) {
         const chunk = segments.slice(offset, offset + AI_CHUNK_SEGMENTS);
-        const reply = await job.call(buildAlignPrompt(deck, chunk, offset, previous), controller.signal);
+        const reply = await job.call(buildAlignPrompt(deck.entries, chunk, offset, previous, deck.digestLang), controller.signal);
         const parsed = parseAlignRuns(reply, offset, chunk.length, pageCount);
         chunk.forEach((s, i) => (labels[String(s.id)] = parsed[i]));
         previous = parsed[parsed.length - 1];
@@ -1690,7 +1709,7 @@ export async function startAiAlignment(docId: string, rid: string, job: AiAlignJ
       console.warn(`[recordings] ${rid}: AI alignment failed: ${errorText(err)}`);
       await rec
         .serial(async () => {
-          rec.meta.error = `AI 정렬 실패: ${errorText(err)}`;
+          rec.meta.error = m.failed(errorText(err));
           await rec.saveMeta();
         })
         .catch(() => {});

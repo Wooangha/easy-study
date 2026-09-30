@@ -13,6 +13,7 @@ import path from 'node:path';
 import { INLINE_MAX_BYTES, INLINE_MAX_EDGE, inlinePathFor, isInlineReady } from '../assets.ts';
 import { taskkillPath, trackChild } from '../children.ts';
 import { childProcessEnv } from '../config.ts';
+import { smsg } from '../i18n.ts';
 import type { ProviderAvailability } from './types.ts';
 
 /** Time between SIGTERM and SIGKILL when a turn is aborted. */
@@ -29,7 +30,7 @@ const STDIO_CLOSE_GRACE_MS = 2_000;
 // ---------------------------------------------------------------------------
 
 /** The error every provider rejects with when its AbortSignal fires. */
-export function abortError(message = '요청이 중단되었습니다.'): Error {
+export function abortError(message = smsg().chat.providers.aborted): Error {
   const err = new Error(message);
   err.name = 'AbortError';
   return err;
@@ -490,19 +491,17 @@ export function stopProcess(
 /** Why a batch file cannot be the CLI ('' for other files): Node only starts .cmd/.bat through a shell. */
 function batchFileProblem(bin: string): string {
   if (!/\.(?:cmd|bat)$/i.test(bin)) return '';
-  return (
-    `${path.basename(bin)} 은(는) 배치 파일이라 직접 실행할 수 없습니다. ` +
-    '공식 설치 프로그램으로 설치하거나, 실제 실행 파일(.exe)의 경로를 CLAUDE_BIN / CODEX_BIN 에 지정하세요.'
-  );
+  return smsg().chat.providers.batchFile(path.basename(bin));
 }
 
 function spawnError(bin: string, err: unknown): Error {
+  const m = smsg().chat.providers;
   const code = (err as NodeJS.ErrnoException | undefined)?.code;
   const name = path.basename(bin);
-  if (code === 'ENOENT') return new Error(`${name} 실행 파일을 찾을 수 없습니다 (PATH를 확인하세요).`);
-  if (code === 'EACCES') return new Error(`${name} 실행 권한이 없습니다 (${bin}).`);
+  if (code === 'ENOENT') return new Error(m.executableNotFound(name));
+  if (code === 'EACCES') return new Error(m.notExecutable(name, bin));
   if (code === 'EINVAL' && batchFileProblem(bin)) return new Error(batchFileProblem(bin));
-  return new Error(`${name} 실행에 실패했습니다: ${errorMessage(err)}`);
+  return new Error(m.spawnFailed(name, errorMessage(err)));
 }
 
 // ---------------------------------------------------------------------------
@@ -513,15 +512,23 @@ export interface VersionProbeOptions {
   bin: string;
   /** Shown in reasons, e.g. "claude". */
   displayName: string;
-  /** Appended to the "not found" reason, e.g. install instructions. */
-  installHint: string;
+  /** Appended to the "not found" reason, e.g. install instructions: a function for a text of the current language. */
+  installHint: string | (() => string);
   timeoutMs?: number;
   env?: NodeJS.ProcessEnv;
 }
 
-/** Runs `<bin> --version`. Never throws: failures become `available: false` with a reason. */
-export function probeVersion(opts: VersionProbeOptions): Promise<ProviderAvailability> {
-  return new Promise<ProviderAvailability>((resolve) => {
+/** A detection result in no language: the function words it in the current language (smsg()) when called. */
+export type LocalizedAvailability = () => ProviderAvailability;
+
+/**
+ * Runs `<bin> --version` once. Resolves with what words the result in the current language, so one check serves every
+ * language (providers/index.ts). Never throws: failures become `available: false` with a reason.
+ */
+export function versionCheck(opts: VersionProbeOptions): Promise<LocalizedAvailability> {
+  return new Promise<LocalizedAvailability>((resolve) => {
+    const hint = () => (typeof opts.installHint === 'function' ? opts.installHint() : opts.installHint);
+    const unavailable = (reason: () => string) => resolve(() => ({ available: false, reason: reason() }));
     try {
       const probe = execFile(
         opts.bin,
@@ -536,34 +543,37 @@ export function probeVersion(opts: VersionProbeOptions): Promise<ProviderAvailab
           if (err) {
             const e = err as NodeJS.ErrnoException & { killed?: boolean; signal?: string | null };
             if (e.code === 'ENOENT') {
-              resolve({
-                available: false,
-                reason: `${opts.displayName} CLI를 찾을 수 없습니다 (PATH). ${opts.installHint}`.trim(),
-              });
+              unavailable(() => smsg().chat.providers.cliNotFound(opts.displayName, hint()));
             } else if (e.killed || e.signal) {
-              resolve({ available: false, reason: `${opts.displayName} --version 이 응답하지 않습니다.` });
+              unavailable(() => smsg().chat.providers.versionTimeout(opts.displayName));
             } else if (e.code === 'EINVAL' && batchFileProblem(opts.bin)) {
-              resolve({ available: false, reason: `${batchFileProblem(opts.bin)} ${opts.installHint}`.trim() });
+              unavailable(() => `${batchFileProblem(opts.bin)} ${hint()}`.trim());
             } else {
               const detail = String(stderr || stdout || e.message).trim().split('\n')[0] ?? '';
-              resolve({ available: false, reason: `${opts.displayName} --version 실패: ${detail}`.trim() });
+              unavailable(() => smsg().chat.providers.versionFailed(opts.displayName, detail));
             }
             return;
           }
           const version = firstLine(String(stdout)) || firstLine(String(stderr));
-          resolve(version ? { available: true, version } : { available: true });
+          resolve(() => (version ? { available: true, version } : { available: true }));
         },
       );
       trackChild(probe);
     } catch (err) {
       // spawn throws synchronously for a .cmd/.bat without a shell (EINVAL).
-      const problem = (err as NodeJS.ErrnoException).code === 'EINVAL' ? batchFileProblem(opts.bin) : '';
-      resolve({
-        available: false,
-        reason: problem ? `${problem} ${opts.installHint}`.trim() : `${opts.displayName} 실행 실패: ${errorMessage(err)}`,
+      const batch = (err as NodeJS.ErrnoException).code === 'EINVAL';
+      const message = errorMessage(err);
+      unavailable(() => {
+        const problem = batch ? batchFileProblem(opts.bin) : '';
+        return problem ? `${problem} ${hint()}`.trim() : smsg().chat.providers.runFailed(opts.displayName, message);
       });
     }
   });
+}
+
+/** Runs `<bin> --version`. Never throws: failures become `available: false` with a reason (in the current language). */
+export async function probeVersion(opts: VersionProbeOptions): Promise<ProviderAvailability> {
+  return (await versionCheck(opts))();
 }
 
 function firstLine(text: string): string {
@@ -693,7 +703,7 @@ export function clearInlineImageCache(): void {
 }
 
 function unreadableImage(file: string, err: unknown): Error {
-  return new Error(`슬라이드 이미지를 읽을 수 없습니다: ${file} (${errorMessage(err)})`);
+  return new Error(smsg().chat.providers.slideImageUnreadable(file, errorMessage(err)));
 }
 
 /** The image worker's JPEG of `file` when it exists, is not empty and is not older than `file`; else null. */

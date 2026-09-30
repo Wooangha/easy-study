@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AlignmentMarker } from '../../../shared/types.ts';
 import * as api from '../api.ts';
+import { msg } from '../i18n/index.ts';
 import { recordingFeed } from '../lib/recording/feeds.ts';
 import { markersReducer, parseStoredMarkers, sameMarkers, type MarkerAction } from '../lib/recording/markers.ts';
 import { readStorage, storageKeys, writeStorage } from '../lib/storage.ts';
@@ -45,7 +46,7 @@ export function useMarkers(docId: string, rid: string | null, pageCount: number,
         } catch (e) {
           setState({ rid, markers: before });
           markersRef.current = before;
-          toast(`슬라이드 표시를 저장하지 못했어요: ${api.recordingErrorMessage(e)}`, 'error');
+          toast(msg().recording.markers.saveFailed(api.recordingErrorMessage(e)), 'error');
           return false;
         } finally {
           setPending(false);

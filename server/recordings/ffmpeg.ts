@@ -3,6 +3,7 @@
 // +faststart) from the same timeline. Recipe and error codes from the audio spike (minimal LGPL ffmpeg 8.1:
 // exit 183 = not media / damaged ("moov atom not found", "Invalid data found"), 234 = no audio stream).
 import fs from 'node:fs/promises';
+import { smsg } from '../i18n.ts';
 import { runTool } from './asr.ts';
 
 export interface SniffedMedia {
@@ -91,19 +92,20 @@ export function ffmpegArgs(source: string, asrWav: string, playback: string): st
   ];
 }
 
-/** A readable Korean reason for a failed conversion. */
+/** A readable reason for a failed conversion, in the current language (the recording's, see service.ts). */
 export function conversionError(err: unknown): string {
+  const m = smsg().recordings.conversion;
   const e = err as Error & { exitCode?: number | null; stderr?: string; code?: string };
-  if (e.code === 'ENOENT') return 'ffmpeg를 찾을 수 없습니다. ffmpeg를 설치하거나 EASY_STUDY_FFMPEG에 경로를 지정하세요';
+  if (e.code === 'ENOENT') return m.ffmpegNotFound;
   const stderr = e.stderr ?? e.message ?? '';
   if (e.exitCode === 234 || /matches no streams|does not contain any stream|Output file .* does not contain/i.test(stderr)) {
-    return '오디오 트랙이 없습니다';
+    return m.noAudioTrack;
   }
   if (e.exitCode === 183 || /moov atom not found|Invalid data found|could not find codec parameters|End of file/i.test(stderr)) {
-    return '파일이 손상되었거나 업로드가 끝나지 않았습니다';
+    return m.damaged;
   }
   const last = stderr.trim().split('\n').filter(Boolean).slice(-1)[0] ?? '';
-  return `녹음 파일을 변환하지 못했습니다${last ? `: ${last.slice(0, 300)}` : ''}`;
+  return m.failed(last.slice(0, 300));
 }
 
 /** "Duration: 01:00:00.02" of ffmpeg's input banner → seconds. */

@@ -10,6 +10,7 @@
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import type { Lang } from '../../shared/i18n.ts';
 import { RECORDING_ID_RE } from '../../shared/types.ts';
 import type {
   AlignmentKind,
@@ -21,6 +22,7 @@ import type {
   TranscriptSegment,
   TranscriptStatus,
 } from '../../shared/types.ts';
+import { smsg } from '../i18n.ts';
 import { docPaths, isNotFound, readJsonFile, writeFileAtomic, writeJsonAtomic } from '../library.ts';
 import type { AsrWindow } from './segmenter.ts';
 
@@ -57,6 +59,11 @@ export interface RecordingMeta {
   /** Upload: stored file name (source.<ext>) and the name it was uploaded with. */
   sourceFile?: string;
   originalName?: string;
+  /**
+   * The language of the request that made the recording (absent in older ones: Korean). Its background work
+   * (conversion, transcription; resumed after a restart too) runs in it, so the errors it stores read in it.
+   */
+  lang?: Lang;
 }
 
 export interface TranscriptState {
@@ -125,9 +132,19 @@ export function newRecordingId(now: Date = new Date()): string {
   return `rec-${stamp}-${randomBytes(2).toString('hex')}`;
 }
 
-/** Default title of a live recording: "녹음 2026-09-27 15:30". */
+/** "2026-09-27 15:30" (local time): the date part of the default titles. */
+function titleStamp(now: Date): string {
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+}
+
+/** Default title of a live recording, in the request's language: "녹음 2026-09-27 15:30". */
 export function defaultLiveTitle(now: Date = new Date()): string {
-  return `녹음 ${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  return smsg().recordings.titles.live(titleStamp(now), now);
+}
+
+/** Title of an upload whose file name leaves nothing, in the request's language: "녹음 파일 2026-09-27 15:30". */
+export function defaultUploadTitle(now: Date = new Date()): string {
+  return smsg().recordings.titles.upload(titleStamp(now), now);
 }
 
 const MAX_TITLE_CHARS = 200;

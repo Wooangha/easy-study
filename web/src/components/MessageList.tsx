@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import type { Attachment, ChatMessage, LlmSwitch, MessageStatus, ProviderInfo } from '../../../shared/types.ts';
 import { PENDING_ASSISTANT_ID, PENDING_USER_ID } from '../hooks/useStudySession.ts';
+import { msg, useLang } from '../i18n/index.ts';
 import { CHAT_WINDOW, chatWindowStart, switchAtWindowStart, windowStartFor } from '../lib/chatWindow.ts';
 import { copyText } from '../lib/clipboard.ts';
 import {
@@ -248,6 +249,7 @@ export function MessageList({
     pushSwitchMarkers(m.id);
   }
 
+  const m = msg().chat.messages;
   return (
     <div className="message-list-wrap">
       <div className="message-list" ref={listRef} onScroll={onScroll}>
@@ -255,11 +257,11 @@ export function MessageList({
           {start > 0 && (
             <div className="older-messages">
               <button type="button" className="ghost-btn small" onClick={() => showOlder(false)}>
-                <ArrowUp /> 이전 메시지 {start - nextStart}개 보기
+                <ArrowUp /> {m.showOlder(start - nextStart)}
               </button>
               {nextStart > 0 && (
                 <button type="button" className="ghost-btn small" onClick={() => showOlder(true)}>
-                  모두 보기 ({start}개)
+                  {m.showAll(start)}
                 </button>
               )}
             </div>
@@ -269,7 +271,7 @@ export function MessageList({
       </div>
       {showJump && messages.length > 0 && (
         <button type="button" className="jump-bottom" onClick={() => scrollToBottom('smooth')}>
-          <ArrowDown /> 최신 메시지
+          <ArrowDown /> {m.latest}
         </button>
       )}
     </div>
@@ -294,6 +296,7 @@ interface MessageItemProps {
 }
 
 const MessageItem = memo(function MessageItem(props: MessageItemProps) {
+  useLang(); // memo(): re-render on a change of the language
   const { message: m } = props;
   if (m.role === 'user') {
     return m.kind === 'prime' ? <PrimeCard {...props} /> : <UserBubble {...props} />;
@@ -330,7 +333,7 @@ function ContextLine({ message }: { message: ChatMessage }) {
   const chips = describeContext(message.context);
   if (chips.length === 0) return null;
   return (
-    <div className="context-line" title="이 질문과 함께 LLM에게 전달된 내용">
+    <div className="context-line" title={msg().chat.messages.contextTitle}>
       {chips.map((c) => (
         <span key={c.kind} className={`context-chip chip-${c.kind}`} title={c.title}>
           <ContextChipText chip={c} />
@@ -345,10 +348,10 @@ function UserBubble({ message: m, onGoToSlide }: MessageItemProps) {
   return (
     <div className="msg msg-user" data-msg-id={m.id}>
       <div className="msg-user-meta">
-        <button type="button" className="slide-chip" onClick={() => onGoToSlide(m.slide)} title="이 슬라이드로 이동">
+        <button type="button" className="slide-chip" onClick={() => onGoToSlide(m.slide)} title={msg().chat.shared.goToThisSlide}>
           p.{m.slide}
         </button>
-        <span className="msg-time">{pending ? '보내는 중…' : formatTime(m.createdAt)}</span>
+        <span className="msg-time">{pending ? msg().chat.messages.sending : formatTime(m.createdAt)}</span>
       </div>
       <AttachmentThumbs attachments={m.attachments} className="in-chat" />
       <div className="bubble">{m.text}</div>
@@ -416,6 +419,8 @@ function AssistantMessage({
   onRetry,
   onRetryPrime,
 }: MessageItemProps) {
+  const t = msg().chat.messages;
+  const shared = msg().chat.shared;
   const pending = m.id === PENDING_ASSISTANT_ID;
   const streaming = m.status === 'streaming';
   const meta: string[] = [];
@@ -424,8 +429,8 @@ function AssistantMessage({
 
   const copy = () => {
     void copyText(m.text)
-      .then(() => toast('답변을 복사했어요', 'success', 2000))
-      .catch(() => toast('복사하지 못했어요', 'error'));
+      .then(() => toast(msg().chat.messages.copied, 'success', 2000))
+      .catch(() => toast(msg().chat.shared.copyFailed, 'error'));
   };
 
   return (
@@ -434,11 +439,11 @@ function AssistantMessage({
         <span className="assistant-avatar" aria-hidden>
           {m.kind === 'prime' ? <ClipboardList /> : <GraduationCap />}
         </span>
-        <span className="assistant-title">{m.kind === 'prime' ? '슬라이드 개요' : '튜터'}</span>
+        <span className="assistant-title">{m.kind === 'prime' ? t.overview : t.tutor}</span>
         {meta.length > 0 && <span className="msg-meta">{meta.join(' · ')}</span>}
         {!streaming && m.text && (
-          <button type="button" className="ghost-btn tiny" onClick={copy} title="Markdown 복사">
-            복사
+          <button type="button" className="ghost-btn tiny" onClick={copy} title={t.copyTitle}>
+            {msg().common.copy}
           </button>
         )}
       </div>
@@ -456,29 +461,29 @@ function AssistantMessage({
               <i />
               <i />
             </span>
-            {pending ? '요청을 보내는 중…' : m.kind === 'prime' ? '슬라이드를 읽는 중…' : '생각하는 중…'}
+            {pending ? t.requesting : m.kind === 'prime' ? t.readingSlides : t.thinking}
           </div>
         )
       )}
 
       {streaming && live && (status || stopping) && (
         <div className="live-status">
-          <Hourglass /> {stopping ? '중지하는 중…' : status}
+          <Hourglass /> {stopping ? t.stopping : status}
         </div>
       )}
       {streaming && !live && (
         <div className="msg-note">
-          <Hourglass /> 답변이 아직 완료되지 않았어요 (다른 창에서 진행 중이거나 중단됨)
+          <Hourglass /> {t.unfinishedElsewhere}
         </div>
       )}
       {m.status === 'error' && (
         <div className="msg-error">
-          <TriangleAlert /> 답변 실패{m.error ? `: ${m.error}` : ''}
+          <TriangleAlert /> {shared.answerFailed(m.error ?? '')}
         </div>
       )}
       {m.status === 'aborted' && (
         <div className="msg-note">
-          <Square fill="currentColor" /> 중단된 답변이에요
+          <Square fill="currentColor" /> {shared.answerAborted}
         </div>
       )}
       {m.usage && (
@@ -491,9 +496,9 @@ function AssistantMessage({
           type="button"
           className="ghost-btn small"
           onClick={() => onRetry(retryText, retrySlide, retryAttachments)}
-          title={retryAttachments?.length ? `첨부 ${retryAttachments.length}개와 함께 다시 보내요` : undefined}
+          title={retryAttachments?.length ? t.retryWithAttachments(retryAttachments.length) : undefined}
         >
-          <RefreshCw /> 다시 질문하기
+          <RefreshCw /> {t.retry}
         </button>
       )}
       {onRetryPrime && (
@@ -501,9 +506,9 @@ function AssistantMessage({
           type="button"
           className="ghost-btn small"
           onClick={onRetryPrime}
-          title="슬라이드를 LLM에게 다시 전달해요 (바로 질문해도 첫 질문과 함께 전달돼요)"
+          title={t.retryPrimeTitle}
         >
-          <Library /> 다시 전달하기
+          <Library /> {t.retryPrime}
         </button>
       )}
     </div>

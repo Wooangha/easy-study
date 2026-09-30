@@ -16,7 +16,6 @@ import {
   ATTACHMENT_ID_RE,
   COURSE_ID_RE,
   DOC_ID_RE,
-  EFFORT_LABELS,
   MAX_ATTACHMENTS,
   MAX_ATTACHMENT_BYTES,
   MODEL_ID_RE,
@@ -117,6 +116,7 @@ import {
   waitForDigestsIdle,
 } from './digest.ts';
 import type { DigestDeps } from './digest.ts';
+import { langContext, requestLang, smsg } from './i18n.ts';
 import {
   LibraryLockedError,
   SERVER_LOCK_FILE_NAME,
@@ -139,6 +139,7 @@ import {
 } from './library.ts';
 import type { ServerLock, StoredDocMeta } from './library.ts';
 import { providerInfos } from './providers/index.ts';
+import { effortLabel } from './providers/types.ts';
 import { createRecordingsRouter } from './recordings/routes.ts';
 import { configureRecordings, forgetDocRecordings, resumeRecordings, stopRecordingWork } from './recordings/service.ts';
 import type { RecordingsConfig } from './recordings/service.ts';
@@ -203,14 +204,14 @@ function serverVersion(): string | undefined {
 /** DocMeta with its derived fields (course, digest status): only GET /docs/:docId needs them. */
 async function requireDoc(docId: string): Promise<DocMeta> {
   const doc = await getDoc(docId);
-  if (!doc) throw new HttpError(404, '문서를 찾을 수 없습니다');
+  if (!doc) throw new HttpError(404, smsg().common.notFound.doc);
   return doc;
 }
 
 /** doc.json alone (no course or digest file is read): for routes that only need the document to exist. */
 async function requireStoredDoc(docId: string): Promise<StoredDocMeta> {
   const doc = await readStoredDoc(docId);
-  if (!doc) throw new HttpError(404, '문서를 찾을 수 없습니다');
+  if (!doc) throw new HttpError(404, smsg().common.notFound.doc);
   return doc;
 }
 
@@ -226,7 +227,7 @@ async function requireSlide(docId: string, file: string, ext: 'png' | 'webp'): P
   const doc = await readStoredDoc(docId);
   const match = /^(\d{1,6})\.([a-z]+)$/.exec(file);
   const slide = match && match[2] === ext ? Number(match[1]) : 0;
-  if (!doc || slide < 1 || slide > doc.pageCount) throw new HttpError(404, '슬라이드를 찾을 수 없습니다');
+  if (!doc || slide < 1 || slide > doc.pageCount) throw new HttpError(404, smsg().common.notFound.slide);
   return { doc, slide, slideFile: slideFileName(slide, doc.pageCount) };
 }
 
@@ -252,23 +253,20 @@ function resolveProviderChoice(
   model: unknown,
   effort?: unknown,
 ): { info: ProviderInfo; model: string; effort: string } {
+  const m = smsg().chat.providers;
   const info = infos.find((candidate) => candidate.id === provider);
-  if (!info) throw new HttpError(400, `알 수 없는 제공자입니다: ${String(provider)}`);
-  if (!info.available) {
-    throw new HttpError(400, `${info.label}을(를) 사용할 수 없습니다${info.reason ? `: ${info.reason}` : ''}`);
-  }
-  if (model !== undefined && typeof model !== 'string') throw new HttpError(400, '모델 이름이 올바르지 않습니다');
+  if (!info) throw new HttpError(400, m.unknownProvider(String(provider)));
+  if (!info.available) throw new HttpError(400, m.unavailable(info.label, info.reason ?? ''));
+  if (model !== undefined && typeof model !== 'string') throw new HttpError(400, m.modelInvalid);
   const resolved = (model ?? '').trim() || info.defaultModel;
-  if (resolved && !MODEL_ID_RE.test(resolved)) throw new HttpError(400, `모델 이름이 올바르지 않습니다: ${resolved}`);
-  if (effort !== undefined && typeof effort !== 'string') throw new HttpError(400, '추론 수준이 올바르지 않습니다');
+  if (resolved && !MODEL_ID_RE.test(resolved)) throw new HttpError(400, m.modelNameInvalid(resolved));
+  if (effort !== undefined && typeof effort !== 'string') throw new HttpError(400, m.effortInvalid);
   const level = (effort ?? '').trim();
   if (level) {
-    if (!info.efforts?.length) throw new HttpError(400, `${info.label}은(는) 추론 수준을 고를 수 없습니다`);
-    if (!info.efforts.some((e) => e.id === level)) throw new HttpError(400, `알 수 없는 추론 수준입니다: ${level}`);
-    const supported = info.models.find((m) => m.id === resolved)?.efforts;
-    if (supported && !supported.includes(level)) {
-      throw new HttpError(400, `이 모델은 추론 수준 '${EFFORT_LABELS[level] ?? level}'을(를) 지원하지 않습니다`);
-    }
+    if (!info.efforts?.length) throw new HttpError(400, m.noEffortChoice(info.label));
+    if (!info.efforts.some((e) => e.id === level)) throw new HttpError(400, m.unknownEffort(level));
+    const supported = info.models.find((candidate) => candidate.id === resolved)?.efforts;
+    if (supported && !supported.includes(level)) throw new HttpError(400, m.effortUnsupported(effortLabel(level)));
   }
   return { info, model: resolved, effort: level };
 }
@@ -280,10 +278,10 @@ function resolveProviderChoice(
 function parseAttachmentIds(value: unknown): string[] | undefined {
   if (value === undefined || value === null) return undefined;
   if (!Array.isArray(value) || !value.every((id) => typeof id === 'string' && ATTACHMENT_ID_RE.test(id))) {
-    throw new HttpError(400, 'attachments는 첨부 id의 배열이어야 합니다');
+    throw new HttpError(400, smsg().library.attachments.idsNotArray);
   }
   const ids = [...new Set(value as string[])];
-  if (ids.length > MAX_ATTACHMENTS) throw new HttpError(400, `첨부는 질문 하나에 최대 ${MAX_ATTACHMENTS}개까지 보낼 수 있습니다`);
+  if (ids.length > MAX_ATTACHMENTS) throw new HttpError(400, smsg().library.attachments.tooMany(MAX_ATTACHMENTS));
   return ids;
 }
 
@@ -303,7 +301,7 @@ function rawImageBody(): express.RequestHandler {
 /** SendMessageRequest.memos (DESIGN §25): absent, or a boolean. */
 function parseMemos(value: unknown): boolean | undefined {
   if (value === undefined) return undefined;
-  if (typeof value !== 'boolean') throw new HttpError(400, 'memos는 true/false여야 합니다');
+  if (typeof value !== 'boolean') throw new HttpError(400, smsg().chat.turns.memosNotBoolean);
   return value;
 }
 
@@ -311,7 +309,7 @@ function parseMemos(value: unknown): boolean | undefined {
 function parseNeighbors(value: unknown): number | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > MAX_NEIGHBORS) {
-    throw new HttpError(400, `neighbors는 0부터 ${MAX_NEIGHBORS} 사이의 정수여야 합니다`);
+    throw new HttpError(400, smsg().chat.turns.neighborsInvalid(MAX_NEIGHBORS));
   }
   return value;
 }
@@ -374,7 +372,7 @@ async function sendImmutable(req: Request, res: Response, file: string): Promise
     await sendFile(res, file, immutableOptions(res));
   } catch (err) {
     // Not rendered yet (still processing) or the client went away mid-transfer.
-    if (!res.headersSent) throw new HttpError(404, '슬라이드를 찾을 수 없습니다');
+    if (!res.headersSent) throw new HttpError(404, smsg().common.notFound.slide);
     warnTransfer(req, err);
   }
 }
@@ -400,7 +398,7 @@ async function sendDerivedFile(req: Request, res: Response, doc: StoredDocMeta, 
       headers: { 'Cache-Control': 'no-store' },
     });
   } catch (err) {
-    if (!res.headersSent) throw new HttpError(404, '슬라이드를 찾을 수 없습니다');
+    if (!res.headersSent) throw new HttpError(404, smsg().common.notFound.slide);
     warnTransfer(req, err);
   }
 }
@@ -409,7 +407,7 @@ async function sendDerivedFile(req: Request, res: Response, doc: StoredDocMeta, 
 function parseViewWidth(value: unknown): ViewWidth {
   if (value === undefined || value === '') return VIEW_WIDTHS[VIEW_WIDTHS.length - 1];
   const width = VIEW_WIDTHS.find((candidate) => String(candidate) === value);
-  if (width === undefined) throw new HttpError(400, `w는 ${VIEW_WIDTHS.join(', ')} 중 하나여야 합니다`);
+  if (width === undefined) throw new HttpError(400, smsg().common.http.viewWidthInvalid(VIEW_WIDTHS.join(', ')));
   return width;
 }
 
@@ -483,12 +481,12 @@ function apiGuard(authRequired: boolean): express.RequestHandler {
   return (req, _res, next) => {
     const hostHeader = req.headers.host ?? '';
     if (!authRequired && !isLoopbackHost(hostHeader.replace(/:\d+$/, ''))) {
-      next(new HttpError(403, '로컬 주소(127.0.0.1)로만 접속할 수 있습니다'));
+      next(new HttpError(403, smsg().common.http.localOnly));
       return;
     }
     const origin = req.headers.origin;
     if (origin !== undefined && req.method !== 'GET' && req.method !== 'HEAD' && !isSameOrigin(req, origin, authRequired)) {
-      next(new HttpError(403, '다른 사이트에서 보낸 요청은 허용되지 않습니다'));
+      next(new HttpError(403, smsg().common.http.crossSite));
       return;
     }
     next();
@@ -532,7 +530,8 @@ export function requestBodyDeadline(ms: number = REQUEST_BODY_DEADLINE_MS, exemp
     const timer = setTimeout(() => {
       if (req.complete || res.writableEnded) return;
       if (!res.headersSent) {
-        res.status(408).set('Connection', 'close').json({ error: '요청을 받는 데 너무 오래 걸려서 중단했습니다' });
+        // Outside the API router (no request language yet): the request's own.
+        res.status(408).set('Connection', 'close').json({ error: smsg(requestLang(req)).common.http.requestTimeout });
       }
       req.socket?.destroySoon?.();
     }, ms);
@@ -564,6 +563,8 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
   };
   const api = express.Router();
 
+  // First: everything below answers in the request's language (DESIGN §27), the guard's refusals included.
+  api.use(langContext());
   api.use(apiGuard(gate.required));
   // Login routes answer without a session; everything after requireAuth needs one in remote mode
   // (including slide images and SSE turns: the cookie comes along on same-origin requests).
@@ -572,19 +573,19 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
 
   // Invalid ids are answered with 404 before any handler (and any filesystem access) runs.
   api.param('docId', (_req, _res, next, value: string) => {
-    next(DOC_ID_RE.test(value) ? undefined : new HttpError(404, '문서를 찾을 수 없습니다'));
+    next(DOC_ID_RE.test(value) ? undefined : new HttpError(404, smsg().common.notFound.doc));
   });
   api.param('sid', (_req, _res, next, value: string) => {
-    next(SESSION_ID_RE.test(value) ? undefined : new HttpError(404, '세션을 찾을 수 없습니다'));
+    next(SESSION_ID_RE.test(value) ? undefined : new HttpError(404, smsg().common.notFound.session));
   });
   api.param('courseId', (_req, _res, next, value: string) => {
-    next(COURSE_ID_RE.test(value) ? undefined : new HttpError(404, '과목을 찾을 수 없습니다'));
+    next(COURSE_ID_RE.test(value) ? undefined : new HttpError(404, smsg().common.notFound.course));
   });
   api.param('groupId', (_req, _res, next, value: string) => {
-    next(COURSE_ID_RE.test(value) ? undefined : new HttpError(404, '그룹을 찾을 수 없습니다'));
+    next(COURSE_ID_RE.test(value) ? undefined : new HttpError(404, smsg().common.notFound.group));
   });
   api.param('attachmentId', (_req, _res, next, value: string) => {
-    next(ATTACHMENT_ID_RE.test(value) ? undefined : new HttpError(404, '첨부를 찾을 수 없습니다'));
+    next(ATTACHMENT_ID_RE.test(value) ? undefined : new HttpError(404, smsg().common.notFound.attachment));
   });
   // Only parses application/json bodies; the raw PDF upload passes through untouched.
   api.use(express.json({ limit: '2mb' }));
@@ -613,11 +614,11 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
 
   api.post('/docs', express.raw({ type: () => true, limit: MAX_UPLOAD }), async (req, res) => {
     const bytes: unknown = req.body;
-    if (!Buffer.isBuffer(bytes) || bytes.length === 0) throw new HttpError(400, 'PDF 파일 내용이 비어 있습니다');
+    if (!Buffer.isBuffer(bytes) || bytes.length === 0) throw new HttpError(400, smsg().library.docs.pdfEmpty);
     // X-Course-Id: upload straight into a course ("과목" folder).
     const courseId = req.get('X-Course-Id')?.trim() || null;
     if (courseId !== null && (!COURSE_ID_RE.test(courseId) || (await getCourse(courseId)) === null)) {
-      throw new HttpError(400, `과목을 찾을 수 없습니다: ${courseId}`);
+      throw new HttpError(400, smsg().library.courses.courseNotFoundId(courseId));
     }
     const meta: DocMeta = await importPdf(bytes, decodeFileName(req.get('X-Filename')));
     if (courseId !== null) {
@@ -660,8 +661,8 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
     const docId = req.params.docId;
     // Checked synchronously right before the deletion starts, so nothing can start in between.
     await deleteDoc(docId, () => {
-      if (isDigestRunning(docId)) return '정리본을 만드는 중에는 지울 수 없습니다. 정리본 만들기를 먼저 중단해 주세요';
-      if (hasRunningTurns(docId)) return '답변을 생성하는 중에는 지울 수 없습니다. 답변이 끝난 뒤에 다시 시도해 주세요';
+      if (isDigestRunning(docId)) return smsg().library.docs.deleteWhileDigest;
+      if (hasRunningTurns(docId)) return smsg().library.docs.deleteWhileAnswering;
       // From here on the document is gone for every request: attachment images still being made are not wanted,
       // its recordings stop (live audio, transcription, conversion, AI alignment) and its annotation streams end.
       stopAttachmentJobs(docId);
@@ -718,10 +719,8 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
     const docId = String(req.params.docId);
     await requireStoredDoc(docId);
     const bytes: unknown = req.body;
-    if (!Buffer.isBuffer(bytes) || bytes.length === 0) throw new HttpError(400, '이미지 내용이 비어 있습니다');
-    if (!/^image\//i.test(req.get('Content-Type') ?? '')) {
-      throw new HttpError(415, '이미지 파일만 첨부할 수 있습니다 (Content-Type: image/*)');
-    }
+    if (!Buffer.isBuffer(bytes) || bytes.length === 0) throw new HttpError(400, smsg().library.attachments.imageEmpty);
+    if (!/^image\//i.test(req.get('Content-Type') ?? '')) throw new HttpError(415, smsg().library.attachments.imageOnly);
     const header = req.get('X-Filename');
     res.status(201).json(await createImageAttachment(docId, bytes, header ? decodeFileName(header) : undefined));
   });
@@ -730,11 +729,11 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
   api.get('/docs/:docId/attachments/:attachmentId', async (req, res) => {
     const { docId, attachmentId } = req.params;
     const file = (await readAttachment(docId, attachmentId)) ? await attachmentImagePath(docId, attachmentId) : null;
-    if (!file) throw new HttpError(404, '첨부를 찾을 수 없습니다');
+    if (!file) throw new HttpError(404, smsg().common.notFound.attachment);
     try {
       await sendFile(res, file, { cacheControl: false, headers: { 'Cache-Control': PRIVATE_IMMUTABLE } });
     } catch (err) {
-      if (!res.headersSent) throw new HttpError(404, '첨부를 찾을 수 없습니다');
+      if (!res.headersSent) throw new HttpError(404, smsg().common.notFound.attachment);
       warnTransfer(req, err);
     }
   });
@@ -784,7 +783,7 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
 
   api.get('/docs/:docId/sessions/:sid', async (req, res) => {
     const record = await getSession(req.params.docId, req.params.sid);
-    if (!record) throw new HttpError(404, '세션을 찾을 수 없습니다');
+    if (!record) throw new HttpError(404, smsg().common.notFound.session);
     res.json(toSession(record));
   });
 
@@ -796,7 +795,7 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
   api.patch('/docs/:docId/sessions/:sid', async (req, res) => {
     const { docId, sid } = req.params;
     // Existence first, like POST /sessions: a missing session is 404 whatever the body says (and no CLI is detected for it).
-    if (!(await getSession(docId, sid))) throw new HttpError(404, '세션을 찾을 수 없습니다');
+    if (!(await getSession(docId, sid))) throw new HttpError(404, smsg().common.notFound.session);
     const body = jsonBody(req) as Partial<Record<keyof UpdateSessionRequest, unknown>>;
     const { info, model, effort } = resolveProviderChoice(await getProviderInfos(), body.provider, body.model, body.effort);
     const { record } = await withSessionReserved(docId, sid, () =>
@@ -808,7 +807,7 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
   api.delete('/docs/:docId/sessions/:sid', async (req, res) => {
     const { docId, sid } = req.params;
     if (abortTurn(docId, sid)) await waitForTurn(docId, sid, 5_000);
-    if (!(await deleteSession(docId, sid))) throw new HttpError(404, '세션을 찾을 수 없습니다');
+    if (!(await deleteSession(docId, sid))) throw new HttpError(404, smsg().common.notFound.session);
     res.status(204).end();
   });
 
@@ -818,8 +817,8 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
     const sessionId = String(req.params.sid);
     const body = jsonBody(req);
     const slide = body.slide;
-    if (typeof slide !== 'number' || !Number.isInteger(slide)) throw new HttpError(400, '슬라이드 번호가 필요합니다');
-    if (kind === 'question' && typeof body.text !== 'string') throw new HttpError(400, '질문을 입력해 주세요');
+    if (typeof slide !== 'number' || !Number.isInteger(slide)) throw new HttpError(400, smsg().chat.turns.slideRequired);
+    if (kind === 'question' && typeof body.text !== 'string') throw new HttpError(400, smsg().chat.turns.questionRequired);
     const text = kind === 'question' ? String(body.text) : '';
     const neighbors = parseNeighbors(body.neighbors);
     // Priming turns take no attachments (DESIGN §21) and no memos (DESIGN §25).
@@ -828,9 +827,11 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
 
     // Abort the turn when the client goes away mid-stream. This must watch the *response*:
     // req 'close' fires as soon as the request body has been consumed.
+    // The reason is read here: the 'close' listener runs outside the request's language (AsyncLocalStorage).
     const disconnect = new AbortController();
+    const gone = smsg().chat.turns.clientGone;
     res.on('close', () => {
-      if (!res.writableFinished) disconnect.abort(new Error('클라이언트 연결이 끊어져 중단되었습니다'));
+      if (!res.writableFinished) disconnect.abort(new Error(gone));
     });
 
     const sse = lazySse(res);
@@ -853,7 +854,7 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
 
   api.post('/docs/:docId/sessions/:sid/abort', async (req, res) => {
     const { docId, sid } = req.params;
-    if (!(await getSession(docId, sid))) throw new HttpError(404, '세션을 찾을 수 없습니다');
+    if (!(await getSession(docId, sid))) throw new HttpError(404, smsg().common.notFound.session);
     abortTurn(docId, sid);
     res.status(204).end();
   });
@@ -883,7 +884,7 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
     const docId = req.params.docId;
     await requireStoredDoc(docId);
     const body = jsonBody(req) as Partial<Record<keyof StartDigestRequest, unknown>>;
-    if (body.force !== undefined && typeof body.force !== 'boolean') throw new HttpError(400, 'force는 true/false 여야 합니다');
+    if (body.force !== undefined && typeof body.force !== 'boolean') throw new HttpError(400, smsg().chat.digest.forceNotBoolean);
     const { info, model, effort } = resolveProviderChoice(await getProviderInfos(), body.provider, body.model, body.effort);
     res.status(202).json(await startDigest(docId, { provider: info.id, model, effort, force: body.force === true }, digestDeps));
   });
@@ -896,7 +897,7 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
 
   api.get('/docs/:docId/digest.md', async (req, res) => {
     const markdown = await readDigestMarkdown(req.params.docId);
-    if (markdown === null) throw new HttpError(404, '정리본이 아직 없습니다');
+    if (markdown === null) throw new HttpError(404, smsg().chat.digest.notYet);
     sendMarkdown(res, markdown);
   });
 
@@ -918,20 +919,20 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
   });
 
   api.delete('/courses/:courseId', async (req, res) => {
-    if (!(await deleteCourse(req.params.courseId))) throw new HttpError(404, '과목을 찾을 수 없습니다');
+    if (!(await deleteCourse(req.params.courseId))) throw new HttpError(404, smsg().common.notFound.course);
     res.status(204).end();
   });
 
   api.get('/courses/:courseId/summary.md', async (req, res) => {
     const courseId = req.params.courseId;
-    if ((await getCourse(courseId)) === null) throw new HttpError(404, '과목을 찾을 수 없습니다');
+    if ((await getCourse(courseId)) === null) throw new HttpError(404, smsg().common.notFound.course);
     // Regenerated on every request: lecture titles and summaries may have changed since the last write.
     await writeCourseMarkdown(courseId);
     let markdown: string;
     try {
       markdown = await fs.readFile(coursePaths(courseId).courseMd, 'utf8');
     } catch {
-      throw new HttpError(404, '과목을 찾을 수 없습니다'); // deleted in the meantime
+      throw new HttpError(404, smsg().common.notFound.course); // deleted in the meantime
     }
     sendMarkdown(res, markdown);
   });
@@ -958,7 +959,7 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
 
   /** Its courses move to the top level where the group was; nothing else is deleted. */
   api.delete('/groups/:groupId', async (req, res) => {
-    if (!(await deleteGroup(req.params.groupId))) throw new HttpError(404, '그룹을 찾을 수 없습니다');
+    if (!(await deleteGroup(req.params.groupId))) throw new HttpError(404, smsg().common.notFound.group);
     res.status(204).end();
   });
 
@@ -976,7 +977,7 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
 
   api.use(createAnnotationsRouter());
 
-  api.use((_req, _res, next) => next(new HttpError(404, 'API 경로를 찾을 수 없습니다')));
+  api.use((_req, _res, next) => next(new HttpError(404, smsg().common.notFound.apiRoute)));
   api.use(apiErrorHandler);
   return api;
 }
@@ -992,10 +993,10 @@ function apiErrorHandler(err: unknown, req: Request, res: Response, _next: NextF
     fields = err.fields;
   } else if (bodyParserError.type === 'entity.too.large') {
     status = 413;
-    message = `파일이 너무 큽니다 (최대 ${MAX_UPLOAD.toUpperCase()})`;
+    message = smsg().common.http.fileTooLarge(MAX_UPLOAD.toUpperCase());
   } else if (bodyParserError.type === 'entity.parse.failed') {
     status = 400;
-    message = '요청 본문이 올바른 JSON이 아닙니다';
+    message = smsg().common.http.bodyNotJson;
   } else {
     const candidate = bodyParserError.status ?? bodyParserError.statusCode;
     if (typeof candidate === 'number' && candidate >= 400 && candidate < 600) status = candidate;
@@ -1031,11 +1032,11 @@ export function mountProductionClient(app: express.Express, log: boolean, dist =
           '`npm start`(빌드 후 실행) 또는 `npm run dev`(개발 모드)로 실행하세요.',
       );
     }
-    app.use((_req, res) => {
+    app.use((req, res) => {
       res
         .status(503)
         .type('text/plain; charset=utf-8')
-        .send('웹 클라이언트가 빌드되지 않았습니다 (web/dist 없음).\n`npm start` 또는 `npm run dev` 로 실행하세요.\n');
+        .send(`${smsg(requestLang(req)).common.page.clientNotBuilt}\n`);
     });
     app.use(clientErrorHandler);
     return;
@@ -1068,11 +1069,12 @@ function clientErrorHandler(err: unknown, req: Request, res: Response, _next: Ne
     res.end();
     return;
   }
+  const m = smsg(requestLang(req)).common.page;
   res
     .status(status)
     .set('Cache-Control', 'no-store')
     .type('text/plain; charset=utf-8')
-    .send(status === 404 ? '페이지를 찾을 수 없습니다.\n' : status < 500 ? '요청을 처리할 수 없습니다.\n' : '서버 오류가 발생했습니다.\n');
+    .send(`${status === 404 ? m.notFound : status < 500 ? m.badRequest : m.serverError}\n`);
 }
 
 // ---------------------------------------------------------------------------

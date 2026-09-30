@@ -21,6 +21,8 @@ import { ATTACHMENTS_DIR } from './assets.ts';
 import { attachmentFileNames, removeUnreferencedAttachments } from './attachments.ts';
 import { HttpError } from './config.ts';
 import { initialProviderState } from './context.ts';
+import { isLang, slang, smsg } from './i18n.ts';
+import type { Lang } from './i18n.ts';
 import type { SessionChange, SessionRecord } from './internal-types.ts';
 import {
   createKeyedQueue,
@@ -119,7 +121,7 @@ export function newSessionId(now: Date = new Date()): string {
 }
 
 function sessionFile(docId: string, sessionId: string): string {
-  if (!SESSION_ID_RE.test(sessionId)) throw new HttpError(404, '세션을 찾을 수 없습니다');
+  if (!SESSION_ID_RE.test(sessionId)) throw new HttpError(404, smsg().common.notFound.session);
   return path.join(docPaths(docId).sessionsDir, `${sessionId}.json`);
 }
 
@@ -139,7 +141,7 @@ export interface CreateSessionInput {
 /** Creates and persists an empty session. Throws HttpError 404 when the document does not exist. */
 export async function createSession(docId: string, input: CreateSessionInput): Promise<SessionRecord> {
   const doc = await readStoredDoc(docId);
-  if (!doc) throw new HttpError(404, '문서를 찾을 수 없습니다');
+  if (!doc) throw new HttpError(404, smsg().common.notFound.doc);
   await fs.mkdir(docPaths(docId).sessionsDir, { recursive: true });
 
   const now = new Date();
@@ -152,7 +154,10 @@ export async function createSession(docId: string, input: CreateSessionInput): P
     version: 1,
     id,
     docId,
-    title: cleanTitle(input.title) || `세션 ${pad2(now.getMonth() + 1)}/${pad2(now.getDate())} ${formatTime(createdAt)}`,
+    // "세션 09/30 11:36" / "Session Sep 30, 11:36 AM", in the request's language (DESIGN §27).
+    title:
+      cleanTitle(input.title) ||
+      smsg().chat.sessions.defaultTitle(`${pad2(now.getMonth() + 1)}/${pad2(now.getDate())}`, formatTime(createdAt), now),
     provider: input.provider,
     model: input.model,
     createdAt,
@@ -206,6 +211,7 @@ async function readRecord(docId: string, sessionId: string): Promise<SessionReco
   const switches = readSwitches(record.switches);
   if (switches) record.switches = switches;
   else delete record.switches;
+  if (!isLang(record.lang)) delete record.lang;
   return record;
 }
 
@@ -252,7 +258,7 @@ function sameLlm(a: LlmChoice, b: LlmChoice): boolean {
  */
 export async function switchSessionLlm(docId: string, sessionId: string, to: LlmChoice): Promise<{ record: SessionRecord; changed: boolean }> {
   const record = await getSession(docId, sessionId);
-  if (!record) throw new HttpError(404, '세션을 찾을 수 없습니다');
+  if (!record) throw new HttpError(404, smsg().common.notFound.session);
   const from = llmOf(record);
   const next: LlmChoice = { provider: to.provider, model: to.model };
   if (to.effort) next.effort = to.effort;
@@ -384,15 +390,15 @@ export function toSession(record: SessionRecord): Session {
 }
 
 /**
- * Marks assistant messages stuck in 'streaming' (the server stopped mid-turn) as aborted.
+ * Marks assistant messages stuck in 'streaming' (the server stopped mid-turn) as aborted, with the reason in `lang`.
  * Only call when no turn of this session is running. Returns true when something changed.
  */
-export function repairInterruptedMessages(record: SessionRecord): boolean {
+export function repairInterruptedMessages(record: SessionRecord, lang: Lang = slang()): boolean {
   let changed = false;
   for (const message of record.messages) {
     if (message.status === 'streaming') {
       message.status = 'aborted';
-      message.error ??= '서버가 중단되어 답변이 완료되지 않았습니다';
+      message.error ??= smsg(lang).chat.turns.interrupted;
       changed = true;
     }
   }
@@ -405,7 +411,8 @@ export async function recoverInterruptedSessions(): Promise<number> {
   for (const doc of await listStoredDocs()) {
     let docChanged = false;
     for (const record of await loadRecords(doc.id)) {
-      if (repairInterruptedMessages(record)) {
+      // No request at startup: the language of the turn that was stopped.
+      if (repairInterruptedMessages(record, record.lang ?? 'ko')) {
         await writeRecord(record);
         repaired++;
         docChanged = true;
@@ -490,14 +497,15 @@ function answerMarkdown(answer: ChatMessage | null, headingLevels: number): stri
 /**
  * The attachments of a question as Markdown images (DESIGN §21), one line: `![p.12 영역](<prefix><id>.png)` for a
  * selected region, `![이미지](<prefix><id>.jpg)` for an image; '' without attachments. `files` maps ids to the
- * stored file names.
+ * stored file names. The alt texts are in the language of the request that rewrote the notes.
  */
 function attachmentsMarkdown(question: ChatMessage, files: ReadonlyMap<string, string>, prefix: string): string {
   if (!Array.isArray(question.attachments)) return '';
+  const m = smsg().chat.sessions;
   return question.attachments
     .filter((attachment) => typeof attachment?.id === 'string' && ATTACHMENT_ID_RE.test(attachment.id))
     .map((attachment) => {
-      const alt = attachment.kind === 'region' ? `p.${attachment.slide ?? question.slide} 영역` : '이미지';
+      const alt = attachment.kind === 'region' ? m.regionAlt(attachment.slide ?? question.slide) : m.imageAlt;
       return `![${alt}](${prefix}${files.get(attachment.id) ?? `${attachment.id}.jpg`})`;
     })
     .join(' ');
@@ -598,7 +606,7 @@ export function writeNotes(docId: string): Promise<void> {
 
 /** All Q&A of a document grouped by slide (also makes sure STUDY_NOTES.md exists). */
 export async function buildNotes(docId: string): Promise<NotesResponse> {
-  if ((await readStoredDoc(docId)) === null) throw new HttpError(404, '문서를 찾을 수 없습니다');
+  if ((await readStoredDoc(docId)) === null) throw new HttpError(404, smsg().common.notFound.doc);
   const paths = docPaths(docId);
   try {
     await fs.access(paths.studyNotes);

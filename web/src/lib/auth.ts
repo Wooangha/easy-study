@@ -6,6 +6,7 @@
 //   ok       — the API can be used (logged in, or the server needs no login)
 //   login    — a login is needed; API requests wait for it (see api.ts)
 //   local    — the server only accepts loopback addresses and this page was opened from another one
+import { msg } from '../i18n/index.ts';
 
 export type AuthPhase = 'checking' | 'ok' | 'login' | 'local';
 
@@ -200,15 +201,16 @@ export function parseRetryAfter(value: string | null | undefined, now: number = 
   return Math.max(0, Math.ceil((at - now) / 1000));
 }
 
-/** "45초", "3분", "9분 12초", "1시간 5분". */
+/** "45초", "3분", "9분 12초", "1시간 5분" (in the page's language). */
 export function formatWait(totalSeconds: number): string {
+  const m = msg().shell.auth.wait;
   const s = Math.max(0, Math.ceil(totalSeconds));
-  if (s < 60) return `${s}초`;
+  if (s < 60) return m.seconds(s);
   const hours = Math.floor(s / 3600);
   const minutes = Math.floor((s % 3600) / 60);
   const seconds = s % 60;
-  if (hours > 0) return minutes > 0 ? `${hours}시간 ${minutes}분` : `${hours}시간`;
-  return seconds > 0 ? `${minutes}분 ${seconds}초` : `${minutes}분`;
+  if (hours > 0) return minutes > 0 ? m.hoursMinutes(hours, minutes) : m.hours(hours);
+  return seconds > 0 ? m.minutesSeconds(minutes, seconds) : m.minutes(minutes);
 }
 
 // ---------------------------------------------------------------------------

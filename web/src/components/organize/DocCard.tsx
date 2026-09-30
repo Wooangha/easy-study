@@ -2,6 +2,7 @@ import { Hourglass, Mic, Pencil, TriangleAlert } from 'lucide-react';
 import { useState } from 'react';
 import type { Course, DocMeta, LibraryLayout } from '../../../../shared/types.ts';
 import { viewUrl } from '../../api.ts';
+import { msg } from '../../i18n/index.ts';
 import { formatDate } from '../../lib/format.ts';
 import { dndId, type DropData } from '../../lib/libraryDnd.ts';
 import { RecordingUploadBadge, useRecordingUploadPicker } from '../recording/RecordingUploads.tsx';
@@ -25,6 +26,8 @@ interface DocCardProps {
  * top, with the menu). */
 export function DocCard({ doc, courses, layout, onOpen, onMove, onRetry, onRename, onDelete }: DocCardProps) {
   const [renaming, setRenaming] = useState(false);
+  const m = msg().shell.lecture;
+  const lib = msg().shell.library;
   const ready = doc.status === 'ready';
   const hasCourses = courses.length > 0;
   const pickRecording = useRecordingUploadPicker();
@@ -33,7 +36,7 @@ export function DocCard({ doc, courses, layout, onOpen, onMove, onRetry, onRenam
   const { setNodeRef, setActivatorNodeRef, listeners, attributes, isDragging } = useOrgItem({
     id: dndId.lecture(doc.id),
     data,
-    roleDescription: '옮길 수 있는 강의',
+    roleDescription: m.roleDescription,
     canDrag: hasCourses,
   });
   return (
@@ -48,32 +51,32 @@ export function DocCard({ doc, courses, layout, onOpen, onMove, onRetry, onRenam
         {hasCourses && (
           <div className="doc-card-move">
             <DragHandle
-              label={`‘${doc.title}’ 강의를 과목으로 옮기기`}
+              label={m.moveToACourse(doc.title)}
               setRef={setActivatorNodeRef}
               listeners={listeners}
               attributes={attributes}
             />
             <select
               className="picker"
-              aria-label={`${doc.title}을(를) 과목으로 이동`}
+              aria-label={m.moveSelect(doc.title)}
               value=""
               onChange={(e) => {
                 if (e.target.value) onMove(doc.id, e.target.value);
               }}
             >
-              <option value="">과목으로 이동…</option>
+              <option value="">{m.moveSelectPlaceholder}</option>
               <CourseOptions courses={courses} layout={layout} />
             </select>
           </div>
         )}
         <PopoverMenu
-          label={`‘${doc.title}’ 강의 메뉴`}
+          label={m.menu(doc.title)}
           sections={[
             {
               items: [
                 {
                   key: 'rename',
-                  label: '이름 바꾸기',
+                  label: msg().common.rename,
                   icon: Pencil,
                   onSelect: () => setRenaming(true),
                 },
@@ -81,9 +84,9 @@ export function DocCard({ doc, courses, layout, onOpen, onMove, onRetry, onRenam
                   ? [
                       {
                         key: 'recording',
-                        label: '녹음 파일 올리기',
+                        label: m.uploadRecording,
                         icon: Mic,
-                        hint: '음성·동영상',
+                        hint: m.uploadRecordingHint,
                         onSelect: () => pickRecording?.(doc),
                       },
                     ]
@@ -98,7 +101,7 @@ export function DocCard({ doc, courses, layout, onOpen, onMove, onRetry, onRenam
         <div className="doc-card-rename">
           <RenameInput
             initial={doc.title}
-            label="강의 이름"
+            label={m.nameLabel}
             maxLength={200}
             className="course-title-input doc-title-input"
             onDone={(title) => {
@@ -128,14 +131,14 @@ export function DocCard({ doc, courses, layout, onOpen, onMove, onRetry, onRenam
           {renaming ? null : <div className="doc-title">{doc.title}</div>}
           <div className="doc-sub">
             {doc.fileName} · {formatDate(doc.createdAt)}
-            {ready && ` · ${doc.pageCount}장`}
+            {ready && ` · ${lib.slideCount(doc.pageCount)}`}
           </div>
           <div className="doc-badges">
             {doc.digestStatus !== 'none' && <DigestBadge status={doc.digestStatus} />}
             <RecordingUploadBadge docId={doc.id} />
           </div>
           {doc.status === 'processing' && <DocProgress doc={doc} compact />}
-          {doc.status === 'error' && <div className="doc-error">{doc.error ?? '처리 중 오류가 발생했어요'}</div>}
+          {doc.status === 'error' && <div className="doc-error">{doc.error ?? lib.processingError}</div>}
         </div>
       </button>
       {doc.status === 'error' && (

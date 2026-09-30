@@ -27,6 +27,7 @@ import {
   listAnnotationTags,
   patchSlideAnnotations,
 } from '../../api.ts';
+import { msg } from '../../i18n/index.ts';
 import { RecordingEventsClient, type ConnectionState, type EventSourceLike, type Timers } from '../recording/events.ts';
 import { toast as showToast, type ToastKind } from '../toast.ts';
 import { applyOps, canHideMarker, emptySlideAnnotations, itemsAfter, newClientId, rebaseOps } from './geometry.ts';
@@ -94,9 +95,10 @@ export const KEEP_RADIUS = 24;
 export const LOAD_RADIUS = 3;
 export const MAX_LOAD_RADIUS = 12;
 
-export const CONFLICT_RELOADED = '다른 곳에서 필기가 바뀌어서 다시 불러왔어요';
-export const TOO_MANY_ITEMS = `이 슬라이드에는 필기를 더 넣을 수 없어요 (최대 ${MAX_ANNOTATION_ITEMS}개)`;
-export const TOO_MANY_HIDDEN = '숨긴 질문 표시가 너무 많아요';
+/** The store's toasts, in the current language. */
+export const conflictReloaded = (): string => msg().viewer.store.conflictReloaded;
+export const tooManyItems = (): string => msg().viewer.store.tooManyItems(MAX_ANNOTATION_ITEMS);
+export const tooManyHidden = (): string => msg().viewer.store.tooManyHidden;
 
 const EVENT_NAMES = ['slide', 'slide-reset', 'summary', 'qa', 'ping', 'message'] as const;
 
@@ -345,11 +347,11 @@ export class DocAnnotations {
     if (this.disposed || ops.length === 0) return false;
     const doc = this.snapshot.slides.get(slide) ?? emptySlideAnnotations(slide);
     if (itemsAfter(doc, ops) > MAX_ANNOTATION_ITEMS) {
-      this.deps.toast(TOO_MANY_ITEMS, 'error');
+      this.deps.toast(tooManyItems(), 'error');
       return false;
     }
     if (ops.some((op) => op.op === 'hideMarker') && !canHideMarker(doc)) {
-      this.deps.toast(TOO_MANY_HIDDEN, 'error');
+      this.deps.toast(tooManyHidden(), 'error');
       return false;
     }
     const next = applyOps(doc, ops);
@@ -417,7 +419,7 @@ export class DocAnnotations {
       w.stale = false;
       this.setSlide(slide, current);
       this.set({ history: pruneSlide(this.snapshot.history, slide) });
-      this.deps.toast(CONFLICT_RELOADED, 'info');
+      this.deps.toast(conflictReloaded(), 'info');
       return;
     }
     const status = (e as { status?: unknown }).status;
@@ -439,7 +441,7 @@ export class DocAnnotations {
     w.rebased = false;
     w.pending = [];
     this.set({ history: pruneSlide(this.snapshot.history, slide) });
-    this.deps.toast(`필기를 저장하지 못했어요: ${annotationErrorMessage(e)}`, 'error');
+    this.deps.toast(msg().viewer.store.saveFailed(annotationErrorMessage(e)), 'error');
     void this.fetchSlide(slide);
   }
 

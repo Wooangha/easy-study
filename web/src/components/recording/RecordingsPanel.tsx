@@ -30,9 +30,9 @@ import type { ProviderChoice } from '../../hooks/useProviderChoice.ts';
 import { useRecorder, useRecordingUploads } from '../../hooks/useRecorder.ts';
 import { useRecordingFeed } from '../../hooks/useRecordingFeed.ts';
 import type { RecordingsState } from '../../hooks/useRecordings.ts';
+import { msg } from '../../i18n/index.ts';
 import { confirmDialog } from '../../lib/confirm.ts';
 import { formatDate, formatTime } from '../../lib/format.ts';
-import { withParticle } from '../../lib/korean.ts';
 import { finishRecordingElsewhere, recordedHere, startRecording } from '../../lib/recording/actions.ts';
 import { recordingFeed, updateFeedInfo } from '../../lib/recording/feeds.ts';
 import {
@@ -48,7 +48,7 @@ import {
   type StatusIcon,
 } from '../../lib/recording/labels.ts';
 import type { MarkerAction } from '../../lib/recording/markers.ts';
-import { markerLabel } from '../../lib/recording/markers.ts';
+import { markerShortLabel } from '../../lib/recording/markers.ts';
 import { useReplayAnnotations } from '../../lib/annotations/settings.ts';
 import { clearPlayhead, setPlayhead } from '../../lib/recording/playhead.ts';
 import { recorder } from '../../lib/recording/recorder.ts';
@@ -64,6 +64,9 @@ import { PlaybackRate } from './PlaybackRate.tsx';
 import { Transcript, type TranscriptMode } from './Transcript.tsx';
 
 const isMode = (v: unknown): v is TranscriptMode => v === 'current' || v === 'all';
+
+/** Why the player could not play (kept as a key, so the text follows a language change). */
+type AudioError = 'format' | 'play' | 'pressPlay' | 'load';
 
 /**
  * "Play this moment" (a memo's recording chip, DESIGN §25): the recording and the time; `seq` makes repeats distinct.
@@ -112,6 +115,8 @@ export function RecordingsPanel({ doc, focusedSlide, active, providers, choice, 
   const uploadDisabled = asr.status !== null && !asr.status.ffmpegAvailable;
 
   const pickFiles = () => fileRef.current?.click();
+  const m = msg().recording.panel;
+  const statusText = msg().recording.status;
 
   return (
     <div className="rec-panel">
@@ -121,10 +126,10 @@ export function RecordingsPanel({ doc, focusedSlide, active, providers, choice, 
             type="button"
             className="ghost-btn small rec-live-chip"
             onClick={() => rec.recordingId && setPicked(rec.recordingId)}
-            title="녹음 중인 녹음 보기 (멈추기는 위쪽 녹음 막대에서)"
+            title={m.liveChipTitle}
           >
             <span className={rec.phase === 'paused' ? 'rec-dot is-paused' : 'rec-dot'} aria-hidden />
-            {rec.phase === 'stopping' ? '저장 중' : rec.phase === 'paused' ? '일시정지' : '녹음 중'} {formatClock(rec.seconds)}
+            {rec.phase === 'stopping' ? m.saving : rec.phase === 'paused' ? statusText.paused : statusText.recording} {formatClock(rec.seconds)}
           </button>
         ) : (
           <button
@@ -132,9 +137,9 @@ export function RecordingsPanel({ doc, focusedSlide, active, providers, choice, 
             className="ghost-btn small accent"
             disabled={recordingElsewhere || rec.phase === 'starting'}
             onClick={() => void startRecording(doc.id, focusedSlide)}
-            title={recordingElsewhere ? '다른 강의를 녹음하고 있어요' : (recorder.unavailableReason() ?? '이 강의를 녹음하고 바로 받아쓰기해요')}
+            title={recordingElsewhere ? m.recordingElsewhere : (recorder.unavailableReason() ?? m.startTitle)}
           >
-            <Mic /> 녹음 시작
+            <Mic /> {m.start}
           </button>
         )}
         <button
@@ -142,13 +147,9 @@ export function RecordingsPanel({ doc, focusedSlide, active, providers, choice, 
           className="ghost-btn small"
           onClick={pickFiles}
           disabled={uploadDisabled}
-          title={
-            uploadDisabled
-              ? '서버에 파일 변환 도구(ffmpeg)가 없어서 녹음 파일을 올릴 수 없어요'
-              : '이미 녹음한 파일(음성·동영상)을 올려서 받아쓰고 슬라이드에 맞춰요'
-          }
+          title={uploadDisabled ? m.uploadNoFfmpeg : m.uploadTitle}
         >
-          <Upload /> 녹음 파일 올리기
+          <Upload /> {m.upload}
         </button>
         <span className="spacer" />
         <button
@@ -156,16 +157,16 @@ export function RecordingsPanel({ doc, focusedSlide, active, providers, choice, 
           className={settingsOpen ? 'ghost-btn small is-active' : 'ghost-btn small'}
           aria-expanded={settingsOpen}
           onClick={() => setSettingsOpen((o) => !o)}
-          title="받아쓰기 설정 (모델·언어·실시간 받아쓰기)"
+          title={m.settingsTitle}
         >
-          <Settings /> 설정
+          <Settings /> {msg().common.settings}
         </button>
         <button
           type="button"
           className="ghost-btn small"
           onClick={() => void recordings.refresh()}
-          title="새로고침"
-          aria-label="새로고침"
+          title={m.refresh}
+          aria-label={m.refresh}
         >
           <RefreshCw />
         </button>
@@ -194,7 +195,7 @@ export function RecordingsPanel({ doc, focusedSlide, active, providers, choice, 
               </span>
               <span className="muted small">{Math.round(u.fraction * 100)}%</span>
               <button type="button" className="ghost-btn tiny" onClick={() => cancelRecordingUpload(u.id)}>
-                취소
+                {msg().common.cancel}
               </button>
             </div>
             <ProgressBar fraction={u.fraction} />
@@ -202,33 +203,39 @@ export function RecordingsPanel({ doc, focusedSlide, active, providers, choice, 
         ))}
         {recordings.error && (
           <div className="inline-error">
-            <TriangleAlert /> 녹음 목록을 불러오지 못했어요: {recordings.error}{' '}
+            <TriangleAlert /> {m.listFailed(recordings.error)}{' '}
             <button type="button" className="ghost-btn small" onClick={() => void recordings.refresh()}>
-              다시 시도
+              {msg().common.retry}
             </button>
           </div>
         )}
-        {list === null && !recordings.error && <div className="notes-empty muted">불러오는 중…</div>}
+        {list === null && !recordings.error && <div className="notes-empty muted">{msg().common.loading}</div>}
         {list !== null && list.length === 0 && uploads.length === 0 && (
           <div className="rec-empty">
             <div className="chat-empty-icon" aria-hidden>
               <Mic />
             </div>
-            <h3>아직 녹음이 없어요</h3>
+            <h3>{m.emptyTitle}</h3>
             <p>
-              수업 중에 <b><Mic /> 녹음 시작</b>을 누르면 강의를 녹음하면서 바로 받아써요. 이미 녹음한 파일은 <b><Upload /> 녹음 파일 올리기</b>로
-              올리면 돼요.
+              {m.emptyBody(
+                <b>
+                  <Mic /> {m.start}
+                </b>,
+                <b>
+                  <Upload /> {m.upload}
+                </b>,
+              )}
             </p>
             <ul className="tips">
-              <li><MessageCircle /> 녹음하는 동안 질문하면 최근 몇 분 동안 교수님이 한 말도 튜터에게 함께 전달돼요</li>
-              <li><Files /> 받아쓴 문장은 슬라이드별로 나뉘고, 튜터가 그 슬라이드에서 한 말을 알고 설명해요</li>
-              <li><Play /> 나중에 문장을 누르면 그 부분부터 다시 들을 수 있고, 슬라이드도 따라 넘어가요</li>
-              <li><Lock /> 받아쓰기는 서버 컴퓨터에서 해요 (녹음을 인터넷으로 보내지 않아요)</li>
+              <li><MessageCircle /> {m.tipAsk}</li>
+              <li><Files /> {m.tipSlides}</li>
+              <li><Play /> {m.tipReplay}</li>
+              <li><Lock /> {m.tipLocal}</li>
             </ul>
           </div>
         )}
         {list !== null && list.length > 0 && (
-          <ul className="rec-list" aria-label="녹음 목록">
+          <ul className="rec-list" aria-label={m.list}>
             {list.map((r) => (
               <RecordingRow key={r.id} info={r} selected={r.id === selected?.id} onSelect={() => setPicked(r.id)} />
             ))}
@@ -342,7 +349,7 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
   const [duration, setDuration] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [rate, setRateState] = useState(() => readStorage(storageKeys.playbackRate, 1, isPlaybackRate));
-  const [audioError, setAudioError] = useState<string | null>(null);
+  const [audioError, setAudioError] = useState<AudioError | null>(null);
   /**
    * Reload the audio of a live recording to reach its newest part: the live WAV has the length it had when it was
    * loaded, so a player opened during the recording is reloaded when the recording ends, and a seek past the loaded
@@ -387,7 +394,7 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
   const playFrom = useCallback((t: number) => {
     const audio = audioRef.current;
     if (!audio) {
-      toast('아직 재생할 수 있는 파일이 없어요.', 'info');
+      toast(msg().recording.detail.noPlayableFile, 'info');
       return;
     }
     if (liveRef.current && pastLoadedEnd(audio.duration, t)) {
@@ -400,14 +407,14 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
     // From inside the click: allowed to start playback. Not awaited (DESIGN: do not await play() for UI state).
     void audio.play().catch((e: unknown) => {
       if (e instanceof DOMException && e.name === 'AbortError') return;
-      setAudioError('재생하지 못했어요. 이 브라우저가 이 형식을 재생할 수 없을 수 있어요.');
+      setAudioError('format');
     });
   }, [reloadAudio]);
 
   const togglePlay = () => {
     const audio = audioRef.current;
     if (!audio) return;
-    if (audio.paused) void audio.play().catch(() => setAudioError('재생하지 못했어요.'));
+    if (audio.paused) void audio.play().catch(() => setAudioError('play'));
     else audio.pause();
   };
 
@@ -462,17 +469,16 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
       recordings.patch(next);
       updateFeedInfo(next);
     } catch (e) {
-      toast(`이름을 바꾸지 못했어요: ${api.recordingErrorMessage(e)}`, 'error');
+      toast(msg().recording.detail.renameFailed(api.recordingErrorMessage(e)), 'error');
     }
   };
 
   const remove = async () => {
+    const d = msg().recording.detail;
     const ok = await confirmDialog({
-      title: `${withParticle(`‘${info.title}’ 녹음`, '을', '를')} 삭제할까요?`,
-      message:
-        (live ? '녹음을 멈추고 삭제해요. ' : '') +
-        '녹음 파일과 받아쓴 글, 슬라이드 정렬이 모두 지워지고 되돌릴 수 없어요. 튜터도 이 녹음의 내용을 더 이상 쓰지 않아요.',
-      confirmLabel: '녹음 삭제',
+      title: d.deleteConfirm.title(info.title),
+      message: live ? d.deleteConfirm.messageLive : d.deleteConfirm.message,
+      confirmLabel: d.deleteConfirm.confirmLabel,
       danger: true,
     });
     if (!ok) return;
@@ -482,9 +488,9 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
       await api.deleteRecording(doc.id, info.id);
       writeStorage(storageKeys.recordingMarkers(info.id), null);
       recordings.removeLocally(info.id);
-      toast(`‘${info.title}’ 녹음을 삭제했어요.`, 'success');
+      toast(d.deleted(info.title), 'success');
     } catch (e) {
-      toast(`녹음을 삭제하지 못했어요: ${api.recordingErrorMessage(e)}`, 'error');
+      toast(d.deleteFailed(api.recordingErrorMessage(e)), 'error');
     }
     void recordings.refresh();
   };
@@ -493,11 +499,8 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
     (action: MarkerAction) => {
       void applyMarker(action).then((ok) => {
         if (ok && action.type === 'add') {
-          toast(
-            action.slide === null ? '여기부터 슬라이드 밖으로 표시하고 다시 정렬했어요.' : `여기부터 p.${action.slide}로 표시하고 다시 정렬했어요.`,
-            'success',
-            2500,
-          );
+          const d = msg().recording.detail;
+          toast(action.slide === null ? d.markedOff : d.markedSlide(action.slide), 'success', 2500);
         }
       });
     },
@@ -514,15 +517,14 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
     const next = await finishRecordingElsewhere(info);
     if (next) recordings.patch(next);
   };
+  const m = msg().recording.detail;
   const menuSections = [
     {
       items: [
-        ...(recordingElsewhere ? [{ key: 'finish', label: '녹음 끝내기', hint: '다른 기기의 녹음', onSelect: () => void finishElsewhere() }] : []),
-        { key: 'rename', label: '이름 바꾸기', onSelect: () => setRenaming(true) },
-        ...(markers.length > 0
-          ? [{ key: 'clear', label: '직접 표시한 구간 모두 지우기', onSelect: () => onMarker({ type: 'clear' }) }]
-          : []),
-        { key: 'delete', label: '녹음 삭제', danger: true, onSelect: () => void remove() },
+        ...(recordingElsewhere ? [{ key: 'finish', label: m.finish, hint: m.finishHint, onSelect: () => void finishElsewhere() }] : []),
+        { key: 'rename', label: msg().common.rename, onSelect: () => setRenaming(true) },
+        ...(markers.length > 0 ? [{ key: 'clear', label: m.clearMarkers, onSelect: () => onMarker({ type: 'clear' }) }] : []),
+        { key: 'delete', label: m.delete, danger: true, onSelect: () => void remove() },
       ],
     },
   ];
@@ -549,7 +551,7 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
               defaultValue={info.title}
               maxLength={120}
               autoFocus
-              aria-label="녹음 이름"
+              aria-label={m.nameLabel}
               onKeyDown={(e) => {
                 if (e.key === 'Escape') {
                   e.preventDefault();
@@ -570,25 +572,19 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
           className={aiOpen ? 'ghost-btn small is-active' : 'ghost-btn small'}
           onClick={() => setAiOpen((o) => !o)}
           disabled={info.transcriptStatus !== 'ready' || live || aligning}
-          title={
-            aligning
-              ? 'AI가 정렬하고 있어요'
-              : info.transcriptStatus !== 'ready' || live
-                ? '받아쓰기가 끝난 뒤에 할 수 있어요'
-                : 'LLM이 받아쓴 글과 슬라이드를 비교해서 더 정확하게 나눠요'
-          }
+          title={aligning ? m.aligningTitle : info.transcriptStatus !== 'ready' || live ? m.alignAfterTranscript : m.alignTitle}
         >
           {aligning ? (
             <>
-              <Hourglass /> AI 정렬 중…
+              <Hourglass /> {m.aligning}
             </>
           ) : (
             <>
-              <Bot /> AI 정밀 정렬
+              <Bot /> {m.align}
             </>
           )}
         </button>
-        <PopoverMenu label={`‘${info.title}’ 녹음 메뉴`} sections={menuSections} />
+        <PopoverMenu label={m.menu(info.title)} sections={menuSections} />
       </div>
       <div className="rec-detail-meta">
         <StatusBadge status={status} />
@@ -599,7 +595,7 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
         )}
         {info.hasManualMarkers && (
           <span className="rec-badge tone-muted">
-            <MapPin /> 직접 표시
+            <MapPin /> {m.manualMarkers}
           </span>
         )}
         <span className="muted small">
@@ -623,23 +619,28 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
 
       {info.hasManualMarkers && markers.length === 0 && (
         <p className="msg-note">
-          <MapPin /> 다른 기기(또는 브라우저)에서 직접 표시한 구간이 있어요. 여기서 새로 표시하면 그 표시를 대신해요.
+          <MapPin /> {m.markersElsewhere}
         </p>
       )}
       {markers.length > 0 && (
         <div className="rec-markers">
-          <span className="muted small">직접 표시한 구간{markersPending ? ' (다시 정렬하는 중…)' : ''}:</span>
-          {markers.map((m) => (
-            <span key={m.t} className="rec-marker-chip">
-              <button type="button" className="rec-marker-go" onClick={() => playFrom(m.t)} title="여기부터 재생">
-                {formatClock(m.t)} {markerLabel(m).replace('여기부터 ', '→ ')}
+          <span className="muted small">{markersPending ? m.markersRealigning : m.markers}</span>
+          {markers.map((mk) => (
+            <span key={mk.t} className="rec-marker-chip">
+              <button
+                type="button"
+                className="rec-marker-go"
+                onClick={() => playFrom(mk.t)}
+                title={msg().recording.transcript.playFromHere}
+              >
+                {formatClock(mk.t)} {markerShortLabel(mk)}
               </button>
               <button
                 type="button"
                 className="rec-marker-x"
-                onClick={() => onMarker({ type: 'remove', t: m.t })}
-                aria-label={`${formatClock(m.t)} 표시 지우기`}
-                title="이 표시 지우기"
+                onClick={() => onMarker({ type: 'remove', t: mk.t })}
+                aria-label={m.removeMarkerAt(formatClock(mk.t))}
+                title={msg().recording.transcript.removeMarker}
               >
                 <X size="1em" />
               </button>
@@ -649,28 +650,28 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
       )}
 
       <div className="rec-transcript-bar">
-        <div className="segmented" role="group" aria-label="받아쓴 글 보기 방식">
+        <div className="segmented" role="group" aria-label={m.viewMode}>
           <button type="button" aria-pressed={mode === 'current'} onClick={() => setMode('current')}>
-            현재 슬라이드 (p.{focusedSlide})
+            {m.currentSlide(focusedSlide)}
           </button>
           <button type="button" aria-pressed={mode === 'all'} onClick={() => setMode('all')}>
-            전체
+            {m.all}
           </button>
         </div>
-        {segments.length > 0 && <span className="muted small">{segments.length}문장</span>}
+        {segments.length > 0 && <span className="muted small">{m.sentences(segments.length)}</span>}
       </div>
 
       <div className="rec-transcript" ref={scrollRef}>
         {feed?.error && (
           <div className="inline-error">
-            <TriangleAlert /> 받아쓴 글을 불러오지 못했어요: {feed.error}{' '}
+            <TriangleAlert /> {m.transcriptFailed(feed.error)}{' '}
             <button type="button" className="ghost-btn small" onClick={() => recordingFeed(doc.id, info.id).reload()}>
-              다시 시도
+              {msg().common.retry}
             </button>
           </div>
         )}
         {feed && !feed.loaded ? (
-          <div className="notes-empty muted">불러오는 중…</div>
+          <div className="notes-empty muted">{msg().common.loading}</div>
         ) : (
           <Transcript
             segments={segments}
@@ -711,7 +712,7 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
                   setTime(t);
                   if (seek.play) {
                     void audio.play().catch((err: unknown) => {
-                      if (!(err instanceof DOMException && err.name === 'AbortError')) setAudioError('재생하지 못했어요. 재생 버튼을 눌러 주세요.');
+                      if (!(err instanceof DOMException && err.name === 'AbortError')) setAudioError('pressPlay');
                     });
                   }
                 }
@@ -722,9 +723,9 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
               }}
               onPause={() => setPlaying(false)}
               onEnded={() => setPlaying(false)}
-              onError={() => setAudioError('녹음 파일을 불러오지 못했어요.')}
+              onError={() => setAudioError('load')}
             />
-            <button type="button" className="rec-play" onClick={togglePlay} aria-label={playing ? '일시정지' : '재생'}>
+            <button type="button" className="rec-play" onClick={togglePlay} aria-label={playing ? m.pause : m.play}>
               {playing ? <Pause fill="currentColor" /> : <Play fill="currentColor" />}
             </button>
             <span className="rec-player-time">
@@ -745,32 +746,32 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
                 if (live && pastLoadedEnd(audio.duration, t)) reloadAudio({ t, play: !audio.paused });
                 else audio.currentTime = t;
               }}
-              aria-label="재생 위치"
+              aria-label={m.position}
             />
             <PlaybackRate rate={rate} onChange={setRate} />
-            <label className="rec-follow" title="재생하는 동안 슬라이드 창이 지금 설명 중인 슬라이드로 넘어가요">
+            <label className="rec-follow" title={m.followTitle}>
               <input type="checkbox" checked={follow} onChange={(e) => setFollow(e.target.checked)} />
-              <span>슬라이드 따라가기</span>
+              <span>{m.follow}</span>
             </label>
-            <label className="rec-follow" title="재생하는 동안 그때까지 쓴 필기(형광·메모 등)만 슬라이드에 보여요">
+            <label className="rec-follow" title={m.replayTitle}>
               <input type="checkbox" checked={replayOn} onChange={(e) => setReplayOn(e.target.checked)} />
-              <span>그때 필기 재생</span>
+              <span>{m.replay}</span>
             </label>
             {live && (
               <button
                 type="button"
                 className="ghost-btn tiny"
                 onClick={() => setAudioEpoch((n) => n + 1)}
-                title="녹음 중인 부분까지 다시 불러와요"
+                title={m.latestTitle}
               >
-                <RefreshCw /> 최신
+                <RefreshCw /> {m.latest}
               </button>
             )}
-            {audioError && <span className="rec-player-error">{audioError}</span>}
+            {audioError && <span className="rec-player-error">{m.audioErrors[audioError]}</span>}
           </>
         ) : (
           <span className="muted small">
-            {info.status === 'converting' ? '재생할 파일을 만드는 중이에요…' : '아직 재생할 수 있는 파일이 없어요.'}
+            {info.status === 'converting' ? m.preparing : m.noPlayableFile}
           </span>
         )}
       </div>
@@ -805,24 +806,22 @@ function AiAlignForm({
     try {
       // No model: the server runs the alignment on a small, fast one (Haiku), not the chat's model.
       await api.alignRecordingWithAi(doc.id, info.id, { provider });
-      toast('AI 정밀 정렬을 시작했어요. 끝나면 받아쓴 글의 슬라이드 구분이 바뀌어요.', 'success');
+      toast(msg().recording.aiAlign.started, 'success');
       onStarted();
     } catch (e) {
-      toast(`AI 정밀 정렬을 시작하지 못했어요: ${api.recordingErrorMessage(e)}`, 'error');
+      toast(msg().recording.aiAlign.failed(api.recordingErrorMessage(e)), 'error');
     } finally {
       setBusy(false);
     }
   };
 
+  const m = msg().recording.aiAlign;
   return (
     <div className="rec-ai">
-      <p className="small">
-        LLM이 받아쓴 글과 슬라이드(정리본이 있으면 정리본)를 직접 비교해서, 어느 문장이 어느 슬라이드 설명인지 다시 나눠요. 직접 표시한
-        구간(<MapPin />)은 그대로 지켜요. 몇 분 걸리고 LLM 사용량이 들어요.
-      </p>
+      <p className="small">{m.intro(<MapPin />)}</p>
       {available.length === 0 ? (
         <p className="warn-text">
-          <TriangleAlert /> 사용할 수 있는 LLM이 없어요.
+          <TriangleAlert /> {m.noLlm}
         </p>
       ) : (
         <div className="rec-ai-actions">
@@ -830,7 +829,7 @@ function AiAlignForm({
             className="picker small"
             value={provider}
             onChange={(e) => setProvider(e.target.value as ProviderId)}
-            aria-label="정렬에 쓸 LLM"
+            aria-label={m.llmLabel}
           >
             {available.map((p) => (
               <option key={p.id} value={p.id}>
@@ -839,9 +838,9 @@ function AiAlignForm({
             ))}
           </select>
           <button type="button" className="primary-btn small" disabled={busy || !provider} onClick={() => void start()}>
-            {busy ? '시작하는 중…' : '정렬 시작'}
+            {busy ? m.starting : m.start}
           </button>
-          {selectedProvider && <span className="muted small">모델: {aiAlignModelLabel(selectedProvider)}</span>}
+          {selectedProvider && <span className="muted small">{m.model(aiAlignModelLabel(selectedProvider))}</span>}
         </div>
       )}
     </div>

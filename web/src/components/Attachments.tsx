@@ -4,6 +4,7 @@ import type { Attachment } from '../../../shared/types.ts';
 import { attachmentUrl, checkSessionSoon } from '../api.ts';
 import { useLoginEpoch } from '../hooks/useAuth.ts';
 import { useLatest } from '../hooks/useLatest.ts';
+import { msg } from '../i18n/index.ts';
 import { attachmentLabel, attachmentTitle, type Chip } from '../lib/attachments.ts';
 import { inDialog } from './SlideViewer.tsx';
 
@@ -29,7 +30,7 @@ export function AttachmentImage({
   const [failedAt, setFailedAt] = useState<number | null>(null);
   if (failedAt === epoch) {
     return (
-      <span className="att-img-missing" role="img" aria-label="이미지를 불러오지 못했어요">
+      <span className="att-img-missing" role="img" aria-label={msg().chat.attachments.imageLoadFailed}>
         <ImageIcon />
       </span>
     );
@@ -54,6 +55,7 @@ export function AttachmentImage({
 export function AttachmentThumbs({ attachments, className }: { attachments?: Attachment[]; className?: string }) {
   const actions = useContext(AttachmentContext);
   if (!actions || !attachments || attachments.length === 0) return null;
+  const m = msg().chat.attachments;
   return (
     <div className={className ? `att-thumbs ${className}` : 'att-thumbs'}>
       {attachments.map((a) => (
@@ -62,7 +64,7 @@ export function AttachmentThumbs({ attachments, className }: { attachments?: Att
           type="button"
           className={`att-thumb kind-${a.kind}`}
           onClick={() => actions.open(a)}
-          title={a.kind === 'region' ? `${attachmentTitle(a)} — 클릭하면 크게 보고 슬라이드에서 위치를 보여줘요` : `${attachmentTitle(a)} — 클릭하면 크게 봐요`}
+          title={a.kind === 'region' ? m.openRegionTitle(attachmentTitle(a)) : m.openImageTitle(attachmentTitle(a))}
         >
           <AttachmentImage docId={actions.docId} attachment={a} />
           <span className="att-thumb-label">{attachmentLabel(a)}</span>
@@ -85,8 +87,9 @@ export function AttachmentChips({
   onRemove: (key: string) => void;
 }) {
   if (chips.length === 0) return null;
+  const m = msg().chat.attachments;
   return (
-    <ul className="att-chips" aria-label="질문에 첨부할 항목">
+    <ul className="att-chips" aria-label={m.chipsLabel}>
       {chips.map((c) => {
         const ready = c.status === 'ready' && c.attachment;
         return (
@@ -99,11 +102,11 @@ export function AttachmentChips({
               title={
                 ready
                   ? c.kind === 'region'
-                    ? `${c.title} — 클릭하면 크게 보고 슬라이드에서 위치를 보여줘요`
-                    : `${c.title} — 클릭하면 크게 봐요`
+                    ? m.openRegionTitle(c.title)
+                    : m.openImageTitle(c.title)
                   : c.kind === 'region'
-                    ? '영역을 잘라내는 중…'
-                    : `올리는 중… ${Math.round(c.progress * 100)}%`
+                    ? m.cropping
+                    : m.uploading(Math.round(c.progress * 100))
               }
             >
               <span className="att-chip-thumb" aria-hidden>
@@ -128,8 +131,8 @@ export function AttachmentChips({
               type="button"
               className="att-chip-remove"
               onClick={() => onRemove(c.key)}
-              aria-label={`${c.label} 첨부 빼기`}
-              title="첨부 빼기"
+              aria-label={m.removeLabel(c.label)}
+              title={m.removeTitle}
             >
               <X size="1em" />
             </button>
@@ -173,6 +176,7 @@ export function AttachmentPreview({
     };
   }, [attachment.id, onCloseRef]);
 
+  const m = msg().chat.attachments;
   const region = attachment.kind === 'region';
   const text = region ? (attachment.text ?? '').trim() : '';
   return (
@@ -195,10 +199,10 @@ export function AttachmentPreview({
           <span className="spacer" />
           {region && attachment.slide !== undefined && (
             <button type="button" className="ghost-btn small" onClick={() => onShowOnSlide(attachment)}>
-              <FileText /> p.{attachment.slide}에서 보기
+              <FileText /> {m.showOnSlide(attachment.slide)}
             </button>
           )}
-          <button ref={closeRef} type="button" className="icon-btn small" onClick={onClose} aria-label="닫기" title="닫기 (Esc)">
+          <button ref={closeRef} type="button" className="icon-btn small" onClick={onClose} aria-label={msg().common.close} title={m.closeTitle}>
             <X />
           </button>
         </div>
@@ -207,11 +211,11 @@ export function AttachmentPreview({
         </div>
         {region && (
           <details className="att-preview-text">
-            <summary>선택 영역의 텍스트{text ? '' : ' (없음)'}</summary>
+            <summary>{m.regionText(!text)}</summary>
             {text ? (
               <pre>{text}</pre>
             ) : (
-              <p className="muted small">이 영역에는 PDF 텍스트가 없어요. LLM은 이미지로 읽어요.</p>
+              <p className="muted small">{m.noPdfText}</p>
             )}
           </details>
         )}

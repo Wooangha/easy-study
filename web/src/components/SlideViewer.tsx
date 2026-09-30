@@ -19,6 +19,7 @@ import { useAnnotations } from '../hooks/useAnnotations.ts';
 import { useLoginEpoch } from '../hooks/useAuth.ts';
 import { useLatest } from '../hooks/useLatest.ts';
 import { useTextLayout } from '../hooks/useTextLayout.ts';
+import { msg, useLang } from '../i18n/index.ts';
 import {
   itemBounds,
   memoAt,
@@ -50,6 +51,7 @@ import {
   LONG_PRESS_SLOP_PX,
   MIN_DRAG_PX,
   MIN_REGION_PX,
+  explainRegionPrompt,
   framePixels,
   imageFrame,
   menuPlacement,
@@ -149,7 +151,7 @@ interface MenuActions {
 }
 
 const FLASH_MS = 2200;
-/** Rough width of the floating menu, to keep it inside the slide. */
+/** Rough width of the floating menu, to keep it inside the slide (at least: a wider menu — a longer language — is measured). */
 const MENU_WIDTH_PX = 250;
 /** A layout that takes longer than this to arrive does not hold a highlight back (a plain band is drawn). */
 const LAYOUT_WAIT_MS = 1500;
@@ -566,10 +568,11 @@ export function SlideViewer({
       const memos = items.filter((it): it is MemoItem => it.type === 'memo' && it.text.trim() !== '');
       if (memos.length > 0) {
         const one = items.length === 1;
+        const m = msg().viewer.confirmDelete;
         const ok = await confirmDialog({
-          title: one ? '메모를 지울까요?' : `필기 ${items.length}개를 지울까요?`,
-          message: one ? firstLine(memos[0].text, 80) : `글이 있는 메모 ${memos.length}개가 함께 지워져요`,
-          confirmLabel: '삭제',
+          title: one ? m.memoTitle : m.itemsTitle(items.length),
+          message: one ? firstLine(memos[0].text, 80) : m.itemsMessage(memos.length),
+          confirmLabel: msg().common.delete,
           danger: true,
         });
         if (!ok) return;
@@ -657,7 +660,7 @@ export function SlideViewer({
           if (g.itemId) {
             // Re-drag: the existing item takes the new words (its id, color and history stay); without a layout it is left alone.
             if (!fit) {
-              toast(result.pending ? '이 슬라이드의 글자 위치를 준비하는 중이에요 — 잠시 뒤 다시 해 보세요' : '이 슬라이드에서는 글자를 찾지 못했어요', 'info');
+              toast(result.pending ? msg().viewer.toasts.layoutPending : msg().viewer.toasts.noText, 'info');
               return;
             }
             if (mutate(slide, [{ op: 'update', id: g.itemId, patch: { rects: fit.rects, chars: fit.chars, engine: fit.engine, text: fit.text } }])) {
@@ -668,7 +671,7 @@ export function SlideViewer({
           if (fit) {
             item = newTextHighlight(seed(), fit);
           } else {
-            if (!result.layout && result.pending) toast('이 슬라이드의 글자 위치를 준비하는 중이에요 — 잠시 뒤 다시 해 보세요', 'info');
+            if (!result.layout && result.pending) toast(msg().viewer.toasts.layoutPending, 'info');
             item = newHighlight(seed(), snapBand(g.start, point, result.layout));
           }
           break;
@@ -971,7 +974,7 @@ export function SlideViewer({
     if (!g.active) return; // a plain click / tap
     if (!moved) {
       setSelection(null);
-      if (g.touch) toast('길게 누른 채로 끌어서 영역을 선택하세요', 'info', 2500);
+      if (g.touch) toast(msg().viewer.toasts.longPress, 'info', 2500);
       return;
     }
     const rect = regionFromPoints(g.start, point, size, MIN_REGION_PX);
@@ -1092,7 +1095,7 @@ export function SlideViewer({
       void s.ensureSlide(slide).then((loaded) => {
         const item = loaded?.items.find((it) => it.id === id);
         if (!item) {
-          toast('그 메모를 찾을 수 없어요', 'info');
+          toast(msg().viewer.toasts.memoNotFound, 'info');
           return;
         }
         if (shownRef.current.indexOf(slide) === -1) setFilterState(NO_FILTER);
@@ -1223,7 +1226,7 @@ export function SlideViewer({
       if (!s) return;
       const result = direction === 'undo' ? s.undo() : s.redo();
       if (!result) return;
-      toast(direction === 'undo' ? '되돌렸어요' : '다시 실행했어요', 'info', 1200);
+      toast(direction === 'undo' ? msg().viewer.toasts.undone : msg().viewer.toasts.redone, 'info', 1200);
       setItemSelection(null);
       if (result.slide !== focusedRef.current) scrollToSlide(result.slide);
     },
@@ -1311,9 +1314,11 @@ export function SlideViewer({
   const [jumpValue, setJumpValue] = useState('');
 
   // Question markers (DESIGN §25): derived from the notes and the loaded slide documents.
+  // `lang` re-derives them on a language change: a question sent without text is labelled in it (markers.ts noTextLabel).
+  const lang = useLang();
   const markers = useMemo(
     () => deriveMarkers(notes, (s) => snapshot.slides.get(s), markersShown && layerShown),
-    [notes, snapshot.slides, markersShown, layerShown],
+    [notes, snapshot.slides, markersShown, layerShown, lang],
   );
   // Selected items that vanished (deleted elsewhere, undone) leave the selection; none left → no menu.
   const selectedIdsKey = itemSelection ? itemSelection.ids.join(',') : '';
@@ -1361,6 +1366,7 @@ export function SlideViewer({
     );
   }
 
+  const m = msg().viewer;
   const viewerCls = [
     'viewer',
     (selection?.phase === 'drag' || draft) && 'is-selecting',
@@ -1387,7 +1393,7 @@ export function SlideViewer({
             <input
               className="page-jump-input"
               inputMode="numeric"
-              aria-label="이동할 슬라이드 번호"
+              aria-label={m.toolbar.jumpLabel}
               placeholder={String(focused)}
               value={jumpValue}
               onChange={(e) => setJumpValue(e.target.value.replace(/[^0-9]/g, ''))}
@@ -1417,17 +1423,17 @@ export function SlideViewer({
           {/* After the tools, taking the leftover width: the buttons never move when the hint changes with the state. */}
           <span
             className="viewer-hint"
-            title="키보드: j/k 또는 ↑/↓ 로 슬라이드 이동 · 도구 없이 빈 곳을 끌면 그 영역을 질문에 첨부해요 · 필기는 어느 도구에서든 클릭해서 옮기거나 지워요 (Shift+클릭으로 여러 개, 범위 선택 도구로 끌어서 여러 개) · ⌘Z/Ctrl+Z 되돌리기"
+            title={m.toolbar.keyboardTitle}
           >
             {toolHint(layerShown ? tool : 'select')}
           </span>
-          <div className="zoom-controls" role="group" aria-label="확대/축소">
+          <div className="zoom-controls" role="group" aria-label={m.toolbar.zoomGroup}>
             <button
               type="button"
               className="icon-btn"
               onClick={() => stepZoom(-1)}
               disabled={zoomIndex <= 0}
-              title="축소"
+              title={m.toolbar.zoomOut}
             >
               −
             </button>
@@ -1435,17 +1441,17 @@ export function SlideViewer({
               type="button"
               className="zoom-label"
               onClick={() => setZoom(1)}
-              title="너비에 맞춤"
+              title={m.toolbar.zoomFitTitle}
               aria-pressed={zoom === 1}
             >
-              {zoom === 1 ? '맞춤' : `${Math.round(zoom * 100)}%`}
+              {zoom === 1 ? m.toolbar.zoomFit : `${Math.round(zoom * 100)}%`}
             </button>
             <button
               type="button"
               className="icon-btn"
               onClick={() => stepZoom(1)}
               disabled={zoomIndex >= ZOOM_LEVELS.length - 1}
-              title="확대"
+              title={m.toolbar.zoomIn}
             >
               ＋
             </button>
@@ -1460,7 +1466,7 @@ export function SlideViewer({
           onPointerUp={onPointerUp}
           onPointerCancel={onPointerCancel}
           tabIndex={0}
-          aria-label="슬라이드 (j/k 또는 ↑/↓ 로 이동, 빈 곳을 끌어서 영역 첨부)"
+          aria-label={m.slides.label}
         >
           <div
             className="slides-track"
@@ -1470,9 +1476,9 @@ export function SlideViewer({
             {slides}
             {filtering && shown.length === 0 && (
               <div className="annot-filter-empty">
-                <p>{filter.tag ? `#${filter.tag} 태그가 붙은 슬라이드가 없어요.` : '표시가 있는 슬라이드가 아직 없어요.'}</p>
+                <p>{filter.tag ? m.slides.filterEmptyTag(filter.tag) : m.slides.filterEmpty}</p>
                 <button type="button" className="ghost-btn small" onClick={() => setFilterState(NO_FILTER)}>
-                  모든 슬라이드 보기
+                  {m.slides.showAll}
                 </button>
               </div>
             )}
@@ -1488,11 +1494,11 @@ export function SlideViewer({
                 if (e.target === e.currentTarget) setSheet(null);
               }}
             >
-              <div className="memo-sheet" role="dialog" aria-label={`슬라이드 ${sheet.slide}의 메모`}>
+              <div className="memo-sheet" role="dialog" aria-label={m.slides.memoSheet(sheet.slide)}>
                 <div className="memo-sheet-head">
                   <span className="slide-chip">p.{sheet.slide}</span>
                   <span className="spacer" />
-                  <button type="button" className="icon-btn small" onClick={() => setSheet(null)} aria-label="닫기" title="닫기">
+                  <button type="button" className="icon-btn small" onClick={() => setSheet(null)} aria-label={msg().common.close} title={msg().common.close}>
                     <X />
                   </button>
                 </div>
@@ -1573,6 +1579,9 @@ const SlideItem = memo(function SlideItem({
   layerShown,
   unsaved,
 }: SlideItemProps) {
+  // memo(): the language is read here too, so a change re-renders the slide and its annotations.
+  useLang();
+  const m = msg().viewer.slides;
   // Tagged with the login epoch: images that failed while the session had ended load again after a login.
   const epoch = useLoginEpoch();
   const [failedAt, setFailedAt] = useState<number | null>(null);
@@ -1591,7 +1600,7 @@ const SlideItem = memo(function SlideItem({
     <div ref={setRef} className={cls} data-slide={slide} aria-current={focused ? 'true' : undefined}>
       <div className="slide-box" style={{ aspectRatio: aspect }}>
         {failed ? (
-          <div className="slide-error">슬라이드 {slide} 이미지를 불러오지 못했어요</div>
+          <div className="slide-error">{m.imageFailed(slide)}</div>
         ) : (
           sizes && (
             <SlideImage
@@ -1600,7 +1609,7 @@ const SlideItem = memo(function SlideItem({
               src={viewUrl(docId, slide, 1000)}
               srcSet={viewSrcSet(docId, slide)}
               sizes={sizes}
-              alt={`슬라이드 ${slide}`}
+              alt={m.imageAlt(slide)}
               draggable={false}
               onFail={() => setFailedAt(epoch)}
               onLoad={onImageLoad}
@@ -1632,7 +1641,7 @@ const SlideItem = memo(function SlideItem({
         )}
         <span className="slide-label">
           {pinned && (
-            <span role="img" aria-label="고정됨">
+            <span role="img" aria-label={m.pinned}>
               <Pin />{' '}
             </span>
           )}
@@ -1643,16 +1652,16 @@ const SlideItem = memo(function SlideItem({
             type="button"
             className="qa-badge"
             onClick={() => onOpenNotes(slide)}
-            title={`이 슬라이드의 Q&A ${qaCount}개 보기`}
-            aria-label={`이 슬라이드의 Q&A ${qaCount}개 보기`}
+            title={m.qaBadge(qaCount)}
+            aria-label={m.qaBadge(qaCount)}
           >
             <ChatIcon className="qa-badge-icon" />
             {qaCount}
           </button>
         )}
         {unsaved && (
-          <span className="annot-unsaved" title="이 슬라이드의 필기를 서버에 저장하지 못했어요. 연결되면 다음 수정과 함께 다시 저장해요.">
-            저장 안 됨
+          <span className="annot-unsaved" title={m.unsavedTitle}>
+            {m.unsaved}
           </span>
         )}
       </div>
@@ -1685,12 +1694,20 @@ function RegionMenu({
   askDisabledReason: string | null;
 }) {
   const attachRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     attachRef.current?.focus({ preventScroll: true });
   }, []);
   const pct = (n: number) => `${(n * 100).toFixed(3)}%`;
+  const m = msg().viewer.regionMenu;
+  const prompt = explainRegionPrompt();
+  // The menu's own width when it is wider than MENU_WIDTH_PX (its texts in another language), so it still ends inside the slide.
+  const [width, setWidth] = useState(MENU_WIDTH_PX);
+  useLayoutEffect(() => {
+    setWidth(Math.max(MENU_WIDTH_PX, Math.ceil(menuRef.current?.offsetWidth ?? 0)));
+  }, [m.attach, prompt]);
   const style: CSSProperties = {
-    left: `clamp(0px, ${pct(boxRect.x)}, calc(100% - ${MENU_WIDTH_PX}px))`,
+    left: `clamp(0px, ${pct(boxRect.x)}, calc(100% - ${width}px))`,
     top:
       placement === 'below'
         ? `calc(${pct(boxRect.y + boxRect.h)} + 8px)`
@@ -1700,25 +1717,26 @@ function RegionMenu({
   };
   return (
     <div
+      ref={menuRef}
       className={`region-menu is-${placement}`}
       style={style}
       role="toolbar"
-      aria-label={`슬라이드 ${slide}에서 선택한 영역`}
+      aria-label={m.label(slide)}
     >
-      <button ref={attachRef} type="button" className="region-menu-btn" onClick={menu.attach} title="질문에 첨부해요 (입력창 위에 표시돼요)">
-        <Paperclip /> 첨부
+      <button ref={attachRef} type="button" className="region-menu-btn" onClick={menu.attach} title={m.attachTitle}>
+        <Paperclip /> {m.attach}
       </button>
       <button
         type="button"
         className="region-menu-btn is-primary"
         onClick={menu.ask}
         disabled={askDisabledReason !== null}
-        title={askDisabledReason ?? '이 영역을 첨부해서 “이 부분 설명해줘”라고 바로 질문해요'}
+        title={askDisabledReason ?? m.askTitle(prompt)}
       >
         <ChatIcon className="region-menu-icon" />
-        이 부분 설명해줘
+        {prompt}
       </button>
-      <button type="button" className="region-menu-btn is-close" onClick={menu.cancel} aria-label="선택 취소" title="선택 취소 (Esc)">
+      <button type="button" className="region-menu-btn is-close" onClick={menu.cancel} aria-label={m.cancel} title={m.cancelTitle}>
         <X />
       </button>
     </div>

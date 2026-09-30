@@ -9,7 +9,8 @@
 // static dot: expanding it — inline, or as the sheet on narrow / touch screens — gives the dot that opens them).
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { BookOpen, ChevronDown, Link, Mic, Paperclip, X, type LucideIcon } from 'lucide-react';
-import type { MemoItem, MemoLink } from '../../../../shared/types.ts';
+import { MAX_MEMO_LINKS, type MemoItem, type MemoLink } from '../../../../shared/types.ts';
+import { msg } from '../../i18n/index.ts';
 import type { QuestionMarker } from '../../lib/annotations/markers.ts';
 import { capText, memoPreview, movePoint, withLink } from '../../lib/annotations/geometry.ts';
 import { memoFontSize, memoSheetFontSize } from '../../lib/annotations/text.ts';
@@ -164,10 +165,11 @@ export function MemoCard({ slide, item, selected, editing, mode, group = false, 
   const [linkButton, setLinkButton] = useState<HTMLButtonElement | null>(null);
   const closeLinking = useCallback(() => setLinking(false), []);
   const playhead = usePlayhead();
+  const m = msg().viewer.memo;
   const addLink = (link: MemoLink) => {
     const links = withLink(item.links, link);
     if (!links) {
-      toast('메모 하나에는 연결을 8개까지 넣을 수 있어요', 'error');
+      toast(m.tooManyLinks(MAX_MEMO_LINKS), 'error');
       return;
     }
     if (links.length !== item.links.length) actions.update(slide, item.id, { links });
@@ -177,34 +179,34 @@ export function MemoCard({ slide, item, selected, editing, mode, group = false, 
   const linkLabel = (link: MemoLink): { icon: LucideIcon | null; text: string; title: string; go: (() => void) | null } => {
     switch (link.kind) {
       case 'slide':
-        return { icon: null, text: `p.${link.slide}`, title: `슬라이드 ${link.slide}로 이동`, go: () => actions.goToSlide(link.slide) };
+        return { icon: null, text: `p.${link.slide}`, title: m.goToSlide(link.slide), go: () => actions.goToSlide(link.slide) };
       case 'doc': {
         const target = docs?.find((d) => d.id === link.docId);
-        const title = target ? target.title : docs ? '지워진 강의' : '…';
+        const title = target ? target.title : docs ? m.deletedLecture : '…';
         const page = link.slide ? ` · p.${link.slide}` : '';
         return {
           icon: BookOpen,
           text: `${title}${page}`,
-          title: target ? `‘${target.title}’ 열기${page}` : '이 강의는 지워졌어요',
+          title: target ? m.openLecture(target.title, page) : m.lectureDeleted,
           go: target ? () => actions.openDoc(link.docId, link.slide) : null,
         };
       }
       case 'recording':
-        return { icon: Mic, text: formatClock(link.t), title: '녹음의 이 순간 듣기 (녹음 탭)', go: () => actions.playRecording(link.rid, link.t) };
+        return { icon: Mic, text: formatClock(link.t), title: m.playMoment, go: () => actions.playRecording(link.rid, link.t) };
     }
   };
   const nowPlaying = playhead && playhead.docId === docId ? playhead : null;
 
-  const preview = memoPreview(item.text) || '메모';
+  const preview = memoPreview(item.text) || m.fallbackTitle;
   const menu: MenuSection[] = [
     {
       items: [
-        { key: 'attach', label: '질문에 첨부', icon: Paperclip, hint: '다음 질문과 함께', onSelect: () => actions.attach(slide, item.id) },
-        { key: 'link', label: '슬라이드·강의 연결', icon: Link, onSelect: () => setLinking(true) },
-        ...(nowPlaying ? [{ key: 'now', label: `지금 재생 위치 연결 (${formatClock(nowPlaying.t)})`, icon: Mic, onSelect: () => addLink({ kind: 'recording', rid: nowPlaying.rid, t: Math.round(nowPlaying.t * 1000) / 1000 }) }] : []),
-        { key: 'tutor', label: item.tutor ? '튜터에게 숨기기' : '튜터에게 보이기', onSelect: () => actions.update(slide, item.id, { tutor: !item.tutor }) },
-        ...(inline ? [{ key: 'collapse', label: '접기', onSelect: () => actions.update(slide, item.id, { collapsed: true }) }] : []),
-        { key: 'delete', label: '메모 삭제', danger: true, onSelect: () => actions.remove(slide, item.id) },
+        { key: 'attach', label: m.menuAttach, icon: Paperclip, hint: m.menuAttachHint, onSelect: () => actions.attach(slide, item.id) },
+        { key: 'link', label: m.menuLink, icon: Link, onSelect: () => setLinking(true) },
+        ...(nowPlaying ? [{ key: 'now', label: m.menuLinkNow(formatClock(nowPlaying.t)), icon: Mic, onSelect: () => addLink({ kind: 'recording', rid: nowPlaying.rid, t: Math.round(nowPlaying.t * 1000) / 1000 }) }] : []),
+        { key: 'tutor', label: item.tutor ? m.tutorHide : m.tutorShow, onSelect: () => actions.update(slide, item.id, { tutor: !item.tutor }) },
+        ...(inline ? [{ key: 'collapse', label: m.collapse, onSelect: () => actions.update(slide, item.id, { collapsed: true }) }] : []),
+        { key: 'delete', label: m.delete, danger: true, onSelect: () => actions.remove(slide, item.id) },
       ],
     },
   ];
@@ -251,19 +253,19 @@ export function MemoCard({ slide, item, selected, editing, mode, group = false, 
         onPointerMove={onHeaderPointerMove}
         onPointerUp={onHeaderPointerUp}
         onPointerCancel={() => endDrag(false)}
-        title={item.text.trim() ? `${item.text.trim().slice(0, 200)}${item.text.length > 200 ? '…' : ''}` : '메모 (클릭해서 펴기)'}
-        aria-label={`메모: ${preview}${item.tutor ? '' : ' · 튜터에게 숨김'}${marker ? ` · 질문 ${marker.count}개` : ''}`}
+        title={item.text.trim() ? `${item.text.trim().slice(0, 200)}${item.text.length > 200 ? '…' : ''}` : m.pillTitle}
+        aria-label={m.pillLabel(preview, !item.tutor, marker ? marker.count : null)}
       >
         <span className="memo-dot" aria-hidden />
         <span className="memo-pill-text">{preview}</span>
         {item.tags.length > 0 && <span className="memo-pill-tags">#{item.tags.length}</span>}
         {!item.tutor && (
-          <span className="memo-pill-hidden" title="튜터에게 숨김" aria-hidden>
+          <span className="memo-pill-hidden" title={m.tutorHidden} aria-hidden>
             <EyeIcon off />
           </span>
         )}
         {marker && (
-          <span className="memo-pill-q" title={`이 메모로 물어본 질문 ${marker.count}개 (메모를 펴면 볼 수 있어요)`} aria-hidden>
+          <span className="memo-pill-q" title={m.questionsTitle(marker.count)} aria-hidden>
             <QuestionDot count={marker.count} />
           </span>
         )}
@@ -286,17 +288,17 @@ export function MemoCard({ slide, item, selected, editing, mode, group = false, 
         onPointerMove={onHeaderPointerMove}
         onPointerUp={onHeaderPointerUp}
         onPointerCancel={() => endDrag(false)}
-        title={inline ? '끌어서 옮기기' : undefined}
+        title={inline ? m.dragTitle : undefined}
       >
         <span className="memo-dot" aria-hidden />
         {inline && (
-          <button type="button" className="memo-toggle" onClick={() => actions.update(slide, item.id, { collapsed: true })} aria-label="메모 접기" title="접기">
+          <button type="button" className="memo-toggle" onClick={() => actions.update(slide, item.id, { collapsed: true })} aria-label={m.collapseLabel} title={m.collapse}>
             <ChevronDown />
           </button>
         )}
         <span className="memo-head-title">{preview}</span>
         {!item.tutor && (
-          <span className="memo-head-hidden" role="img" title="튜터에게 숨김" aria-label="튜터에게 숨김">
+          <span className="memo-head-hidden" role="img" title={m.tutorHidden} aria-label={m.tutorHidden}>
             <EyeIcon off />
           </span>
         )}
@@ -305,15 +307,15 @@ export function MemoCard({ slide, item, selected, editing, mode, group = false, 
             <QuestionDot count={marker.count} />
           </MarkerButton>
         )}
-        <PopoverMenu label="메모 메뉴" sections={menu} />
+        <PopoverMenu label={m.menu} sections={menu} />
       </div>
       <textarea
         ref={textareaRef}
         className="memo-text"
         style={textStyle}
         value={text}
-        placeholder="메모…"
-        aria-label="메모 내용"
+        placeholder={m.placeholder}
+        aria-label={m.textLabel}
         rows={2}
         onChange={(e) => {
           const value = e.target.value;
@@ -347,15 +349,15 @@ export function MemoCard({ slide, item, selected, editing, mode, group = false, 
                   label
                 )}
               </button>
-              <button type="button" className="memo-link-x" onClick={() => removeLink(i)} aria-label={`연결 ${label} 빼기`} title="연결 빼기">
+              <button type="button" className="memo-link-x" onClick={() => removeLink(i)} aria-label={m.removeLink(label)} title={m.removeLinkTitle}>
                 <X size="1em" />
               </button>
             </span>
           );
         })}
         <span className="memo-link-add">
-          <button ref={setLinkButton} type="button" className="ghost-btn tiny" onClick={() => setLinking((v) => !v)} aria-expanded={linking} title="슬라이드나 다른 강의에 연결">
-            <Link /> 연결
+          <button ref={setLinkButton} type="button" className="ghost-btn tiny" onClick={() => setLinking((v) => !v)} aria-expanded={linking} title={m.linkTitle}>
+            <Link /> {m.link}
           </button>
           {linking && <LinkPicker anchor={linkButton} onPick={addLink} onClose={closeLinking} />}
         </span>
@@ -366,14 +368,14 @@ export function MemoCard({ slide, item, selected, editing, mode, group = false, 
           className={item.tutor ? 'memo-eye is-on' : 'memo-eye is-off'}
           aria-pressed={item.tutor}
           onClick={() => actions.update(slide, item.id, { tutor: !item.tutor })}
-          title={item.tutor ? '튜터에게 보이기 — 질문할 때 이 메모도 함께 가요 (클릭하면 숨김)' : '튜터에게 숨김 — 이 메모는 튜터가 보지 않아요 (클릭하면 보이기)'}
+          title={item.tutor ? m.tutorShownTitle : m.tutorHiddenTitle}
         >
           <EyeIcon off={!item.tutor} />
-          튜터에게 보이기
+          {m.tutorShow}
         </button>
         <span className="spacer" />
-        <button type="button" className="ghost-btn tiny" onClick={() => actions.attach(slide, item.id)} title="이 메모를 질문에 첨부해요 (입력창 위에 표시돼요)">
-          <Paperclip /> 첨부
+        <button type="button" className="ghost-btn tiny" onClick={() => actions.attach(slide, item.id)} title={m.attachTitle}>
+          <Paperclip /> {m.attach}
         </button>
       </div>
     </div>

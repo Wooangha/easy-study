@@ -3,16 +3,17 @@
 // screens a list on the left jumps to them. What is set here is this device's (browser storage), except the theme
 // inside the app, which the shell keeps for all of its windows.
 import { useLayoutEffect, useRef, useState, type ReactNode } from 'react';
-import { ExternalLink, Settings, TriangleAlert, X } from 'lucide-react';
+import { ExternalLink, Languages, Settings, TriangleAlert, X } from 'lucide-react';
 import type { HealthResponse } from '../../../shared/types.ts';
 import { useAsrStatus } from '../hooks/useAsrStatus.ts';
 import { useLatest } from '../hooks/useLatest.ts';
 import { NEIGHBOR_OPTIONS, useNeighbors } from '../hooks/useNeighbors.ts';
+import { msg } from '../i18n/index.ts';
+import { LangSelect } from '../i18n/LangSelect.tsx';
 import { useMemosToTutor, useQuestionMarkers } from '../lib/annotations/settings.ts';
 import { copyText } from '../lib/clipboard.ts';
 import { confirmDialog } from '../lib/confirm.ts';
 import {
-  MAC_MIC_HINT,
   SETTINGS_SECTIONS,
   compareVersions,
   desktopAction,
@@ -21,6 +22,7 @@ import {
   installBlockReason,
   isNameUrl,
   leaveConfirm,
+  macMicHint,
   readPageBusy,
   resetCodeConfirm,
   shareBlockReason,
@@ -33,25 +35,11 @@ import {
   type SettingsSection,
 } from '../lib/desktop.ts';
 import { storageKeys, writeStorage } from '../lib/storage.ts';
-import { setThemePref, useThemePref, type ThemePref } from '../lib/theme.ts';
+import { THEME_PREFS, setThemePref, useThemePref } from '../lib/theme.ts';
 import { toast } from '../lib/toast.ts';
 import { AsrSettings } from './recording/AsrSettings.tsx';
 import { Toaster } from './Toaster.tsx';
 import { UpdateProgress, startInstall } from './UpdateBanner.tsx';
-
-const SECTION_TITLES: Record<SettingsSection, string> = {
-  display: '화면',
-  study: '공부',
-  recording: '녹음',
-  desktop: '데스크톱 앱',
-  about: '정보',
-};
-
-const THEME_OPTIONS: Array<{ value: ThemePref; label: string }> = [
-  { value: 'system', label: '시스템 설정 따르기' },
-  { value: 'light', label: '라이트' },
-  { value: 'dark', label: '다크' },
-];
 
 interface SettingsDialogProps {
   open: boolean;
@@ -148,6 +136,8 @@ function SettingsContent({ section, onClose, health, busy }: Omit<SettingsDialog
     else sectionRefs.current.delete(s);
   };
 
+  const m = msg();
+  const titles = m.settings.dialog.sections;
   const content: Record<SettingsSection, ReactNode> = {
     display: <DisplaySection inApp={marker !== null} />,
     study: <StudySection />,
@@ -160,14 +150,14 @@ function SettingsContent({ section, onClose, health, busy }: Omit<SettingsDialog
     <>
       <header className="settings-head">
         <h2 id="settings-title" className="settings-title">
-          설정
+          {m.common.settings}
         </h2>
-        <button type="button" className="icon-btn" aria-label="닫기" title="닫기 (Esc)" onClick={onClose}>
+        <button type="button" className="icon-btn" aria-label={m.common.close} title={m.settings.dialog.closeTitle} onClick={onClose}>
           <X />
         </button>
       </header>
       <div className="settings-layout">
-        <nav className="settings-nav" aria-label="설정 항목">
+        <nav className="settings-nav" aria-label={m.settings.dialog.nav}>
           {sections.map((s) => (
             <button
               key={s}
@@ -176,7 +166,7 @@ function SettingsContent({ section, onClose, health, busy }: Omit<SettingsDialog
               aria-current={s === active ? 'true' : undefined}
               onClick={() => show(s)}
             >
-              {SECTION_TITLES[s]}
+              {titles[s]}
             </button>
           ))}
         </nav>
@@ -184,7 +174,7 @@ function SettingsContent({ section, onClose, health, busy }: Omit<SettingsDialog
           {sections.map((s) => (
             <section key={s} ref={register(s)} className="settings-section" aria-labelledby={`settings-${s}`}>
               <h3 id={`settings-${s}`} className="settings-section-title">
-                {SECTION_TITLES[s]}
+                {titles[s]}
               </h3>
               {content[s]}
             </section>
@@ -201,28 +191,36 @@ function SettingsContent({ section, onClose, health, busy }: Omit<SettingsDialog
 
 function DisplaySection({ inApp }: { inApp: boolean }) {
   const theme = useThemePref();
+  const m = msg().settings.display;
   return (
     <>
       <div className="settings-row">
         <span className="settings-label" id="settings-theme-label">
-          테마
+          {m.theme}
         </span>
         <div className="settings-seg" role="radiogroup" aria-labelledby="settings-theme-label">
-          {THEME_OPTIONS.map((o) => (
-            <label key={o.value}>
+          {THEME_PREFS.map((value) => (
+            <label key={value}>
               <input
                 type="radio"
                 name="settings-theme"
-                value={o.value}
-                checked={theme === o.value}
-                onChange={() => setThemePref(o.value)}
+                value={value}
+                checked={theme === value}
+                onChange={() => setThemePref(value)}
               />
-              <span>{o.label}</span>
+              <span>{m.themeOptions[value]}</span>
             </label>
           ))}
         </div>
       </div>
-      <p className="settings-hint">{inApp ? '앱의 모든 화면(연결 선택 화면 포함)에 적용돼요.' : '이 브라우저에만 저장돼요.'}</p>
+      {inApp && <p className="settings-hint">{m.themeHintApp}</p>}
+      <div className="settings-row settings-row-gap">
+        <label className="settings-label" htmlFor="settings-lang">
+          <Languages /> {m.language}
+        </label>
+        <LangSelect id="settings-lang" />
+      </div>
+      <p className="settings-hint">{inApp ? m.languageHintApp : m.browserOnlyHint}</p>
     </>
   );
 }
@@ -231,39 +229,41 @@ function StudySection() {
   const [neighbors, setNeighbors] = useNeighbors();
   const [memosToTutor, setMemosToTutor] = useMemosToTutor();
   const [markers, setMarkers] = useQuestionMarkers();
+  const m = msg().settings.study;
   return (
     <>
       <label className="settings-row">
-        <span className="settings-label">질문과 함께 보낼 앞뒤 슬라이드</span>
+        <span className="settings-label">{m.neighbors}</span>
         <select className="picker" value={neighbors} onChange={(e) => setNeighbors(Number(e.target.value))}>
           {NEIGHBOR_OPTIONS.map((n) => (
             <option key={n} value={n}>
-              {n === 0 ? '지금 슬라이드만' : `앞뒤 ${n}장`}
+              {n === 0 ? m.neighborsNone : m.neighborsCount(n)}
             </option>
           ))}
         </select>
       </label>
-      <p className="settings-hint">대화 창의 ‘앞뒤 ±N’과 같은 설정이에요.</p>
-      <h4 className="settings-sub">필기</h4>
+      <p className="settings-hint">{m.neighborsHint}</p>
+      <h4 className="settings-sub">{m.annotations}</h4>
       <label className="rec-setting rec-setting-check">
         <input type="checkbox" checked={memosToTutor} onChange={(e) => setMemosToTutor(e.target.checked)} />
-        <span>학생의 메모를 튜터에게 보이기</span>
+        <span>{m.memosToTutor}</span>
       </label>
-      <p className="settings-hint">질문할 때 지금 슬라이드와 앞뒤 슬라이드에 붙인 메모를 함께 전달해요. 메모마다 눈 모양 버튼(튜터에게 보이기)으로 따로 끌 수도 있어요.</p>
+      <p className="settings-hint">{m.memosToTutorHint}</p>
       <label className="rec-setting rec-setting-check">
         <input type="checkbox" checked={markers} onChange={(e) => setMarkers(e.target.checked)} />
-        <span>슬라이드에 질문 표시 보기</span>
+        <span>{m.questionMarkers}</span>
       </label>
-      <p className="settings-hint">슬라이드의 한 부분을 첨부해서 질문하면 그 부분이 옅게 칠해지고 왼쪽에 파란 줄과 Q 표시가 남아요. 필기나 메모를 첨부했으면 그 모서리에 파란 점이 붙어요. 표시를 클릭하면 그 질문과 답으로 가요.</p>
+      <p className="settings-hint">{m.questionMarkersHint}</p>
     </>
   );
 }
 
 function RecordingSection() {
   const asr = useAsrStatus(true);
+  const m = msg().settings.recording;
   return (
     <>
-      {asr.error && !asr.status && <div className="inline-error"><TriangleAlert /> 음성 인식 상태를 확인하지 못했어요: {asr.error}</div>}
+      {asr.error && !asr.status && <div className="inline-error"><TriangleAlert /> {m.asrStatusFailed(asr.error)}</div>}
       <AsrSettings asr={asr} />
       <div className="settings-actions">
         <button
@@ -271,10 +271,10 @@ function RecordingSection() {
           className="ghost-btn small"
           onClick={() => {
             writeStorage(storageKeys.recordingConsent, null);
-            toast('다음에 녹음할 때 안내를 다시 보여 드려요.', 'success');
+            toast(msg().settings.recording.noticeReset, 'success');
           }}
         >
-          녹음 안내 다시 보기
+          {m.showNoticeAgain}
         </button>
       </div>
     </>
@@ -295,7 +295,8 @@ async function chooseServer(busy: PageBusy): Promise<void> {
 /** The switch "다른 기기에서 접속 허용": the shell restarts this computer's server (the chooser shows meanwhile). */
 async function setShare(on: boolean, busy: PageBusy): Promise<void> {
   const warning = shareWarning(readPageBusy() ?? busy);
-  if (warning && !(await confirmDialog({ title: '서버를 다시 시작할까요?', message: warning, confirmLabel: '다시 시작' }))) return;
+  const m = msg().settings.share.restartConfirm;
+  if (warning && !(await confirmDialog({ title: m.title, message: warning, confirmLabel: m.confirmLabel }))) return;
   desktopAction(on ? 'share/on' : 'share/off');
 }
 
@@ -305,74 +306,68 @@ async function resetShareCode(busy: PageBusy): Promise<void> {
   desktopAction('share/reset-code');
 }
 
-function copyWithToast(text: string, what: string): void {
+/** Copies `text`, then says `done` (or that it could not). */
+function copyWithToast(text: string, done: string): void {
   copyText(text).then(
-    () => toast(`${what}를 복사했어요.`, 'success'),
-    () => toast('복사하지 못했어요.', 'error'),
+    () => toast(done, 'success'),
+    () => toast(msg().settings.copyFailed, 'error'),
   );
 }
 
 /** 다른 기기에서 접속 (this computer's server only, DESIGN §16/§19). */
 function ShareBlock({ share, busy }: { share: DesktopShare; busy: PageBusy }) {
   const blocked = shareBlockReason(busy);
+  const { common } = msg();
+  const m = msg().settings.share;
   return (
     <>
-      <h4 className="settings-sub">다른 기기에서 접속</h4>
+      <h4 className="settings-sub">{m.title}</h4>
       <label className="rec-setting rec-setting-check">
         <input type="checkbox" checked={share.on} disabled={blocked !== null} onChange={(e) => void setShare(e.target.checked, busy)} />
-        <span>다른 기기에서 접속 허용 (같은 네트워크, 접속 코드 필요)</span>
+        <span>{m.allow}</span>
       </label>
       {blocked && <p className="settings-hint">{blocked}</p>}
-      <p className="settings-hint">
-        같은 Wi‑Fi의 다른 컴퓨터·태블릿에서 이 컴퓨터의 easy-study를 쓸 수 있어요. 켜거나 끄면 이 컴퓨터의 서버를 다시 시작해요 (잠시
-        연결 선택 화면이 나와요). 코드를 아는 사람은 이 컴퓨터의 Claude/Codex로 질문하고 강의 파일을 보고 지울 수 있어요.
-      </p>
-      {share.on && !share.running && <p className="settings-hint">서버를 다시 시작하면 주소가 나와요.</p>}
+      <p className="settings-hint">{m.about}</p>
+      {share.on && !share.running && <p className="settings-hint">{m.restartForAddresses}</p>}
       {share.running && (
         <>
-          <p className="settings-line">다른 기기에서 열 주소</p>
-          {share.urls.length === 0 && <p className="settings-hint">네트워크 주소를 찾지 못했어요. Wi‑Fi나 이더넷에 연결한 뒤 스위치를 껐다 켜세요.</p>}
+          <p className="settings-line">{m.addresses}</p>
+          {share.urls.length === 0 && <p className="settings-hint">{m.noAddresses}</p>}
           {share.urls.map((url) => (
             <p key={url} className="settings-line">
               <span className="settings-path">
                 <code>{url}</code>
-                <button type="button" className="ghost-btn tiny" onClick={() => copyWithToast(url, '주소')}>
-                  복사
+                <button type="button" className="ghost-btn tiny" onClick={() => copyWithToast(url, m.copiedAddress)}>
+                  {common.copy}
                 </button>
-                {isNameUrl(url) && <span className="settings-status">(같은 네트워크에서 이름이 풀릴 때만)</span>}
+                {isNameUrl(url) && <span className="settings-status">{m.nameOnly}</span>}
               </span>
             </p>
           ))}
           <p className="settings-line">
             {share.code ? (
               <span className="settings-path">
-                접속 코드 <code>{share.code}</code>
-                <button type="button" className="ghost-btn tiny" onClick={() => copyWithToast(share.code!, '접속 코드')}>
-                  복사
+                {m.code} <code>{share.code}</code>
+                <button type="button" className="ghost-btn tiny" onClick={() => copyWithToast(share.code!, m.copiedCode)}>
+                  {common.copy}
                 </button>
               </span>
             ) : (
               <span className="settings-path">
-                접속 코드
+                {m.code}
                 <button type="button" className="ghost-btn tiny" onClick={() => desktopAction('share/reveal')}>
-                  보기
+                  {m.showCode}
                 </button>
-                <span className="settings-status">(연결 선택 화면의 <Settings /> 앱 설정에도 있어요)</span>
+                <span className="settings-status">{m.codeInChooser(<Settings />)}</span>
               </span>
             )}
           </p>
           <div className="settings-actions">
             <button type="button" className="ghost-btn small" disabled={blocked !== null} title={blocked ?? undefined} onClick={() => void resetShareCode(busy)}>
-              접속 코드 새로 만들기 (모든 기기 로그아웃)
+              {m.resetCode}
             </button>
           </div>
-          <p className="settings-hint">
-            macOS·Windows가 ‘node’의 네트워크 연결을 허용할지 물으면 허용하세요 (앱에 든 서버예요; 직접 빌드한 앱은 켤 때마다 물을 수
-            있어요). 다른 컴퓨터에서는 easy-study 앱의 ‘다른 컴퓨터에 연결’(녹음도 돼요) 또는 브라우저로 여세요. 태블릿·폰의
-            브라우저에서 녹음하려면 HTTPS가 필요해요. http로는 같은 네트워크의 누군가가 오가는 내용을 엿보거나 바꿀 수 있어요
-            (바뀐 화면은 마이크와 로그인까지 쓸 수 있어요): 믿을 수 있는 네트워크에서만 켜고, 다른 곳에서는 Tailscale·HTTPS를 쓰세요.
-            Wi‑Fi가 바뀌어 주소가 바뀌면 껐다 켜세요.
-          </p>
+          <p className="settings-hint">{m.networkHint}</p>
         </>
       )}
     </>
@@ -389,24 +384,25 @@ function DesktopSection({ marker, busy }: { marker: DesktopMarker; busy: PageBus
   const canInstall = !!pending && update.install === 'inApp';
   const blocked = installBlockReason(busy);
   const working = update?.phase === 'checking' || update?.phase === 'downloading' || update?.phase === 'installing';
+  const m = msg().settings.desktop;
 
   return (
     <>
-      <h4 className="settings-sub">업데이트</h4>
+      <h4 className="settings-sub">{m.updates}</h4>
       <p className="settings-line">
-        버전 <b>{update?.current ?? marker.version}</b>
+        {m.version(<b>{update?.current ?? marker.version}</b>)}
         {update && <span className="settings-status"> · {updateStatusLine(update)}</span>}
       </p>
       {update?.phase === 'downloading' && <UpdateProgress update={update} />}
       {pending && update.notes && (
         <details className="settings-notes">
-          <summary>새 버전의 변경 사항</summary>
+          <summary>{m.releaseNotes}</summary>
           <p>{update.notes}</p>
         </details>
       )}
       <div className="settings-actions">
         <button type="button" className="ghost-btn small" disabled={working} onClick={() => desktopAction('check-update')}>
-          업데이트 확인
+          {m.checkUpdate}
         </button>
         {canInstall && (
           <button
@@ -416,39 +412,35 @@ function DesktopSection({ marker, busy }: { marker: DesktopMarker; busy: PageBus
             title={blocked ?? undefined}
             onClick={() => void startInstall(busy)}
           >
-            업데이트하고 다시 시작
+            {m.installAndRestart}
           </button>
         )}
         {/* Also after an update that did not take (phase error: "다운로드 페이지에서 직접 설치해 주세요"). */}
         {(pending || update?.phase === 'error') && update.install === 'download' && update.releaseUrl && (
           <a className="ghost-btn small" href={update.releaseUrl} target="_blank" rel="noreferrer">
-            다운로드 페이지 열기 <ExternalLink />
+            {m.openDownloadPage} <ExternalLink />
           </a>
         )}
       </div>
       {canInstall && blocked && <p className="settings-hint">{blocked}</p>}
       {pending && update.install === 'download' && <p className="settings-hint">{downloadHint(update)}</p>}
-      {canInstall && mac && <p className="settings-hint">{MAC_MIC_HINT}</p>}
+      {canInstall && mac && <p className="settings-hint">{macMicHint()}</p>}
       {update?.auto === false && (
-        <p className="settings-hint">시작할 때 새 버전 확인은 꺼져 있어요 (연결 선택 화면의 <Settings /> 앱 설정에서 켤 수 있어요).</p>
+        <p className="settings-hint">{m.autoCheckOff(<Settings />)}</p>
       )}
 
-      <h4 className="settings-sub">연결</h4>
+      <h4 className="settings-sub">{m.connection}</h4>
       <p className="settings-line">
         {connection
           ? connection.kind === 'local'
-            ? '연결: 이 컴퓨터'
-            : `연결: 다른 컴퓨터 (${connection.origin})`
-          : `연결: ${window.location.origin}`}
+            ? m.connectedLocal
+            : m.connectedRemote(connection.origin)
+          : m.connectedTo(window.location.origin)}
       </p>
-      {connection && (
-        <p className="settings-line">
-          {connection.startup === 'auto' ? '시작할 때: 마지막 연결 대상에 바로 연결' : '시작할 때: 선택 화면 보여주기'}
-        </p>
-      )}
+      {connection && <p className="settings-line">{connection.startup === 'auto' ? m.startupAuto : m.startupAsk}</p>}
       <div className="settings-actions">
         <button type="button" className="ghost-btn small" onClick={() => void chooseServer(busy)}>
-          연결 대상 바꾸기…
+          {m.changeConnection}
         </button>
         {connection?.startup === 'auto' && (
           <button
@@ -456,16 +448,14 @@ function DesktopSection({ marker, busy }: { marker: DesktopMarker; busy: PageBus
             className="ghost-btn small"
             onClick={() => {
               desktopAction('forget-choice');
-              toast('다음에 앱을 열면 연결 선택 화면이 먼저 나와요.', 'success');
+              toast(msg().settings.desktop.askNextTimeDone, 'success');
             }}
           >
-            다음 실행 때 선택 화면 보기
+            {m.askNextTime}
           </button>
         )}
       </div>
-      <p className="settings-hint">
-        메뉴 연결 › 연결 대상 바꾸기… (<kbd>{mac ? '⌘⇧K' : 'Ctrl+Shift+K'}</kbd>)로도 바꿀 수 있어요.
-      </p>
+      <p className="settings-hint">{m.menuHint(<kbd>{mac ? '⌘⇧K' : 'Ctrl+Shift+K'}</kbd>)}</p>
       {share && <ShareBlock share={share} busy={busy} />}
     </>
   );
@@ -481,35 +471,38 @@ function AboutSection({ health, marker }: { health: HealthResponse | null; marke
   // A server from before the version was reported is older than any app that asks.
   const olderServer = marker !== null && remote && health !== null && (!health.version || compareVersions(health.version, marker.version) < 0);
   const mod = marker?.os === 'macos' ? '⌘' : 'Ctrl+';
+  const { common } = msg();
+  const m = msg().settings.about;
+  const k = m.keys;
   const keys: Array<[ReactNode, string]> = [
-    [<><kbd>j</kbd> <kbd>↓</kbd> <kbd>PageDown</kbd></>, '다음 슬라이드'],
-    [<><kbd>k</kbd> <kbd>↑</kbd> <kbd>PageUp</kbd></>, '이전 슬라이드'],
-    [<><kbd>Home</kbd> <kbd>End</kbd></>, '첫 슬라이드 · 마지막 슬라이드'],
-    [<kbd>/</kbd>, '질문 입력창으로'],
-    [<kbd>Enter</kbd>, '질문 보내기'],
-    [<><kbd>Shift</kbd>+<kbd>Enter</kbd></>, '줄 바꾸기'],
-    [<kbd>Esc</kbd>, '창 닫기 · 필기 도구 끄기 · 선택 해제'],
-    [<kbd>{`${mod}Z`}</kbd>, '필기 되돌리기'],
-    [<kbd>{marker?.os === 'macos' || !marker ? '⌘⇧Z' : 'Ctrl+Y'}</kbd>, '필기 다시 실행'],
-    [<kbd>Delete</kbd>, '선택한 필기 삭제'],
+    [<><kbd>j</kbd> <kbd>↓</kbd> <kbd>PageDown</kbd></>, k.nextSlide],
+    [<><kbd>k</kbd> <kbd>↑</kbd> <kbd>PageUp</kbd></>, k.previousSlide],
+    [<><kbd>Home</kbd> <kbd>End</kbd></>, k.firstLastSlide],
+    [<kbd>/</kbd>, k.focusComposer],
+    [<kbd>Enter</kbd>, k.send],
+    [<><kbd>Shift</kbd>+<kbd>Enter</kbd></>, k.newLine],
+    [<kbd>Esc</kbd>, k.escape],
+    [<kbd>{`${mod}Z`}</kbd>, k.undo],
+    [<kbd>{marker?.os === 'macos' || !marker ? '⌘⇧Z' : 'Ctrl+Y'}</kbd>, k.redo],
+    [<kbd>Delete</kbd>, k.deleteSelected],
   ];
   if (marker) {
-    keys.push([<kbd>{`${mod},`}</kbd>, '설정 (앱)']);
-    keys.push([<kbd>{marker.os === 'macos' ? '⌘⇧K' : 'Ctrl+Shift+K'}</kbd>, '연결 대상 바꾸기 (앱)']);
+    keys.push([<kbd>{`${mod},`}</kbd>, k.settings]);
+    keys.push([<kbd>{marker.os === 'macos' ? '⌘⇧K' : 'Ctrl+Shift+K'}</kbd>, k.changeConnection]);
   }
 
   return (
     <>
       <dl className="settings-kv">
-        <dt>서버 버전</dt>
-        <dd>{health ? (health.version ?? '알 수 없음') : '불러오는 중…'}</dd>
+        <dt>{m.serverVersion}</dt>
+        <dd>{health ? (health.version ?? m.unknown) : common.loading}</dd>
         {marker && (
           <>
-            <dt>앱 버전</dt>
+            <dt>{m.appVersion}</dt>
             <dd>{marker.version}</dd>
           </>
         )}
-        <dt>라이브러리 폴더</dt>
+        <dt>{m.libraryFolder}</dt>
         <dd>
           {health ? (
             <span className="settings-path">
@@ -517,23 +510,18 @@ function AboutSection({ health, marker }: { health: HealthResponse | null; marke
               <button
                 type="button"
                 className="ghost-btn tiny"
-                onClick={() => {
-                  copyText(health.libraryDir).then(
-                    () => toast('라이브러리 폴더 경로를 복사했어요.', 'success'),
-                    () => toast('복사하지 못했어요.', 'error'),
-                  );
-                }}
+                onClick={() => copyWithToast(health.libraryDir, m.copiedLibraryFolder)}
               >
-                복사
+                {common.copy}
               </button>
             </span>
           ) : (
-            '불러오는 중…'
+            common.loading
           )}
         </dd>
       </dl>
-      {olderServer && <p className="settings-hint is-warn">이 서버는 앱보다 오래된 버전이에요. 서버 컴퓨터에서 업데이트해 주세요.</p>}
-      <h4 className="settings-sub">단축키</h4>
+      {olderServer && <p className="settings-hint is-warn">{m.olderServer}</p>}
+      <h4 className="settings-sub">{m.shortcuts}</h4>
       <table className="settings-keys">
         <tbody>
           {keys.map(([k, what]) => (
@@ -544,7 +532,7 @@ function AboutSection({ health, marker }: { health: HealthResponse | null; marke
           ))}
         </tbody>
       </table>
-      <p className="settings-hint">슬라이드 단축키는 글을 입력하는 중이 아닐 때 동작해요.</p>
+      <p className="settings-hint">{m.shortcutsHint}</p>
     </>
   );
 }

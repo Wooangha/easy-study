@@ -1,8 +1,9 @@
-// Token usage and subscription limits in the chat (DESIGN §23): compact Korean counts ("4.7만"), the exact numbers
+// Token usage and subscription limits in the chat (DESIGN §23): compact counts ("4.7만", in English "47.2K"), the exact numbers
 // for tooltips, and the limit windows with a warning level. Limits are the account's, not a session's: the newest
 // report of each provider is shown, whichever session it came from.
 import type { ChatMessage, LimitWindow, ProviderId, SessionUsage, TokenUsage, UsageLimits } from '../../../shared/types.ts';
 import { readUsageLimits, totalTokens } from '../../../shared/usage.ts';
+import { msg } from '../i18n/index.ts';
 import { formatTime } from './format.ts';
 
 /** From this share of a window on, it is shown as a warning. */
@@ -16,40 +17,31 @@ function count(n: number | undefined): number {
   return typeof n === 'number' && Number.isFinite(n) && n > 0 ? Math.round(n) : 0;
 }
 
-function oneDecimal(n: number): string {
-  return n.toFixed(1).replace(/\.0$/, '');
-}
-
-/** A compact token count: "820", "9,876", "4.7만", "123만", "1.2억". */
+/** A compact token count: "820", "9,876", "4.7만", "123만", "1.2억" (in English "47.2K", "1.2M"). */
 export function formatTokens(n: number): string {
-  const value = count(n);
-  if (value < 10_000) return value.toLocaleString('ko-KR');
-  if (value < 100_000_000) {
-    const man = value / 10_000;
-    return `${man >= 99.95 ? Math.round(man).toLocaleString('ko-KR') : oneDecimal(man)}만`;
-  }
-  return `${oneDecimal(value / 100_000_000)}억`;
+  return msg().format.tokens(count(n));
 }
 
 /** The exact count with separators: "47,213". */
 export function exactTokens(n: number | undefined): string {
-  return count(n).toLocaleString('ko-KR');
+  return msg().format.count(count(n));
 }
 
 /** The muted line under an answer: "입력 4.7만 (캐시 4.1만) · 출력 820". */
 export function usageLine(usage: TokenUsage): string {
   const cached = count(usage.cachedInput);
-  return `입력 ${formatTokens(usage.input)}${cached > 0 ? ` (캐시 ${formatTokens(cached)})` : ''} · 출력 ${formatTokens(usage.output)}`;
+  return msg().chat.usage.line(formatTokens(usage.input), cached > 0 ? formatTokens(cached) : null, formatTokens(usage.output));
 }
 
-/** The exact numbers (tooltip), one per line, headed by `heading`. */
-export function usageTitle(usage: TokenUsage, heading = '이 답변에 쓴 토큰'): string {
-  const lines = [heading, `입력 ${exactTokens(usage.input)}`];
-  if (count(usage.cachedInput) > 0) lines.push(`  캐시에서 읽음 ${exactTokens(usage.cachedInput)}`);
-  if (count(usage.cacheWrite) > 0) lines.push(`  캐시에 저장 ${exactTokens(usage.cacheWrite)}`);
-  lines.push(`출력 ${exactTokens(usage.output)}`);
-  if (count(usage.reasoning) > 0) lines.push(`  추론 ${exactTokens(usage.reasoning)}`);
-  lines.push(`합계 ${exactTokens(totalTokens(usage))}`);
+/** The exact numbers (tooltip), one per line, headed by `heading` (default: "이 답변에 쓴 토큰"). */
+export function usageTitle(usage: TokenUsage, heading?: string): string {
+  const m = msg().chat.usage;
+  const lines = [heading ?? m.answerHeading, m.input(exactTokens(usage.input))];
+  if (count(usage.cachedInput) > 0) lines.push(m.cacheRead(exactTokens(usage.cachedInput)));
+  if (count(usage.cacheWrite) > 0) lines.push(m.cacheWrite(exactTokens(usage.cacheWrite)));
+  lines.push(m.output(exactTokens(usage.output)));
+  if (count(usage.reasoning) > 0) lines.push(m.reasoning(exactTokens(usage.reasoning)));
+  lines.push(m.total(exactTokens(totalTokens(usage))));
   return lines.join('\n');
 }
 
@@ -63,10 +55,11 @@ export function unrecordedAnswers(messages: readonly ChatMessage[]): number {
 
 /** The session's total ("이 세션 12.3만 토큰") and its tooltip, which names the answers left out (`unrecorded`). */
 export function sessionUsageSummary(usage: SessionUsage, unrecorded = 0): { text: string; title: string } {
-  const title = [usageTitle(usage.total, '이 세션에서 쓴 토큰 (슬라이드 전달, 실패·중단된 답변 포함)')];
-  if (usage.priming) title.push(`그중 슬라이드 전달 ${exactTokens(totalTokens(usage.priming))}`);
-  if (unrecorded > 0) title.push(`토큰이 기록되지 않은 답변 ${unrecorded}개는 빠져 있어요 (기록 전에 만든 답변 등)`);
-  return { text: `이 세션 ${formatTokens(totalTokens(usage.total))} 토큰`, title: title.join('\n') };
+  const m = msg().chat.usage;
+  const title = [usageTitle(usage.total, m.sessionHeading)];
+  if (usage.priming) title.push(m.sessionPriming(exactTokens(totalTokens(usage.priming))));
+  if (unrecorded > 0) title.push(m.unrecorded(unrecorded));
+  return { text: m.session(formatTokens(totalTokens(usage.total))), title: title.join('\n') };
 }
 
 export type LimitLevel = 'ok' | 'warn' | 'danger';
@@ -79,12 +72,13 @@ export interface LimitItem {
 /** "5시간", "주간", "3일", "2시간", "90분"; a model family's own limit gets its name: "주간(Opus)". */
 export function windowName(window: Pick<LimitWindow, 'minutes' | 'label'>): string {
   const { minutes } = window;
+  const m = msg().chat.usage;
   let name: string;
-  if (minutes === 7 * 24 * 60) name = '주간';
-  else if (minutes % (24 * 60) === 0) name = `${minutes / (24 * 60)}일`;
-  else if (minutes % 60 === 0) name = `${minutes / 60}시간`;
-  else name = `${minutes}분`;
-  return window.label ? `${name}(${window.label})` : name;
+  if (minutes === 7 * 24 * 60) name = m.weekly;
+  else if (minutes % (24 * 60) === 0) name = m.days(minutes / (24 * 60));
+  else if (minutes % 60 === 0) name = m.hours(minutes / 60);
+  else name = m.minutes(minutes);
+  return window.label ? m.windowOf(name, window.label) : name;
 }
 
 /**
@@ -140,20 +134,20 @@ export function limitItems(limits: UsageLimits | null | undefined, now: number):
   if (statusHolds(limits, now)) {
     const level: LimitLevel = limits.status === 'reached' ? 'danger' : 'warn';
     const about = statusWindow(limits);
-    if (!about) return [{ text: limits.status === 'reached' ? '사용 한도 도달' : '사용 한도 임박', level }];
+    if (!about) return [{ text: limits.status === 'reached' ? msg().chat.usage.reached : msg().chat.usage.near, level }];
     const i = windows.indexOf(about);
     if (levels[i] !== 'danger') levels[i] = level;
   }
   return windows.map((window, i) => {
-    const resets = levels[i] !== 'ok' && window.resetsAt ? ` (${formatTime(window.resetsAt)} 초기화)` : '';
-    return { text: `${windowName(window)}${i === 0 ? ' 한도' : ''} ${Math.round(window.usedPercent)}%${resets}`, level: levels[i] };
+    const resets = levels[i] !== 'ok' && window.resetsAt ? formatTime(window.resetsAt) : null;
+    return { text: msg().chat.usage.limit(windowName(window), i === 0, Math.round(window.usedPercent), resets), level: levels[i] };
   });
 }
 
 /** "14:30 기준" when the report is LIMITS_AGED_MS old or older, else null. */
 export function limitsAge(limits: UsageLimits, now: number): string | null {
   const at = Date.parse(limits.at);
-  return Number.isFinite(at) && now - at >= LIMITS_AGED_MS ? `${formatTime(limits.at)} 기준` : null;
+  return Number.isFinite(at) && now - at >= LIMITS_AGED_MS ? msg().chat.usage.asOf(formatTime(limits.at)) : null;
 }
 
 /** The next moment (Unix ms) after `now` at which the limit line changes by itself (a window resets, …), or null. */
@@ -170,14 +164,12 @@ export function nextLimitsChange(limits: UsageLimits, now: number): number | nul
 
 /** Tooltip of the limit line: when it was reported and when each window starts over. */
 export function limitsTitle(limits: UsageLimits, now: number, providerName: string): string {
-  const lines = [`${providerName} 사용 한도 (${formatTime(limits.at)} 기준)`];
+  const m = msg().chat.usage;
+  const lines = [m.limitsHeading(providerName, formatTime(limits.at))];
   for (const window of currentWindows(limits, now)) {
-    const resets = window.resetsAt ? ` · ${formatTime(window.resetsAt)}에 초기화` : '';
-    lines.push(`${windowName(window)}: ${Math.round(window.usedPercent)}% 사용${resets}`);
+    lines.push(m.windowLine(windowName(window), Math.round(window.usedPercent), window.resetsAt ? formatTime(window.resetsAt) : null));
   }
-  if (statusHolds(limits, now)) {
-    lines.push(limits.status === 'reached' ? '한도에 도달했어요. 초기화될 때까지 답변을 받지 못할 수 있어요.' : '한도에 가까워졌어요.');
-  }
+  if (statusHolds(limits, now)) lines.push(limits.status === 'reached' ? m.reachedNote : m.nearNote);
   return lines.join('\n');
 }
 

@@ -34,6 +34,7 @@ import rehypeHighlight from 'rehype-highlight';
 import rehypeKatex from 'rehype-katex';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
+import { msg } from '../i18n/index.ts';
 import { DESKTOP_ACTION_PREFIX } from './desktop.ts';
 
 /** Origin used to resolve relative image URLs outside a browser (tests). */
@@ -61,37 +62,45 @@ export function isAllowedImageSrc(src: string, origin: string = currentOrigin())
   return url.origin === origin && url.pathname.startsWith('/api/');
 }
 
-/** Class of what stands in for an image that is not loaded automatically (components/Markdown.tsx draws an image icon in the link). */
+/**
+ * Class of what stands in for an image that is not loaded automatically: an empty `a` with the image's URL as href
+ * (http and https only; no href otherwise) and its alt text in data-image-alt. components/Markdown.tsx draws it at
+ * render time (an image icon, the alt text or "External image" and the host, the tooltip) in the current language, so
+ * the parsed Markdown holds no text of any language and a change of language does not parse it again.
+ */
 export const BLOCKED_IMAGE_CLASS = 'md-blocked-image';
 
-/** Text shown instead of an image that is not loaded automatically. */
-function blockedImageLabel(alt: string, url: URL | null): string {
-  const name = alt.trim() || '외부 이미지';
-  return url ? `${name} (${url.host})` : name;
+/** The React prop that carries the alt text of an image not loaded automatically (hast property dataImageAlt). */
+export const BLOCKED_IMAGE_ALT = 'data-image-alt';
+
+/** Text shown instead of an image that is not loaded automatically: its alt text (or "External image") and the host. */
+export function blockedImageLabel(alt: string, href: string | undefined): string {
+  const name = alt.trim() || msg().chat.markdown.externalImage;
+  let host = '';
+  try {
+    host = href ? new URL(href).host : '';
+  } catch {
+    /* not a URL: the name alone */
+  }
+  return host ? `${name} (${host})` : name;
 }
 
-/** Replace an `<img>` whose source is not allowed with a link (http/https) or plain text. */
+/** Replace an `<img>` whose source is not allowed with the stand-in of BLOCKED_IMAGE_CLASS (a link for http/https). */
 function blockedImage(img: Element): ElementContent {
   const src = String(img.properties.src ?? '').trim();
   const alt = String(img.properties.alt ?? '');
-  let url: URL | null = null;
+  let href: string | undefined;
   try {
     const parsed = new URL(src);
-    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') url = parsed;
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') href = parsed.href;
   } catch {
     /* relative or malformed: no link */
   }
-  const text: ElementContent = { type: 'text', value: blockedImageLabel(alt, url) };
-  if (!url) return { type: 'element', tagName: 'span', properties: { className: [BLOCKED_IMAGE_CLASS] }, children: [text] };
   return {
     type: 'element',
     tagName: 'a',
-    properties: {
-      href: url.href,
-      className: [BLOCKED_IMAGE_CLASS],
-      title: `외부 이미지는 자동으로 불러오지 않아요 — 클릭하면 새 탭에서 열려요: ${url.href}`,
-    },
-    children: [text],
+    properties: { ...(href ? { href } : {}), className: [BLOCKED_IMAGE_CLASS], dataImageAlt: alt },
+    children: [],
   };
 }
 

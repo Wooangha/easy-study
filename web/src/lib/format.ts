@@ -1,5 +1,5 @@
-import { EFFORT_LABELS } from '../../../shared/types.ts';
 import type { ContextInfo, LlmSwitch, MessageStatus, ProviderId, ProviderInfo } from '../../../shared/types.ts';
+import { msg } from '../i18n/index.ts';
 
 const FALLBACK_PROVIDER_LABELS: Record<ProviderId, string> = {
   'claude-code': 'Claude Code',
@@ -12,16 +12,22 @@ export function providerLabel(providers: ProviderInfo[] | undefined, id: Provide
   return providers?.find((p) => p.id === id)?.label ?? FALLBACK_PROVIDER_LABELS[id] ?? id;
 }
 
-/** Korean name of a reasoning-effort level ("높음"), as the provider lists it; the id when unknown. */
+/**
+ * Name of a reasoning-effort level in the current language ("높음" / "high"); a level this client does not know
+ * keeps the provider's label, else its id. (A known level is named here rather than by the provider's label, which
+ * is in the language of the request that listed the providers.)
+ */
 export function effortName(providers: ProviderInfo[] | undefined, id: ProviderId, effort: string): string {
-  return providers?.find((p) => p.id === id)?.efforts?.find((e) => e.id === effort)?.label ?? EFFORT_LABELS[effort] ?? effort;
+  const names = msg().chat.llm.effortNames;
+  if (Object.hasOwn(names, effort)) return names[effort];
+  return providers?.find((p) => p.id === id)?.efforts?.find((e) => e.id === effort)?.label ?? effort;
 }
 
 /** "Claude Code · sonnet · 추론 높음" (model and effort omitted when they are the defaults ''). */
 export function providerWithModel(providers: ProviderInfo[] | undefined, id: ProviderId, model?: string, effort?: string): string {
   const parts = [providerLabel(providers, id)];
   if (model) parts.push(model);
-  if (effort) parts.push(`추론 ${effortName(providers, id, effort)}`);
+  if (effort) parts.push(msg().chat.llm.reasoning(effortName(providers, id, effort)));
   return parts.join(' · ');
 }
 
@@ -30,45 +36,48 @@ export function providerWithModel(providers: ProviderInfo[] | undefined, id: Pro
  * message list draws a shuffle icon before it).
  */
 export function switchMarkerText(providers: ProviderInfo[] | undefined, change: LlmSwitch): string {
-  return `여기부터 ${providerWithModel(providers, change.to.provider, change.to.model, change.to.effort)}`;
+  return msg().chat.llm.switchMarker(providerWithModel(providers, change.to.provider, change.to.model, change.to.effort));
 }
 
 /** The marker's tooltip: when, from what to what, and that the new LLM got the slides and a recap first. */
 export function switchMarkerTitle(providers: ProviderInfo[] | undefined, change: LlmSwitch): string {
   const from = providerWithModel(providers, change.from.provider, change.from.model, change.from.effort);
   const to = providerWithModel(providers, change.to.provider, change.to.model, change.to.effort);
-  return `${formatTime(change.at)}에 LLM을 바꿨어요: ${from} → ${to}. 새 LLM은 슬라이드와 최근 대화 요약을 다시 받고 이어서 답해요.`;
+  return msg().chat.llm.switchMarkerTitle(formatTime(change.at), from, to);
 }
 
 /** The one-line notice shown in the chat after its LLM was changed (`name` = providerWithModel of the new one). */
 export function llmSwitchNotice(name: string): string {
-  return `다음 질문부터 ${name}(으)로 답해요. 슬라이드와 최근 대화 요약을 다시 보내서 처음 질문은 토큰이 더 들어요.`;
+  return msg().chat.llm.switchNotice(name);
 }
 
 function sameDay(a: Date, b: Date): boolean {
   return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
 }
 
-/** "15:42" for today, "9/21 15:42" otherwise. */
+/** "15:42" for today, "9/21 15:42" otherwise (in English "3:42 PM", "Sep 21, 3:42 PM"). */
 export function formatTime(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '';
-  const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-  return sameDay(d, new Date()) ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
+  const f = msg().format;
+  return sameDay(d, new Date()) ? f.time(d) : f.dayTime(d);
 }
 
+/** "2026.9.21" (in English "Sep 21, 2026"). */
 export function formatDate(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '';
-  return `${d.getFullYear()}.${d.getMonth() + 1}.${d.getDate()}`;
+  return msg().format.date(d);
 }
 
+/** "12.3초", "2분 5초" (in English "12.3s", "2m 5s"). */
 export function formatDuration(ms: number | undefined): string {
   if (ms === undefined || !Number.isFinite(ms)) return '';
+  const f = msg().format;
   const s = ms / 1000;
-  if (s < 60) return `${s.toFixed(1)}초`;
+  if (s < 60) return f.seconds(s.toFixed(1));
   const m = Math.floor(s / 60);
-  return `${m}분 ${Math.round(s - m * 60)}초`;
+  return f.minutesSeconds(m, Math.round(s - m * 60));
 }
 
 export function formatBytes(n: number): string {
@@ -101,54 +110,40 @@ export interface ContextChip {
   title?: string;
 }
 
-const RECOVERED_CHIPS: Record<NonNullable<ContextInfo['recoveredFrom']>, { text: string; title: string }> = {
-  resume_invalid: {
-    text: '이전 대화를 잃어 새 대화로 다시 전달',
-    title:
-      'LLM 쪽 이전 대화를 이어갈 수 없어서(만료·삭제 등) 새 대화를 시작하고, 슬라이드와 최근 대화 요약을 다시 전달한 뒤 답했어요.',
-  },
-  context_overflow: {
-    text: '대화가 길어져 새 대화로 전달',
-    title: 'LLM 대화가 너무 길어져서 새 대화를 시작하고, 슬라이드와 최근 대화 요약을 다시 전달한 뒤 답했어요.',
-  },
-};
+/** The chip of a recovered turn: why a new conversation was started. */
+function recoveredChip(from: NonNullable<ContextInfo['recoveredFrom']>): { text: string; title: string } | undefined {
+  const m = msg().chat.context;
+  switch (from) {
+    case 'resume_invalid':
+      return { text: m.resumeInvalid, title: m.resumeInvalidTitle };
+    case 'context_overflow':
+      return { text: m.contextOverflow, title: m.contextOverflowTitle };
+    default:
+      return undefined;
+  }
+}
 
 /** Human-readable description of what was sent to the LLM for a turn (one entry per chip). */
 export function describeContext(ctx: ContextInfo | undefined): ContextChip[] {
   if (!ctx) return [];
+  const m = msg().chat.context;
   const out: ContextChip[] = [];
-  const recovered = ctx.recoveredFrom ? RECOVERED_CHIPS[ctx.recoveredFrom] : undefined;
+  const recovered = ctx.recoveredFrom ? recoveredChip(ctx.recoveredFrom) : undefined;
   // A recovery or an LLM switch is a forced rollover: its chip replaces the plain "new conversation" one.
   if (recovered) out.push({ kind: 'recovered', ...recovered });
   else if (ctx.switched) {
-    out.push({
-      kind: 'switched',
-      text: '바꾼 LLM으로 새 대화 시작',
-      title: 'LLM을 바꿔서 새 대화를 시작하고, 슬라이드와 최근 대화 요약을 다시 전달한 뒤 답했어요.',
-    });
-  } else if (ctx.rollover) out.push({ kind: 'rollover', text: '새 대화로 이어감' });
-  if (ctx.primed) out.push({ kind: 'primed', text: '전체 슬라이드 전달' });
-  if (ctx.overviewImages > 0) out.push({ kind: 'overview', text: `개요 이미지 ${ctx.overviewImages}장` });
+    out.push({ kind: 'switched', text: m.switched, title: m.switchedTitle });
+  } else if (ctx.rollover) out.push({ kind: 'rollover', text: m.rollover });
+  if (ctx.primed) out.push({ kind: 'primed', text: m.primed });
+  if (ctx.overviewImages > 0) out.push({ kind: 'overview', text: m.overviewImages(ctx.overviewImages) });
   const attached = [...(ctx.attachedSlides ?? [])].sort((a, b) => a - b);
   const reused = [...(ctx.reusedSlides ?? [])].sort((a, b) => a - b);
-  if (attached.length > 0) out.push({ kind: 'attached', text: `${pageList(attached)} 첨부` });
-  if (reused.length > 0) out.push({ kind: 'reused', text: `${pageList(reused)} 이미 전달됨` });
+  if (attached.length > 0) out.push({ kind: 'attached', text: m.attached(pageList(attached)) });
+  if (reused.length > 0) out.push({ kind: 'reused', text: m.reused(pageList(reused)) });
   const extra = ctx.attachments ?? 0;
-  if (extra > 0) {
-    out.push({
-      kind: 'attachments',
-      text: `첨부 ${extra}개`,
-      title: '질문과 함께 보낸 선택 영역·이미지 (선택 영역은 그 안의 텍스트도 함께 전달돼요)',
-    });
-  }
+  if (extra > 0) out.push({ kind: 'attachments', text: m.attachments(extra), title: m.attachmentsTitle });
   const memos = ctx.memos ?? 0;
-  if (memos > 0) {
-    out.push({
-      kind: 'memos',
-      text: `메모 ${memos}개`,
-      title: '이 슬라이드와 앞뒤 슬라이드에 쓴 메모를 튜터에게 함께 전달했어요',
-    });
-  }
+  if (memos > 0) out.push({ kind: 'memos', text: m.memos(memos), title: m.memosTitle });
   return out;
 }
 
@@ -161,20 +156,20 @@ export function primeCardState(
   pending: boolean,
   answerStatus: MessageStatus | undefined,
 ): { title: string; icon: PrimeCardIcon; tone: 'normal' | 'failed' | 'aborted'; delivered: boolean } {
-  const deck = `전체 슬라이드 ${pageCount}장`;
+  const m = msg().chat.primeCard;
   if (pending || answerStatus === 'streaming') {
-    return { title: `${deck}을 LLM에게 전달하는 중…`, icon: 'deck', tone: 'normal', delivered: false };
+    return { title: m.sending(pageCount), icon: 'deck', tone: 'normal', delivered: false };
   }
   switch (answerStatus) {
     case 'complete':
-      return { title: `${deck}을 LLM에게 전달했어요`, icon: 'deck', tone: 'normal', delivered: true };
+      return { title: m.sent(pageCount), icon: 'deck', tone: 'normal', delivered: true };
     case 'error':
-      return { title: `${deck}을 LLM에게 전달하지 못했어요`, icon: 'failed', tone: 'failed', delivered: false };
+      return { title: m.failed(pageCount), icon: 'failed', tone: 'failed', delivered: false };
     case 'aborted':
-      return { title: `${deck} 전달이 중단됐어요`, icon: 'stopped', tone: 'aborted', delivered: false };
+      return { title: m.aborted(pageCount), icon: 'stopped', tone: 'aborted', delivered: false };
     default:
       // No answer saved (e.g. an interrupted server): nothing says the deck arrived.
-      return { title: `${deck} 전달 (결과를 알 수 없어요)`, icon: 'deck', tone: 'aborted', delivered: false };
+      return { title: m.unknown(pageCount), icon: 'deck', tone: 'aborted', delivered: false };
   }
 }
 

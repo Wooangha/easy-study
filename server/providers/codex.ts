@@ -61,7 +61,7 @@
 import { constants as fsConstants } from 'node:fs';
 import { access, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
-import type { TokenUsage, UsageLimits } from '../../shared/types.ts';
+import type { ModelOption, TokenUsage, UsageLimits } from '../../shared/types.ts';
 import type {
   Part,
   Provider,
@@ -71,9 +71,10 @@ import type {
   ProviderRunResult,
 } from './types.ts';
 import { ProviderError } from './types.ts';
-import { describeExit, probeVersion, resolveBin, runJsonlProcess, stderrSuffix } from './proc.ts';
-import type { CliBinSpec, JsonlProcessResult, JsonObject } from './proc.ts';
-import { CODEX_DEFAULT_MODEL_LABEL, codexCatalog, codexConfigModel, codexModelChoices, readCodexConfig } from './codexCatalog.ts';
+import { smsg } from '../i18n.ts';
+import { describeExit, resolveBin, runJsonlProcess, stderrSuffix, versionCheck } from './proc.ts';
+import type { CliBinSpec, JsonlProcessResult, JsonObject, LocalizedAvailability } from './proc.ts';
+import { codexCatalog, codexConfigModel, codexModelChoices, readCodexConfig } from './codexCatalog.ts';
 import { codexRolloutSize, readCodexRolloutTurn } from './codexRollout.ts';
 import type { CodexRolloutTurn } from './codexRollout.ts';
 import { openaiUsage } from './usage.ts';
@@ -203,9 +204,8 @@ export const CODEX_BIN_SPEC: CliBinSpec = {
 
 /** How to install Codex: the standalone installer (on Windows an npm install only gives a .cmd shim). */
 export function codexInstallHint(platform: NodeJS.Platform = process.platform): string {
-  return platform === 'win32'
-    ? 'Codex CLI 설치 (PowerShell): powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"'
-    : 'Codex CLI 설치: curl -fsSL https://chatgpt.com/codex/install.sh | sh  (또는 npm install -g @openai/codex)';
+  const m = smsg().chat.providers.codex;
+  return platform === 'win32' ? m.installHintWindows : m.installHint;
 }
 
 /**
@@ -368,10 +368,7 @@ export class CodexStreamState {
       case 'thread.started':
         if (typeof event.thread_id === 'string' && event.thread_id) {
           if (this.resumedThread && event.thread_id !== this.resumedThread) {
-            throw new ProviderError(
-              `Codex가 이전 대화(thread ${this.resumedThread})를 찾지 못해 새 대화(thread ${event.thread_id})를 시작했습니다.`,
-              'resume_invalid',
-            );
+            throw new ProviderError(smsg().chat.providers.codex.threadReplaced(this.resumedThread, event.thread_id), 'resume_invalid');
           }
           this.threadId = event.thread_id;
         }
@@ -420,7 +417,7 @@ export class CodexStreamState {
       this.pending = item.text;
       this.pendingShown = false;
     } else if (item.type === 'error' && typeof item.message === 'string') {
-      this.onStatus(`경고: ${clip(item.message, 120)}`);
+      this.onStatus(smsg().chat.providers.warning(clip(item.message, 120)));
     }
   }
 
@@ -441,15 +438,16 @@ export class CodexStreamState {
 
 /** Status line for a started work item ('' for item types without one). */
 function startedItemStatus(item: JsonObject): string {
+  const m = smsg().chat.providers;
   switch (item.type) {
     case 'reasoning':
-      return '생각하는 중…';
+      return m.thinking;
     case 'command_execution':
-      return `명령 실행 중: ${clip(String(item.command ?? ''), 100)}`;
+      return m.runningCommand(clip(String(item.command ?? ''), 100));
     case 'web_search':
-      return '웹 검색 중…';
+      return m.searchingWeb;
     case 'mcp_tool_call':
-      return `도구 사용 중: ${String(item.tool ?? '')}`;
+      return m.usingTool(String(item.tool ?? ''));
     default:
       return '';
   }
@@ -469,9 +467,7 @@ function clip(text: string, max: number): string {
 }
 
 function loginHint(message: string): string {
-  return /login|log in|unauthori[sz]ed|401|403|auth/i.test(message)
-    ? '\n터미널에서 `codex login` 으로 로그인 상태를 확인하세요.'
-    : '';
+  return /login|log in|unauthori[sz]ed|401|403|auth/i.test(message) ? `\n${smsg().chat.providers.codex.loginHint}` : '';
 }
 
 /**
@@ -511,21 +507,21 @@ export function classifyCodexFailure(text: string, resumed: boolean): ProviderEr
   return 'other';
 }
 
-const KIND_HINTS: Partial<Record<ProviderErrorKind, string>> = {
-  resume_invalid: '\n이전 Codex 대화(thread)를 더 이상 이어갈 수 없습니다. 새 대화로 다시 시작해야 합니다.',
-  context_overflow: '\n대화가 모델의 컨텍스트 한도를 넘었습니다. 새 대화로 이어가야 합니다.',
-  model_unavailable:
-    '\n선택한 모델을 이 Codex에서 사용할 수 없습니다. 다른 모델을 설정하거나 Codex CLI를 업데이트하세요.',
-};
+/** The hint of a failure kind, on its own line ('' for kinds without one). */
+function kindHint(kind: ProviderErrorKind): string {
+  const m = smsg().chat.providers.codex;
+  const hint = kind === 'resume_invalid' ? m.resumeInvalid : kind === 'context_overflow' ? m.contextOverflow : kind === 'model_unavailable' ? m.modelUnavailable : '';
+  return hint ? `\n${hint}` : '';
+}
 
 /** Codex could not start (or run a command) under the read-confining permissions profile. */
 const CONFINEMENT_FAILURE_RE =
   /default_permissions|permissions profile|\[permissions\]|fs sandbox helper|sandbox-exec|failed to load AGENTS\.md|failed to initialize session/i;
 
-export const CONFINEMENT_HINT =
-  '\nCodex가 읽기 제한(이 강의와 같은 과목 강의 폴더만 읽기)을 적용한 채로 시작하지 못했을 수 있습니다. ' +
-  'Codex CLI를 업데이트해 보고, 그래도 안 되면 EASY_STUDY_CODEX_CONFINE=0 으로 서버를 다시 시작하세요 ' +
-  '(이 경우 Codex가 컴퓨터의 모든 파일을 읽을 수 있습니다).';
+/** Added (on its own line) to a failure of a confined Codex that looks like the confinement's doing. */
+export function confinementHint(): string {
+  return `\n${smsg().chat.providers.codex.confinementHint}`;
+}
 
 /**
  * ProviderError for a failed run: `base` + a hint for its kind (a login hint for 'auth'; for other failures of a
@@ -533,8 +529,8 @@ export const CONFINEMENT_HINT =
  */
 function codexFailure(base: string, evidence: string, resumed: boolean, stderrTail: string, confined: boolean): ProviderError {
   const kind = classifyCodexFailure(evidence, resumed);
-  let hint = kind === 'auth' ? loginHint(evidence) || loginHint('login') : (KIND_HINTS[kind] ?? loginHint(evidence));
-  if (!hint && confined && kind === 'other' && CONFINEMENT_FAILURE_RE.test(evidence)) hint = CONFINEMENT_HINT;
+  let hint = kind === 'auth' ? loginHint(evidence) || loginHint('login') : kindHint(kind) || loginHint(evidence);
+  if (!hint && confined && kind === 'other' && CONFINEMENT_FAILURE_RE.test(evidence)) hint = confinementHint();
   return new ProviderError(`${base}${hint}${stderrSuffix(stderrTail)}`, kind);
 }
 
@@ -633,47 +629,58 @@ async function runCodex(input: ProviderRunInput): Promise<ProviderRunResult> {
   const { usage, limits } = await reportUsage();
 
   const tail = stderrSuffix(proc.stderrTail);
+  const m = smsg().chat.providers.codex;
   if (state.failure) {
-    throw codexFailure(`Codex 오류: ${state.failure}`, `${state.failure}\n${proc.stderrTail}`, resumed, proc.stderrTail, confine);
+    throw codexFailure(m.error(state.failure), `${state.failure}\n${proc.stderrTail}`, resumed, proc.stderrTail, confine);
   }
   if (state.lastError && !state.completed) {
-    throw codexFailure(`Codex 오류: ${state.lastError}`, `${state.lastError}\n${proc.stderrTail}`, resumed, proc.stderrTail, confine);
+    throw codexFailure(m.error(state.lastError), `${state.lastError}\n${proc.stderrTail}`, resumed, proc.stderrTail, confine);
   }
   if (proc.code !== 0) {
-    throw codexFailure(
-      `Codex가 비정상 종료했습니다 (${describeExit(proc.code, proc.signal)}).`,
-      proc.stderrTail,
-      resumed,
-      proc.stderrTail,
-      confine,
-    );
+    throw codexFailure(m.crashed(describeExit(proc.code, proc.signal)), proc.stderrTail, resumed, proc.stderrTail, confine);
   }
   state.finish();
-  if (!state.completed && !state.text) throw new Error(`Codex가 응답 없이 종료되었습니다.${tail}`);
+  if (!state.completed && !state.text) throw new Error(`${m.noResponse}${tail}`);
 
   const id = state.threadId ?? threadId;
   // Without a thread id the next turn could not continue this conversation (and would lack the deck).
-  if (!ephemeral && !id) throw new Error(`Codex가 thread id를 알려주지 않았습니다.${tail}`);
+  if (!ephemeral && !id) throw new Error(`${m.noThreadId}${tail}`);
   const out: ProviderRunResult = { text: state.text, resume: id ? { cliSessionId: id } : {} };
   if (usage) out.usage = usage;
   if (limits) out.limits = limits;
   return out;
 }
 
+/**
+ * `codex --version`, then its model catalog and config.toml, once for every language: the model and effort labels are
+ * worded when the result is (codexModelChoices).
+ */
+async function probeCodex(): Promise<LocalizedAvailability> {
+  const bin = await resolveBin(CODEX_BIN_SPEC);
+  const version = await versionCheck({ bin, displayName: 'codex', installHint: () => codexInstallHint() });
+  const found = version();
+  if (!found.available) return version;
+  const [catalog, config] = await Promise.all([codexCatalog(bin, found.version), readCodexConfig()]);
+  const configModel = codexConfigModel(config);
+  return () => ({ ...version(), ...codexModelChoices(catalog, configModel) });
+}
+
 export const codexProvider: Provider = {
   id: 'codex',
-  label: 'Codex (ChatGPT 구독)',
+  // Texts in the request's language (DESIGN §27).
+  get label(): string {
+    return smsg().chat.providers.label.codex;
+  },
   kind: 'cli',
   // Until detect() has read the model catalog.
-  models: [{ id: '', label: CODEX_DEFAULT_MODEL_LABEL }],
+  get models(): ModelOption[] {
+    return [{ id: '', label: smsg().chat.providers.codexDefaultModel }];
+  },
   defaultModel: '',
   maxImagesPerConversation: 90,
   async detect(): Promise<ProviderAvailability> {
-    const bin = await resolveBin(CODEX_BIN_SPEC);
-    const availability = await probeVersion({ bin, displayName: 'codex', installHint: codexInstallHint() });
-    if (!availability.available) return availability;
-    const [catalog, config] = await Promise.all([codexCatalog(bin, availability.version), readCodexConfig()]);
-    return { ...availability, ...codexModelChoices(catalog, codexConfigModel(config)) };
+    return (await probeCodex())();
   },
+  probe: probeCodex,
   run: runCodex,
 };

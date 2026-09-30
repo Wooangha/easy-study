@@ -683,8 +683,15 @@ describe('the loopback proxy in front of a remote-mode server', () => {
     assert.equal((await exitWithin(missing, 5_000)).code, 2);
 
     const taken = spawnProxy(['--to', remote.url], { PORT: String(proxy.port) });
-    assert.deepEqual(await exitWithin(taken, 5_000), { code: 1, signal: null });
+    assert.deepEqual(await exitWithin(taken, 5_000), { code: 3, signal: null });
     assert.match(taken.stderr(), new RegExp(`포트 ${proxy.port}를 다른 프로그램이 쓰고 있습니다`));
+    // In the shell's language (EASY_STUDY_LANG), the same exit code.
+    const takenEn = spawnProxy(['--to', remote.url], { PORT: String(proxy.port), EASY_STUDY_LANG: 'en-US' });
+    assert.deepEqual(await exitWithin(takenEn, 5_000), { code: 3, signal: null });
+    assert.match(takenEn.stderr(), new RegExp(`^Port ${proxy.port} is being used by another program$`, 'm'));
+    const missingEn = spawnProxy([], { EASY_STUDY_LANG: 'en' });
+    assert.equal((await exitWithin(missingEn, 5_000)).code, 2);
+    assert.match(missingEn.stderr(), /^No address to relay: --to http:\/\/host:port is required$/m);
 
     const started = Date.now();
     proxy.child.stdin!.end();

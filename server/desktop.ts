@@ -18,8 +18,9 @@
 // - A repeated SIGTERM / SIGHUP / EOF does not cut the graceful stop short (Linux PR_SET_PDEATHSIG delivers
 //   SIGTERM once per exiting thread of the shell, 5-11 times were measured); only a second SIGINT forces it.
 // - A failure before listening (library locked by `npm start`, port taken, configuration) ends in a short
-//   Korean message at the end of stderr — the shell shows the tail of stderr — and exit code 1; a port that
-//   another program holds exits with EXIT_PORT_IN_USE (3), so the shell can try another port.
+//   message at the end of stderr — the shell shows the tail of stderr — and exit code 1; a port that another program
+//   holds exits with EXIT_PORT_IN_USE (3), so the shell can try another port. The message is in the language of
+//   EASY_STUDY_LANG when the shell passes one (its OS language, DESIGN §27), Korean otherwise.
 // - Every child process is gone when the server exits, whatever the path (server/children.ts): the graceful
 //   stop ends them, the exit hook kills what is left, and on POSIX the process group gets SIGTERM for the
 //   grandchildren of the CLIs.
@@ -40,6 +41,8 @@ import { runningTurnCount } from './chat.ts';
 import { signalProcessGroupOnExit } from './children.ts';
 import { ConfigError, fallbackFontProblem, isLoopbackHost, libraryDir } from './config.ts';
 import { digestCallsInFlight } from './digest.ts';
+import { envLang, smsg } from './i18n.ts';
+import type { Lang } from './i18n.ts';
 import type { RunningServer, ServerOptions } from './index.ts';
 import { LibraryLockedError, readStoredDoc } from './library.ts';
 import { currentLiveRecording, queueState, recordingsConfig } from './recordings/service.ts';
@@ -64,12 +67,20 @@ export const EXIT_PORT_IN_USE = 3;
 
 const ON_VALUES = ['1', 'true', 'on', 'yes'];
 
+/**
+ * EASY_STUDY_LANG (a language tag such as "en-US" or "ko_KR.UTF-8", the shell's OS language): the language of the
+ * startup failure messages. Korean when unset; English for a language the app does not have.
+ */
+export function desktopLang(env: NodeJS.ProcessEnv = process.env): Lang {
+  return envLang(env);
+}
+
 /** PORT in desktop mode: unset = 0 (any free port; the ready line tells which), otherwise 0-65535. */
 export function desktopPort(env: NodeJS.ProcessEnv = process.env): number {
   const raw = env.PORT?.trim() ?? '';
   if (raw === '') return 0;
   const value = Number(raw);
-  if (!/^\d+$/.test(raw) || value > 65_535) throw new ConfigError(`PORT 값이 올바르지 않습니다: "${raw}" (0~65535)`);
+  if (!/^\d+$/.test(raw) || value > 65_535) throw new ConfigError(smsg(desktopLang(env)).desktop.startup.portInvalid(raw));
   return value;
 }
 
@@ -101,7 +112,7 @@ export function ignoredNetworkSettings(env: NodeJS.ProcessEnv = process.env): st
  */
 export function desktopServerOptions(env: NodeJS.ProcessEnv = process.env): ServerOptions {
   if (!env.EASY_STUDY_LIBRARY?.trim()) {
-    throw new ConfigError('데스크톱 모드에는 라이브러리 폴더가 필요합니다 (EASY_STUDY_LIBRARY).');
+    throw new ConfigError(smsg(desktopLang(env)).desktop.startup.libraryRequired);
   }
   const share = desktopShare(env);
   return {
@@ -178,17 +189,6 @@ export async function desktopBusy(): Promise<DesktopBusyResponse> {
   };
 }
 
-/** File system errors on the library folder itself (the first thing startup writes is its lock file). */
-const LIBRARY_PROBLEMS: Record<string, string> = {
-  EACCES: '라이브러리 폴더에 쓸 권한이 없습니다',
-  EPERM: '라이브러리 폴더에 쓸 권한이 없습니다',
-  EROFS: '라이브러리 폴더가 읽기 전용입니다',
-  EEXIST: '라이브러리 폴더 자리에 폴더가 아닌 파일이 있습니다',
-  ENOTDIR: '라이브러리 폴더 경로에 폴더가 아닌 파일이 있습니다',
-  EISDIR: '라이브러리 폴더를 쓸 수 없습니다',
-  ENOENT: '라이브러리 폴더를 찾을 수 없습니다',
-  ENOSPC: '디스크 공간이 부족해서 라이브러리 폴더에 쓸 수 없습니다',
-};
 
 function isInside(file: string, dir: string): boolean {
   const relative = path.relative(dir, path.resolve(file));
@@ -200,43 +200,26 @@ function describe(err: unknown): string {
 }
 
 /**
- * Why desktop mode could not start, in Korean, for the shell's error screen (it shows the tail of stderr, so
- * the message is short and names what the user can do in the app). `known` is false for unexpected errors,
+ * Why desktop mode could not start, for the shell's error screen (it shows the tail of stderr, so the message is
+ * short and names what the user can do in the app), in `lang` (desktopLang). `known` is false for unexpected errors,
  * whose stack trace is worth logging before the message. `exitCode` is EXIT_PORT_IN_USE for a taken port, 1 otherwise.
  */
-export function startupFailureMessage(err: unknown, port: number): { message: string; known: boolean; exitCode: number } {
-  if (err instanceof ConfigError) return { message: `설정 오류: ${err.message}`, known: true, exitCode: 1 };
+export function startupFailureMessage(err: unknown, port: number, lang: Lang = desktopLang()): { message: string; known: boolean; exitCode: number } {
+  const m = smsg(lang).desktop.startup;
+  if (err instanceof ConfigError) return { message: m.configError(err.message), known: true, exitCode: 1 };
   if (err instanceof LibraryLockedError) {
     const { holder } = err;
-    return {
-      known: true,
-      exitCode: 1,
-      message: [
-        `이 라이브러리 폴더는 다른 easy-study가 이미 쓰고 있습니다 (pid ${holder.pid}, 포트 ${holder.port}).`,
-        `  라이브러리: ${libraryDir()}`,
-        '  같은 폴더를 두 서버가 함께 쓰면 서로의 작업을 망가뜨리므로 시작하지 않았습니다.',
-        '  그 easy-study(예: 터미널에서 실행한 npm start)를 끄거나, 다른 라이브러리 폴더를 고르세요.',
-        `  실행 중인 easy-study가 없는데도 이 메시지가 나오면 잠금 파일을 지우세요: ${err.lockFile}`,
-      ].join('\n'),
-    };
+    return { known: true, exitCode: 1, message: m.libraryLocked(holder.pid, holder.port, libraryDir(), err.lockFile) };
   }
   const errno = err as NodeJS.ErrnoException | null;
-  if (errno?.code === 'EADDRINUSE') {
-    return {
-      known: true,
-      exitCode: EXIT_PORT_IN_USE,
-      message: `포트 ${port}을(를) 다른 프로그램이 이미 쓰고 있어서 서버를 시작하지 못했습니다. 앱을 다시 실행해 보세요.`,
-    };
-  }
+  if (errno?.code === 'EADDRINUSE') return { known: true, exitCode: EXIT_PORT_IN_USE, message: m.portInUse(port) };
+  // File system errors on the library folder itself (the first thing startup writes is its lock file).
+  const problems: Readonly<Record<string, string>> = m.libraryProblem;
   const code = errno?.code ?? '';
-  if (Object.hasOwn(LIBRARY_PROBLEMS, code) && typeof errno?.path === 'string' && isInside(errno.path, libraryDir())) {
-    return {
-      known: true,
-      exitCode: 1,
-      message: `${LIBRARY_PROBLEMS[code]} (${code}): ${libraryDir()}\n  다른 라이브러리 폴더를 고르거나, 이 폴더를 확인해 주세요.`,
-    };
+  if (Object.hasOwn(problems, code) && typeof errno?.path === 'string' && isInside(errno.path, libraryDir())) {
+    return { known: true, exitCode: 1, message: m.libraryFailed(problems[code], code, libraryDir()) };
   }
-  return { known: false, exitCode: 1, message: `서버를 시작하지 못했습니다: ${describe(err)}` };
+  return { known: false, exitCode: 1, message: m.failed(describe(err)) };
 }
 
 /** Exits with `code` once what was written to stdout and stderr is out (pipes may be asynchronous). */

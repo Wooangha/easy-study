@@ -2422,3 +2422,58 @@ app ships it.
   a server from this install is running (`/proc/*/exe`), when the install folder holds anything outside the tarball
   layout (it would be deleted), or when the folder is not writable; signals during the download clean up, and are held
   during the swap. It never touches the library or the models.
+
+## 27. Languages — Korean and English (i18n)
+
+The user: "다른 언어 사용자도 사용할 수 있게 해줘" — Korean and English now, more languages easy to add. Korean stays the
+reference: every text is written in Korean first and every test pins the Korean texts (the default outside a browser).
+
+- **Shared** (`shared/i18n.ts`): `Lang = 'ko' | 'en'`, `LANGS` with the native names (한국어, English; the picker never
+  translates them), the header `X-Easy-Study-Lang`, tag parsing (`langOfTag`, `pickLang`: the first supported language of
+  a list, English when none is, null without a real tag; `acceptLanguageTags`). Adding a language = the union, `LANGS`, a
+  messages file per namespace on both sides, and `intlLocale`.
+- **Texts** are typed objects, one file per namespace and language, no dependency and no template syntax: `ko/<ns>.ts`
+  is the reference, `en/<ns>.ts` is `{ … } satisfies typeof ko` (a missing or extra key is a type error), dynamic texts
+  are functions (`(n: number) => string`) so each language builds its own sentence, rich text is a function of its
+  elements returning `rich(…)` (a fragment of the pieces in order). Web namespaces (`web/src/i18n/`): common, shell,
+  chat, recording, viewer, settings, format. Server namespaces (`server/messages/`): common, library, chat, recordings,
+  auth, desktop. `tests/i18nParity.ts` checks what types cannot: a namespace filled on one side only, empty texts, Hangul
+  left in an English text (functions are called with sample arguments).
+- **Web** (`web/src/i18n/index.ts`): `msg()` is the current language's texts, called where a text is used (never at
+  module level); `useLang()` subscribes. AuthGate subscribes, so a change re-renders the whole tree without remounting it
+  (drafts, a playing recording, a live recording and open dialogs stay); text made in useMemo/useCallback or in a memo()
+  component subscribes itself. The setting is this browser's (localStorage `easy-study:lang`, absent = 시스템 설정 = the
+  browser's language: navigator.language / languages, 'ko*' → Korean, anything else → English; Korean without a
+  browser). <html lang> follows; other tabs follow through `storage`. Settings › 화면 › 언어 (시스템 설정 따르기 (<its
+  language>) / 한국어 / English), and the same picker on the login and local-only screens. Dates, numbers and relative
+  times go through Intl with `intlLocale()`.
+- **Requests**: api.ts sends `X-Easy-Study-Lang` with every fetch and upload (XMLHttpRequest). Plain links (notes.md,
+  digest.md, COURSE.md) and EventSource streams cannot set headers: their URLs carry `?lang=ko|en` (`langUrl`, read when
+  the URL is made). Server answers that carry labels (/api/health, /api/asr) are dropped when they arrive for a language
+  no longer shown (`keepAnswer`), and the local-only screen asks the server again on a change.
+- **Server** (`server/i18n.ts`): `langContext()`, first in the API router, runs each request in its language
+  (AsyncLocalStorage): the header, else `?lang=`, else Accept-Language, else Korean. `smsg()` is that language's texts (Korean outside a
+  request); async work started by a request keeps its language; work resumed later (at startup) stores its language
+  and runs in it with `runInLang(lang, fn)`. Log lines and terminal output stay as they are.
+- **Stored language**: the tutor and the digest answer in the request's language when the question's own language is
+  unclear; a digest run, a session's latest turn and a recording (`RecordingMeta.lang`) store their language (absent =
+  Korean), so work resumed at startup (digest, conversion, transcription, a cut-off answer) writes in it. A digest run
+  that continues earlier entries keeps their language; only a redo (or a first run) takes the request's. `DIGEST.md`
+  headings and default titles ("세션 09/30 11:36" / "Session Sep 30, 11:36 AM", "녹음 2026-09-27 15:30" / "Recording Sep
+  27, 2026, 3:30 PM") use it; `COURSE.md` is rewritten in the language of the request that changes or opens it (its link
+  carries `?lang=`). An English digest ends each slide with "Key point:" instead of "핵심:" (context.ts reads both; the AI
+  alignment reads only the digest's own label, its last one, so a transcribed "Key points of …" bullet in a Korean
+  digest is slide text). /api/health labels (providers, effort, reasons) are worded for each request from one detection
+  cache shared by every language (`Provider.probe()`: the checks once, the wording per call). The lecture language of a
+  new recording defaults to the UI language (web setting not chosen: read at use; server without `language`: the
+  request's).
+- **Desktop shell** (`desktop/src-tauri/src/i18n.rs`, `i18n/ko.rs`, `i18n/en.rs`; the chooser's `desktop/ui/texts.js`):
+  menus, native dialogs, the chooser page and the texts it sends the pages follow the OS language list, read once per
+  launch (macOS CFLocaleCopyPreferredLanguages, Windows GetUserPreferredUILanguages, Linux LANGUAGE/LC_ALL/LC_MESSAGES/
+  LANG) with `pickLang`'s rule; no crate. The marker carries it (`window.__EASY_STUDY_DESKTOP__.lang`): the chooser paints
+  in it, and the web's 시스템 설정 in the app follows it rather than the web view's language. The local server and the
+  relay get it as `EASY_STUDY_LANG` (the startup errors the chooser shows; a taken port is exit code 3 for both, so the
+  shell never depends on the wording; it still recognizes the Korean phrases). A language chosen in the web (per origin)
+  does not change the shell's. The rest of the server's terminal output (CLI, banners, proxy.log lines) stays Korean.
+  The Linux package description (tauri.conf.json `shortDescription`, the launcher's Comment=) is both languages in one
+  line.

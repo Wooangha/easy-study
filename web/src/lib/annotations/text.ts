@@ -55,8 +55,6 @@ export function memoSizePt(item: Pick<MemoItem, 'size'>, shown?: MemoShown | nul
 
 export const isTextFont = (v: unknown): v is TextFont => (TEXT_FONTS as readonly unknown[]).includes(v);
 
-export const FONT_LABELS: Record<TextFont, string> = { sans: '기본', serif: '명조', mono: '고정폭' };
-
 /** The CSS font stack of a font choice ('sans' = the app's own font, so `inherit`). */
 export function fontFamilyOf(font: TextFont | undefined): string {
   switch (font) {

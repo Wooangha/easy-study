@@ -55,7 +55,7 @@ import {
   type Indicator,
   type OrgView,
 } from '../../lib/libraryDnd.ts';
-import { withParticle } from '../../lib/korean.ts';
+import { msg } from '../../i18n/index.ts';
 import type { Move } from '../../lib/libraryLayout.ts';
 
 /** Hovering over a collapsed course/group this long opens it. */
@@ -191,7 +191,8 @@ export function LibraryDnd({ courses, layout, collapsed, nameOf, renderOverlay, 
   const noteOpened = (key: string) => {
     stopOpenedNote();
     const container = containerOfKey(key);
-    const text = container ? `${withParticle(nameRef.current(container), '을', '를')} 열었어요.` : '열었어요.';
+    const d = msg().shell.dnd;
+    const text = container ? d.opened(nameRef.current(container)) : d.openedPlain;
     const timer = window.setTimeout(() => {
       openedNote.current = null;
       const item = activeRef.current;
@@ -293,18 +294,15 @@ export function LibraryDnd({ courses, layout, collapsed, nameOf, renderOverlay, 
   const announcements: Announcements = {
     onDragStart: ({ active: dragged }) => {
       const item = dragItemOf(isDropData(dragged.data.current) ? dragged.data.current : null);
-      return item
-        ? `${withParticle(nameRef.current(item), '을', '를')} 집었어요. 위아래 화살표로 옮기고 스페이스나 엔터로 놓으세요.`
-        : undefined;
+      return item ? msg().shell.dnd.pickedUp(nameRef.current(item)) : undefined;
     },
     onDragMove: () => takeAnnouncement(),
     onDragOver: () => takeAnnouncement(),
     onDragEnd: () => finalAnnouncement.current,
     onDragCancel: ({ active: dragged }) => {
       const item = dragItemOf(isDropData(dragged.data.current) ? dragged.data.current : null);
-      return item
-        ? `옮기기를 취소했어요. ${withParticle(nameRef.current(item), '은', '는')} 원래 자리에 있어요.`
-        : '옮기기를 취소했어요.';
+      const d = msg().shell.dnd;
+      return item ? d.cancelled(nameRef.current(item)) : d.cancelledPlain;
     },
   };
   function takeAnnouncement(): string | undefined {
@@ -326,10 +324,7 @@ export function LibraryDnd({ courses, layout, collapsed, nameOf, renderOverlay, 
       autoScroll={{ threshold: { x: 0, y: 0.18 } }}
       accessibility={{
         announcements,
-        screenReaderInstructions: {
-          draggable:
-            '끌어서 옮길 수 있어요. 스페이스나 엔터로 집고, 위아래 화살표로 옮긴 뒤 스페이스나 엔터로 놓으세요. Esc를 누르면 취소돼요. 터치 화면에서는 손잡이를 길게 누른 채 끌어요.',
-        },
+        screenReaderInstructions: { draggable: msg().shell.dnd.instructions },
       }}
       onDragStart={({ active: dragged, activatorEvent }) => {
         const item = dragItemOf(isDropData(dragged.data.current) ? dragged.data.current : null);
@@ -344,15 +339,15 @@ export function LibraryDnd({ courses, layout, collapsed, nameOf, renderOverlay, 
         const item = activeRef.current;
         const dropped = targetRef.current;
         const opened = springOpen;
+        const d = msg().shell.dnd;
         if (item && dropped?.move) {
           const { place, total } = describeTarget(dropped, viewRef.current);
-          finalAnnouncement.current =
-            `${withParticle(nameRef.current(item), '을', '를')} ${place}로 옮겼어요` + (total === null ? '.' : ` (${total}개 중).`);
+          finalAnnouncement.current = d.moved(nameRef.current(item), place, total);
           const dest = destinationKey(dropped.move);
           if (dest && opened.has(dest)) onKeepOpen(dest);
           onMove(dropped.move);
         } else {
-          finalAnnouncement.current = item ? `${withParticle(nameRef.current(item), '을', '를')} 원래 자리에 놓았어요.` : '';
+          finalAnnouncement.current = item ? d.droppedBack(nameRef.current(item)) : '';
         }
         reset();
       }}
@@ -493,7 +488,7 @@ export function TopEndZone() {
   if (!active || active.kind === 'lecture') return null;
   return (
     <div ref={setNodeRef} className={`top-end-zone${mark === 'into' ? ' drop-into' : ''}`} aria-hidden>
-      {active.kind === 'group' ? '맨 아래로 옮기기' : '그룹 밖 맨 아래로 옮기기'}
+      {active.kind === 'group' ? msg().shell.dnd.toBottom : msg().shell.dnd.toBottomOutsideGroups}
     </div>
   );
 }

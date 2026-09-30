@@ -1060,9 +1060,18 @@ details[open] > summary::before {
   gap: 2px;
   padding: 0 10px;
   border-bottom: 1px solid var(--border);
+  /* A narrow pane (a phone, or longer tab names in English) scrolls the row sideways instead of breaking it. */
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.panel-tabs::-webkit-scrollbar {
+  display: none;
 }
 
 .panel-tab {
+  flex: none;
+  white-space: nowrap;
   border: 0;
   background: none;
   padding: 9px 12px 7px;
@@ -1073,6 +1082,11 @@ details[open] > summary::before {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+/* Inside the row: the scrolling row would clip an outline drawn outside the tab. */
+.panel-tab:focus-visible {
+  outline-offset: -2px;
 }
 
 .panel-tab:hover {
@@ -3766,6 +3780,11 @@ details[open] > summary::before {
   font-size: 13px;
 }
 
+/* A second row of a section (테마, then 언어). */
+.settings-row-gap {
+  margin-top: 14px;
+}
+
 .settings-line {
   margin: 4px 0;
   font-size: 13.5px;
@@ -3938,6 +3957,16 @@ details[open] > summary::before {
 
 .banner-error .update-hint {
   color: inherit;
+}
+
+/* The language before a login (DESIGN §27): a small picker under the card's content. */
+.auth-lang {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 14px;
+  color: var(--muted);
 }
 
 /* The login screens inside the desktop app: "다른 서버에 연결…". */

@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { DigestInfo, DigestStatus } from '../../../shared/types.ts';
 import * as api from '../api.ts';
+import { msg } from '../i18n/index.ts';
 import { toast } from '../lib/toast.ts';
 import { useLatest } from './useLatest.ts';
 import type { ProviderChoice } from './useProviderChoice.ts';
@@ -34,12 +35,9 @@ export function useDigest(docId: string | null) {
       if (prev !== 'running' || info.status === 'running') return;
       if (info.status === 'ready') {
         const failed = info.slides.filter((s) => s.failed).length;
-        toast(
-          failed > 0 ? `정리본을 만들었어요 (슬라이드 ${failed}장은 실패)` : '정리본이 완성됐어요',
-          failed > 0 ? 'info' : 'success',
-        );
+        toast(failed > 0 ? msg().chat.digest.doneWithFailures(failed) : msg().chat.digest.done, failed > 0 ? 'info' : 'success');
       } else if (info.status === 'error') {
-        toast(`정리본을 만들지 못했어요: ${info.error ?? '알 수 없는 오류'}`, 'error');
+        toast(msg().chat.digest.failed(info.error ?? msg().common.unknownError), 'error');
       }
     },
     [docIdRef],
@@ -91,7 +89,7 @@ export function useDigest(docId: string | null) {
       const target = docIdRef.current;
       if (!target) return false;
       if (!choice) {
-        toast('사용할 수 있는 LLM이 없어요. 상단의 모델 선택을 확인해 주세요.', 'error');
+        toast(msg().chat.shared.noLlmToast, 'error');
         return false;
       }
       setPending('start');
@@ -106,10 +104,10 @@ export function useDigest(docId: string | null) {
         return true;
       } catch (e) {
         if (e instanceof api.ApiError && e.status === 409) {
-          toast('이미 정리본을 만들고 있어요.', 'info');
+          toast(msg().chat.digest.alreadyRunning, 'info');
           void refresh(target);
         } else {
-          toast(`정리본 만들기를 시작하지 못했어요: ${api.errorMessage(e)}`, 'error');
+          toast(msg().chat.digest.startFailed(api.errorMessage(e)), 'error');
         }
         return false;
       } finally {
@@ -126,7 +124,7 @@ export function useDigest(docId: string | null) {
     try {
       await api.abortDigest(target);
     } catch (e) {
-      toast(`정리를 중지하지 못했어요: ${api.errorMessage(e)}`, 'error');
+      toast(msg().chat.digest.abortFailed(api.errorMessage(e)), 'error');
     } finally {
       setPending(null);
     }

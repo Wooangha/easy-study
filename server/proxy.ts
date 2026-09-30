@@ -19,16 +19,21 @@
 //   `es_session` (the shell's own server's login) or another remote's `es_session_<other>` is dropped from the
 //   Cookie header and never reaches the remote (scopedSessionCookieName, upstreamCookie, downstreamSetCookie).
 // - The same ready line as the server (`EASY_STUDY_READY {"url":"http://127.0.0.1:<port>","port":<port>}`), the
-//   same watch on the shell (stdin EOF, parent gone, signals → exit 0). Exit 1 when it cannot listen, 2 for a bad
-//   `--to`. stderr is Korean (the shell's proxy.log); no request URL or header is ever logged: `/login?code=` carries
-//   the code, Cookie headers the session.
-// - Imports nothing of the server (no library, no lock, no auth store): only node:http/net/dns/url and shellWatch.ts.
+//   same watch on the shell (stdin EOF, parent gone, signals → exit 0). Exit 3 (EXIT_PORT_TAKEN) when its port is
+//   taken, 1 when it cannot listen otherwise, 2 for a bad `--to`. Those startup errors are in the shell's language
+//   (EASY_STUDY_LANG: the chooser shows the last one); the rest of stderr (the shell's proxy.log) is Korean. No
+//   request URL or header is ever logged: `/login?code=` carries the code, Cookie headers the session. The relay's own
+//   plain-text pages (421, 400, 502) are in the language of the request (the WebView's Accept-Language, DESIGN §27).
+// - Imports nothing of the server (no library, no lock, no auth store): only node:http/net/dns/url, shellWatch.ts and
+//   the server's texts (i18n.ts, data only).
 import { createHash } from 'node:crypto';
 import dns from 'node:dns';
 import http from 'node:http';
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http';
 import { BlockList, isIP } from 'node:net';
 import type { Socket } from 'node:net';
+import { envLang, requestLang, smsg } from './i18n.ts';
+import type { Lang } from './i18n.ts';
 import { readyLine, stopSignals, watchShell } from './shellWatch.ts';
 
 /** How long the graceful stop may take before the process exits anyway. */
@@ -246,8 +251,25 @@ function drainRest(req: IncomingMessage): Promise<void> {
   });
 }
 
-function unreachableText(target: ProxyTarget): string {
-  return `연결한 컴퓨터(${target.origin})에 닿지 않아요. 그 컴퓨터의 easy-study가 켜져 있는지, 같은 네트워크인지 확인하세요.\n`;
+/** The language of a request to the relay: X-Easy-Study-Lang (API calls), else ?lang=, else Accept-Language, else Korean. */
+function langOf(req: IncomingMessage): Lang {
+  let query: Record<string, string> | undefined;
+  try {
+    query = Object.fromEntries(new URL(req.url ?? '/', 'http://relay.invalid').searchParams);
+  } catch {
+    query = undefined;
+  }
+  return requestLang({
+    get: (name) => {
+      const value = req.headers[name.toLowerCase()];
+      return Array.isArray(value) ? value.join(', ') : value;
+    },
+    query,
+  });
+}
+
+function unreachableText(target: ProxyTarget, lang: Lang): string {
+  return `${smsg(lang).desktop.proxy.unreachable(target.origin)}\n`;
 }
 
 function plain(res: ServerResponse, status: number, text: string, close = false): void {
@@ -275,14 +297,15 @@ export function startProxy(target: ProxyTarget, port: number): Promise<ProxyServ
   let proxyHost = '';
 
   server.on('request', (req: IncomingMessage, res: ServerResponse) => {
-    if (req.headers.host !== proxyHost) return plain(res, 421, '이 주소로는 열 수 없습니다\n', true);
+    const lang = langOf(req);
+    if (req.headers.host !== proxyHost) return plain(res, 421, `${smsg(lang).desktop.proxy.wrongHost}\n`, true);
     const path = req.url ?? '';
-    if (!path.startsWith('/')) return plain(res, 400, '요청 주소가 올바르지 않습니다\n', true);
+    if (!path.startsWith('/')) return plain(res, 400, `${smsg(lang).desktop.proxy.badPath}\n`, true);
 
     // net.connect resolves nothing for an IP literal (the lookup below never runs): checked here instead.
     if (isIP(target.hostname) && !isPrivateAddress(target.hostname)) {
       console.error(`[proxy] ${target.origin} 이(가) 사설 네트워크 주소가 아니어서 중계하지 않았습니다`);
-      return plain(res, 502, unreachableText(target), true);
+      return plain(res, 502, unreachableText(target, lang), true);
     }
 
     let answered = false;
@@ -323,7 +346,7 @@ export function startProxy(target: ProxyTarget, port: number): Promise<ProxyServ
       answered = true;
       if (res.headersSent) return res.destroy();
       if (err.code === 'EPUBLIC') console.error(`[proxy] ${target.origin} 이(가) 사설 네트워크 주소가 아니어서 중계하지 않았습니다`);
-      plain(res, 502, unreachableText(target));
+      plain(res, 502, unreachableText(target, lang));
     });
     // The client left (page closed, navigation, an aborted upload): the remote sees the close and aborts its turn.
     res.on('close', () => {
@@ -364,6 +387,9 @@ export function startProxy(target: ProxyTarget, port: number): Promise<ProxyServ
 // main
 // ---------------------------------------------------------------------------
 
+/** Exit code when the port is held by another program: the shell then tries another port (proxy.rs). */
+export const EXIT_PORT_TAKEN = 3;
+
 function argValue(args: string[], flag: string): string | undefined {
   const at = args.indexOf(flag);
   return at >= 0 ? args[at + 1] : undefined;
@@ -374,11 +400,13 @@ async function main(): Promise<void> {
   process.stdout.on('error', () => {});
   process.stderr.on('error', () => {});
 
+  // The startup errors are for the shell's connection screen: in its language (EASY_STUDY_LANG).
+  const m = smsg(envLang()).desktop.proxy;
   let target: ProxyTarget;
   let port: number;
   try {
     const raw = argValue(process.argv.slice(2), '--to');
-    if (raw === undefined || raw === '') throw new Error('중계할 주소가 올바르지 않습니다: --to http://호스트:포트 가 필요합니다');
+    if (raw === undefined || raw === '') throw new Error(m.toMissing);
     target = parseTarget(raw);
     port = proxyPort();
   } catch (err) {
@@ -391,9 +419,9 @@ async function main(): Promise<void> {
   try {
     proxy = await startProxy(target, port);
   } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    console.error(code === 'EADDRINUSE' ? `포트 ${port}를 다른 프로그램이 쓰고 있습니다` : `연결 통로를 시작하지 못했습니다: ${err instanceof Error ? err.message : String(err)}`);
-    process.exitCode = 1;
+    const taken = (err as NodeJS.ErrnoException).code === 'EADDRINUSE';
+    console.error(taken ? m.portTaken(port) : m.startFailed(err instanceof Error ? err.message : String(err)));
+    process.exitCode = taken ? EXIT_PORT_TAKEN : 1;
     return;
   }
 

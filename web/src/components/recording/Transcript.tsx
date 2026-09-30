@@ -3,6 +3,7 @@
 import { ChevronLeft, ChevronRight, MapPin, Play } from 'lucide-react';
 import { createContext, memo, useContext, useEffect, useLayoutEffect, useRef } from 'react';
 import type { AlignmentMarker, TranscriptSegment } from '../../../../shared/types.ts';
+import { msg, useLang } from '../../i18n/index.ts';
 import { markerAtSegment, markerLabel, type MarkerAction } from '../../lib/recording/markers.ts';
 import { formatClock, groupBySlide, groupsOfSlide, type TranscriptGroup } from '../../lib/recording/timeline.ts';
 import { PopoverMenu } from '../organize/PopoverMenu.tsx';
@@ -76,19 +77,16 @@ export function Transcript({
     scroller.scrollTop = scroller.scrollHeight;
   }, [count, live, mode, playing, scroller]);
 
+  const m = msg().recording.transcript;
   if (segments.length === 0) {
-    return (
-      <div className="tr-empty muted">
-        {live ? '받아쓴 문장이 여기에 나타나요…' : '받아쓴 문장이 아직 없어요.'}
-      </div>
-    );
+    return <div className="tr-empty muted">{live ? m.emptyLive : m.empty}</div>;
   }
 
   if (groups.length === 0) {
     return (
       <div className="tr-empty">
         <span className="slide-chip">p.{focusedSlide}</span>
-        <span className="muted"> 이 슬라이드에서 한 말이 {live ? '아직 ' : ''}없어요.</span>
+        <span className="muted"> {live ? m.nothingOnSlideYet : m.nothingOnSlide}</span>
         <div className="digest-nav">
           <button
             type="button"
@@ -118,15 +116,15 @@ export function Transcript({
         <section key={`${g.segments[0].id}`} className={g.slide === focusedSlide ? 'tr-group is-focused' : 'tr-group'}>
           <header className="tr-group-head">
             {g.slide === null ? (
-              <span className="tr-offslide" title="슬라이드와 관계없는 말 (공지, 잡담 등)">
-                슬라이드 밖
+              <span className="tr-offslide" title={m.offSlideTitle}>
+                {m.offSlide}
               </span>
             ) : (
-              <button type="button" className="slide-chip" onClick={() => onGoToSlide(g.slide!)} title="이 슬라이드로 이동">
+              <button type="button" className="slide-chip" onClick={() => onGoToSlide(g.slide!)} title={m.goToSlide}>
                 p.{g.slide}
               </button>
             )}
-            <button type="button" className="tr-group-time" onClick={() => onPlayFrom(g.start)} title="여기부터 재생">
+            <button type="button" className="tr-group-time" onClick={() => onPlayFrom(g.start)} title={m.playFromHere}>
               <Play fill="currentColor" /> {formatClock(g.start)}
             </button>
           </header>
@@ -167,9 +165,9 @@ function MarkButton({
       type="button"
       className="tr-mark-btn"
       onClick={() => onMarker({ type: 'add', t: segment.start, slide: focusedSlide })}
-      title={`이 문장부터 지금 보고 있는 슬라이드(p.${focusedSlide})에 대한 설명이라고 표시해요 — 뒤따르는 문장도 다시 정렬돼요`}
+      title={msg().recording.transcript.markTitle(focusedSlide)}
     >
-      여기부터 p.{focusedSlide}
+      {msg().recording.markers.fromSlide(focusedSlide)}
     </button>
   );
 }
@@ -189,20 +187,22 @@ const Segment = memo(function Segment({
   onPlayFrom: (t: number) => void;
   onMarker: (action: MarkerAction) => void;
 }) {
+  useLang(); // memo(): the texts below follow a language change
+  const m = msg().recording.transcript;
   return (
     <li className={active ? 'tr-seg is-active' : 'tr-seg'} data-seg={segment.id}>
       <button
         type="button"
         className="tr-seg-main"
         onClick={() => onPlayFrom(segment.start)}
-        title={`${formatClock(segment.start)}부터 재생`}
+        title={m.playFrom(formatClock(segment.start))}
       >
         <span className="tr-time">{formatClock(segment.start)}</span>
         <span className="tr-text">
           {marker && (
-            <span className="tr-marker" title={`직접 표시한 구간: ${markerLabel(marker)}`}>
+            <span className="tr-marker" title={m.markerTitle(markerLabel(marker))}>
               <MapPin />
-              {marker.slide === null ? '밖' : `p.${marker.slide}`}
+              {marker.slide === null ? m.markerOff : `p.${marker.slide}`}
             </span>
           )}
           {segment.text}
@@ -212,22 +212,22 @@ const Segment = memo(function Segment({
         <span className="tr-seg-actions">
           <MarkButton segment={segment} marker={marker} onMarker={onMarker} />
           <PopoverMenu
-            label={`${formatClock(segment.start)} 문장 메뉴`}
+            label={m.sentenceMenu(formatClock(segment.start))}
             sections={[
               {
                 items: [
-                  { key: 'play', label: '여기부터 재생', onSelect: () => onPlayFrom(segment.start) },
+                  { key: 'play', label: m.playFromHere, onSelect: () => onPlayFrom(segment.start) },
                   {
                     key: 'off',
-                    label: '여기부터 슬라이드 밖',
-                    hint: '공지·잡담',
+                    label: msg().recording.markers.fromHereOff,
+                    hint: m.offSlideHint,
                     onSelect: () => onMarker({ type: 'add', t: segment.start, slide: null }),
                   },
                   ...(marker
                     ? [
                         {
                           key: 'remove',
-                          label: '이 표시 지우기',
+                          label: m.removeMarker,
                           hint: markerLabel(marker),
                           onSelect: () => onMarker({ type: 'remove', t: marker.t }),
                         },

@@ -5,6 +5,7 @@ import { errorMessage, getAuthStatus, logout } from './api.ts';
 import { LocalOnlyScreen } from './components/LocalOnlyScreen.tsx';
 import { LoginScreen } from './components/LoginScreen.tsx';
 import { useAuth } from './hooks/useAuth.ts';
+import { msg, useLang } from './i18n/index.ts';
 import { applyAuthStatus, getAuthSnapshot, markLoggedOut, markStatusUnknown, type LoginLinkResult } from './lib/auth.ts';
 import { toast } from './lib/toast.ts';
 
@@ -14,7 +15,7 @@ async function checkAuth(loginLink: LoginLinkResult): Promise<void> {
     const status = await getAuthStatus();
     applyAuthStatus(status, loginLink);
     if (loginLink === 'failed' && getAuthSnapshot().phase === 'ok') {
-      toast('로그인 링크의 접속 코드가 맞지 않았어요. 이 브라우저는 이미 로그인되어 있어요.', 'info');
+      toast(msg().shell.auth.linkAlreadyLoggedIn, 'info');
     }
   } catch {
     // 403 (local-only) already switched the phase; otherwise the app starts and shows its own
@@ -25,6 +26,9 @@ async function checkAuth(loginLink: LoginLinkResult): Promise<void> {
 
 export function AuthGate({ loginLink }: { loginLink: LoginLinkResult }) {
   const auth = useAuth();
+  // A change of language re-renders everything below (the texts come from msg() in render, DESIGN §27): the app stays
+  // mounted, so nothing typed, playing or recording is lost.
+  useLang();
 
   useEffect(() => {
     void checkAuth(loginLink);
@@ -35,7 +39,7 @@ export function AuthGate({ loginLink }: { loginLink: LoginLinkResult }) {
       await logout();
       markLoggedOut();
     } catch (e) {
-      toast(`로그아웃하지 못했어요: ${errorMessage(e)}`, 'error');
+      toast(msg().shell.auth.logoutFailed(errorMessage(e)), 'error');
     }
   }, []);
 

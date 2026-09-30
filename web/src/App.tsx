@@ -30,10 +30,11 @@ import { useNotes } from './hooks/useNotes.ts';
 import { useProviderChoice } from './hooks/useProviderChoice.ts';
 import { useRecordings } from './hooks/useRecordings.ts';
 import { useStudySession } from './hooks/useStudySession.ts';
+import { msg } from './i18n/index.ts';
 import {
   classifyDragTypes,
   dropOverlayCopy,
-  EXPLAIN_REGION_PROMPT,
+  explainRegionPrompt,
   planDrop,
   readyAttachments,
   withoutAttachments,
@@ -58,7 +59,6 @@ import { RECORDING_ACCEPT } from './lib/recording/labels.ts';
 import { recorder } from './lib/recording/recorder.ts';
 import { getRecordingUploads, subscribeRecordingUploads, uploadRecordingFiles } from './lib/recording/uploads.ts';
 import { earlierLectures } from './lib/courseContext.ts';
-import { withParticle } from './lib/korean.ts';
 import { providerWithModel } from './lib/format.ts';
 import { isString, readStorage, storageKeys, writeStorage } from './lib/storage.ts';
 import { toast } from './lib/toast.ts';
@@ -315,7 +315,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
     (sessionId: string, messageId: string) => {
       const s = studyRef.current;
       if (s.sessions && !s.sessions.some((x) => x.id === sessionId)) {
-        toast('그 질문의 세션을 찾을 수 없어요', 'info');
+        toast(msg().shell.app.qaSessionMissing, 'info');
         return;
       }
       setTab('chat');
@@ -332,7 +332,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
     (rid: string, t: number) => {
       const list = recordingsRef.current.list;
       if (list && !list.some((r) => r.id === rid)) {
-        toast('그 녹음을 찾을 수 없어요', 'info');
+        toast(msg().shell.app.recordingMissing, 'info');
         return;
       }
       changeTab('recordings');
@@ -348,7 +348,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
         return;
       }
       if (!docs?.some((d) => d.id === target)) {
-        toast('그 강의는 지워졌어요', 'info');
+        toast(msg().shell.app.lectureDeleted, 'info');
         return;
       }
       if (slide) writeStorage(storageKeys.slide(target), slide);
@@ -398,14 +398,11 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
       const stay = open && countAttachments() > 0;
       const courseTitle = courseId ? courses?.find((c) => c.id === courseId)?.title : undefined;
       if (courseId) void refreshCourses(); // the server inserts new lectures in natural title order
+      const m = msg().shell.app;
       if (stay) {
-        const what = created.length === 1 ? `‘${last.title}’ 강의` : `강의 ${created.length}개`;
-        toast(
-          `${what}를 ${courseTitle ? `${courseTitle} 과목에 ` : ''}추가했어요. 입력창의 첨부를 지키려고 지금 강의에 그대로 있어요 — 상단 문서 목록에서 열 수 있어요.`,
-          'success',
-        );
+        toast(m.addedKeptOpen(created.length, last.title, courseTitle ?? null), 'success');
       } else {
-        if (courseTitle) toast(`${courseTitle} 과목에 강의 ${created.length}개를 추가했어요`, 'success');
+        if (courseTitle) toast(m.addedToCourse(courseTitle, created.length), 'success');
         if (open) setDocId(last.id);
       }
     },
@@ -567,14 +564,13 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
   const logout = useCallback(async () => {
     if (!onLogout) return;
     const recording = recorderPhase === 'recording' || recorderPhase === 'paused';
+    const m = msg().shell.app.logoutConfirm;
     if (
       busy &&
       !(await confirmDialog({
-        title: '로그아웃할까요?',
-        message: recording
-          ? '강의를 녹음하는 중이에요. 로그아웃하면 녹음을 끝내요 (지금까지 녹음한 것은 다시 로그인하면 마저 올라가요).'
-          : '답변을 만들거나 파일을 올리는 중이에요. 지금 로그아웃하면 이 화면에서는 결과를 볼 수 없어요.',
-        confirmLabel: '로그아웃',
+        title: m.title,
+        message: recording ? m.recording : m.busy,
+        confirmLabel: m.confirmLabel,
       }))
     ) {
       return;
@@ -586,16 +582,17 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
   // ---- Documents whose conversion failed: retry or delete (DESIGN §14) ----------------------------
   const deleteDoc = useCallback(
     async (target: DocMeta) => {
+      const m = msg().shell.app;
       const ok = await confirmDialog({
-        title: `${withParticle(`‘${target.title}’`, '을', '를')} 삭제할까요?`,
-        message: '업로드한 PDF와 여기서 만든 파일(슬라이드 이미지, 대화, 노트, 정리본)이 모두 지워지고, 과목에서도 빠져요.',
-        confirmLabel: '삭제',
+        title: m.deleteDocConfirm.title(target.title),
+        message: m.deleteDocConfirm.message,
+        confirmLabel: msg().common.delete,
         danger: true,
       });
       if (!ok) return;
       if (await removeDoc(target.id)) {
         void refreshCourses(); // the server also removed it from its course
-        toast(`‘${target.title}’을(를) 삭제했어요.`, 'success');
+        toast(msg().shell.app.docDeleted(target.title), 'success');
       }
     },
     [removeDoc, refreshCourses],
@@ -606,16 +603,15 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
     async (targets: DocMeta[]) => {
       if (targets.length === 0) return;
       if (!choice) {
-        toast('사용할 수 있는 LLM이 없어요. 상단의 모델 선택을 확인해 주세요.', 'error');
+        toast(msg().shell.app.noLlmForDigest, 'error');
         return;
       }
       const who = providerWithModel(providers, choice.provider, choice.model, choice.effort);
+      const m = msg().shell.app.digestConfirm;
       const ok = await confirmDialog({
-        title: `강의 ${targets.length}개의 정리본을 ${who}(으)로 만들까요?`,
-        message:
-          targets.map((d) => `• ${d.title}`).join('\n') +
-          '\nLLM이 강의마다 모든 슬라이드를 읽어서 시간이 걸리고 사용량이 들어요. 완성된 강의의 요약은 같은 과목의 뒤 강의를 공부할 때 LLM에게 함께 전달돼요.',
-        confirmLabel: '정리본 만들기',
+        title: m.title(targets.length, who),
+        message: targets.map((d) => `• ${d.title}`).join('\n') + '\n' + m.note,
+        confirmLabel: m.confirmLabel,
       });
       if (!ok) return;
       let started = 0;
@@ -638,10 +634,8 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
           }
         }
       }
-      if (started > 0) {
-        toast(`정리본 만들기를 시작했어요 (${started}개). 진행 상황은 강의 목록의 배지에서 볼 수 있어요.`, 'success');
-      }
-      if (failed.length > 0) toast(`정리본을 시작하지 못했어요:\n${failed.join('\n')}`, 'error');
+      if (started > 0) toast(msg().shell.app.digestsStarted(started), 'success');
+      if (failed.length > 0) toast(msg().shell.app.digestsFailed(failed.join('\n')), 'error');
       void refreshDocs();
     },
     [choice, providers, patchDoc, refreshDocs],
@@ -649,21 +643,18 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
   const onDigestLectures = useCallback((targets: DocMeta[]) => void digestLectures(targets), [digestLectures]);
 
   // ---- Provider availability ---------------------------------------------------------------------
+  const m = msg().shell.app;
   const noProvider = !!providers && !providers.some((p) => p.available);
   const providerProblem = healthError
-    ? `서버 상태를 확인하지 못했어요 (${healthError})`
+    ? m.healthFailed(healthError)
     : !providers
-      ? '사용할 수 있는 LLM을 확인하는 중…'
+      ? m.checkingLlms
       : noProvider
-        ? '사용 가능한 LLM이 없어요 — 상단 ⓘ 에서 이유를 확인하세요'
+        ? m.noLlmSeeInfo
         : null;
 
   // "이 부분 설명해줘" on a selected region: the same rule as the composer's send button.
-  const askDisabledReason = study.running
-    ? '답변이 끝난 뒤에 질문할 수 있어요 (첨부는 지금도 돼요)'
-    : !study.session && !choice
-      ? (providerProblem ?? '사용 가능한 LLM이 없어요')
-      : null;
+  const askDisabledReason = study.running ? m.askAfterAnswer : !study.session && !choice ? (providerProblem ?? m.noLlm) : null;
   const askDisabledRef = useLatest(askDisabledReason);
   const askRegion = useCallback(
     async (slide: number, rect: RegionRect) => {
@@ -673,10 +664,10 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
       await settleAttachments(); // images still uploading go along
       const blocked = askDisabledRef.current;
       if (blocked) {
-        toast(`영역을 입력창에 첨부해 두었어요. ${blocked}`, 'info');
+        toast(msg().shell.app.regionAttached(blocked), 'info');
         return;
       }
-      await sendQuestion(EXPLAIN_REGION_PROMPT, slide);
+      await sendQuestion(explainRegionPrompt(), slide);
     },
     [addRegion, settleAttachments, askDisabledRef, sendQuestion],
   );
@@ -880,7 +871,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
       {healthError && (
         <div className="banner banner-error" role="alert">
           <span>
-            <TriangleAlert /> 서버에 연결할 수 없어요: {healthError}
+            <TriangleAlert /> {m.serverUnreachable(healthError)}
           </span>
           <button
             type="button"
@@ -891,18 +882,18 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
               void refreshCourses();
             }}
           >
-            다시 시도
+            {msg().common.retry}
           </button>
         </div>
       )}
       {!healthError && noProvider && (
         <div className="banner banner-warn" role="alert">
           <span>
-            <TriangleAlert /> 사용 가능한 LLM이 없어요.{' '}
-            {providers?.map((p) => `${p.label}: ${p.reason ?? '사용 불가'}`).join(' · ')}
+            <TriangleAlert /> {m.noLlmBanner}{' '}
+            {providers?.map((p) => `${p.label}: ${p.reason ?? m.unavailable}`).join(' · ')}
           </span>
           <button type="button" className="ghost-btn small" onClick={() => void reloadHealth()}>
-            다시 확인
+            {m.checkAgain}
           </button>
         </div>
       )}
@@ -943,15 +934,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
             {(() => {
               const copy = dropOverlayCopy(
                 dragOver,
-                uploadTarget ? (
-                  <>
-                    <FileText /> PDF를 놓으면 <Folder /> {uploadTarget.title}에 강의로 추가해요
-                  </>
-                ) : (
-                  <>
-                    <FileText /> PDF를 놓으면 업로드해요
-                  </>
-                ),
+                uploadTarget ? m.dropPdfToCourse(<FileText />, <Folder />, uploadTarget.title) : m.dropPdf(<FileText />),
                 readyDocId !== null,
               );
               return (
@@ -970,7 +953,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
               );
             })()}
             {!doc && (courses?.length ?? 0) > 0 && (dragOver.pdf || dragOver.unknown) && (
-              <div className="drop-overlay-sub">과목 카드 위에 놓으면 그 과목에 추가돼요</div>
+              <div className="drop-overlay-sub">{m.dropOnCourseCard}</div>
             )}
           </div>
         </div>

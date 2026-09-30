@@ -36,6 +36,7 @@ import type {
   ProviderRunResult,
 } from './types.ts';
 import { ProviderError } from './types.ts';
+import { smsg } from '../i18n.ts';
 import { abortError, errorMessage, loadInlineImage } from './proc.ts';
 import { AnthropicUsageTracker, anthropicUsage } from './usage.ts';
 
@@ -125,9 +126,9 @@ export function estimateAnthropicInputTokens(params: BetaMessageStreamParams): n
 export function checkAnthropicRequest(params: BetaMessageStreamParams, continued: boolean): void {
   const bytes = Buffer.byteLength(JSON.stringify(params), 'utf8');
   if (bytes > MAX_REQUEST_BYTES) {
+    const m = smsg().chat.providers.anthropic;
     throw new ProviderError(
-      `Anthropic API 요청이 너무 큽니다 (약 ${(bytes / 1_000_000).toFixed(1)} MB, 한도 32 MB).` +
-        (continued ? ' 대화에 이미지가 많이 쌓여 새 대화로 이어가야 합니다.' : ''),
+      m.requestTooLarge((bytes / 1_000_000).toFixed(1)) + (continued ? ` ${m.tooManyImages}` : ''),
       'context_overflow',
     );
   }
@@ -136,8 +137,7 @@ export function checkAnthropicRequest(params: BetaMessageStreamParams, continued
   const estimate = estimateAnthropicInputTokens(params);
   if (estimate + OUTPUT_RESERVE_TOKENS > window) {
     throw new ProviderError(
-      `대화가 모델(${params.model})의 컨텍스트 한도(${Math.round(window / 1000)}K 토큰)에 가까워졌습니다 ` +
-        `(추정 ${Math.round(estimate / 1000)}K 토큰). 새 대화로 이어가야 합니다.`,
+      smsg().chat.providers.anthropic.nearContextLimit(params.model, Math.round(window / 1000), Math.round(estimate / 1000)),
       'context_overflow',
     );
   }
@@ -256,12 +256,12 @@ export class AnthropicStreamState {
     if (event.type === 'content_block_start') {
       const type = event.content_block.type;
       if (type === 'thinking' || type === 'redacted_thinking') {
-        this.onStatus('생각하는 중…');
+        this.onStatus(smsg().chat.providers.thinking);
       } else if (type === 'fallback') {
         // The requested model declined; a fallback model takes over. After partial output it is given
         // the partial text as continuation context and carries on from it (mid-sentence), so the text
         // is kept and the continuation appended without a separator (lastIndex = null).
-        this.onStatus('다른 모델이 이어서 답변하는 중…');
+        this.onStatus(smsg().chat.providers.anthropic.continuedByOtherModel);
         this.lastIndex = null;
       }
       return;
@@ -310,33 +310,32 @@ function loadAnthropicSdk(): Promise<AnthropicSdk> {
 
 function toProviderError(Anthropic: AnthropicSdk, err: unknown): Error {
   if (err instanceof ProviderError) return err;
-  if (err instanceof Anthropic.APIConnectionError) {
-    return new ProviderError(`Anthropic API에 연결할 수 없습니다: ${err.message}`, 'other', { cause: err });
-  }
+  const m = smsg().chat.providers.anthropic;
+  if (err instanceof Anthropic.APIConnectionError) return new ProviderError(m.connectFailed(err.message), 'other', { cause: err });
   if (!(err instanceof Anthropic.APIError)) return err instanceof Error ? err : new Error(errorMessage(err));
   const kind = classifyAnthropicError(err.status, err.message);
   let message: string;
   if (err instanceof Anthropic.AuthenticationError) {
-    message = 'Anthropic API 인증에 실패했습니다. ANTHROPIC_API_KEY를 확인하세요.';
+    message = m.authFailed;
   } else if (err instanceof Anthropic.PermissionDeniedError) {
-    message = `Anthropic API 권한 오류: ${err.message}`;
+    message = m.permissionDenied(err.message);
   } else if (err instanceof Anthropic.NotFoundError) {
-    message = `Anthropic API: 모델 또는 경로를 찾을 수 없습니다 (${err.message})`;
+    message = m.notFound(err.message);
   } else if (err instanceof Anthropic.RateLimitError) {
-    message = 'Anthropic API 요청 한도를 초과했습니다. 잠시 후 다시 시도하세요.';
+    message = m.rateLimited;
   } else if (kind === 'context_overflow') {
-    message = `Anthropic API: 대화가 너무 커서 모델이 받을 수 없습니다 (${err.message})`;
+    message = m.tooLargeForModel(err.message);
   } else if (err instanceof Anthropic.BadRequestError) {
-    message = `Anthropic API 요청 오류: ${err.message}`;
+    message = m.badRequest(err.message);
   } else {
-    message = `Anthropic API 오류${err.status ? ` (${err.status})` : ''}: ${err.message}`;
+    message = m.error(err.status ?? 0, err.message);
   }
   return new ProviderError(message, kind, { cause: err });
 }
 
 async function runAnthropic(input: ProviderRunInput): Promise<ProviderRunResult> {
   if (!process.env.ANTHROPIC_API_KEY) {
-    throw new ProviderError('ANTHROPIC_API_KEY 환경 변수가 설정되지 않았습니다.', 'auth');
+    throw new ProviderError(smsg().chat.providers.apiKeyMissing('ANTHROPIC_API_KEY'), 'auth');
   }
   if (input.signal.aborted) throw abortError();
 
@@ -361,14 +360,14 @@ async function runAnthropic(input: ProviderRunInput): Promise<ProviderRunResult>
     state.reportUsage(anthropicUsage(final.usage));
     if (final.stop_reason === 'refusal') {
       const category = final.stop_details?.category;
-      throw new Error(`모델이 이 요청에 대한 답변을 거절했습니다${category ? ` (${category})` : ''}. 질문을 바꿔 다시 시도해 보세요.`);
+      throw new Error(smsg().chat.providers.anthropic.refused(category ?? ''));
     }
     if ((final.stop_reason as string) === 'model_context_window_exceeded') {
       // The context window filled up while answering: without an answer a new conversation is needed.
       if (!state.text.trim()) {
-        throw new ProviderError('대화가 모델의 컨텍스트 한도를 채워 답변을 쓸 수 없습니다. 새 대화로 이어가야 합니다.', 'context_overflow');
+        throw new ProviderError(smsg().chat.providers.anthropic.contextFull, 'context_overflow');
       }
-      input.onStatus('컨텍스트 한도에 도달해 답변이 중간에 끝났습니다.');
+      input.onStatus(smsg().chat.providers.anthropic.cutOffByContext);
     }
   } catch (err) {
     if (input.signal.aborted || err instanceof Anthropic.APIUserAbortError) throw abortError();
@@ -379,9 +378,18 @@ async function runAnthropic(input: ProviderRunInput): Promise<ProviderRunResult>
   return out;
 }
 
+/** Available with an API key; checked once for every language (the reason is worded when the result is). */
+async function probeAnthropic(): Promise<() => ProviderAvailability> {
+  const hasKey = !!process.env.ANTHROPIC_API_KEY;
+  return () => (hasKey ? { available: true } : { available: false, reason: smsg().chat.providers.apiKeyMissing('ANTHROPIC_API_KEY') });
+}
+
 export const anthropicApiProvider: Provider = {
   id: 'anthropic-api',
-  label: 'Claude API (API 키)',
+  // In the request's language (DESIGN §27).
+  get label(): string {
+    return smsg().chat.providers.label['anthropic-api'];
+  },
   kind: 'api',
   get models(): ModelOption[] {
     const model = defaultModel();
@@ -393,9 +401,8 @@ export const anthropicApiProvider: Provider = {
   },
   maxImagesPerConversation: 90,
   async detect(): Promise<ProviderAvailability> {
-    return process.env.ANTHROPIC_API_KEY
-      ? { available: true }
-      : { available: false, reason: 'ANTHROPIC_API_KEY 환경 변수가 설정되지 않았습니다.' };
+    return (await probeAnthropic())();
   },
+  probe: probeAnthropic,
   run: runAnthropic,
 };

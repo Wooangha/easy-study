@@ -4,6 +4,7 @@ import { Mic } from 'lucide-react';
 import { createContext, useContext } from 'react';
 import type { DocMeta } from '../../../../shared/types.ts';
 import { useRecordingUploads } from '../../hooks/useRecorder.ts';
+import { msg } from '../../i18n/index.ts';
 
 /** Opens the file picker for recordings of this lecture (null where uploading is not offered). */
 export const RecordingUploadContext = createContext<((doc: DocMeta) => void) | null>(null);
@@ -21,7 +22,7 @@ export function RecordingUploadBadge({ docId }: { docId: string }) {
   const pct = size > 0 ? Math.round((done / size) * 100) : 0;
   return (
     <span className="digest-badge is-running" title={uploads.map((u) => u.name).join('\n')}>
-      <Mic /> 녹음 올리는 중 {pct}%
+      <Mic /> {msg().recording.uploadBadge(pct)}
     </span>
   );
 }

@@ -9,6 +9,7 @@
 //
 // API providers spawn no process and take no slot.
 import { maxCliProcs } from './config.ts';
+import { smsg } from './i18n.ts';
 
 export type CliSlotKind = 'chat' | 'digest';
 
@@ -30,7 +31,7 @@ interface Waiter {
 }
 
 function abortReason(signal: AbortSignal): Error {
-  return signal.reason instanceof Error ? signal.reason : new Error('중단되었습니다');
+  return signal.reason instanceof Error ? signal.reason : new Error(smsg().chat.turns.stopped);
 }
 
 /** A budget of `limit()` CLI processes (read on every decision, so the environment may change). */

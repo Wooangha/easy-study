@@ -21,7 +21,6 @@ import type {
   StreamEvent,
 } from '../shared/types.ts';
 import { configureAnnotations } from '../server/annotations.ts';
-import { LAYOUT_NEVER, LAYOUT_PENDING } from '../server/annotationsRoutes.ts';
 import { defaultChatDeps } from '../server/chat.ts';
 import type { ChatDeps } from '../server/chat.ts';
 import { startServer } from '../server/index.ts';
@@ -31,6 +30,10 @@ import type { StoredDocMeta } from '../server/library.ts';
 import { TEXT_ENGINE, TEXT_ENGINE_FILE, layoutFileName, textFileName } from '../server/pageNames.ts';
 import type { Part, Provider, ProviderRunInput } from '../server/providers/types.ts';
 import { deckPdf } from './pdfFixtures.ts';
+import { smsg } from '../server/i18n.ts';
+
+/** The 404 bodies of GET …/text-layout/:slide (Korean: the tests send no language). */
+const { layoutPending: LAYOUT_PENDING, layoutNever: LAYOUT_NEVER } = smsg('ko').library.annotations;
 
 let tmpRoot = '';
 

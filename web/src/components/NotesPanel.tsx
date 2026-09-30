@@ -3,6 +3,7 @@ import { ChevronRight, FileText, Hourglass, NotebookPen, Paperclip, RefreshCw, S
 import type { NoteEntry, NotesResponse, ProviderInfo } from '../../../shared/types.ts';
 import { notesMarkdownUrl, thumbUrl } from '../api.ts';
 import { useAuth } from '../hooks/useAuth.ts';
+import { msg } from '../i18n/index.ts';
 import { copyText } from '../lib/clipboard.ts';
 import { firstLine, formatTime, providerLabel } from '../lib/format.ts';
 import { toast } from '../lib/toast.ts';
@@ -52,11 +53,14 @@ export function NotesPanel({
 
   const copyPath = () => {
     if (!notes) return;
+    const t = msg().chat.shared;
     void copyText(notes.markdownPath)
-      .then(() => toast(remote ? '서버 컴퓨터의 경로를 복사했어요' : '경로를 복사했어요', 'success', 2000))
-      .catch(() => toast('복사하지 못했어요', 'error'));
+      .then(() => toast(remote ? t.pathCopiedRemote : t.pathCopied, 'success', 2000))
+      .catch(() => toast(t.copyFailed, 'error'));
   };
 
+  const m = msg().chat.notes;
+  const shared = msg().chat.shared;
   return (
     <div className="notes-panel">
       <div className="notes-toolbar">
@@ -66,11 +70,11 @@ export function NotesPanel({
             checked={filter === 'current'}
             onChange={(e) => onFilterChange(e.target.checked ? 'current' : 'all')}
           />
-          현재 슬라이드만
+          {shared.currentSlideOnly}
         </label>
         {typeof filter === 'number' && (
-          <button type="button" className="filter-chip" onClick={() => onFilterChange('all')} title="필터 해제">
-            p.{filter}만 보는 중 <X size="1em" />
+          <button type="button" className="filter-chip" onClick={() => onFilterChange('all')} title={m.clearFilter}>
+            {m.onlySlide(filter)} <X size="1em" />
           </button>
         )}
         <span className="spacer" />
@@ -80,9 +84,9 @@ export function NotesPanel({
           onClick={() => setExpand((e) => ({ open: !e.open, gen: e.gen + 1 }))}
           disabled={!hasNotes}
         >
-          {expand.open ? '모두 접기' : '모두 펼치기'}
+          {expand.open ? m.collapseAll : m.expandAll}
         </button>
-        <button type="button" className="ghost-btn small" onClick={onRefresh} disabled={loading} title="새로고침" aria-label="새로고침">
+        <button type="button" className="ghost-btn small" onClick={onRefresh} disabled={loading} title={shared.refresh} aria-label={shared.refresh}>
           <RefreshCw />
         </button>
       </div>
@@ -90,7 +94,7 @@ export function NotesPanel({
       <div className="notes-file">
         {hasNotes ? (
           <a className="notes-file-link" href={notesMarkdownUrl(docId)} target="_blank" rel="noreferrer">
-            <FileText /> STUDY_NOTES.md 열기
+            <FileText /> {m.openFile}
           </a>
         ) : (
           <span className="muted">
@@ -102,7 +106,7 @@ export function NotesPanel({
             type="button"
             className="path"
             onClick={copyPath}
-            title={remote ? '서버 컴퓨터의 경로예요. 클릭해서 복사' : '클릭해서 경로 복사'}
+            title={remote ? shared.pathTitleRemote : shared.pathTitle}
           >
             {notes.markdownPath}
           </button>
@@ -112,21 +116,21 @@ export function NotesPanel({
       <div className="notes-scroll">
         {error && (
           <div className="inline-error">
-            <TriangleAlert /> 노트를 불러오지 못했어요: {error}
+            <TriangleAlert /> {m.loadFailed(error)}
           </div>
         )}
-        {!notes && !error && <div className="notes-empty muted">불러오는 중…</div>}
+        {!notes && !error && <div className="notes-empty muted">{msg().common.loading}</div>}
         {notes && !hasNotes && (
           <div className="notes-empty">
             <div className="chat-empty-icon" aria-hidden>
               <NotebookPen strokeWidth={1.5} />
             </div>
-            <p>아직 저장된 Q&amp;A가 없어요.</p>
-            <p className="muted small">채팅에서 질문하면 슬라이드별로 자동으로 기록돼요.</p>
+            <p>{m.empty}</p>
+            <p className="muted small">{m.emptyHint}</p>
           </div>
         )}
         {notes && hasNotes && shown.length === 0 && (
-          <div className="notes-empty muted">p.{filterSlide}에 대한 Q&amp;A가 아직 없어요.</div>
+          <div className="notes-empty muted">{m.noneForSlide(filterSlide ?? 0)}</div>
         )}
         {shown.map((group) => (
           <section key={group.slide} className="note-group">
@@ -135,20 +139,20 @@ export function NotesPanel({
                 type="button"
                 className="note-thumb"
                 onClick={() => onGoToSlide(group.slide)}
-                title={`슬라이드 ${group.slide}로 이동`}
+                title={shared.goToSlide(group.slide)}
               >
                 <SlideImage
                   docId={docId}
                   slide={group.slide}
                   src={thumbUrl(docId, group.slide)}
-                  alt={`슬라이드 ${group.slide}`}
+                  alt={m.slideAlt(group.slide)}
                 />
               </button>
               <div className="note-group-title">
                 <button type="button" className="slide-chip" onClick={() => onGoToSlide(group.slide)}>
                   p.{group.slide}
                 </button>
-                <span className="muted">Q&amp;A {group.entries.length}개</span>
+                <span className="muted">{m.count(group.entries.length)}</span>
               </div>
             </header>
             <div className="note-entries">
@@ -181,6 +185,8 @@ function NoteCard({
   const { question, answer } = entry;
   const multiLine = question.text.trim().includes('\n');
   const attachmentCount = question.attachments?.length ?? 0;
+  const m = msg().chat.notes;
+  const shared = msg().chat.shared;
   return (
     <details className="note-card" open={open} onToggle={(e) => setOpen(e.currentTarget.open)}>
       <summary>
@@ -188,7 +194,7 @@ function NoteCard({
           <ChevronRight className="note-q-caret" size={14} />
           Q. {firstLine(question.text)}
           {attachmentCount > 0 && (
-            <span className="note-att-count" title={`첨부 ${attachmentCount}개 (선택 영역·이미지)`}>
+            <span className="note-att-count" title={m.attachmentsTitle(attachmentCount)}>
               <Paperclip />
               {attachmentCount}
             </span>
@@ -204,7 +210,7 @@ function NoteCard({
           {multiLine && <div className="note-question">{question.text}</div>}
           <AttachmentThumbs attachments={question.attachments} className="in-notes" />
           {!answer ? (
-            <div className="msg-note">(답변 없음)</div>
+            <div className="msg-note">{m.noAnswer}</div>
           ) : answer.status === 'complete' ? (
             <Markdown text={answer.text} />
           ) : (
@@ -213,15 +219,15 @@ function NoteCard({
               <div className={answer.status === 'error' ? 'msg-error' : 'msg-note'}>
                 {answer.status === 'error' ? (
                   <>
-                    <TriangleAlert /> 답변 실패{answer.error ? `: ${answer.error}` : ''}
+                    <TriangleAlert /> {shared.answerFailed(answer.error ?? '')}
                   </>
                 ) : answer.status === 'aborted' ? (
                   <>
-                    <Square fill="currentColor" /> 중단된 답변이에요
+                    <Square fill="currentColor" /> {shared.answerAborted}
                   </>
                 ) : (
                   <>
-                    <Hourglass /> 답변이 아직 완료되지 않았어요
+                    <Hourglass /> {shared.answerUnfinished}
                   </>
                 )}
               </div>

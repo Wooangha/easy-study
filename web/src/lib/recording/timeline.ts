@@ -2,6 +2,7 @@
 // being discussed (for "슬라이드 따라가기"), the transcript grouped under slide headers, and clock labels.
 // Pure helpers, no DOM.
 import type { TranscriptSegment } from '../../../../shared/types.ts';
+import { msg } from '../../i18n/index.ts';
 
 /** "0:05", "12:34", "1:02:03" (seconds, floored). */
 export function formatClock(seconds: number): string {
@@ -12,15 +13,15 @@ export function formatClock(seconds: number): string {
   return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`;
 }
 
-/** "3분 12초", "45초", "1시간 2분" — for sentences. */
+/** "3분 12초", "45초", "1시간 2분" ("3 min 12 sec", …) — for sentences, in the current language. */
 export function formatSpan(seconds: number): string {
+  const span = msg().recording.span;
   const s = Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds) : 0;
-  if (s < 60) return `${s}초`;
+  if (s < 60) return span.seconds(s);
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
-  if (h > 0) return m > 0 ? `${h}시간 ${m}분` : `${h}시간`;
-  const rest = s % 60;
-  return rest > 0 ? `${m}분 ${rest}초` : `${m}분`;
+  if (h > 0) return span.hours(h, m);
+  return span.minutes(m, s % 60);
 }
 
 /** Segments in time order (ids are increasing, but a re-transcription may deliver them out of order). */

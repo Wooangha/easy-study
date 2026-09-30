@@ -17,6 +17,7 @@ import express from 'express';
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import type { AuthStatusResponse } from '../shared/types.ts';
 import { HttpError, isLoopbackHost, isWildcardHost, libraryDir } from './config.ts';
+import { smsg } from './i18n.ts';
 import { createKeyedQueue, isNotFound, renameWithRetry } from './library.ts';
 
 /** File in the library that holds the generated access code and the session hashes (mode 0600). */
@@ -628,14 +629,14 @@ export interface AuthGate {
 function tooManyAttempts(res: Response, retryAfter: number): void {
   res.set('Retry-After', String(retryAfter));
   res.set('Cache-Control', 'no-store');
-  res.status(429).json({ error: `로그인 시도가 너무 많습니다. ${Math.ceil(retryAfter / 60)}분 뒤에 다시 시도해 주세요` });
+  res.status(429).json({ error: smsg().auth.tooManyAttempts(Math.ceil(retryAfter / 60)) });
 }
 
 /** Body of a login that could not be checked (not a string, empty or absurdly long): 400. */
 function loginCodeOf(body: unknown): string {
   const code = typeof body === 'object' && body !== null ? (body as { code?: unknown }).code : undefined;
-  if (typeof code !== 'string' || code.trim() === '') throw new HttpError(400, '접속 코드를 입력해 주세요');
-  if (code.length > MAX_CODE_INPUT) throw new HttpError(400, '접속 코드가 너무 깁니다');
+  if (typeof code !== 'string' || code.trim() === '') throw new HttpError(400, smsg().auth.codeRequired);
+  if (code.length > MAX_CODE_INPUT) throw new HttpError(400, smsg().auth.codeTooLong);
   return code;
 }
 
@@ -703,7 +704,7 @@ export function createAuthGate(store: AuthStore | null, limiter: LoginLimiter = 
     const code = loginCodeOf(req.body);
     if (!store.checkCode(code)) {
       limiter.fail(key);
-      throw new HttpError(401, '접속 코드가 올바르지 않습니다');
+      throw new HttpError(401, smsg().auth.codeInvalid);
     }
     limiter.succeed(key);
     await startSession(req, res);
@@ -728,7 +729,7 @@ export function createAuthGate(store: AuthStore | null, limiter: LoginLimiter = 
     res.set('Cache-Control', 'no-store');
     if (result.kind === 'limited') return tooManyAttempts(res, result.retryAfter);
     res.set('WWW-Authenticate', 'Bearer realm="easy-study"');
-    res.status(401).json({ error: result.kind === 'invalid-code' ? '접속 코드가 올바르지 않습니다' : 'login required' });
+    res.status(401).json({ error: result.kind === 'invalid-code' ? smsg().auth.codeInvalid : 'login required' });
   };
 
   const loginLink: RequestHandler = async (req: Request, res: Response, next: NextFunction) => {

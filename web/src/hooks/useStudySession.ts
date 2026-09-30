@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import type { Attachment, ChatMessage, Session, SessionSummary, StreamEvent, TokenUsage, UsageLimits } from '../../../shared/types.ts';
 import * as api from '../api.ts';
+import { msg } from '../i18n/index.ts';
 import { getMemosToTutor } from '../lib/annotations/settings.ts';
 import { missingAttachmentsMessage } from '../lib/attachments.ts';
 import { readStorage, storageKeys, writeStorage, isString } from '../lib/storage.ts';
@@ -217,7 +218,7 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
       .catch((e: unknown) => {
         if (cancelled) return;
         setSessionsState({ docId, list: [] });
-        toast(`세션 목록을 불러오지 못했어요: ${api.errorMessage(e)}`, 'error');
+        toast(msg().chat.session.listFailed(api.errorMessage(e)), 'error');
       });
     return () => {
       cancelled = true;
@@ -241,7 +242,7 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
       })
       .catch((e: unknown) => {
         if (cancelled) return;
-        toast(`세션을 불러오지 못했어요: ${api.errorMessage(e)}`, 'error');
+        toast(msg().chat.session.loadFailed(api.errorMessage(e)), 'error');
         if (e instanceof api.ApiError && e.status === 404) {
           setSelection(null);
           void refreshSessions(docId);
@@ -298,7 +299,7 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
     ): Promise<TurnResult> => {
       const key = turnKey(forDoc, sid);
       if (turnsRef.current.has(key)) {
-        toast('이미 답변을 생성하고 있어요. 끝난 뒤에 다시 시도해 주세요.', 'error');
+        toast(msg().common.api.busyAnswering, 'error');
         return { outcome: 'rejected', missingAttachments: [] };
       }
       const turn: LiveTurn = {
@@ -402,7 +403,7 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
             turn.controller.signal,
           );
         }
-        if (!finished) toast('서버와의 연결이 끊겼어요. 대화를 다시 불러올게요.', 'error');
+        if (!finished) toast(msg().chat.session.connectionLostReload, 'error');
       } catch (e) {
         if (api.isAbortError(e)) {
           if (!finished) outcome = 'aborted';
@@ -414,7 +415,7 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
             'error',
           );
         } else if (!finished) {
-          toast(`연결이 끊겼어요: ${api.errorMessage(e)}`, 'error');
+          toast(msg().chat.session.connectionLost(api.errorMessage(e)), 'error');
         }
       } finally {
         turnsRef.current.delete(key);
@@ -436,7 +437,7 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
     async (forDoc: string, slide: number): Promise<{ sid: string; outcome: TurnOutcome } | null> => {
       const c = choiceRef.current;
       if (!c) {
-        toast('사용할 수 있는 LLM이 없어요. 상단의 모델 선택을 확인해 주세요.', 'error');
+        toast(msg().chat.shared.noLlmToast, 'error');
         return null;
       }
       let created: Session;
@@ -447,7 +448,7 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
           effort: c.effort || undefined,
         });
       } catch (e) {
-        toast(`세션을 만들지 못했어요: ${api.errorMessage(e)}`, 'error');
+        toast(msg().chat.session.createFailed(api.errorMessage(e)), 'error');
         return null;
       }
       onSessionCreatedRef.current?.(forDoc);
@@ -509,7 +510,7 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
         if (!started) return notAccepted;
         if (started.outcome !== 'complete') {
           if (started.outcome !== 'aborted') {
-            toast('슬라이드를 LLM에게 전달하지 못해서 질문을 보내지 않았어요. 다시 시도해 주세요.', 'error');
+            toast(msg().chat.session.primeFailed, 'error');
           }
           return notAccepted;
         }
@@ -543,7 +544,7 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
       const forDoc = docId;
       const sid = sessionId;
       if (turnsRef.current.has(turnKey(forDoc, sid)) || flowActive) {
-        toast('답변이 끝난 뒤에 LLM을 바꿀 수 있어요.', 'error');
+        toast(msg().chat.session.switchWhileRunning, 'error');
         return null;
       }
       let updated: Session;
@@ -554,7 +555,7 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
           effort: next.effort || undefined,
         });
       } catch (e) {
-        toast(`LLM을 바꾸지 못했어요: ${api.errorMessage(e)}`, 'error');
+        toast(msg().chat.session.switchFailed(api.errorMessage(e)), 'error');
         return null;
       }
       // The saved session is authoritative (the change is in its `switches`), wherever the user is now.
@@ -601,14 +602,14 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
     async (sid: string) => {
       if (!docId) return;
       if (turnsRef.current.has(turnKey(docId, sid))) {
-        toast('답변이 생성되는 중에는 세션을 삭제할 수 없어요.', 'error');
+        toast(msg().chat.session.deleteWhileRunning, 'error');
         return;
       }
       const forDoc = docId;
       try {
         await api.deleteSession(forDoc, sid);
       } catch (e) {
-        toast(`세션을 삭제하지 못했어요: ${api.errorMessage(e)}`, 'error');
+        toast(msg().chat.session.deleteFailed(api.errorMessage(e)), 'error');
         return;
       }
       // Without a loaded list (still loading), ask the server rather than assume there are no others.
@@ -620,7 +621,7 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
         if (list) setSessionsState({ docId: forDoc, list: remaining });
         if (sessionId === sid) setSelection(remaining[0] ? { docId: forDoc, sessionId: remaining[0].id } : null);
       }
-      toast('세션을 삭제했어요.', 'success');
+      toast(msg().chat.session.deleted, 'success');
       onTurnFinishedRef.current?.(forDoc); // notes changed
     },
     [docId, docIdRef, sessionId, sessions, onTurnFinishedRef],

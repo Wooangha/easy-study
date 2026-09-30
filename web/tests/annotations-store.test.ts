@@ -8,7 +8,7 @@ import { MAX_ANNOTATION_OPS, type AnnotationEvent, type AnnotationOp, type Annot
 import { ApiError } from '../src/api.ts';
 import { applyOps, emptySlideAnnotations } from '../src/lib/annotations/geometry.ts';
 import {
-  CONFLICT_RELOADED,
+  conflictReloaded,
   DocAnnotations,
   KEEP_RADIUS,
   NETWORK_RETRY_MS,
@@ -260,7 +260,7 @@ describe('DocAnnotations: conflicts and failures', () => {
     await tick();
     assert.equal(t.patches.length, 2);
     assert.deepEqual(t.slide(3), theirsAgain);
-    assert.deepEqual(t.toasts, [CONFLICT_RELOADED]);
+    assert.deepEqual(t.toasts, [conflictReloaded()]);
     assert.equal(t.store.canUndo, false);
     // The next write starts clean (a 409 rebases again).
     t.store.mutate(3, [{ op: 'remove', id: B }]);

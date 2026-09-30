@@ -15,6 +15,7 @@ import fs from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { crc32 } from 'node:zlib';
 import { HttpError } from '../config.ts';
+import { smsg } from '../i18n.ts';
 import { isNotFound } from '../library.ts';
 
 /** CRCs checked at recovery (older commits were fsynced long before; reading a whole lecture would cost ~115 MB/h). */
@@ -139,11 +140,10 @@ export class LiveAudio {
   async append(offset: number, body: Buffer, final = false): Promise<AppendResult> {
     const audio = this.audio;
     const index = this.index;
-    if (!audio || !index) throw new HttpError(409, '녹음 파일이 닫혀 있습니다', { offset: this.committed });
+    const m = smsg().recordings.live;
+    if (!audio || !index) throw new HttpError(409, m.fileClosed, { offset: this.committed });
     if (offset > this.committed) {
-      throw new HttpError(409, `offset ${offset}은(는) 저장된 끝(${this.committed})보다 뒤입니다. 그 지점부터 다시 보내 주세요`, {
-        offset: this.committed,
-      });
+      throw new HttpError(409, m.gap(offset, this.committed), { offset: this.committed });
     }
     const end = offset + body.length;
     const overlap = Math.min(end, this.committed) - offset;
@@ -151,12 +151,12 @@ export class LiveAudio {
       const stored = Buffer.alloc(overlap);
       await audio.read(stored, 0, overlap, offset);
       if (!stored.equals(body.subarray(0, overlap))) {
-        throw new HttpError(409, '이미 저장된 오디오와 내용이 다릅니다', { offset: this.committed });
+        throw new HttpError(409, m.conflict, { offset: this.committed });
       }
       if (end <= this.committed) return { offset: this.committed, duplicate: true, appended: Buffer.alloc(0), at: this.committed };
     }
-    if (final) throw new HttpError(409, '녹음이 이미 끝났습니다', { offset: this.committed });
-    if (end > MAX_LIVE_BYTES) throw new HttpError(409, '녹음이 너무 깁니다 (최대 24시간)', { offset: this.committed });
+    if (final) throw new HttpError(409, m.ended, { offset: this.committed });
+    if (end > MAX_LIVE_BYTES) throw new HttpError(409, m.tooLong, { offset: this.committed });
     const tail = body.subarray(Math.max(0, overlap));
     const at = this.committed;
     const { trace, fault } = this.hooks;

@@ -10,8 +10,6 @@ import { after, afterEach, before, describe, test } from 'node:test';
 import { MAX_ANNOTATION_ITEMS, MAX_HIDDEN_MARKERS, MAX_MEMO_TAGS, MAX_SLIDE_ANNOTATION_BYTES, MAX_TEXT_SIZE_PT, MIN_TEXT_SIZE_PT, SLIDE_PT_HEIGHT } from '../shared/types.ts';
 import type { AnnotationEvent, AnnotationItem, AnnotationOp, MarkerKey, MemoItem, SlideAnnotations } from '../shared/types.ts';
 import {
-  ANNOTATIONS_TOO_LARGE,
-  ANNOTATION_CONFLICT,
   annotationBytes,
   annotationSubscribers,
   closeAnnotationStreams,
@@ -30,10 +28,14 @@ import {
   subscribeAnnotations,
 } from '../server/annotations.ts';
 import { HttpError } from '../server/config.ts';
+import { smsg } from '../server/i18n.ts';
 import { docPaths } from '../server/library.ts';
 import type { StoredDocMeta } from '../server/library.ts';
 import type { SseTarget } from '../server/recordings/events.ts';
 import { notifySessionsChanged } from '../server/sessions.ts';
+
+/** The 400 of a slide document grown too large and the 409 of a stale write (Korean: no request language here). */
+const { tooLarge: ANNOTATIONS_TOO_LARGE, conflict: ANNOTATION_CONFLICT } = smsg('ko').library.annotations;
 
 let tmpRoot = '';
 

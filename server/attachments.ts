@@ -21,6 +21,7 @@ import type { AnnotationItem, Attachment, AttachmentAnnotation, RegionRect } fro
 import { readSlideAnnotations } from './annotations.ts';
 import { ATTACHMENTS_DIR, ATTACHMENT_IMAGE_EXTS } from './assets.ts';
 import { HttpError } from './config.ts';
+import { smsg } from './i18n.ts';
 import { isImageWorkerStopped, runAttachmentWorker } from './imageWorker.ts';
 import type { AttachmentJob, AttachmentWorkerResult, AttachmentWorkerRun, UploadImageType } from './imageWorker.ts';
 import {
@@ -29,6 +30,7 @@ import {
   docPaths,
   isNotFound,
   listStoredDocs,
+  notReadyError,
   readJsonFile,
   readStoredDoc,
   rmWithRetry,
@@ -48,15 +50,10 @@ const MAX_NAME_CHARS = 120;
 /** A rect coordinate may overshoot 0..1 by this much (floating point of the client), and is then clamped. */
 const RECT_EPSILON = 1e-6;
 
-const NOT_FOUND = '첨부를 찾을 수 없습니다';
-/** 400 of POST …/regions when `annotationId` names no item of that slide (DESIGN §25). */
-export const ANNOTATION_NOT_FOUND = '그 필기를 찾을 수 없습니다';
-const SHUTTING_DOWN = '서버를 종료하는 중입니다';
 /** Item types a region can be made from (Attachment.annotation.type). */
 const ANNOTATION_TYPES: ReadonlySet<string> = new Set<AnnotationItem['type']>(['highlight', 'textHighlight', 'rect', 'ellipse', 'text', 'memo']);
-const UNSUPPORTED_IMAGE = '지원하지 않는 이미지 형식입니다 (PNG, JPEG, WebP, GIF만 올릴 수 있습니다)';
-/** 413 for an image whose resolution the worker refuses (imageWorker.ts uploadRefusal): not a damaged file. */
-export const IMAGE_TOO_LARGE_PIXELS = '이미지 해상도가 너무 커서 처리할 수 없습니다. 스크린샷이나 더 작은 이미지로 올려 주세요';
+/** The texts of this module's errors, in the request's language (DESIGN §27). */
+const texts = () => smsg().library.attachments;
 /** Decimals a stored rect keeps (the client sends 4; clamping must not add floating-point noise). */
 const RECT_DECIMALS = 1e6;
 
@@ -94,14 +91,14 @@ async function ensureAttachmentsDir(docId: string): Promise<string> {
     await withFsRetry(() => fs.mkdir(dir));
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'EEXIST') return dir;
-    if (isNotFound(err)) throw new HttpError(404, '문서를 찾을 수 없습니다');
+    if (isNotFound(err)) throw new HttpError(404, smsg().common.notFound.doc);
     throw err;
   }
   return dir;
 }
 
 function metaFile(docId: string, id: string): string {
-  if (!ATTACHMENT_ID_RE.test(id)) throw new HttpError(404, NOT_FOUND);
+  if (!ATTACHMENT_ID_RE.test(id)) throw new HttpError(404, smsg().common.notFound.attachment);
   return path.join(attachmentsDir(docId), `${id}.json`);
 }
 
@@ -242,10 +239,10 @@ export interface HeldAttachments {
 export async function holdAttachments(docId: string, ids: readonly string[]): Promise<HeldAttachments> {
   const unique = [...new Set(ids)];
   if (unique.length > MAX_ATTACHMENTS) {
-    throw new HttpError(400, `첨부는 질문 하나에 최대 ${MAX_ATTACHMENTS}개까지 보낼 수 있습니다`);
+    throw new HttpError(400, texts().tooMany(MAX_ATTACHMENTS));
   }
   for (const id of unique) {
-    if (typeof id !== 'string' || !ATTACHMENT_ID_RE.test(id)) throw new HttpError(400, `첨부 id가 올바르지 않습니다: ${String(id)}`);
+    if (typeof id !== 'string' || !ATTACHMENT_ID_RE.test(id)) throw new HttpError(400, texts().idInvalid(String(id)));
   }
   if (unique.length === 0) return { items: [], release: () => {} };
   return lock(docId, async () => {
@@ -259,11 +256,7 @@ export async function holdAttachments(docId: string, ids: readonly string[]): Pr
         else missing.push(id);
       }
       if (missing.length > 0) {
-        throw new HttpError(
-          400,
-          `첨부를 찾을 수 없습니다: ${missing.join(', ')} (지워졌거나 다른 문서의 첨부입니다 — 질문에 쓰지 않은 첨부는 24시간 뒤에 지워집니다)`,
-          { missingAttachments: missing },
-        );
+        throw new HttpError(400, texts().missing(missing.join(', ')), { missingAttachments: missing });
       }
       return { items, release };
     } catch (err) {
@@ -288,10 +281,10 @@ const runningJobs = new Map<string, Set<AttachmentWorkerRun>>();
  */
 async function runJob(docId: string, job: AttachmentJob, failure: string): Promise<AttachmentWorkerResult> {
   const release = await attachmentSlots.acquire();
-  if (!release) throw new HttpError(503, SHUTTING_DOWN);
+  if (!release) throw new HttpError(503, smsg().common.http.shuttingDown);
   try {
     // The document may have been deleted while the job waited for a slot.
-    if ((await readStoredDoc(docId)) === null) throw new HttpError(404, '문서를 찾을 수 없습니다');
+    if ((await readStoredDoc(docId)) === null) throw new HttpError(404, smsg().common.notFound.doc);
     const run = runAttachmentWorker(job);
     let runs = runningJobs.get(docId);
     if (!runs) runningJobs.set(docId, (runs = new Set()));
@@ -299,8 +292,8 @@ async function runJob(docId: string, job: AttachmentJob, failure: string): Promi
     try {
       return await run.done;
     } catch (err) {
-      if ((await readStoredDoc(docId)) === null) throw new HttpError(404, '문서를 찾을 수 없습니다');
-      if (isImageWorkerStopped(err)) throw new HttpError(503, SHUTTING_DOWN);
+      if ((await readStoredDoc(docId)) === null) throw new HttpError(404, smsg().common.notFound.doc);
+      if (isImageWorkerStopped(err)) throw new HttpError(503, smsg().common.http.shuttingDown);
       console.warn(`[attachments] ${docId}: ${job.kind} ${job.id} failed: ${(err as Error).message}`);
       throw new HttpError(500, failure);
     } finally {
@@ -331,13 +324,13 @@ export function hasAttachmentJobs(docId: string): boolean {
 /** Writes <id>.json once the image exists; a document deleted meanwhile is not made again (404, image removed). */
 async function saveAttachment(docId: string, attachment: Attachment): Promise<Attachment> {
   try {
-    if ((await readStoredDoc(docId)) === null) throw new HttpError(404, '문서를 찾을 수 없습니다');
+    if ((await readStoredDoc(docId)) === null) throw new HttpError(404, smsg().common.notFound.doc);
     // No mkdir: when the folder went away with its document, this fails instead of making it again.
     await writeJsonAtomic(metaFile(docId, attachment.id), attachment);
     return attachment;
   } catch (err) {
     await removeAttachmentFiles(docId, attachment.id).catch(() => {});
-    if (isNotFound(err)) throw new HttpError(404, '문서를 찾을 수 없습니다');
+    if (isNotFound(err)) throw new HttpError(404, smsg().common.notFound.doc);
     throw err;
   }
 }
@@ -347,23 +340,23 @@ export function parseRegionRequest(body: unknown, pageCount: number): { slide: n
   const request = (typeof body === 'object' && body !== null ? body : {}) as { slide?: unknown; rect?: unknown; annotationId?: unknown };
   const slide = request.slide;
   if (typeof slide !== 'number' || !Number.isInteger(slide) || slide < 1 || slide > pageCount) {
-    throw new HttpError(400, `슬라이드 번호가 올바르지 않습니다 (1–${pageCount})`);
+    throw new HttpError(400, smsg().common.slideOutOfRange(pageCount));
   }
-  if (!isRect(request.rect)) throw new HttpError(400, '선택 영역(rect: x, y, w, h)이 올바르지 않습니다');
+  if (!isRect(request.rect)) throw new HttpError(400, texts().regionInvalid);
   const { x, y, w, h } = request.rect;
   const inside = (value: number) => value >= -RECT_EPSILON && value <= 1 + RECT_EPSILON;
   if (!(w > 0 && h > 0) || !inside(x) || !inside(y) || !inside(x + w) || !inside(y + h)) {
-    throw new HttpError(400, '선택 영역은 슬라이드 안(0–1)에 있고 넓이가 있어야 합니다');
+    throw new HttpError(400, texts().regionOutside);
   }
   // Clamped and rounded to 6 decimals (0.1 + 0.62 - 0.1 would be stored as 0.6200000000000001): x + w stays ≤ 1.
   const round = (value: number) => Math.round(Math.min(Math.max(value, 0), 1) * RECT_DECIMALS) / RECT_DECIMALS;
   const x0 = round(x);
   const y0 = round(y);
   const rect = { x: x0, y: y0, w: round(round(x + w) - x0), h: round(round(y + h) - y0) };
-  if (!(rect.w > 0 && rect.h > 0)) throw new HttpError(400, '선택 영역은 슬라이드 안(0–1)에 있고 넓이가 있어야 합니다');
+  if (!(rect.w > 0 && rect.h > 0)) throw new HttpError(400, texts().regionOutside);
   const annotationId = request.annotationId;
   if (annotationId === undefined || annotationId === null) return { slide, rect };
-  if (typeof annotationId !== 'string' || !ANNOTATION_ID_RE.test(annotationId)) throw new HttpError(400, ANNOTATION_NOT_FOUND);
+  if (typeof annotationId !== 'string' || !ANNOTATION_ID_RE.test(annotationId)) throw new HttpError(400, texts().annotationNotFound);
   return { slide, rect, annotationId };
 }
 
@@ -373,7 +366,7 @@ export function parseRegionRequest(body: unknown, pageCount: number): { slide: n
  */
 async function annotationSnapshot(docId: string, slide: number, annotationId: string): Promise<AttachmentAnnotation> {
   const item = (await readSlideAnnotations(docId, slide)).items.find((candidate) => candidate.id === annotationId);
-  if (!item) throw new HttpError(400, ANNOTATION_NOT_FOUND);
+  if (!item) throw new HttpError(400, texts().annotationNotFound);
   const annotation: AttachmentAnnotation = { id: item.id, type: item.type };
   const text = item.type === 'memo' || item.type === 'text' || item.type === 'textHighlight' ? item.text.trim() : '';
   if (text) annotation.text = text.slice(0, MAX_ANNOTATION_TEXT_CHARS);
@@ -387,19 +380,14 @@ async function annotationSnapshot(docId: string, slide: number, annotationId: st
  */
 export async function createRegionAttachment(docId: string, body: unknown, now: Date = new Date()): Promise<Attachment> {
   const doc = await readStoredDoc(docId);
-  if (!doc) throw new HttpError(404, '문서를 찾을 수 없습니다');
-  if (doc.status !== 'ready') {
-    throw new HttpError(
-      409,
-      doc.status === 'error' ? `문서 처리에 실패했습니다: ${doc.error ?? '알 수 없는 오류'}` : '문서를 아직 처리하는 중입니다',
-    );
-  }
+  if (!doc) throw new HttpError(404, smsg().common.notFound.doc);
+  if (doc.status !== 'ready') throw notReadyError(doc);
   const { slide, rect, annotationId } = parseRegionRequest(body, doc.pageCount);
   const annotation = annotationId ? await annotationSnapshot(docId, slide, annotationId) : null;
   await ensureAttachmentsDir(docId);
   const id = newAttachmentId();
   const job: AttachmentJob = { kind: 'region', docDir: docPaths(docId).dir, id, slide, slideFile: slideFileName(slide, doc.pageCount), rect };
-  const failure = `슬라이드 ${slide}의 선택 영역을 잘라내지 못했습니다`;
+  const failure = texts().cropFailed(slide);
   const result = await runJob(docId, job, failure);
   if (!result.ok) throw new HttpError(500, failure);
   return saveAttachment(docId, {
@@ -448,11 +436,11 @@ export function cleanAttachmentName(name: string | undefined | null): string | u
  * supported image, 400 empty or unreadable.
  */
 export async function createImageAttachment(docId: string, bytes: Buffer, fileName?: string, now: Date = new Date()): Promise<Attachment> {
-  if ((await readStoredDoc(docId)) === null) throw new HttpError(404, '문서를 찾을 수 없습니다');
-  if (bytes.length === 0) throw new HttpError(400, '이미지 내용이 비어 있습니다');
+  if ((await readStoredDoc(docId)) === null) throw new HttpError(404, smsg().common.notFound.doc);
+  if (bytes.length === 0) throw new HttpError(400, texts().imageEmpty);
   if (bytes.length > MAX_ATTACHMENT_BYTES) throw tooLarge();
   const type = sniffImageType(bytes);
-  if (!type) throw new HttpError(415, UNSUPPORTED_IMAGE);
+  if (!type) throw new HttpError(415, texts().unsupportedImage);
   const dir = await ensureAttachmentsDir(docId);
   const id = newAttachmentId();
   // The worker reads the upload from a file (not through the IPC channel); the sweep removes it if we crash.
@@ -462,20 +450,19 @@ export async function createImageAttachment(docId: string, bytes: Buffer, fileNa
     try {
       await fs.writeFile(input, bytes);
     } catch (err) {
-      if (isNotFound(err)) throw new HttpError(404, '문서를 찾을 수 없습니다');
+      if (isNotFound(err)) throw new HttpError(404, smsg().common.notFound.doc);
       throw err;
     }
-    result = await runJob(docId, { kind: 'upload', docDir: docPaths(docId).dir, id, input, type }, '이미지를 처리하지 못했습니다');
+    result = await runJob(docId, { kind: 'upload', docDir: docPaths(docId).dir, id, input, type }, texts().imageFailed);
   } finally {
     await rmWithRetry(input, { force: true }).catch(() => {});
   }
   if (!result.ok) {
-    if (result.reason === 'too-large') throw new HttpError(413, IMAGE_TOO_LARGE_PIXELS);
-    if (type === 'heif') {
-      throw new HttpError(415, 'HEIC/HEIF 이미지는 이 컴퓨터에서 열 수 없습니다. JPEG나 PNG로 바꿔서(예: 스크린샷) 다시 올려 주세요');
-    }
-    if (result.reason === 'unsupported') throw new HttpError(415, UNSUPPORTED_IMAGE);
-    throw new HttpError(400, '이미지를 읽을 수 없습니다 (파일이 손상되었을 수 있습니다)');
+    // A resolution the worker refuses (imageWorker.ts uploadRefusal) is not a damaged file.
+    if (result.reason === 'too-large') throw new HttpError(413, texts().imageTooManyPixels);
+    if (type === 'heif') throw new HttpError(415, texts().heifUnsupported);
+    if (result.reason === 'unsupported') throw new HttpError(415, texts().unsupportedImage);
+    throw new HttpError(400, texts().imageUnreadable);
   }
   const name = cleanAttachmentName(fileName);
   return saveAttachment(docId, {
@@ -490,7 +477,7 @@ export async function createImageAttachment(docId: string, bytes: Buffer, fileNa
 
 /** HttpError 413 for an image over MAX_ATTACHMENT_BYTES. */
 export function tooLarge(): HttpError {
-  return new HttpError(413, `이미지가 너무 큽니다 (최대 ${Math.round(MAX_ATTACHMENT_BYTES / (1024 * 1024))} MB)`);
+  return new HttpError(413, texts().imageTooLarge(Math.round(MAX_ATTACHMENT_BYTES / (1024 * 1024))));
 }
 
 // ---------------------------------------------------------------------------
@@ -517,12 +504,10 @@ async function removeAttachmentFiles(docId: string, id: string): Promise<void> {
  * it (or a running turn uses it).
  */
 export async function deleteAttachment(docId: string, id: string, referenced: ReferencedIds): Promise<void> {
-  if ((await readAttachment(docId, id)) === null) throw new HttpError(404, NOT_FOUND);
+  if ((await readAttachment(docId, id)) === null) throw new HttpError(404, smsg().common.notFound.attachment);
   await lock(docId, async () => {
-    if ((await readAttachment(docId, id)) === null) throw new HttpError(404, NOT_FOUND);
-    if (isAttachmentPinned(docId, id) || (await referenced(docId)).has(id)) {
-      throw new HttpError(409, '이미 질문에 쓰인 첨부는 지울 수 없습니다');
-    }
+    if ((await readAttachment(docId, id)) === null) throw new HttpError(404, smsg().common.notFound.attachment);
+    if (isAttachmentPinned(docId, id) || (await referenced(docId)).has(id)) throw new HttpError(409, texts().inUse);
     await removeAttachmentFiles(docId, id);
   });
 }

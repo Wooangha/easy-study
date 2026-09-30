@@ -1,6 +1,7 @@
 // Internal contract between the chat orchestrator (server/chat.ts) and LLM providers.
-import { EFFORT_LABELS } from '../../shared/types.ts';
 import type { EffortOption, ModelOption, ProviderId, TokenUsage, UsageLimits } from '../../shared/types.ts';
+import { slang, smsg } from '../i18n.ts';
+import type { Lang } from '../i18n.ts';
 
 /** One piece of a user turn. Images are referenced by absolute path and loaded by the provider. */
 export type Part =
@@ -109,6 +110,7 @@ export interface ProviderAvailability {
 
 export interface Provider {
   id: ProviderId;
+  /** The name shown to the user (ProviderInfo.label), in the language of the current request (a getter). */
   label: string;
   kind: 'cli' | 'api';
   /** Models offered before (or without) detection; detect() may report the current list instead. */
@@ -121,7 +123,14 @@ export interface Provider {
    * orchestrator starts a fresh conversation (re-priming). Keeps requests under API limits.
    */
   maxImagesPerConversation: number;
+  /** Availability, with its texts (reason, model and effort labels) in the current language. */
   detect(): Promise<ProviderAvailability>;
+  /**
+   * detect() in two steps, for the availability cache every language shares (providers/index.ts): the checks run once,
+   * and the function they resolve with words their result in the current language when called (detect() = probe()
+   * and that call). A provider without it is detected per call of detect().
+   */
+  probe?(): Promise<() => ProviderAvailability>;
   /**
    * Must reject with an Error on failure (preferably a ProviderError with a precise kind); must reject with an
    * AbortError-like error when aborted.
@@ -150,9 +159,15 @@ export class ProviderError extends Error {
   }
 }
 
-/** An EffortOption with its Korean label (EFFORT_LABELS; an unknown level keeps its id). */
-export function effortOption(id: string, description?: string): EffortOption {
-  const option: EffortOption = { id, label: EFFORT_LABELS[id] ?? id };
+/** The name of a reasoning-effort level in `lang` ('높음' / 'high'); an unknown level is shown by its id. */
+export function effortLabel(id: string, lang: Lang = slang()): string {
+  const names: Readonly<Record<string, string>> = smsg(lang).chat.providers.effort;
+  return Object.hasOwn(names, id) ? names[id] : id;
+}
+
+/** An EffortOption with its label in `lang` (effortLabel; an unknown level keeps its id). */
+export function effortOption(id: string, description?: string, lang: Lang = slang()): EffortOption {
+  const option: EffortOption = { id, label: effortLabel(id, lang) };
   if (description) option.description = description;
   return option;
 }

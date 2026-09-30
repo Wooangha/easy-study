@@ -2,8 +2,8 @@ import { useDroppable } from '@dnd-kit/core';
 import { useId, useState, type ReactNode } from 'react';
 import { Folder, Folders, GripVertical, Pencil, Trash } from 'lucide-react';
 import type { Course, CourseGroup } from '../../../../shared/types.ts';
+import { msg } from '../../i18n/index.ts';
 import { confirmDialog } from '../../lib/confirm.ts';
-import { withParticle } from '../../lib/korean.ts';
 import { dndId, type DropData } from '../../lib/libraryDnd.ts';
 import { collapseKey } from '../../lib/libraryLayout.ts';
 import { isHeaderToggleClick, isToggleClick } from './CourseCard.tsx';
@@ -32,12 +32,13 @@ export function GroupCard({ group, courses, collapsed, onToggle, onExpand, canDr
   const bodyId = useId();
   const drag = useDragState();
   const key = collapseKey.group(group.id);
+  const m = msg().shell.group;
   // While a group is dragged every group shows only its header.
   const compact = drag.active?.kind === 'group';
   const shownCollapsed = compact || (collapsed && !drag.springOpen.has(key));
 
   const data: DropData = { role: 'group', groupId: group.id };
-  const item = useOrgItem({ id: dndId.group(group.id), data, roleDescription: '옮길 수 있는 그룹', canDrag });
+  const item = useOrgItem({ id: dndId.group(group.id), data, roleDescription: m.roleDescription, canDrag });
   const headData: DropData = { role: 'group-head', groupId: group.id };
   const head = useDroppable({ id: dndId.groupHead(group.id), data: headData });
   const bodyData: DropData = { role: 'group-body', groupId: group.id };
@@ -45,13 +46,11 @@ export function GroupCard({ group, courses, collapsed, onToggle, onExpand, canDr
   const mark = useDropMark(dndId.group(group.id));
 
   const confirmDelete = async () => {
+    const c = msg().shell.group.deleteConfirm;
     const ok = await confirmDialog({
-      title: `그룹 ${withParticle(`‘${group.title}’`, '을', '를')} 삭제할까요?`,
-      message:
-        courses.length > 0
-          ? `안에 있는 과목 ${courses.length}개와 강의는 지워지지 않고, 그룹이 있던 자리에 그대로 남아요.`
-          : '비어 있는 그룹이에요.',
-      confirmLabel: '그룹 삭제',
+      title: c.title(group.title),
+      message: courses.length > 0 ? c.coursesKept(courses.length) : c.empty,
+      confirmLabel: c.confirmLabel,
       danger: true,
     });
     if (ok) props.onDelete();
@@ -69,7 +68,7 @@ export function GroupCard({ group, courses, collapsed, onToggle, onExpand, canDr
       data-drag-node=""
       data-org-key={dndId.group(group.id)}
       className={className}
-      aria-label={`그룹 ${group.title}`}
+      aria-label={m.label(group.title)}
     >
       <header
         ref={head.setNodeRef}
@@ -79,7 +78,7 @@ export function GroupCard({ group, courses, collapsed, onToggle, onExpand, canDr
         }}
       >
         <DragHandle
-          label={`‘${group.title}’ 그룹 옮기기`}
+          label={m.move(group.title)}
           setRef={item.setActivatorNodeRef}
           listeners={item.listeners}
           attributes={item.attributes}
@@ -91,7 +90,7 @@ export function GroupCard({ group, courses, collapsed, onToggle, onExpand, canDr
             <Folders className="course-icon" />
             <RenameInput
               initial={group.title}
-              label="그룹 이름"
+              label={m.nameLabel}
               onDone={(title) => {
                 setEditing(false);
                 if (title && title !== group.title) props.onRename(title);
@@ -119,19 +118,19 @@ export function GroupCard({ group, courses, collapsed, onToggle, onExpand, canDr
                 type="button"
                 className="icon-btn tiny rename-btn"
                 onClick={() => setEditing(true)}
-                title="그룹 이름 바꾸기"
-                aria-label={`‘${group.title}’ 그룹 이름 바꾸기`}
+                title={m.rename}
+                aria-label={m.renameLabel(group.title)}
               >
                 <Pencil />
               </button>
             )}
           </>
         )}
-        <span className="course-count">과목 {courses.length}개</span>
+        <span className="course-count">{m.courseCount(courses.length)}</span>
         {mark === 'into' && shownCollapsed && (
           <span className="drop-into-label" aria-hidden>
             {/* A lecture only opens the group (its courses are the places); a course goes to its end. */}
-            {drag.active?.kind === 'lecture' ? '잠시 기다리면 열려요' : '놓으면 이 그룹 끝에 추가'}
+            {drag.active?.kind === 'lecture' ? m.opensSoon : m.dropAtEnd}
           </span>
         )}
         <span className="spacer" />
@@ -144,16 +143,16 @@ export function GroupCard({ group, courses, collapsed, onToggle, onExpand, canDr
                 onExpand();
                 setCreating(true);
               }}
-              title="이 그룹 안에 새 과목 만들기"
+              title={m.newCourseTitle}
             >
-              ＋ 과목
+              {m.newCourse}
             </button>
             <button
               type="button"
               className="icon-btn small"
               onClick={() => void confirmDelete()}
-              title="그룹 삭제 (과목과 강의는 남아요)"
-              aria-label={`‘${group.title}’ 그룹 삭제`}
+              title={m.deleteTitle}
+              aria-label={m.deleteLabel(group.title)}
             >
               <Trash />
             </button>
@@ -167,8 +166,8 @@ export function GroupCard({ group, courses, collapsed, onToggle, onExpand, canDr
           {creating && (
             <NewTitleForm
               icon={Folder}
-              placeholder="과목 이름 (예: Compiler)"
-              label={`‘${group.title}’ 그룹에 만들 과목 이름`}
+              placeholder={msg().shell.library.coursePlaceholder}
+              label={m.newCourseName(group.title)}
               onCancel={() => setCreating(false)}
               onCreate={async (title) => {
                 if (await props.onCreateCourse(title)) setCreating(false);
@@ -177,13 +176,7 @@ export function GroupCard({ group, courses, collapsed, onToggle, onExpand, canDr
           )}
           {courses.length === 0 && !creating && (
             <p className={`group-empty${drag.active?.kind === 'course' ? ' is-target' : ''}`}>
-              {drag.active?.kind === 'course' ? (
-                '여기에 놓으면 이 그룹에 들어가요'
-              ) : (
-                <>
-                  비어 있는 그룹이에요 — 과목의 <GripVertical /> 손잡이를 끌어다 놓거나 ‘＋ 과목’으로 만드세요
-                </>
-              )}
+              {drag.active?.kind === 'course' ? m.dropToJoin : m.empty(<GripVertical />)}
             </p>
           )}
         </div>
@@ -201,7 +194,7 @@ export function GroupGhost({ group }: { group: CourseGroup }) {
       </span>
       <Folders className="course-icon" />
       <span className="drag-ghost-title">{group.title}</span>
-      <span className="course-count">과목 {group.courseIds.length}개</span>
+      <span className="course-count">{msg().shell.group.courseCount(group.courseIds.length)}</span>
     </div>
   );
 }

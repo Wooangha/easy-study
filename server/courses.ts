@@ -12,6 +12,8 @@ import path from 'node:path';
 import type { Course, CourseGroup, LibraryLayout } from '../shared/types.ts';
 import { COURSE_ID_RE } from '../shared/types.ts';
 import { HttpError, libraryDir } from './config.ts';
+import { slang, smsg } from './i18n.ts';
+import type { Lang } from './i18n.ts';
 import type { CourseRecord, LayoutRecord } from './internal-types.ts';
 import {
   normalizeLayout,
@@ -68,16 +70,17 @@ export function compareTitles(a: string, b: string): number {
 // ---------------------------------------------------------------------------
 
 /** A course or group title: one line, trimmed, 1–MAX_TITLE_CHARS characters (400 otherwise). */
-function cleanTitle(value: unknown, noun: '과목' | '그룹' = '과목'): string {
-  if (typeof value !== 'string') throw new HttpError(400, `${noun} 이름을 입력해 주세요`);
+function cleanTitle(value: unknown, kind: 'course' | 'group' = 'course'): string {
+  const m = smsg().library.courses;
+  if (typeof value !== 'string') throw new HttpError(400, m.nameRequired[kind]);
   const title = value
     .normalize('NFC')
     // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u001f\u007f]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-  if (!title) throw new HttpError(400, `${noun} 이름을 입력해 주세요`);
-  if (title.length > MAX_TITLE_CHARS) throw new HttpError(400, `${noun} 이름이 너무 깁니다 (최대 ${MAX_TITLE_CHARS}자)`);
+  if (!title) throw new HttpError(400, m.nameRequired[kind]);
+  if (title.length > MAX_TITLE_CHARS) throw new HttpError(400, m.nameTooLong[kind](MAX_TITLE_CHARS));
   return title;
 }
 
@@ -104,19 +107,20 @@ async function toCourse(record: CourseRecord, owners: Map<string, string>): Prom
 
 /** Validates UpdateCourseRequest.docIds: an array of distinct ids of existing documents. */
 async function validateDocIds(value: unknown): Promise<string[]> {
+  const m = smsg().library.courses;
   if (!Array.isArray(value) || value.some((id) => typeof id !== 'string')) {
-    throw new HttpError(400, 'docIds는 문서 id 목록이어야 합니다');
+    throw new HttpError(400, m.docIdsInvalid);
   }
   const docIds = value as string[];
-  if (docIds.length > MAX_LECTURES) throw new HttpError(400, `강의가 너무 많습니다 (최대 ${MAX_LECTURES}개)`);
+  if (docIds.length > MAX_LECTURES) throw new HttpError(400, m.tooManyLectures(MAX_LECTURES));
   const seen = new Set<string>();
   for (const docId of docIds) {
-    if (seen.has(docId)) throw new HttpError(400, `같은 문서가 두 번 들어 있습니다: ${docId}`);
+    if (seen.has(docId)) throw new HttpError(400, m.duplicateDoc(docId));
     seen.add(docId);
   }
   const exists = await Promise.all(docIds.map(async (docId) => isDocId(docId) && (await readStoredDoc(docId)) !== null));
   const unknown = docIds.filter((_, i) => !exists[i]);
-  if (unknown.length > 0) throw new HttpError(400, `알 수 없는 문서입니다: ${unknown.join(', ')}`);
+  if (unknown.length > 0) throw new HttpError(400, m.unknownDocs(unknown));
   return docIds;
 }
 
@@ -199,7 +203,7 @@ export async function createCourse(title: unknown, now: Date = new Date(), group
     // that the layout does not mention is shown at the end of the top level.
     const layout = targetGroup === null ? null : await currentLayout();
     if (layout && !layout.groups.some((group) => group.id === targetGroup)) {
-      throw new HttpError(400, `그룹을 찾을 수 없습니다: ${targetGroup}`);
+      throw new HttpError(400, smsg().library.courses.groupNotFoundId(String(targetGroup)));
     }
     await fs.mkdir(coursesDir(), { recursive: true });
     const slug = slugify(cleaned, 'course');
@@ -238,7 +242,7 @@ export interface CoursePatch {
 function cleanBaseDocIds(value: unknown): string[] | null {
   if (value === undefined) return null;
   if (!Array.isArray(value) || value.some((id) => typeof id !== 'string')) {
-    throw new HttpError(400, 'baseDocIds는 문서 id 목록이어야 합니다');
+    throw new HttpError(400, smsg().library.courses.baseDocIdsInvalid);
   }
   return value as string[];
 }
@@ -259,9 +263,9 @@ export async function updateCourse(courseId: string, patch: CoursePatch): Promis
   const touched = await mutationQueue(MUTATIONS, async () => {
     const records = await readCourseRecords();
     const record = records.find((candidate) => candidate.id === courseId);
-    if (!record) throw new HttpError(404, '과목을 찾을 수 없습니다');
+    if (!record) throw new HttpError(404, smsg().common.notFound.course);
     if (base && !sameIds((await toCourse(record, courseIdIndex(records))).docIds, base)) {
-      throw new HttpError(409, '다른 곳에서 이 과목의 강의 목록이 바뀌었습니다. 새로 불러온 뒤 다시 시도해 주세요');
+      throw new HttpError(409, smsg().library.courses.lecturesChanged);
     }
     const next: CourseRecord = { ...record };
     if (title !== undefined) next.title = title;
@@ -275,7 +279,7 @@ export async function updateCourse(courseId: string, patch: CoursePatch): Promis
   });
   await refreshMarkdown(touched);
   const course = await getCourse(courseId);
-  if (!course) throw new HttpError(404, '과목을 찾을 수 없습니다'); // deleted in the meantime
+  if (!course) throw new HttpError(404, smsg().common.notFound.course); // deleted in the meantime
   return course;
 }
 
@@ -307,9 +311,9 @@ export async function deleteCourse(courseId: string): Promise<boolean> {
 export async function addDocToCourse(courseId: string, docId: string): Promise<Course> {
   const touched = await mutationQueue(MUTATIONS, async () => {
     const record = await readCourseRecord(courseId);
-    if (!record) throw new HttpError(400, '과목을 찾을 수 없습니다');
+    if (!record) throw new HttpError(400, smsg().common.notFound.course);
     const doc = await readStoredDoc(docId);
-    if (!doc) throw new HttpError(404, '문서를 찾을 수 없습니다');
+    if (!doc) throw new HttpError(404, smsg().common.notFound.doc);
     const others = await removeFromOtherCourses([docId], courseId);
     if (record.docIds.includes(docId)) return [courseId, ...others];
 
@@ -331,7 +335,7 @@ export async function addDocToCourse(courseId: string, docId: string): Promise<C
   });
   await refreshMarkdown(touched);
   const course = await getCourse(courseId);
-  if (!course) throw new HttpError(400, '과목을 찾을 수 없습니다');
+  if (!course) throw new HttpError(400, smsg().common.notFound.course);
   return course;
 }
 
@@ -376,8 +380,8 @@ async function writeLayout(layout: LibraryLayout): Promise<void> {
 /** CreateCourseRequest.groupId: absent (undefined, null, '') = top level; otherwise a group id (400 when malformed). */
 function cleanGroupId(value: unknown): string | null {
   if (value === undefined || value === null || value === '') return null;
-  if (typeof value !== 'string') throw new HttpError(400, 'groupId는 그룹 id여야 합니다');
-  if (!COURSE_ID_RE.test(value)) throw new HttpError(400, '그룹을 찾을 수 없습니다');
+  if (typeof value !== 'string') throw new HttpError(400, smsg().library.courses.groupIdInvalid);
+  if (!COURSE_ID_RE.test(value)) throw new HttpError(400, smsg().common.notFound.group);
   return value;
 }
 
@@ -408,7 +412,7 @@ export function putLayout(body: unknown): Promise<LibraryLayout> {
  * or of a course. 400 for a bad title, unknown or duplicated course ids.
  */
 export async function createGroup(title: unknown, courseIds: unknown = undefined, now: Date = new Date()): Promise<CourseGroup> {
-  const cleaned = cleanTitle(title, '그룹');
+  const cleaned = cleanTitle(title, 'group');
   return mutationQueue(MUTATIONS, async () => {
     const [stored, existing] = await Promise.all([readStoredLayout(), courseIdsOldestFirst()]);
     const moving = validateGroupCourseIds(courseIds, existing);
@@ -433,11 +437,11 @@ export interface GroupPatch {
 
 /** Renames a group (UpdateGroupRequest). 404 for an unknown group, 400 for a bad title. */
 export async function updateGroup(groupId: string, patch: GroupPatch): Promise<CourseGroup> {
-  const title = cleanTitle(patch.title, '그룹');
+  const title = cleanTitle(patch.title, 'group');
   return mutationQueue(MUTATIONS, async () => {
     const layout = await currentLayout();
     const group = layout.groups.find((candidate) => candidate.id === groupId);
-    if (!group) throw new HttpError(404, '그룹을 찾을 수 없습니다');
+    if (!group) throw new HttpError(404, smsg().common.notFound.group);
     const renamed: CourseGroup = { ...group, title };
     await writeLayout({ ...layout, groups: layout.groups.map((candidate) => (candidate.id === groupId ? renamed : candidate)) });
     return renamed;
@@ -467,15 +471,19 @@ export interface CourseMarkdownLecture {
   summary: string | null;
 }
 
-/** `# <course title> — 과목 정리`, then per lecture `## k. <title>`, its summary and links (DESIGN §12). */
-export function courseMarkdown(title: string, lectures: CourseMarkdownLecture[]): string {
-  const lines: string[] = [`# ${title} — 과목 정리`, ''];
-  if (lectures.length === 0) lines.push('_(아직 강의가 없습니다)_', '');
+/**
+ * `# <course title> — 과목 정리`, then per lecture `## k. <title>`, its summary and links (DESIGN §12). The headings
+ * are in `lang`: the language of the request that changed the course (DESIGN §27).
+ */
+export function courseMarkdown(title: string, lectures: CourseMarkdownLecture[], lang: Lang = slang()): string {
+  const m = smsg(lang).library.courseMd;
+  const lines: string[] = [`# ${m.title(title)}`, ''];
+  if (lectures.length === 0) lines.push(`_(${m.noLectures})_`, '');
   lectures.forEach((lecture, i) => {
     lines.push(
       `## ${i + 1}. ${lecture.title}`,
       '',
-      lecture.summary?.trim() ? demoteHeadings(lecture.summary.trim(), 2) : '_(정리본 없음)_',
+      lecture.summary?.trim() ? demoteHeadings(lecture.summary.trim(), 2) : `_(${m.noDigest})_`,
       '',
       `[DIGEST.md](../../${lecture.docId}/DIGEST.md) · [STUDY_NOTES.md](../../${lecture.docId}/STUDY_NOTES.md)`,
       '',

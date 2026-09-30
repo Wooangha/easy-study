@@ -16,6 +16,7 @@ import {
   type PointerEvent,
   type RefObject,
 } from 'react';
+import { msg } from '../../i18n/index.ts';
 import {
   MAX_RATE,
   MIN_RATE,
@@ -66,6 +67,7 @@ export function PlaybackRate({ rate, onChange }: { rate: number; onChange: (rate
   const bubbleRef = useRef<HTMLDivElement>(null);
   const sliderRef = useRef<HTMLDivElement>(null);
   const bubbleId = useId();
+  const m = msg().recording.rate;
 
   const close = useCallback((focusButton: boolean) => {
     setOpen(false);
@@ -179,8 +181,8 @@ export function PlaybackRate({ rate, onChange }: { rate: number; onChange: (rate
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-controls={open ? bubbleId : undefined}
-        aria-label={`재생 속도 ${formatRate(rate)}배속`}
-        title="재생 속도"
+        aria-label={m.button(formatRate(rate))}
+        title={m.title}
         onClick={() => {
           if (!open) setOpen(true);
           // The keyboard was in the bubble: it comes back to the button, not to the page.
@@ -196,7 +198,7 @@ export function PlaybackRate({ rate, onChange }: { rate: number; onChange: (rate
           ref={bubbleRef}
           id={bubbleId}
           role="dialog"
-          aria-label="재생 속도"
+          aria-label={m.title}
           tabIndex={-1}
           className={`rec-rate-pop${pos?.below ? ' is-below' : ''}`}
           style={
@@ -207,15 +209,15 @@ export function PlaybackRate({ rate, onChange }: { rate: number; onChange: (rate
         >
           <div className="rec-rate-head">
             <span className="rec-rate-title" aria-hidden>
-              재생 속도
+              {m.title}
             </span>
             <RateBox rate={rate} onChange={onChange} />
             <button
               type="button"
               className="rec-rate-reset"
               disabled={rate === 1}
-              aria-label="1배속으로"
-              title="보통 속도(1×)로"
+              aria-label={m.reset}
+              title={m.resetTitle}
               onClick={() => {
                 onChange(1);
                 sliderRef.current?.focus({ preventScroll: true });
@@ -248,6 +250,7 @@ function RateSlider({
   sliderRef: RefObject<HTMLDivElement | null>;
 }) {
   const railRef = useRef<HTMLSpanElement>(null);
+  const m = msg().recording.rate;
   // While a pointer holds the thumb: where the thumb is drawn, and whether the press has become a drag yet (until
   // then the thumb glides to the pressed place instead of jumping).
   const [drag, setDrag] = useState<{ pos: number; moving: boolean } | null>(null);
@@ -357,13 +360,13 @@ function RateSlider({
       className={`rec-rate-slider${drag?.moving ? ' is-dragging' : ''}${caught ? ' is-caught' : ''}`}
       role="slider"
       tabIndex={0}
-      aria-label="재생 속도"
+      aria-label={m.title}
       aria-orientation="horizontal"
       aria-valuemin={MIN_RATE}
       aria-valuemax={MAX_RATE}
       aria-valuenow={rate}
-      aria-valuetext={`${formatRate(rate)}배속`}
-      title="끌면 눈금에 달라붙어요 · ←→ 0.05씩 · 더블클릭하면 1×"
+      aria-valuetext={m.valueText(formatRate(rate))}
+      title={m.sliderTitle}
       style={{ '--at': rateFraction(shown) } as CSSProperties}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
@@ -419,12 +422,12 @@ function RateBox({ rate, onChange }: { rate: number; onChange: (rate: number) =>
     if (text.trim() === '') return;
     const typed = parseRate(text);
     if (typed === null) {
-      toast('재생 속도는 숫자로 입력해 주세요 (예: 1.25).', 'info', 3000);
+      toast(msg().recording.rate.notANumber, 'info', 3000);
       return;
     }
     const next = clampRate(typed);
     if (next !== typed) {
-      toast(`재생 속도는 ${formatRate(MIN_RATE)}×부터 ${formatRate(MAX_RATE)}×까지예요. ${formatRate(next)}×로 맞췄어요.`, 'info', 3000);
+      toast(msg().recording.rate.clamped(formatRate(MIN_RATE), formatRate(MAX_RATE), formatRate(next)), 'info', 3000);
     }
     if (next !== rateRef.current) onChangeRef.current(next);
   };
@@ -463,7 +466,7 @@ function RateBox({ rate, onChange }: { rate: number; onChange: (rate: number) =>
   };
 
   return (
-    <label className="rec-rate-num" title="재생 속도 직접 입력 (0.5~3, Enter로 적용 · Esc로 취소)">
+    <label className="rec-rate-num" title={msg().recording.rate.boxTitle}>
       <input
         type="text"
         inputMode="decimal"
@@ -472,7 +475,7 @@ function RateBox({ rate, onChange }: { rate: number; onChange: (rate: number) =>
         maxLength={6}
         autoComplete="off"
         spellCheck={false}
-        aria-label="재생 속도 직접 입력 (배)"
+        aria-label={msg().recording.rate.boxLabel}
         onMouseDown={(e) => {
           selectOnUp.current = document.activeElement !== e.currentTarget;
         }}

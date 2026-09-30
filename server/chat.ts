@@ -34,6 +34,8 @@ import { acquireCliSlot } from './cliBudget.ts';
 import type { AcquireCliSlot } from './cliBudget.ts';
 import { HttpError } from './config.ts';
 import { appendHistory, buildTurn, defaultContextSettings } from './context.ts';
+import { slang, smsg } from './i18n.ts';
+import type { Lang } from './i18n.ts';
 import type { BuildTurnInput, BuildTurnOutput, ContextSettings, DocAssets, ProviderState, SessionRecord, StudentMemo } from './internal-types.ts';
 import { loadDocAssets } from './library.ts';
 import { attachmentLabel } from './prompts.ts';
@@ -54,20 +56,17 @@ const STATELESS_PROVIDERS: ReadonlySet<ProviderId> = new Set<ProviderId>(['anthr
 /** Provider failures that a new provider conversation can fix (BuildTurnInput.forceNewConversation). */
 type RecoverableKind = NonNullable<BuildTurnInput['forceNewConversation']>;
 
-/** Status line shown while a turn waits for a CLI process slot (server/cliBudget.ts). */
-const WAITING_FOR_SLOT_STATUS = '다른 답변이 끝나기를 기다리는 중…';
-
 /**
- * Sent once the waiting turn got its slot: an empty status line clears WAITING_FOR_SLOT_STATUS (the client
- * keeps the latest status and hides an empty one), so the turn looks like one that never waited.
+ * Sent once the waiting turn got its slot: an empty status line clears the waiting status (chat.turns.waitingForSlot;
+ * the client keeps the latest status and hides an empty one), so the turn looks like one that never waited.
  */
 const SLOT_GRANTED_STATUS = '';
 
 /** Status line shown while a turn is retried in a new provider conversation. */
-const RECOVERY_STATUS: Readonly<Record<RecoverableKind, string>> = {
-  resume_invalid: '이전 대화를 이어갈 수 없어 새 대화로 다시 시작해요',
-  context_overflow: '대화가 너무 길어져 새 대화로 이어가요',
-};
+function recoveryStatus(kind: RecoverableKind): string {
+  const m = smsg().chat.turns.recovery;
+  return kind === 'resume_invalid' ? m.resumeInvalid : m.contextOverflow;
+}
 
 export interface ProviderCheck {
   available: boolean;
@@ -160,6 +159,8 @@ export interface TurnResult {
 interface RunningTurn {
   controller: AbortController;
   finished: Promise<void>;
+  /** The language of the request that started it: a shutdown stops it with a reason in that language. */
+  lang: Lang;
 }
 
 const runningTurns = new Map<string, RunningTurn>();
@@ -172,13 +173,13 @@ function turnKey(docId: string, sessionId: string): string {
 export function abortTurn(docId: string, sessionId: string): boolean {
   const turn = runningTurns.get(turnKey(docId, sessionId));
   if (!turn) return false;
-  turn.controller.abort(new Error('사용자가 답변 생성을 중단했습니다'));
+  turn.controller.abort(new Error(smsg().chat.turns.abortedByUser));
   return true;
 }
 
 /** Aborts every running turn (server shutdown). Returns how many were aborted. */
 export function abortAllTurns(): number {
-  for (const turn of runningTurns.values()) turn.controller.abort(new Error('서버가 종료되어 중단되었습니다'));
+  for (const turn of runningTurns.values()) turn.controller.abort(new Error(smsg(turn.lang).chat.turns.abortedByShutdown));
   return runningTurns.size;
 }
 
@@ -226,12 +227,12 @@ export function waitForIdle(timeoutMs: number): Promise<boolean> {
  */
 export async function withSessionReserved<T>(docId: string, sessionId: string, fn: () => Promise<T>): Promise<T> {
   const key = turnKey(docId, sessionId);
-  if (runningTurns.has(key)) throw new HttpError(409, '이 세션은 답변을 생성하고 있습니다. 답변이 끝난 뒤에 다시 시도해 주세요');
+  if (runningTurns.has(key)) throw new HttpError(409, smsg().chat.turns.busy);
   let markFinished = () => {};
   const finished = new Promise<void>((resolve) => {
     markFinished = resolve;
   });
-  runningTurns.set(key, { controller: new AbortController(), finished });
+  runningTurns.set(key, { controller: new AbortController(), finished, lang: slang() });
   try {
     return await fn();
   } finally {
@@ -247,13 +248,13 @@ export async function withSessionReserved<T>(docId: string, sessionId: string, f
 export async function runTurn(request: TurnRequest, deps: ChatDeps = defaultChatDeps()): Promise<TurnResult> {
   const key = turnKey(request.docId, request.sessionId);
   // Check-and-reserve without an await in between, so concurrent requests cannot both pass.
-  if (runningTurns.has(key)) throw new HttpError(409, '이 세션은 이미 답변을 생성하고 있습니다');
+  if (runningTurns.has(key)) throw new HttpError(409, smsg().chat.turns.alreadyAnswering);
   const controller = new AbortController();
   let markFinished = () => {};
   const finished = new Promise<void>((resolve) => {
     markFinished = resolve;
   });
-  runningTurns.set(key, { controller, finished });
+  runningTurns.set(key, { controller, finished, lang: slang() });
 
   const forwardAbort = () => controller.abort(request.signal?.reason);
   if (request.signal?.aborted) forwardAbort();
@@ -285,7 +286,7 @@ function errorText(err: unknown): string {
 function abortReason(signal: AbortSignal): string {
   const reason: unknown = signal.reason;
   if (reason instanceof Error && reason.name !== 'AbortError' && reason.message) return reason.message;
-  return '답변 생성이 중단되었습니다';
+  return smsg().chat.turns.aborted;
 }
 
 async function executeTurn(request: TurnRequest, deps: ChatDeps, signal: AbortSignal): Promise<TurnResult> {
@@ -303,23 +304,20 @@ async function executeTurn(request: TurnRequest, deps: ChatDeps, signal: AbortSi
 
   // 1. Validate ------------------------------------------------------------------------------
   const session = await getSession(docId, sessionId);
-  if (!session) throw new HttpError(404, '세션을 찾을 수 없습니다');
+  const m = smsg();
+  if (!session) throw new HttpError(404, m.common.notFound.session);
   const doc = await loadDocAssets(docId);
   const provider = deps.getProvider(session.provider);
-  if (!provider) throw new HttpError(400, `알 수 없는 제공자입니다: ${session.provider}`);
+  if (!provider) throw new HttpError(400, m.chat.providers.unknownProvider(session.provider));
   const check = await deps.checkProvider(session.provider);
-  if (!check.available) {
-    throw new HttpError(400, `${provider.label}을(를) 사용할 수 없습니다${check.reason ? `: ${check.reason}` : ''}`);
-  }
+  if (!check.available) throw new HttpError(400, m.chat.providers.unavailable(provider.label, check.reason ?? ''));
   const pageCount = doc.meta.pageCount;
   const slide = request.slide;
-  if (!Number.isInteger(slide) || slide < 1 || slide > pageCount) {
-    throw new HttpError(400, `슬라이드 번호가 올바르지 않습니다 (1–${pageCount})`);
-  }
+  if (!Number.isInteger(slide) || slide < 1 || slide > pageCount) throw new HttpError(400, m.common.slideOutOfRange(pageCount));
   const question = kind === 'question' ? request.text.trim() : '';
-  if (kind === 'question' && !question) throw new HttpError(400, '질문을 입력해 주세요');
+  if (kind === 'question' && !question) throw new HttpError(400, m.chat.turns.questionRequired);
   if (question.length > MAX_QUESTION_CHARS) {
-    throw new HttpError(400, `질문이 너무 깁니다 (최대 ${MAX_QUESTION_CHARS.toLocaleString('en-US')}자)`);
+    throw new HttpError(400, m.chat.turns.questionTooLong(MAX_QUESTION_CHARS.toLocaleString('en-US')));
   }
   // Resolved and pinned until the turn has ended (HttpError 400 for unknown ids or more than MAX_ATTACHMENTS:
   // nothing was persisted). Priming turns take none.
@@ -428,6 +426,8 @@ async function startTurn(validated: ValidatedTurn): Promise<TurnResult> {
     model: session.model,
   };
   if (session.effort) assistantMessage.effort = session.effort;
+  // The startup sweep marks this answer in the turn's language if the server stops before it ends.
+  session.lang = slang();
   session.messages.push(userMessage, assistantMessage);
   await saveSession(session);
   emit({ type: 'start', userMessage: structuredClone(userMessage), assistantMessage: structuredClone(assistantMessage) });
@@ -456,7 +456,7 @@ async function startTurn(validated: ValidatedTurn): Promise<TurnResult> {
         let waited = false;
         releaseSlot = await deps.cliSlot('chat', signal, () => {
           waited = true;
-          emit({ type: 'status', text: WAITING_FOR_SLOT_STATUS });
+          emit({ type: 'status', text: smsg().chat.turns.waitingForSlot });
         });
         if (waited) emit({ type: 'status', text: SLOT_GRANTED_STATUS });
       }
@@ -515,7 +515,7 @@ async function startTurn(validated: ValidatedTurn): Promise<TurnResult> {
       console.error(`[chat] could not rebuild the turn of ${sessionId}:`, err);
     }
     if (retry !== null) {
-      emit({ type: 'status', text: RECOVERY_STATUS[recovery] });
+      emit({ type: 'status', text: recoveryStatus(recovery) });
       built = retry;
       // The user message describes what the model was actually given: the retry's context.
       userMessage.context = { ...built.context, recoveredFrom: recovery };

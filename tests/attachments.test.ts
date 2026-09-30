@@ -11,7 +11,6 @@ import sharp from 'sharp';
 import { MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES } from '../shared/types.ts';
 import type { Attachment, DocMeta, ProviderInfo, Session, StreamEvent } from '../shared/types.ts';
 import {
-  IMAGE_TOO_LARGE_PIXELS,
   attachmentsDir,
   cleanAttachmentName,
   createRegionAttachment,
@@ -33,6 +32,10 @@ import type { StoredDocMeta } from '../server/library.ts';
 import type { Part, Provider, ProviderRunInput } from '../server/providers/types.ts';
 import { referencedAttachmentIds } from '../server/sessions.ts';
 import { pngHeaderOnly, svgBehindAvifHeader } from './imageFixtures.ts';
+import { smsg } from '../server/i18n.ts';
+
+/** 413 for an image whose resolution the worker refuses (Korean: the tests send no language). */
+const IMAGE_TOO_LARGE_PIXELS = smsg('ko').library.attachments.imageTooManyPixels;
 
 let tmpRoot = '';
 

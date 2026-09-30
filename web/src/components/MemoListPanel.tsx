@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react';
 import { Mic, RefreshCw, StickyNote, TriangleAlert } from 'lucide-react';
 import type { MemoSummary } from '../../../shared/types.ts';
 import { useAnnotations } from '../hooks/useAnnotations.ts';
+import { msg } from '../i18n/index.ts';
 import { EMPTY_MEMO_FILTER, filterMemos, memoLines, memoTagCounts } from '../lib/annotations/memoList.ts';
 import { confirmDialog } from '../lib/confirm.ts';
 import { formatTime } from '../lib/format.ts';
@@ -39,17 +40,24 @@ export function MemoListPanel({ docId, focusedSlide, onOpenMemo, onGoToSlide, on
   const remove = async (m: MemoSummary) => {
     if (!store) return;
     if (m.text.trim() !== '') {
-      const ok = await confirmDialog({ title: '메모를 지울까요?', message: memoLines(m.text)[0], confirmLabel: '삭제', danger: true });
+      const ok = await confirmDialog({
+        title: msg().chat.memos.deleteTitle,
+        message: memoLines(m.text)[0],
+        confirmLabel: msg().common.delete,
+        danger: true,
+      });
       if (!ok) return;
     }
     const doc = await store.ensureSlide(m.slide);
     if (!doc || !doc.items.some((it) => it.id === m.id)) {
-      toast('그 메모는 이미 지워졌어요', 'info');
+      toast(msg().chat.memos.alreadyDeleted, 'info');
       return;
     }
     store.mutate(m.slide, [{ op: 'remove', id: m.id }]);
   };
 
+  const words = msg().chat.memos;
+  const shared = msg().chat.shared;
   return (
     <div className="notes-panel memo-panel">
       <div className="notes-toolbar">
@@ -57,27 +65,27 @@ export function MemoListPanel({ docId, focusedSlide, onOpenMemo, onGoToSlide, on
           className="memo-search"
           type="search"
           value={query}
-          placeholder="메모·태그 검색"
-          aria-label="메모·태그 검색"
+          placeholder={words.search}
+          aria-label={words.search}
           onChange={(e) => setQuery(e.target.value)}
         />
         <label className="checkbox">
           <input type="checkbox" checked={currentOnly} onChange={(e) => setCurrentOnly(e.target.checked)} />
-          현재 슬라이드만
+          {shared.currentSlideOnly}
         </label>
         <span className="spacer" />
         <button
           type="button"
           className="ghost-btn small"
           onClick={() => void store?.ensureSummary(true)}
-          title="새로고침"
-          aria-label="새로고침"
+          title={shared.refresh}
+          aria-label={shared.refresh}
         >
           <RefreshCw />
         </button>
       </div>
       {tags.length > 0 && (
-        <div className="memo-tag-bar" role="group" aria-label="태그로 거르기">
+        <div className="memo-tag-bar" role="group" aria-label={words.tagFilter}>
           {tags.map((t) => (
             <button
               key={t.tag}
@@ -85,7 +93,7 @@ export function MemoListPanel({ docId, focusedSlide, onOpenMemo, onGoToSlide, on
               className={t.tag === tag ? 'filter-chip is-active' : 'filter-chip is-quiet'}
               aria-pressed={t.tag === tag}
               onClick={() => setTag((current) => (current === t.tag ? null : t.tag))}
-              title={t.tag === tag ? '태그 필터 해제' : `#${t.tag} 메모만 보기`}
+              title={t.tag === tag ? words.clearTag : words.onlyTag(t.tag)}
             >
               #{t.tag} <span className="memo-tag-count">{t.count}</span>
             </button>
@@ -95,21 +103,21 @@ export function MemoListPanel({ docId, focusedSlide, onOpenMemo, onGoToSlide, on
       <div className="notes-scroll">
         {snapshot.summaryError && !summary && (
           <div className="inline-error">
-            <TriangleAlert /> 메모를 불러오지 못했어요: {snapshot.summaryError}
+            <TriangleAlert /> {words.loadFailed(snapshot.summaryError)}
           </div>
         )}
-        {!summary && !snapshot.summaryError && <div className="notes-empty muted">불러오는 중…</div>}
+        {!summary && !snapshot.summaryError && <div className="notes-empty muted">{msg().common.loading}</div>}
         {summary && memos.length === 0 && (
           <div className="notes-empty">
             <div className="chat-empty-icon" aria-hidden>
               <StickyNote strokeWidth={1.5} />
             </div>
-            <p>아직 메모가 없어요.</p>
-            <p className="muted small">슬라이드 위 도구 줄의 메모 도구로 스티커 메모를 붙일 수 있어요. 태그와 다른 슬라이드·녹음으로의 연결도 돼요.</p>
+            <p>{words.empty}</p>
+            <p className="muted small">{words.emptyHint}</p>
           </div>
         )}
         {summary && memos.length > 0 && shown.length === 0 && (
-          <div className="notes-empty muted">{filtering ? '조건에 맞는 메모가 없어요.' : '메모가 없어요.'}</div>
+          <div className="notes-empty muted">{filtering ? words.noMatch : words.none}</div>
         )}
         {shown.map((m) => {
           const [first, second] = memoLines(m.text);
@@ -127,7 +135,7 @@ export function MemoListPanel({ docId, focusedSlide, onOpenMemo, onGoToSlide, on
                   onOpenMemo(m.slide, m.id);
                 }
               }}
-              title="슬라이드에서 이 메모 열기"
+              title={words.openTitle}
             >
               <span className="memo-row-bar" aria-hidden />
               <div className="memo-row-main">
@@ -139,13 +147,13 @@ export function MemoListPanel({ docId, focusedSlide, onOpenMemo, onGoToSlide, on
                       e.stopPropagation();
                       onGoToSlide(m.slide);
                     }}
-                    title={`슬라이드 ${m.slide}로 이동`}
+                    title={shared.goToSlide(m.slide)}
                   >
                     p.{m.slide}
                   </button>
                   <span className="muted small">{formatTime(m.updatedAt)}</span>
                   {!m.tutor && (
-                    <span className="memo-row-hidden" role="img" title="튜터에게 숨김" aria-label="튜터에게 숨김">
+                    <span className="memo-row-hidden" role="img" title={words.hiddenFromTutor} aria-label={words.hiddenFromTutor}>
                       <EyeIcon off />
                     </span>
                   )}
@@ -167,7 +175,7 @@ export function MemoListPanel({ docId, focusedSlide, onOpenMemo, onGoToSlide, on
                           e.stopPropagation();
                           onPlayRecording(recording.rid, recording.t);
                         }}
-                        title="녹음의 이 순간 듣기 (녹음 탭)"
+                        title={words.playTitle}
                       >
                         <Mic /> {formatClock(recording.t)}
                       </button>
@@ -177,12 +185,12 @@ export function MemoListPanel({ docId, focusedSlide, onOpenMemo, onGoToSlide, on
               </div>
               <span onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
                 <PopoverMenu
-                  label="메모 메뉴"
+                  label={words.menu}
                   sections={[
                     {
                       items: [
-                        { key: 'open', label: '슬라이드에서 열기', onSelect: () => onOpenMemo(m.slide, m.id) },
-                        { key: 'delete', label: '메모 삭제', danger: true, onSelect: () => void remove(m) },
+                        { key: 'open', label: words.openOnSlide, onSelect: () => onOpenMemo(m.slide, m.id) },
+                        { key: 'delete', label: words.delete, danger: true, onSelect: () => void remove(m) },
                       ],
                     },
                   ]}

@@ -9,6 +9,7 @@
 import workletUrl from './pcm-worklet.js?url&no-inline';
 import type { RecordingInfo } from '../../../../shared/types.ts';
 import { ApiError, busyRecordingOf, createLiveRecording, deleteRecording, recordingErrorMessage, recordingHttp, untilLoggedIn } from '../../api.ts';
+import { msg } from '../../i18n/index.ts';
 import { toast } from '../toast.ts';
 import { notifyRecordingsChanged } from './bus.ts';
 import { recordingFeed, updateFeedInfo } from './feeds.ts';
@@ -312,7 +313,7 @@ class Recorder {
         this.dropInterrupted(rec.id);
         this.set({ finishing: this.countFinishing() });
         notifyRecordingsChanged(rec.docId);
-        if (finishing) toast(`‘${rec.title}’ 녹음을 모두 올렸어요. 받아쓰기가 끝나면 녹음 탭에서 볼 수 있어요.`, 'success', 6000);
+        if (finishing) toast(msg().recording.recorder.allUploaded(rec.title), 'success', 6000);
       },
       onFatal: (reason, detail) => {
         this.background.delete(rec.id);
@@ -363,22 +364,23 @@ class Recorder {
 
   private onFatal(title: string, docId: string, reason: UploaderFatal, detail: string, store: RecordingStore): void {
     notifyRecordingsChanged(docId);
+    const m = msg().recording.recorder;
     switch (reason) {
       case 'gone':
         void store.destroy();
-        toast(`‘${title}’ 녹음이 서버에서 지워져서 녹음을 멈췄어요.`, 'info', 8000);
+        toast(m.gone(title), 'info', 8000);
         return;
       case 'not-live':
         void store.destroy();
-        toast(`‘${title}’ 녹음은 이미 끝나 있었어요 (다른 창이나 기기에서 멈췄을 수 있어요).`, 'info', 8000);
+        toast(m.notLive(title), 'info', 8000);
         return;
       case 'local-missing':
-        toast(`‘${title}’ 녹음의 이 기기 기록이 사라졌어요 (브라우저 저장소가 지워졌을 수 있어요).`, 'error', 10000);
+        toast(m.localMissing(title), 'error', 10000);
         return;
       case 'data-lost':
       case 'server-ahead':
         // Keep the local data: nothing is deleted when the two sides disagree.
-        toast(`‘${title}’ 녹음을 더 올릴 수 없어요: ${detail}`, 'error', 12000);
+        toast(m.cannotUpload(title, detail), 'error', 12000);
         return;
     }
   }
@@ -434,13 +436,12 @@ class Recorder {
 
   /**
    * Start recording the lecture `docId`. Call it from the click handler of the record button (after the one-time
-   * notice): the AudioContext needs the user gesture. Throws an Error with a Korean message on failure.
+   * notice): the AudioContext needs the user gesture. Throws an Error with a message (in the UI language) on failure.
    */
   async start(docId: string, slide: number | null): Promise<void> {
-    if (this.snapshot.phase === 'stopping') {
-      throw new Error('방금 멈춘 녹음을 마저 올리는 중이에요. 끝난 뒤에 새로 녹음할 수 있어요.');
-    }
-    if (this.snapshot.phase !== 'idle') throw new Error('이미 녹음하고 있어요.');
+    const m = msg().recording.recorder;
+    if (this.snapshot.phase === 'stopping') throw new Error(m.stillSaving);
+    if (this.snapshot.phase !== 'idle') throw new Error(m.alreadyRecording);
     const unavailable = this.unavailableReason();
     if (unavailable) throw new Error(unavailable);
     this.set({ phase: 'starting', docId, micProblem: null });
@@ -457,11 +458,11 @@ class Recorder {
         });
       } catch (e) {
         if (e instanceof ApiError && e.status === 409) {
-          const message = `${e.message ? `${e.message} — ` : ''}다른 녹음이 진행 중이에요. 한 번에 하나만 녹음할 수 있어요.`;
+          const message = e.message ? `${e.message} — ${m.busy}` : m.busy;
           const busy = busyRecordingOf(e);
           throw busy ? new RecordingBusyError(message, busy) : new Error(message);
         }
-        throw new Error(`녹음을 시작하지 못했어요: ${recordingErrorMessage(e)}`);
+        throw new Error(m.startFailed(recordingErrorMessage(e)));
       }
       let store: RecordingStore;
       try {
@@ -473,7 +474,7 @@ class Recorder {
         // the next one).
         this.unclaim(info.id);
         void deleteRecording(docId, info.id).catch(() => {});
-        throw new Error(`녹음을 이 기기에 저장할 수 없어요: ${e instanceof Error ? e.message : String(e)}`);
+        throw new Error(m.cannotStore(e instanceof Error ? e.message : String(e)));
       }
       recordingFeed(docId, info.id, { info, fresh: true });
       this.begin({ docId, rid: info.id, title: info.title, liveTranscribe: info.liveTranscribe, store, baseBytes: 0 }, capture);
@@ -493,11 +494,12 @@ class Recorder {
 
   /** "이어서 녹음": continue an interrupted recording (from the click handler, like start). */
   async continueInterrupted(id: string): Promise<void> {
-    if (this.snapshot.phase !== 'idle') throw new Error('이미 녹음하고 있어요.');
+    const m = msg().recording.recorder;
+    if (this.snapshot.phase !== 'idle') throw new Error(m.alreadyRecording);
     const entry = this.background.get(id);
     if (!entry) {
       this.dropInterrupted(id);
-      throw new Error('이어서 녹음할 수 없어요: 이 기기에 남은 녹음 정보가 없어요.');
+      throw new Error(m.cannotContinue);
     }
     const unavailable = this.unavailableReason();
     if (unavailable) throw new Error(unavailable);
@@ -510,7 +512,7 @@ class Recorder {
       const rec = await entry.store.load();
       if (!rec) {
         this.dropInterrupted(id);
-        throw new Error('이어서 녹음할 수 없어요: 이 기기에 남은 녹음 정보가 없어요.');
+        throw new Error(m.cannotContinue);
       }
       this.background.delete(id);
       await this.retire(entry.uploader);
@@ -607,7 +609,7 @@ class Recorder {
         onSaved: () => uploader.notify(),
         onError: (e, unsavedBytes, first) => this.onStoreError(session, e, unsavedBytes, first),
         onRecovered: () => {
-          if (this.session === session) toast('녹음을 다시 이 기기에 저장하고 있어요.', 'success', 4000);
+          if (this.session === session) toast(msg().recording.recorder.storingAgain, 'success', 4000);
         },
       }),
       flushWaiters: [],
@@ -647,12 +649,12 @@ class Recorder {
     if (track) {
       track.onended = () => {
         if (this.session !== s || s.capture !== capture) return;
-        this.set({ micProblem: '마이크 연결이 끊겼어요. 녹음을 일시정지했어요 — 마이크를 확인하고 ‘계속’을 누르세요.' });
+        this.set({ micProblem: msg().recording.mic.disconnected });
         void this.pause();
       };
       track.onmute = () => {
         if (this.session !== s) return;
-        this.set({ micProblem: '마이크 소리가 들어오지 않아요 (시스템이 마이크를 막았거나 다른 앱이 쓰고 있어요).' });
+        this.set({ micProblem: msg().recording.mic.silent });
       };
       track.onunmute = () => {
         if (this.session === s && this.snapshot.micProblem && track.readyState === 'live') this.set({ micProblem: null });
@@ -684,22 +686,13 @@ class Recorder {
 
   /** The store refused audio: say so once, and pause when too much waits in memory. */
   private onStoreError(s: Session, e: unknown, unsavedBytes: number, first: boolean): void {
+    const m = msg().recording.recorder;
     const quota = e instanceof DOMException && e.name === 'QuotaExceededError';
-    const reason = quota ? '저장 공간이 부족해요' : e instanceof Error ? e.message : String(e);
+    const reason = quota ? m.storageFull : e instanceof Error ? e.message : String(e);
     console.warn('[easy-study] could not store recorded audio', e);
-    if (first) {
-      toast(
-        quota
-          ? '저장 공간이 부족해서 녹음을 이 기기에 저장하지 못하고 있어요. 공간을 확보해 주세요 — 잠시 메모리에 보관하고 있어요.'
-          : `녹음을 이 기기에 저장하지 못하고 있어요: ${reason} — 잠시 메모리에 보관하고 있어요.`,
-        'error',
-        10000,
-      );
-    }
+    if (first) toast(quota ? m.storeFailedQuota : m.storeFailed(reason), 'error', 10000);
     if (unsavedBytes > MAX_UNSAVED_BYTES && this.session === s && this.snapshot.phase === 'recording') {
-      this.set({
-        micProblem: `이 기기에 녹음을 저장할 수 없어서 일시정지했어요 (${reason}). 공간을 확보한 뒤 ‘계속’을 누르고, 그래도 안 되면 새로고침한 뒤 ‘이어서 녹음’을 누르세요.`,
-      });
+      this.set({ micProblem: m.pausedStoreFailed(reason) });
       void this.pause();
     }
   }
@@ -742,11 +735,7 @@ class Recorder {
     };
     if (unsent > BACKLOG_WARN_BYTES && !s.backlogWarned) {
       s.backlogWarned = true;
-      toast(
-        `서버에 아직 못 보낸 녹음이 ${formatSpan(bytesToSeconds(unsent))} 쌓였어요. 이 기기에 안전하게 보관 중이고, 연결되면 이어서 보내요.`,
-        'info',
-        10000,
-      );
+      toast(msg().recording.recorder.backlog(formatSpan(bytesToSeconds(unsent))), 'info', 10000);
     }
     const s2 = this.snapshot;
     if (
@@ -795,7 +784,7 @@ class Recorder {
     if (s.persister.unsavedBytes > MAX_UNSAVED_BYTES) {
       await s.persister.flush();
       if (s.persister.unsavedBytes > MAX_UNSAVED_BYTES) {
-        throw new Error('아직 이 기기에 녹음을 저장할 수 없어요. 저장 공간을 확보하거나, 페이지를 새로고침한 뒤 ‘이어서 녹음’을 눌러 주세요.');
+        throw new Error(msg().recording.recorder.resumeStoreFailed);
       }
     }
     const track = s.capture?.stream.getAudioTracks()[0];
@@ -834,17 +823,13 @@ class Recorder {
       const captured = rec?.captured ?? 0;
       await s.store.update({ stopBytes: captured });
       if (s.persister.unsavedBytes > 0) {
-        toast(
-          `마지막 ${formatSpan(bytesToSeconds(s.persister.unsavedBytes))}은 이 기기에 저장하지 못해서 녹음에서 빠졌어요.`,
-          'error',
-          10000,
-        );
+        toast(msg().recording.recorder.lastPartLost(formatSpan(bytesToSeconds(s.persister.unsavedBytes))), 'error', 10000);
       }
       s.uploader.flush();
     } catch (e) {
       // The store failed: the recording stays (paused) — the user can try again, or reload and continue it.
       if (this.session === s) this.set({ phase: 'paused', pausedAt: Date.now() });
-      throw new Error(`이 기기에 저장된 녹음을 읽지 못했어요: ${e instanceof Error ? e.message : String(e)}`);
+      throw new Error(msg().recording.recorder.readFailed(e instanceof Error ? e.message : String(e)));
     } finally {
       // Whatever happened: the microphone and the screen are released.
       await this.releaseCapture(s);
@@ -861,13 +846,8 @@ class Recorder {
     this.session = null;
     this.toIdle();
     notifyRecordingsChanged(s.docId);
-    toast(
-      s.liveTranscribe
-        ? `‘${s.title}’ 녹음을 저장했어요. 남은 받아쓰기와 슬라이드 정렬이 끝나면 녹음 탭에서 다시 들을 수 있어요.`
-        : `‘${s.title}’ 녹음을 저장했어요. 이제 받아쓰기를 시작해요 — 진행 상황은 녹음 탭에서 볼 수 있어요.`,
-      'success',
-      7000,
-    );
+    const m = msg().recording.recorder;
+    toast(s.liveTranscribe ? m.saved(s.title) : m.savedTranscribing(s.title), 'success', 7000);
   }
 
   private onSessionFatal(reason: UploaderFatal, detail: string): void {

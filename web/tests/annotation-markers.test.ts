@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { Attachment, ChatMessage, MemoItem, NotesResponse, SlideAnnotations } from '../../shared/types.ts';
 import { emptySlideAnnotations } from '../src/lib/annotations/geometry.ts';
-import { NO_TEXT_LABEL, deriveMarkers, markerId, questionsOnItem, regionLabelPlace, regionLabelWidth } from '../src/lib/annotations/markers.ts';
+import { deriveMarkers, markerId, noTextLabel, questionsOnItem, regionLabelPlace, regionLabelWidth } from '../src/lib/annotations/markers.ts';
 
 const region = (id: string, slide: number, rect: Attachment['rect'], annotation?: Attachment['annotation']): Attachment => ({
   id,
@@ -119,7 +119,7 @@ describe('deriveMarkers', () => {
     assert.equal(m.count, 3);
     assert.equal(m.label, '나중에');
     assert.equal(m.sessionId, 's2');
-    assert.deepEqual(m.questions.map((q) => q.label), ['나중에', NO_TEXT_LABEL, '먼저']);
+    assert.deepEqual(m.questions.map((q) => q.label), ['나중에', noTextLabel(), '먼저']);
     assert.equal(markerId(m), 's2:q2:a2', 'the id follows the newest question');
   });
 

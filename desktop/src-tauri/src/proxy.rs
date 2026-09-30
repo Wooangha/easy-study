@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, Url};
 
 use crate::config::{self, lock};
-use crate::{pathenv, remote, server, AppState};
+use crate::{i18n, pathenv, remote, server, AppState};
 
 /// The relay's preferred ports (the local server's are 5350–5359); the last one used is remembered.
 const PREFERRED_PORTS: std::ops::RangeInclusive<u16> = 5360..=5369;
@@ -33,6 +33,9 @@ const LOG_MAX_BYTES: u64 = 1024 * 1024;
 const TAIL_LINES: usize = 20;
 /// Tests: relay a loopback remote too (the local E2E on one computer).
 const ENV_FORCE: &str = "EASY_STUDY_DESKTOP_FORCE_PROXY";
+/// The relay's exit code for a port another program holds (server/proxy.ts EXIT_PORT_TAKEN), whatever the language
+/// of its message; the Korean message is still recognized too (spawn_relay).
+const EXIT_PORT_TAKEN: i32 = 3;
 
 pub struct Running {
     child: Child,
@@ -72,15 +75,16 @@ pub fn start(app: &AppHandle, origin: &Url) -> Result<String, String> {
     // A stop that is under way (stop_async) finishes first: it may still hold the remembered port.
     let _life = lock(&st.proxy_lifecycle);
     stop_locked(app, &st);
-    let res = app.path().resource_dir().map_err(|e| format!("앱의 리소스 폴더를 찾지 못했어요: {e}"))?;
+    let m = i18n::msg();
+    let res = app.path().resource_dir().map_err(|e| (m.common.no_resource_dir)(&e.to_string()))?;
     let node = server::node_path(&res);
     if !node.is_file() {
-        return Err(format!("앱에 들어 있는 Node.js를 찾지 못했어요: {}. 앱을 다시 설치해 보세요.", node.display()));
+        return Err((m.common.no_node)(&node.display().to_string()));
     }
     let server_dir = res.join("server");
     let entry = server_dir.join("dist-server").join("server").join("proxy.js");
     if !entry.is_file() {
-        return Err("앱에 연결 통로 프로그램이 없어요 (proxy.js). 앱을 다시 설치해 주세요.".into());
+        return Err(m.relay.missing.into());
     }
     let target = crate::origin_of(origin);
     let log_file = config::log_dir(app).join("proxy.log");
@@ -96,7 +100,7 @@ pub fn start(app: &AppHandle, origin: &Url) -> Result<String, String> {
         other => other,
     }
     .map_err(|f| match f {
-        Failure::PortTaken => "연결 통로(프록시)가 쓸 포트를 찾지 못했어요.".to_string(),
+        Failure::PortTaken => m.relay.no_port.to_string(),
         Failure::Other(e) => e,
     })?;
     let actual = Url::parse(&shown).ok().and_then(|u| u.port()).unwrap_or(port);
@@ -129,9 +133,7 @@ fn spawn_relay(app: &AppHandle, st: &AppState, relay: &Relay, port: u16) -> Resu
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    // Nothing of the server's: no EASY_STUDY_DESKTOP, no library, no tool paths (it relays, it cannot touch a library).
-    server::base_env(&mut cmd, relay.path_env);
-    cmd.env("PORT", port.to_string());
+    relay_env(&mut cmd, relay.path_env, port);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -143,7 +145,8 @@ fn spawn_relay(app: &AppHandle, st: &AppState, relay: &Relay, port: u16) -> Resu
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
     let t = Instant::now();
-    let mut child = server::spawn(cmd).map_err(|e| Failure::Other(format!("연결 통로(프록시)를 시작하지 못했어요: {e}")))?;
+    let relay_texts = &i18n::msg().relay;
+    let mut child = server::spawn(cmd).map_err(|e| Failure::Other((relay_texts.spawn_failed)(&e.to_string())))?;
     #[cfg(windows)]
     server::winjob::kill_with_parent(&child);
     let generation = st.proxy_generation.fetch_add(1, SeqCst) + 1;
@@ -197,16 +200,18 @@ fn spawn_relay(app: &AppHandle, st: &AppState, relay: &Relay, port: u16) -> Resu
             let lines = lock(&tail).clone();
             let how = server::describe(status);
             config::log(app, &format!("relay exited before its ready line ({how}): {}", lines.join(" / ")));
-            if lines.iter().any(|l| l.contains("다른 프로그램이") && l.contains("쓰고 있")) {
+            let port_taken = status.and_then(|s| s.code()) == Some(EXIT_PORT_TAKEN)
+                || lines.iter().any(|l| l.contains("다른 프로그램이") && l.contains("쓰고 있"));
+            if port_taken {
                 Err(Failure::PortTaken)
             } else {
-                Err(Failure::Other(format!("연결 통로(프록시)가 시작되지 않았어요 ({how}). {}", lines.last().cloned().unwrap_or_default())))
+                Err(Failure::Other((relay_texts.not_started)(&how, &lines.last().cloned().unwrap_or_default())))
             }
         }
         Err(_) => {
             let status = reap(st);
             config::log(app, &format!("relay not ready in {} s ({})", READY_TIMEOUT.as_secs(), server::describe(status)));
-            Err(Failure::Other(format!("연결 통로(프록시)가 {}초 안에 준비되지 않았어요.", READY_TIMEOUT.as_secs())))
+            Err(Failure::Other((relay_texts.not_ready)(READY_TIMEOUT.as_secs())))
         }
     }
 }
@@ -236,7 +241,7 @@ fn on_exit(app: &AppHandle, generation: u64) {
     *lock(&st.proxy_url) = None;
     let how = server::describe(reap(&st));
     config::log(app, &format!("relay exited on its own ({how}), target {}", target.unwrap_or_default()));
-    *lock(&st.error) = Some(format!("연결 통로(프록시)가 예기치 않게 종료됐어요 ({how}). 다시 연결해 주세요."));
+    *lock(&st.error) = Some((i18n::msg().relay.exited)(&how));
     drop(life);
     crate::show_chooser(app);
     crate::smoke_fail(app, 2, "proxy exited");
@@ -295,6 +300,13 @@ fn close_page_windows(app: &AppHandle) {
     }
 }
 
+/// The relay's environment. Nothing of the server's: no EASY_STUDY_DESKTOP, no library, no tool paths (it relays, it
+/// cannot touch a library). EASY_STUDY_LANG: the shell's language, for the startup errors the chooser shows.
+fn relay_env(cmd: &mut Command, path_env: &str, port: u16) {
+    server::base_env(cmd, path_env);
+    cmd.env("PORT", port.to_string()).env("EASY_STUDY_LANG", i18n::lang().id());
+}
+
 /// The saved port when free on loopback, else the first free preferred one, else 0 (any: the ready line tells).
 fn pick_proxy_port(saved: Option<u16>) -> u16 {
     if let Some(p) = saved.filter(|p| *p != 0 && server::port_free(*p)) {
@@ -323,6 +335,25 @@ mod tests {
         assert!(wanted(&url("http://127.0.0.1:5180/")));
         assert!(!wanted(&url("https://127.0.0.1:5180/")));
         std::env::remove_var(ENV_FORCE);
+    }
+
+    #[test]
+    fn the_relay_runs_in_the_shells_language() {
+        let env_of = || {
+            let mut cmd = Command::new("node");
+            relay_env(&mut cmd, "/usr/bin", 5361);
+            let vars: Vec<(String, Option<String>)> = cmd
+                .get_envs()
+                .map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned())))
+                .collect();
+            vars
+        };
+        let get = |vars: &[(String, Option<String>)], k: &str| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        let korean = env_of();
+        assert_eq!(get(&korean, "EASY_STUDY_LANG"), Some(Some("ko".into())), "the shell's language (Korean in tests)");
+        assert_eq!(get(&korean, "PORT"), Some(Some("5361".into())));
+        let english = i18n::with_lang(i18n::Lang::En, env_of);
+        assert_eq!(get(&english, "EASY_STUDY_LANG"), Some(Some("en".into())));
     }
 
     #[test]

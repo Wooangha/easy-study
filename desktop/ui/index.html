@@ -11,13 +11,14 @@
 <body>
 <!-- The desktop app's own start page (DESIGN §19): the ONLY page with IPC. It picks where the easy-study
      server runs; the server's pages (this computer or another one) get no IPC. "⚙ 앱 설정" holds the app's own
-     settings and its updates (DESIGN §24). -->
+     settings and its updates (DESIGN §24). Its texts are in texts.js, in the shell's language (DESIGN §27):
+     data-t="key" fills an element, data-t-placeholder="key" an input's placeholder (chooser.js applyTexts). -->
 <main>
   <header class="brand">
     <img src="icon.svg" alt="" width="48" height="48">
     <div>
       <h1>easy-study</h1>
-      <p class="sub">어디에서 공부할까요?</p>
+      <p class="sub" data-t="brand.sub"></p>
     </div>
   </header>
 
@@ -29,40 +30,40 @@
   <section id="status" class="status" role="status" aria-live="polite" hidden>
     <p id="status-text"></p>
     <details id="log" hidden>
-      <summary>서버 로그 (마지막 줄)</summary>
+      <summary data-t="log.summary"></summary>
       <pre id="log-tail"></pre>
-      <p class="hint">전체 로그: <code id="log-file"></code></p>
+      <p class="hint" data-t="log.file"><code id="log-file"></code></p>
     </details>
   </section>
 
   <form id="form" novalidate>
     <fieldset>
-      <legend class="sr-only">연결 방식</legend>
+      <legend class="sr-only" data-t="mode.legend"></legend>
 
       <div class="option" data-mode="local">
         <label class="option-head">
           <input type="radio" name="mode" value="local" checked>
           <span>
-            <b>이 컴퓨터에서 실행</b>
-            <span class="hint">앱이 이 컴퓨터에서 easy-study 서버를 실행해요. 강의 자료와 기록은 아래 라이브러리 폴더에 저장돼요.</span>
+            <b data-t="local.title"></b>
+            <span class="hint" data-t="local.hint"></span>
           </span>
         </label>
         <div class="option-body" data-body>
           <div class="library">
-            <span class="label">라이브러리</span>
+            <span class="label" data-t="local.library"></span>
             <code id="library-path" class="path">…</code>
             <span id="library-note" class="hint"></span>
           </div>
           <div class="buttons">
-            <button type="button" id="pick-library" class="secondary">라이브러리 폴더 선택…</button>
-            <button type="button" id="default-library" class="secondary" hidden>기본 위치로</button>
-            <button type="button" id="open-library" class="link">폴더 열기</button>
+            <button type="button" id="pick-library" class="secondary" data-t="local.pick"></button>
+            <button type="button" id="default-library" class="secondary" data-t="local.useDefault" hidden></button>
+            <button type="button" id="open-library" class="link" data-t="local.open"></button>
           </div>
           <div id="library-confirm" class="confirm" role="alertdialog" aria-labelledby="library-confirm-text" hidden>
             <p id="library-confirm-text"></p>
             <div class="buttons">
-              <button type="button" id="library-confirm-yes">이 폴더 쓰기</button>
-              <button type="button" id="library-confirm-no" class="secondary">취소</button>
+              <button type="button" id="library-confirm-yes" data-t="local.confirmYes"></button>
+              <button type="button" id="library-confirm-no" class="secondary" data-t="common.cancel"></button>
             </div>
           </div>
         </div>
@@ -72,100 +73,95 @@
         <label class="option-head">
           <input type="radio" name="mode" value="remote">
           <span>
-            <b>다른 컴퓨터에 연결</b>
-            <span class="hint">다른 컴퓨터에서 원격 모드로 실행 중인 easy-study 서버에 접속해요.</span>
+            <b data-t="remote.title"></b>
+            <span class="hint" data-t="remote.hint"></span>
           </span>
         </label>
         <div class="option-body" data-body>
           <label class="field">
-            <span class="label">주소</span>
+            <span class="label" data-t="remote.address"></span>
             <input id="url" type="text" inputmode="url" placeholder="http://192.168.0.10:5180" autocomplete="off" autocapitalize="off" spellcheck="false">
           </label>
           <label class="field">
-            <span class="label">접속 코드</span>
-            <input id="code" type="password" placeholder="처음 연결할 때만 (예: k7qm2-x9fda-…)" autocomplete="off" autocapitalize="off" spellcheck="false">
+            <span class="label" data-t="remote.code"></span>
+            <input id="code" type="password" data-t-placeholder="remote.codePlaceholder" autocomplete="off" autocapitalize="off" spellcheck="false">
           </label>
-          <p class="hint">주소와 접속 코드는 그 컴퓨터의 easy-study 앱(⚙ 설정 › 데스크톱 앱, 또는 이 화면의 ⚙ 앱 설정) 또는 <code>npm run start:remote</code>를 실행한 터미널에 표시돼요. 로그인은 30일 동안 유지돼요.
-            http는 같은 네트워크(집·학교 Wi-Fi, Tailscale)에서만 쓸 수 있고(앱 안에서는 http 주소여도 녹음돼요), https는 이 컴퓨터가 신뢰하는 인증서(예: <code>tailscale serve</code>)여야 해요.
-            http로는 같은 네트워크의 누군가가 오가는 내용을 엿보거나 바꿀 수 있어요 (바뀐 화면은 마이크와 로그인까지 쓸 수 있어요): 믿을 수 있는 네트워크에서만 쓰고, 다른 곳에서는 Tailscale·HTTPS를 쓰세요.</p>
+          <p class="hint" data-t="remote.help"></p>
         </div>
       </div>
     </fieldset>
 
     <div class="actions">
-      <label class="remember"><input type="checkbox" id="remember" checked> 다음에도 바로 연결</label>
-      <button type="submit" id="connect">연결</button>
+      <label class="remember"><input type="checkbox" id="remember" checked> <span data-t="form.remember"></span></label>
+      <button type="submit" id="connect" data-t="common.connect"></button>
     </div>
-    <p class="hint remember-hint">켜 두면 다음부터 이 화면 없이 바로 연결해요. ⚙ 설정에서 언제든 바꿀 수 있어요.</p>
+    <p class="hint remember-hint" data-t="form.rememberHint"></p>
     <p id="previous" class="hint" hidden></p>
   </form>
 
   <details id="settings" class="settings">
-    <summary>⚙ 앱 설정</summary>
+    <summary data-t="settings.summary"></summary>
     <div class="settings-body">
       <div class="setting">
-        <span class="label" id="theme-label">화면 테마</span>
+        <span class="label" id="theme-label" data-t="settings.theme"></span>
         <div class="segmented" role="radiogroup" aria-labelledby="theme-label">
-          <label><input type="radio" name="theme" value="system"> 시스템 설정 따르기</label>
-          <label><input type="radio" name="theme" value="light"> 라이트</label>
-          <label><input type="radio" name="theme" value="dark"> 다크</label>
+          <label><input type="radio" name="theme" value="system"> <span data-t="settings.themeSystem"></span></label>
+          <label><input type="radio" name="theme" value="light"> <span data-t="settings.themeLight"></span></label>
+          <label><input type="radio" name="theme" value="dark"> <span data-t="settings.themeDark"></span></label>
         </div>
       </div>
 
       <div class="setting">
-        <span class="label">업데이트</span>
+        <span class="label" data-t="update.label"></span>
         <p><span id="app-version"></span> · <span id="update-status"></span></p>
         <p id="update-reason" class="hint" hidden></p>
         <progress id="update-progress" max="1" hidden></progress>
         <div class="buttons">
-          <button type="button" id="update-check" class="secondary">지금 확인</button>
-          <button type="button" id="update-install" class="secondary" hidden>설치하고 다시 시작</button>
-          <button type="button" id="update-download" class="secondary" hidden>다운로드 페이지 열기 ↗</button>
-          <button type="button" id="update-cancel" class="link" hidden>취소</button>
+          <button type="button" id="update-check" class="secondary" data-t="update.check"></button>
+          <button type="button" id="update-install" class="secondary" data-t="update.install" hidden></button>
+          <button type="button" id="update-download" class="secondary" data-t="update.download" hidden></button>
+          <button type="button" id="update-cancel" class="link" data-t="common.cancel" hidden></button>
         </div>
-        <label class="check"><input type="checkbox" id="update-auto"> 시작할 때 새 버전 확인 (GitHub에서 확인해요)</label>
+        <label class="check"><input type="checkbox" id="update-auto"> <span data-t="update.auto"></span></label>
       </div>
 
       <div class="setting">
-        <span class="label">다른 기기에서 접속</span>
-        <label class="check"><input type="checkbox" id="share"> 다른 기기에서 접속 허용 (같은 네트워크, 접속 코드 필요)</label>
-        <p id="share-off" class="hint">같은 Wi‑Fi의 다른 컴퓨터·태블릿에서 이 컴퓨터의 easy-study를 쓸 수 있어요. 켜거나 끄면 서버를 다시 시작해요.</p>
-        <p id="share-idle" class="hint" hidden>‘이 컴퓨터에서 실행’으로 연결하면 주소와 접속 코드가 여기 나와요.</p>
+        <span class="label" data-t="share.label"></span>
+        <label class="check"><input type="checkbox" id="share"> <span data-t="share.toggle"></span></label>
+        <p id="share-off" class="hint" data-t="share.off"></p>
+        <p id="share-idle" class="hint" data-t="share.idle" hidden></p>
         <div id="share-info" class="share-info" hidden>
-          <p>다른 기기에서 열 주소</p>
+          <p data-t="share.urls"></p>
           <ul id="share-urls" class="share-urls"></ul>
-          <p id="share-no-urls" class="hint" hidden>네트워크 주소를 찾지 못했어요. Wi‑Fi나 이더넷에 연결한 뒤 스위치를 껐다 켜세요.</p>
-          <p>접속 코드 <code id="share-code" class="path inline"></code> <button type="button" id="share-copy" class="link">복사</button></p>
+          <p id="share-no-urls" class="hint" data-t="share.noUrls" hidden></p>
+          <p data-t="share.code"><code id="share-code" class="path inline"></code> <button type="button" id="share-copy" class="link" data-t="common.copy"></button></p>
           <div class="buttons">
-            <button type="button" id="share-reset" class="secondary">접속 코드 새로 만들기 (모든 기기 로그아웃)</button>
+            <button type="button" id="share-reset" class="secondary" data-t="share.reset"></button>
           </div>
-          <p class="hint">코드를 아는 사람은 이 컴퓨터의 Claude/Codex로 질문하고 강의 파일을 보고 지울 수 있어요: 같은 Wi‑Fi처럼 믿을 수 있는 네트워크에서만 켜세요.
-            macOS·Windows가 ‘node’의 네트워크 연결을 허용할지 물으면 허용하세요 (앱에 든 서버예요; 직접 빌드한 앱은 실행할 때마다 물을 수 있어요).
-            다른 컴퓨터에서는 easy-study 앱의 ‘다른 컴퓨터에 연결’(녹음도 돼요) 또는 브라우저로 여세요. 태블릿·폰의 브라우저에서 녹음하려면 HTTPS가 필요해요.
-            http로는 같은 네트워크의 누군가가 오가는 내용을 엿보거나 바꿀 수 있어요 (바뀐 화면은 마이크와 로그인까지 쓸 수 있어요): 믿을 수 있는 네트워크에서만 켜고, 다른 곳에서는 Tailscale·HTTPS를 쓰세요.
-            주소가 바뀌면(다른 Wi‑Fi) 스위치를 껐다 켜세요.</p>
+          <p class="hint" data-t="share.help"></p>
         </div>
       </div>
 
       <div class="setting">
-        <span class="label">시작할 때</span>
+        <span class="label" data-t="startup.label"></span>
         <p id="startup-text"></p>
         <div class="buttons">
-          <button type="button" id="forget-choice" class="secondary" hidden>다음부터 이 화면 먼저 보기</button>
+          <button type="button" id="forget-choice" class="secondary" data-t="startup.forget" hidden></button>
         </div>
       </div>
 
       <div class="setting">
         <div class="buttons">
-          <button type="button" id="open-logs" class="secondary">로그 폴더 열기</button>
+          <button type="button" id="open-logs" class="secondary" data-t="logs.open"></button>
         </div>
       </div>
     </div>
   </details>
 
 
-  <footer class="hint" id="footer">연결 대상은 나중에 앱 화면 오른쪽 위 <b>⚙ 설정 › 연결 대상 바꾸기…</b>, 또는 메뉴 <b>연결 › 연결 대상 바꾸기…</b> (<kbd id="shortcut">Ctrl+Shift+K</kbd>)에서 바꿀 수 있어요.</footer>
+  <footer class="hint" id="footer" data-t="footer"><kbd id="shortcut">Ctrl+Shift+K</kbd></footer>
 </main>
+<script src="texts.js"></script>
 <script src="chooser.js"></script>
 </body>
 </html>

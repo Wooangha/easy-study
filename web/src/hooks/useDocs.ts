@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DocMeta } from '../../../shared/types.ts';
 import { ApiError, deleteDoc, errorMessage, getDoc, listDocs, renameDoc, retryDoc, uploadPdf } from '../api.ts';
+import { msg } from '../i18n/index.ts';
 import { toast } from '../lib/toast.ts';
 
 export interface UploadItem {
@@ -58,7 +59,7 @@ export function useDocs() {
       const byId = new Map(results.filter((d): d is DocMeta => d !== null).map((d) => [d.id, d]));
       setDocs((prev) => prev && prev.map((d) => byId.get(d.id) ?? d));
       for (const d of byId.values()) {
-        if (d.status === 'error') toast(`"${d.title}" 처리 실패: ${d.error ?? '알 수 없는 오류'}`, 'error');
+        if (d.status === 'error') toast(msg().chat.docs.processingFailed(d.title, d.error ?? msg().common.unknownError), 'error');
       }
       timer = window.setTimeout(tick, POLL_MS);
     };
@@ -86,7 +87,7 @@ export function useDocs() {
       const created: DocMeta[] = [];
       for (const file of files) {
         if (!isPdfFile(file)) {
-          toast(`PDF 파일만 올릴 수 있어요: ${file.name}`, 'error');
+          toast(msg().chat.attachments.pdfOnly(file.name), 'error');
           continue;
         }
         const id = ++uploadSeq.current;
@@ -101,7 +102,7 @@ export function useDocs() {
           created.push(doc);
           onCreated?.(doc);
         } catch (e) {
-          toast(`업로드 실패 (${file.name}): ${errorMessage(e)}`, 'error');
+          toast(msg().chat.docs.uploadFailed(file.name, errorMessage(e)), 'error');
         } finally {
           setUploads((u) => u.filter((x) => x.id !== id));
         }
@@ -118,7 +119,7 @@ export function useDocs() {
       setDocs((prev) => prev && prev.map((d) => (d.id === docId ? doc : d)));
       return true;
     } catch (e) {
-      toast(`다시 변환하지 못했어요: ${errorMessage(e)}`, 'error');
+      toast(msg().chat.docs.retryFailed(errorMessage(e)), 'error');
       void refresh();
       return false;
     }
@@ -131,7 +132,7 @@ export function useDocs() {
       setDocs((prev) => prev && prev.map((d) => (d.id === docId ? doc : d)));
       return true;
     } catch (e) {
-      toast(`이름을 바꾸지 못했어요: ${errorMessage(e)}`, 'error');
+      toast(msg().chat.docs.renameFailed(errorMessage(e)), 'error');
       return false;
     }
   }, []);
@@ -142,12 +143,7 @@ export function useDocs() {
       await deleteDoc(docId);
     } catch (e) {
       const busy = e instanceof ApiError && e.status === 409;
-      toast(
-        busy
-          ? '변환·정리본 만들기·답변이 진행 중이라 지금은 삭제할 수 없어요. 끝난 뒤에 다시 시도해 주세요.'
-          : `삭제하지 못했어요: ${errorMessage(e)}`,
-        'error',
-      );
+      toast(busy ? msg().chat.docs.deleteBusy : msg().chat.docs.deleteFailed(errorMessage(e)), 'error');
       return false;
     }
     setDocs((prev) => prev && prev.filter((d) => d.id !== docId));

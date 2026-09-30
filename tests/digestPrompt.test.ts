@@ -6,14 +6,17 @@ import type { DigestSlide } from '../shared/types.ts';
 import type { Part } from '../server/providers/types.ts';
 import {
   DIGEST_BATCH_SIZE,
-  DIGEST_FAILED_PLACEHOLDER,
   buildDigestBatchParts,
   buildLectureSummaryParts,
+  digestFailedPlaceholder,
   digestSystemPrompt,
   lectureSummarySystemPrompt,
   parseDigestOutput,
 } from '../server/digestPrompt.ts';
 import { TRUNCATED_MARK } from '../server/prompts.ts';
+
+/** The entry of a slide whose output could not be parsed (Korean: no request language here). */
+const DIGEST_FAILED_PLACEHOLDER = digestFailedPlaceholder('ko');
 
 const DIR = '/library/l7-parsing-abc123';
 const img = (n: number) => `${DIR}/slides/${String(n).padStart(3, '0')}.png`;

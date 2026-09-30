@@ -20,7 +20,7 @@
 import { randomUUID } from 'node:crypto';
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
-import type { TokenUsage, UsageLimits } from '../../shared/types.ts';
+import type { EffortOption, ModelOption, TokenUsage, UsageLimits } from '../../shared/types.ts';
 import type {
   Part,
   Provider,
@@ -30,29 +30,54 @@ import type {
   ProviderRunResult,
 } from './types.ts';
 import { ProviderError, effortOption } from './types.ts';
+import { slang, smsg } from '../i18n.ts';
+import type { Lang } from '../i18n.ts';
 import {
   childEnv,
   describeExit,
   loadInlineImage,
-  probeVersion,
   resolveBin,
   runJsonlProcess,
   stderrSuffix,
+  versionCheck,
 } from './proc.ts';
-import type { CliBinSpec, JsonObject } from './proc.ts';
+import type { CliBinSpec, JsonObject, LocalizedAvailability } from './proc.ts';
 import { AnthropicUsageTracker, anthropicUsage, claudeRateLimits } from './usage.ts';
 
 /** Read-only tools the CLI may use (to open slide PNGs it has not been shown). */
 export const CLAUDE_TOOLS = 'Read,Glob,Grep';
 
-/** `claude --effort <level>` levels (claude 2.1.x), weakest first. */
-export const CLAUDE_EFFORTS = [
-  effortOption('low', '빠르게, 가볍게 생각해요'),
-  effortOption('medium', '속도와 깊이의 균형'),
-  effortOption('high', '복잡한 내용을 더 깊이 생각해요'),
-  effortOption('xhigh', '더 깊이 생각해요 (느려지고 사용량이 늘어요)'),
-  effortOption('max', '가장 깊이 생각해요 (가장 느리고 사용량이 가장 많아요)'),
-];
+/** The static choices of the provider per language (built once each). */
+const staticChoices = new Map<Lang, { models: ModelOption[]; efforts: EffortOption[] }>();
+
+/** `claude --effort <level>` levels (claude 2.1.x), weakest first, and the models, with their texts in `lang`. */
+function claudeChoices(lang: Lang): { models: ModelOption[]; efforts: EffortOption[] } {
+  let choices = staticChoices.get(lang);
+  if (!choices) {
+    const m = smsg(lang).chat.providers;
+    choices = {
+      models: [
+        { id: '', label: m.claudeDefaultModel },
+        { id: 'sonnet', label: 'Sonnet' },
+        { id: 'opus', label: 'Opus' },
+        // Haiku (4.5) takes no effort level.
+        { id: 'haiku', label: 'Haiku', efforts: [] },
+        { id: 'fable', label: 'Fable' },
+      ],
+      efforts: (['low', 'medium', 'high', 'xhigh', 'max'] as const).map((id) => effortOption(id, m.claudeEffort[id], lang)),
+    };
+    staticChoices.set(lang, choices);
+  }
+  return choices;
+}
+
+/** The `claude --effort` levels in `lang` (default: the request's). */
+export function claudeEfforts(lang: Lang = slang()): EffortOption[] {
+  return claudeChoices(lang).efforts;
+}
+
+/** The `claude --effort` levels with their Korean texts (the reference). */
+export const CLAUDE_EFFORTS = claudeEfforts('ko');
 
 export interface ClaudeArgsInput {
   systemPrompt: string;
@@ -226,7 +251,7 @@ export class ClaudeStreamState {
     }
     if (e.type === 'content_block_start') {
       const block = asObject(e.content_block);
-      if (block.type === 'thinking' || block.type === 'redacted_thinking') this.onStatus('생각하는 중…');
+      if (block.type === 'thinking' || block.type === 'redacted_thinking') this.onStatus(smsg().chat.providers.thinking);
       return;
     }
     if (e.type !== 'content_block_delta') return;
@@ -258,24 +283,25 @@ export class ClaudeStreamState {
   }
 }
 
-/** Status line for a tool call, e.g. "파일 읽는 중: slides/012.png". */
+/** Status line for a tool call, e.g. "파일 읽는 중: slides/012.png" (in the language of the turn). */
 export function toolStatus(name: string, input: JsonObject, cwd: string): string {
+  const m = smsg().chat.providers;
   const str = (v: unknown) => (typeof v === 'string' ? v : '');
   switch (name) {
     case 'Read':
-      return `파일 읽는 중: ${displayPath(str(input.file_path) || str(input.path), cwd)}`;
+      return m.readingFile(displayPath(str(input.file_path) || str(input.path), cwd));
     case 'Glob':
-      return `파일 찾는 중: ${str(input.pattern)}`;
+      return m.findingFiles(str(input.pattern));
     case 'Grep':
-      return `텍스트 검색 중: ${str(input.pattern)}`;
+      return m.searchingText(str(input.pattern));
     default:
-      return `도구 사용 중: ${name || '알 수 없음'}`;
+      return m.usingTool(name || m.unknownTool);
   }
 }
 
 /** Path relative to the doc dir when it is inside it or in a sibling doc dir (another lecture). */
 function displayPath(file: string, cwd: string): string {
-  if (!file) return '(알 수 없음)';
+  if (!file) return smsg().chat.providers.unknownFile;
   if (!path.isAbsolute(file)) return file;
   const rel = path.relative(cwd, file).split(path.sep).join('/');
   if (!rel || path.isAbsolute(rel)) return file;
@@ -340,15 +366,12 @@ export const CLAUDE_BIN_SPEC: CliBinSpec = {
 
 /** How to install Claude Code: the native installer (on Windows an npm install only gives a .cmd shim). */
 export function claudeInstallHint(platform: NodeJS.Platform = process.platform): string {
-  return platform === 'win32'
-    ? 'Claude Code 설치 (PowerShell): irm https://claude.ai/install.ps1 | iex  또는  winget install Anthropic.ClaudeCode'
-    : 'Claude Code 설치: curl -fsSL https://claude.ai/install.sh | bash  (또는 npm install -g @anthropic-ai/claude-code)';
+  const m = smsg().chat.providers.claude;
+  return platform === 'win32' ? m.installHintWindows : m.installHint;
 }
 
 function loginHint(message: string): string {
-  return /login|log in|api key|auth|credential|401|403/i.test(message)
-    ? '\n터미널에서 `claude` 를 실행해 로그인 상태를 확인하세요.'
-    : '';
+  return /login|log in|api key|auth|credential|401|403/i.test(message) ? `\n${smsg().chat.providers.claude.loginHint}` : '';
 }
 
 /**
@@ -382,17 +405,17 @@ export function classifyClaudeFailure(text: string, resumed: boolean): ProviderE
   return 'other';
 }
 
-const KIND_HINTS: Partial<Record<ProviderErrorKind, string>> = {
-  resume_invalid: '\n이전 Claude Code 대화(세션)를 더 이상 찾을 수 없습니다. 새 대화로 다시 시작해야 합니다.',
-  context_overflow: '\n대화가 모델이 한 번에 받을 수 있는 크기를 넘었습니다. 새 대화로 이어가야 합니다.',
-  model_unavailable:
-    '\n선택한 모델을 이 Claude Code에서 사용할 수 없습니다. 다른 모델을 고르거나 터미널에서 `claude update` 로 CLI를 업데이트하세요.',
-};
+/** The hint of a failure kind, on its own line ('' for kinds without one). */
+function kindHint(kind: ProviderErrorKind): string {
+  const m = smsg().chat.providers.claude;
+  const hint = kind === 'resume_invalid' ? m.resumeInvalid : kind === 'context_overflow' ? m.contextOverflow : kind === 'model_unavailable' ? m.modelUnavailable : '';
+  return hint ? `\n${hint}` : '';
+}
 
 /** ProviderError for a failed run: `base` + a hint for its kind (a login hint for 'auth') + the stderr tail. */
 function claudeFailure(base: string, evidence: string, resumed: boolean, stderrTail: string): ProviderError {
   const kind = classifyClaudeFailure(evidence, resumed);
-  const hint = kind === 'auth' ? loginHint(evidence) || loginHint('login') : (KIND_HINTS[kind] ?? loginHint(evidence));
+  const hint = kind === 'auth' ? loginHint(evidence) || loginHint('login') : kindHint(kind) || loginHint(evidence);
   return new ProviderError(`${base}${hint}${stderrSuffix(stderrTail)}`, kind);
 }
 
@@ -429,17 +452,12 @@ async function runClaude(input: ProviderRunInput): Promise<ProviderRunResult> {
   const resumed = resumeId !== undefined;
   if (result?.isError) {
     const message = result.text || result.subtype || 'unknown error';
-    throw claudeFailure(`Claude Code 오류: ${message}`, `${message}\n${proc.stderrTail}`, resumed, proc.stderrTail);
+    throw claudeFailure(smsg().chat.providers.claude.error(message), `${message}\n${proc.stderrTail}`, resumed, proc.stderrTail);
   }
   if (proc.code !== 0) {
-    throw claudeFailure(
-      `Claude Code가 비정상 종료했습니다 (${describeExit(proc.code, proc.signal)}).`,
-      proc.stderrTail,
-      resumed,
-      proc.stderrTail,
-    );
+    throw claudeFailure(smsg().chat.providers.claude.crashed(describeExit(proc.code, proc.signal)), proc.stderrTail, resumed, proc.stderrTail);
   }
-  if (!result) throw new Error(`Claude Code가 결과 없이 종료되었습니다.${tail}`);
+  if (!result) throw new Error(`${smsg().chat.providers.claude.noResult}${tail}`);
 
   let text = state.text;
   if (!state.sawDelta && result.text) {
@@ -455,30 +473,36 @@ async function runClaude(input: ProviderRunInput): Promise<ProviderRunResult> {
   return out;
 }
 
+/** `claude --version`, once for every language (the install hint is worded when the result is). */
+async function probeClaude(): Promise<LocalizedAvailability> {
+  return versionCheck({
+    bin: await resolveBin(CLAUDE_BIN_SPEC),
+    displayName: 'claude',
+    installHint: () => claudeInstallHint(),
+    env: claudeEnv(),
+  });
+}
+
 export const claudeCodeProvider: Provider = {
   id: 'claude-code',
-  label: 'Claude Code (구독)',
+  // Texts in the request's language (DESIGN §27).
+  get label(): string {
+    return smsg().chat.providers.label['claude-code'];
+  },
   kind: 'cli',
-  models: [
-    { id: '', label: 'CLI 기본값' },
-    { id: 'sonnet', label: 'Sonnet' },
-    { id: 'opus', label: 'Opus' },
-    // Haiku (4.5) takes no effort level.
-    { id: 'haiku', label: 'Haiku', efforts: [] },
-    { id: 'fable', label: 'Fable' },
-  ],
+  get models(): ModelOption[] {
+    return claudeChoices(slang()).models;
+  },
   defaultModel: '',
-  efforts: CLAUDE_EFFORTS,
+  get efforts(): EffortOption[] {
+    return claudeEfforts();
+  },
   // Each image stays in the CLI's conversation and is resent with every turn: a resumed 90-image conversation
   // measured ~330 MB RSS in the claude process, so conversations roll over (re-prime + recap) earlier.
   maxImagesPerConversation: 48,
   async detect(): Promise<ProviderAvailability> {
-    return probeVersion({
-      bin: await resolveBin(CLAUDE_BIN_SPEC),
-      displayName: 'claude',
-      installHint: claudeInstallHint(),
-      env: claudeEnv(),
-    });
+    return (await probeClaude())();
   },
+  probe: probeClaude,
   run: runClaude,
 };

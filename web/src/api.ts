@@ -46,6 +46,7 @@ import {
   parseRetryAfter,
   waitForLogin,
 } from './lib/auth.ts';
+import { langHeaders, langUrl, msg } from './i18n/index.ts';
 import { imageContentType } from './lib/attachments.ts';
 import type { HttpResult, UploaderHttp } from './lib/recording/uploader.ts';
 
@@ -108,7 +109,7 @@ async function toApiError(res: Response): Promise<ApiError> {
   } catch {
     /* body unreadable */
   }
-  if (!message) message = res.ok ? '예상하지 못한 응답 형식이에요' : `HTTP ${res.status} ${res.statusText}`.trim();
+  if (!message) message = res.ok ? msg().common.api.unexpectedResponse : `HTTP ${res.status} ${res.statusText}`.trim();
   const retryAfter = res.status === 429 ? parseRetryAfter(res.headers.get('retry-after')) : null;
   return new ApiError(message, res.ok ? 500 : res.status, retryAfter, missing, data);
 }
@@ -121,6 +122,13 @@ async function toApiError(res: Response): Promise<ApiError> {
 // again after the next login and its caller simply gets the answer, so a question, an upload or a list
 // being loaded is not lost, and polling pauses by itself. While the login screen is up, new requests wait
 // before being sent; identical GETs share one request.
+
+/** `init` with the language header (DESIGN §27): the server answers in the language of the page. */
+function withLang(init?: RequestInit): RequestInit {
+  const headers = new Headers(init?.headers);
+  for (const [name, value] of Object.entries(langHeaders())) headers.set(name, value);
+  return { ...init, headers };
+}
 
 /** Resolves once a request can be sent (logged in, or the server needs no login). */
 async function whenLoggedIn(signal?: AbortSignal | null): Promise<void> {
@@ -137,10 +145,10 @@ async function fetchWithLogin(path: string, init?: RequestInit): Promise<Respons
     const epoch = getAuthSnapshot().epoch;
     let res: Response;
     try {
-      res = await fetch(path, init);
+      res = await fetch(path, withLang(init));
     } catch (e) {
       if (isAbortError(e)) throw e;
-      throw new ApiError('서버에 연결할 수 없어요', 0);
+      throw new ApiError(msg().common.api.cannotConnect, 0);
     }
     if (res.status !== 401) return res;
     await res.body?.cancel().catch(() => {});
@@ -187,10 +195,10 @@ export type AuthStatus = AuthStatusResponse;
 
 async function authFetch(path: string, init?: RequestInit): Promise<Response> {
   try {
-    return await fetch(path, { credentials: 'same-origin', ...init });
+    return await fetch(path, withLang({ credentials: 'same-origin', ...init }));
   } catch (e) {
     if (isAbortError(e)) throw e;
-    throw new ApiError('서버에 연결할 수 없어요', 0);
+    throw new ApiError(msg().common.api.cannotConnect, 0);
   }
 }
 
@@ -343,7 +351,8 @@ export const abortTurn = (docId: string, sid: string) => postJSON<void>(`${sessi
 
 export const getNotes = (docId: string) => request<NotesResponse>(`${docPath(docId)}/notes`);
 
-export const notesMarkdownUrl = (docId: string) => `${docPath(docId)}/notes.md`;
+/** A plain link: the language goes in the URL (?lang=), read when the link is rendered. */
+export const notesMarkdownUrl = (docId: string) => langUrl(`${docPath(docId)}/notes.md`);
 
 // ---------------------------------------------------------------------------
 // Digest ("정리본", DESIGN.md §11)
@@ -357,7 +366,7 @@ export const startDigest = (docId: string, body: StartDigestRequest) =>
 
 export const abortDigest = (docId: string) => postJSON<void>(`${docPath(docId)}/digest/abort`);
 
-export const digestMarkdownUrl = (docId: string) => `${docPath(docId)}/digest.md`;
+export const digestMarkdownUrl = (docId: string) => langUrl(`${docPath(docId)}/digest.md`);
 
 // ---------------------------------------------------------------------------
 // Courses ("과목" folders, DESIGN.md §12)
@@ -376,7 +385,8 @@ export const updateCourse = (courseId: string, body: UpdateCourseRequest) =>
 /** Delete a course folder. Its lectures are kept and become uncategorized. */
 export const deleteCourse = (courseId: string) => request<void>(coursePath(courseId), { method: 'DELETE' });
 
-export const courseSummaryUrl = (courseId: string) => `${coursePath(courseId)}/summary.md`;
+/** COURSE.md, rewritten in the language of this link (?lang=): the app's, not the browser's. */
+export const courseSummaryUrl = (courseId: string) => langUrl(`${coursePath(courseId)}/summary.md`);
 
 // ---------------------------------------------------------------------------
 // Library organization: course groups and the order of courses (DESIGN.md §18)
@@ -409,7 +419,7 @@ export async function uploadPdf(
 ): Promise<DocMeta> {
   const headers: Record<string, string> = { 'Content-Type': 'application/pdf', 'X-Filename': enc(file.name) };
   if (courseId) headers['X-Course-Id'] = courseId;
-  const body = await uploadWithLogin('/api/docs', headers, file, '업로드 실패', onProgress);
+  const body = await uploadWithLogin('/api/docs', headers, file, msg().common.api.uploadFailed, onProgress);
   return normalizeDoc(body as DocMeta);
 }
 
@@ -462,7 +472,7 @@ function uploadOnce(
     }
     const xhr = new XMLHttpRequest();
     xhr.open('POST', path);
-    for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, value);
+    for (const [name, value] of Object.entries({ ...headers, ...langHeaders() })) xhr.setRequestHeader(name, value);
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
     };
@@ -482,11 +492,11 @@ function uploadOnce(
         return;
       }
       const error = (body as { error?: unknown } | null)?.error;
-      reject(new ApiError(typeof error === 'string' ? error : `${failure} (HTTP ${xhr.status})`, xhr.status));
+      reject(new ApiError(typeof error === 'string' ? error : msg().common.api.httpFailure(failure, xhr.status), xhr.status));
     };
     xhr.onerror = () => {
       done();
-      reject(new ApiError('업로드 중 네트워크 오류가 발생했어요', 0));
+      reject(new ApiError(msg().common.api.uploadNetworkError, 0));
     };
     xhr.onabort = () => {
       done();
@@ -529,7 +539,7 @@ export async function uploadAttachment(
     `${docPath(docId)}/attachments`,
     headers,
     file,
-    '첨부 실패',
+    msg().common.api.attachFailed,
     options.onProgress,
     options.signal,
   );
@@ -612,9 +622,9 @@ export function busyRecordingOf(e: unknown): RecordingInfo | null {
 export const deleteRecording = (docId: string, rid: string) =>
   request<void>(recordingPath(docId, rid), { method: 'DELETE' });
 
-/** SSE of a recording: `status`, `segment` (resuming after `since`), `realigned`, `ping`. */
+/** SSE of a recording: `status`, `segment` (resuming after `since`), `realigned`, `ping`. With ?lang= (no header). */
 export function recordingEventsUrl(docId: string, rid: string, since: number | null): string {
-  return `${recordingPath(docId, rid)}/events${since === null ? '' : `?since=${since}`}`;
+  return langUrl(`${recordingPath(docId, rid)}/events${since === null ? '' : `?since=${since}`}`);
 }
 
 /**
@@ -644,7 +654,7 @@ export async function uploadRecording(
     `${recordingsPath(docId)}/upload`,
     headers,
     file,
-    '녹음 파일을 올리지 못했어요',
+    msg().common.api.recordingUploadFailed,
     options.onProgress,
     options.signal,
   );
@@ -660,7 +670,7 @@ export const recordingHttp: UploaderHttp = async (method, path, body, contentTyp
   const epoch = getAuthSnapshot().epoch;
   const res = await fetch(path, {
     method,
-    headers: contentType ? { 'Content-Type': contentType } : undefined,
+    headers: contentType ? { 'Content-Type': contentType, ...langHeaders() } : langHeaders(),
     body: (body ?? undefined) as BodyInit | undefined,
     signal: AbortSignal.timeout(timeoutMs),
     credentials: 'same-origin',
@@ -749,7 +759,7 @@ export async function postStream(
 
   const contentType = res.headers.get('content-type') ?? '';
   if (!res.ok || !contentType.includes('text/event-stream')) throw await toApiError(res);
-  if (!res.body) throw new ApiError('응답 스트림을 읽을 수 없어요', res.status);
+  if (!res.body) throw new ApiError(msg().common.api.streamUnreadable, res.status);
 
   const parser = createSSEParser((eventName, data) => {
     let parsed: StreamEvent;
@@ -799,7 +809,7 @@ export const sendMessage = (
 
 /** User-facing message for a failed recording request: the server's own words (a 409 is not a busy chat turn here). */
 export function recordingErrorMessage(e: unknown): string {
-  if (e instanceof ApiError) return e.status === 401 ? '로그인이 필요해요' : e.message;
+  if (e instanceof ApiError) return e.status === 401 ? msg().common.api.loginRequired : e.message;
   return errorMessage(e);
 }
 
@@ -831,9 +841,9 @@ export const putSlideAnnotations = (docId: string, slide: number, body: PutSlide
 export const patchSlideAnnotations = (docId: string, slide: number, body: PatchSlideAnnotationsRequest, client?: string) =>
   sendJSON<SlideAnnotations>('PATCH', `${annotationsPath(docId)}/${slide}`, body, clientHeaders(client));
 
-/** SSE of a lecture's annotations: `slide` (ops), `slide-reset`, `summary`, `qa`, `ping`. */
+/** SSE of a lecture's annotations: `slide` (ops), `slide-reset`, `summary`, `qa`, `ping`. With ?lang= (no header). */
 export function annotationEventsUrl(docId: string, client?: string): string {
-  return `${annotationsPath(docId)}/events${client ? `?client=${enc(client)}` : ''}`;
+  return langUrl(`${annotationsPath(docId)}/events${client ? `?client=${enc(client)}` : ''}`);
 }
 
 /**
@@ -864,8 +874,8 @@ export function layoutPendingOf(e: unknown): boolean {
  */
 export function annotationErrorMessage(e: unknown): string {
   if (e instanceof ApiError) {
-    if (e.status === 401) return '로그인이 필요해요';
-    if (e.status === 0) return '서버에 연결할 수 없어요';
+    if (e.status === 401) return msg().common.api.loginRequired;
+    if (e.status === 0) return msg().common.api.cannotConnect;
     return e.message;
   }
   return errorMessage(e);
@@ -874,8 +884,8 @@ export function annotationErrorMessage(e: unknown): string {
 /** User-facing message for any thrown value. */
 export function errorMessage(e: unknown): string {
   if (e instanceof ApiError) {
-    if (e.status === 409) return '이미 답변을 생성하고 있어요. 끝난 뒤에 다시 시도해 주세요.';
-    if (e.status === 401) return '로그인이 필요해요';
+    if (e.status === 409) return msg().common.api.busyAnswering;
+    if (e.status === 401) return msg().common.api.loginRequired;
     return e.message;
   }
   if (e instanceof Error) return e.message;

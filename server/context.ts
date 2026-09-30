@@ -778,8 +778,11 @@ function shortenBody(kind: SlideMaterial['kind'], body: string, max: number): st
   return truncateText(body, max);
 }
 
-/** A digest takeaway line: "핵심: …", also decorated ("**핵심:**", "- **핵심**: …"). */
-const KEY_LINE_RE = /^\s{0,3}(?:[-*+>]\s+)?(?:\*\*|__)?\s*핵심\s*(?:\*\*|__)?\s*[:：]/;
+/**
+ * A digest takeaway line: "핵심: …", also decorated ("**핵심:**", "- **핵심**: …"); "Key point: …" in a digest made in
+ * English (digestPrompt.ts, DESIGN §27).
+ */
+const KEY_LINE_RE = /^\s{0,3}(?:[-*+>]\s+)?(?:\*\*|__)?\s*(?:핵심|[Kk]ey [Pp]oint)\s*(?:\*\*|__)?\s*[:：]/;
 
 /** Splits a digest body at its last "핵심:" line outside code fences (the takeaway runs to the end). */
 function splitKeyLine(body: string): { head: string; key: string } | null {

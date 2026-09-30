@@ -5,6 +5,7 @@
 import { useLayoutEffect, useRef, useState } from 'react';
 import type { ProviderInfo } from '../../../shared/types.ts';
 import type { ProviderChoice } from '../hooks/useProviderChoice.ts';
+import { msg } from '../i18n/index.ts';
 import { providerWithModel } from '../lib/format.ts';
 import { effectiveChoice, sameChoice, storedChoice } from '../lib/providerChoice.ts';
 import { ProviderPicker } from './ProviderPicker.tsx';
@@ -53,6 +54,7 @@ export function LlmSwitchDialog({ onClose, providers, current, onApply }: LlmSwi
     }
   };
 
+  const m = msg().shell.llm;
   return (
     <dialog
       ref={dialogRef}
@@ -69,27 +71,22 @@ export function LlmSwitchDialog({ onClose, providers, current, onApply }: LlmSwi
     >
       <div className="llm-switch-card">
         <h2 id="llm-switch-title" className="confirm-title">
-          이 세션의 LLM 바꾸기
+          {m.switchTitle}
         </h2>
-        <p className="llm-switch-current">
-          지금: {providerWithModel(providers, current.provider, current.model, current.effort)}
-        </p>
+        <p className="llm-switch-current">{m.switchCurrent(providerWithModel(providers, current.provider, current.model, current.effort))}</p>
         <ProviderPicker
           className="is-stacked"
           providers={providers}
           choice={choice}
           onChange={(next) => setStored((prev) => storedChoice(prev, next))}
         />
-        <p className="muted small">
-          다음 질문부터 새 LLM이 답해요. 슬라이드와 최근 대화 요약을 다시 보내서 처음 질문은 토큰이 더 들어요. 지금까지의
-          대화는 그대로 남아요.
-        </p>
+        <p className="muted small">{m.switchNote}</p>
         <div className="confirm-actions">
           <button type="button" className="ghost-btn" onClick={onClose} disabled={applying}>
-            취소
+            {msg().common.cancel}
           </button>
           <button type="button" className="primary-btn" onClick={() => void apply()} disabled={!changed || applying}>
-            {applying ? '바꾸는 중…' : 'LLM 바꾸기'}
+            {applying ? m.switching : m.switchApply}
           </button>
         </div>
       </div>

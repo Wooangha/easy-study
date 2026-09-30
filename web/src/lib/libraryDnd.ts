@@ -1,8 +1,9 @@
 // Drag & drop in the library (DESIGN §18), the pure part: what can be dropped where, which droppable a point is
-// on, where the dragged item would land (the move, an insertion indicator, a Korean description for screen
-// readers) and the stops of keyboard dragging. The React side (web/src/components/organize/LibraryDnd.tsx)
+// on, where the dragged item would land (the move, an insertion indicator, a description for screen readers in
+// the page's language) and the stops of keyboard dragging. The React side (web/src/components/organize/LibraryDnd.tsx)
 // feeds it with @dnd-kit's droppable rects and pointer coordinates.
 import type { Course, LayoutItem, LibraryLayout } from '../../../shared/types.ts';
+import { msg } from '../i18n/index.ts';
 import {
   applyCourseMove,
   applyGroupMove,
@@ -289,36 +290,34 @@ function topIndicator(before: LayoutItem | null, order: readonly LayoutItem[], i
  * items that list then has (null for 미분류 / the original place). Every place ends in a vowel ("…로 옮겼어요").
  */
 export function describeTarget(target: DropTarget, view: OrgView): { place: string; total: number | null } {
+  const m = msg().shell.dnd.place;
   const move = target.move;
   if (!move && target.opens) {
-    const title = findGroup(view.layout, target.opens)?.title ?? '그룹';
-    return { place: `접힌 ‘${title}’ 그룹 위 — 잠시 기다리면 열려요`, total: null };
+    const title = findGroup(view.layout, target.opens)?.title ?? m.groupFallback;
+    return { place: m.overCollapsedGroup(title), total: null };
   }
-  if (!move) return { place: '원래 자리', total: null };
+  if (!move) return { place: m.original, total: null };
   switch (move.kind) {
     case 'lecture': {
-      if (move.courseId === null) return { place: '미분류', total: null };
+      if (move.courseId === null) return { place: m.uncategorized, total: null };
       const course = applyLectureMove(view.courses, move).find((c) => c.id === move.courseId);
-      if (!course) return { place: '과목', total: null };
-      return { place: `‘${course.title}’ 과목의 ${course.docIds.indexOf(move.docId) + 1}번째 자리`, total: course.docIds.length };
+      if (!course) return { place: m.course, total: null };
+      return { place: m.inCourse(course.title, course.docIds.indexOf(move.docId) + 1), total: course.docIds.length };
     }
     case 'course': {
       const next = applyCourseMove(view.layout, move);
       if (move.groupId !== null) {
         const group = findGroup(next, move.groupId);
-        if (!group) return { place: '그룹', total: null };
-        return {
-          place: `‘${group.title}’ 그룹의 ${group.courseIds.indexOf(move.courseId) + 1}번째 자리`,
-          total: group.courseIds.length,
-        };
+        if (!group) return { place: m.group, total: null };
+        return { place: m.inGroup(group.title, group.courseIds.indexOf(move.courseId) + 1), total: group.courseIds.length };
       }
       const i = next.order.findIndex((x) => x.type === 'course' && x.id === move.courseId);
-      return { place: `그룹 밖 목록의 ${i + 1}번째 자리`, total: next.order.length };
+      return { place: m.outsideGroups(i + 1), total: next.order.length };
     }
     case 'group': {
       const next = applyGroupMove(view.layout, move);
       const i = next.order.findIndex((x) => x.type === 'group' && x.id === move.groupId);
-      return { place: `전체 목록의 ${i + 1}번째 자리`, total: next.order.length };
+      return { place: m.topLevel(i + 1), total: next.order.length };
     }
   }
 }
@@ -326,7 +325,7 @@ export function describeTarget(target: DropTarget, view: OrgView): { place: stri
 /** "‘Compiler’ 과목의 3번째 자리 (5개 중)". */
 export function describePlace(target: DropTarget, view: OrgView): string {
   const { place, total } = describeTarget(target, view);
-  return total === null ? place : `${place} (${total}개 중)`;
+  return total === null ? place : msg().shell.dnd.place.withTotal(place, total);
 }
 
 // ---------------------------------------------------------------------------------------------------------

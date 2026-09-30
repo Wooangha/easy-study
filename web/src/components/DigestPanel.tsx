@@ -23,6 +23,7 @@ import { digestMarkdownUrl } from '../api.ts';
 import { useAuth } from '../hooks/useAuth.ts';
 import type { DigestState } from '../hooks/useDigest.ts';
 import type { ProviderChoice } from '../hooks/useProviderChoice.ts';
+import { msg, useLang } from '../i18n/index.ts';
 import { copyText } from '../lib/clipboard.ts';
 import { confirmDialog } from '../lib/confirm.ts';
 import { digestContinueLabel, digestNote, digestStatusLabel, digestView, type DigestIcon, type DigestLabel } from '../lib/digestState.ts';
@@ -102,32 +103,24 @@ export function DigestPanel({
   const s = info ? digestView(info, doc.pageCount) : null;
   const bySlide = new Map((info?.slides ?? []).map((e) => [e.slide, e]));
 
+  const m = msg().chat.digest;
+  const shared = msg().chat.shared;
   const start = async (force: boolean) => {
-    if (
-      force &&
-      !(await confirmDialog({
-        title: '정리본을 처음부터 다시 만들까요?',
-        message: '모든 슬라이드를 다시 LLM에게 보여 주고 정리해요 (시간과 사용량이 들어요).',
-        confirmLabel: '다시 만들기',
-      }))
-    ) {
-      return;
-    }
+    if (force && !(await confirmDialog(msg().chat.digest.redoConfirm))) return;
     void digest.start(choice, force);
   };
 
   const copyPath = () => {
     if (!info?.markdownPath) return;
+    const t = msg().chat.shared;
     void copyText(info.markdownPath)
-      .then(() => toast(remote ? '서버 컴퓨터의 경로를 복사했어요' : '경로를 복사했어요', 'success', 2000))
-      .catch(() => toast('복사하지 못했어요', 'error'));
+      .then(() => toast(remote ? t.pathCopiedRemote : t.pathCopied, 'success', 2000))
+      .catch(() => toast(t.copyFailed, 'error'));
   };
 
   const chosen = choice ? providerWithModel(providers, choice.provider, choice.model, choice.effort) : null;
   const startDisabled = !choice || pending !== null;
-  const startTitle = chosen
-    ? `${chosen}(으)로 만들어요 — 상단 ‘새 세션’에서 LLM을 바꿀 수 있어요`
-    : (providerProblem ?? '사용 가능한 LLM이 없어요');
+  const startTitle = chosen ? m.startTitle(chosen) : (providerProblem ?? shared.noLlm);
 
   // ---- Auto-scroll (mode 'all'): keep the focused slide's entry in view ------------------------------
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -193,20 +186,20 @@ export function DigestPanel({
   const note = info && s ? digestNote(info, s) : null;
   const outdatedNote = s?.summaryOutdated ? (
     <p className="muted small">
-      <TriangleAlert /> 슬라이드 정리가 바뀌기 전에 만든 요약이에요. 위의 ‘강의 요약 다시 만들기’로 새로 만들 수 있어요.
+      <TriangleAlert /> {m.outdated}
     </p>
   ) : null;
   let content;
   if (!info || !s) {
     content = error ? (
       <div className="inline-error">
-        <TriangleAlert /> 정리본 정보를 불러오지 못했어요: {error}{' '}
+        <TriangleAlert /> {m.loadFailed(error)}{' '}
         <button type="button" className="ghost-btn small" onClick={() => void digest.refresh()}>
-          다시 시도
+          {msg().common.retry}
         </button>
       </div>
     ) : (
-      <div className="notes-empty muted">불러오는 중…</div>
+      <div className="notes-empty muted">{msg().common.loading}</div>
     );
   } else if (!s.hasAny && !s.running) {
     content = (
@@ -214,29 +207,26 @@ export function DigestPanel({
         <div className="chat-empty-icon" aria-hidden>
           <NotebookPen strokeWidth={1.5} />
         </div>
-        <h3>아직 정리본이 없어요</h3>
-        <p>
-          LLM이 슬라이드 <b>{s.total}장</b>의 이미지를 직접 읽고, 내용을 그대로 옮겨 적은 뒤(수식·표·코드 포함) 설명과
-          핵심을 붙여 정리해요. 한 번 만들어 두면 계속 재사용돼요.
-        </p>
+        <h3>{m.introTitle}</h3>
+        <p>{m.intro(<b>{m.slides(s.total)}</b>)}</p>
         <ul className="tips">
           <li>
-            <Zap /> 새 세션을 시작할 때 이미지 대신 이 텍스트를 전달해서 더 빠르고 저렴해요
+            <Zap /> {m.tipFaster}
           </li>
           <li>
-            <Search /> 텍스트 추출로는 흐트러지는 수식·표·기호(α, ε, ∪, ∈ …)도 이미지에서 정확히 읽어 와요
+            <Search /> {m.tipFormulas}
           </li>
           <li>
-            <Folder /> 과목에 넣어 두면 다음 강의를 공부할 때 이 강의의 요약이 함께 전달돼요
+            <Folder /> {m.tipCourse}
           </li>
           <li>
-            <MessageCircle /> 새 세션을 처음 만들면 자동으로 만들기 시작해요
+            <MessageCircle /> {m.tipAuto}
           </li>
         </ul>
         <button type="button" className="primary-btn" onClick={() => void start(false)} disabled={startDisabled} title={startTitle}>
-          <NotebookPen /> 정리본 만들기
+          <NotebookPen /> {m.make}
         </button>
-        <p className="muted small">{chosen ? `${chosen}(으)로 만들어요 · 몇 분 걸릴 수 있어요` : startTitle}</p>
+        <p className="muted small">{chosen ? m.madeWith(chosen) : startTitle}</p>
       </div>
     );
   } else if (mode === 'current') {
@@ -248,9 +238,7 @@ export function DigestPanel({
         ) : (
           <div className="digest-missing">
             <span className="slide-chip">p.{focusedSlide}</span>
-            {s.running
-              ? ` 아직 정리하는 중이에요 (${s.done} / ${s.total} 완료)`
-              : ' 이 슬라이드는 아직 정리되지 않았어요. ‘이어서 만들기’로 채울 수 있어요.'}
+            {s.running ? m.stillRunning(s.done, s.total) : m.notYet}
           </div>
         )}
         <div className="digest-nav">
@@ -277,7 +265,7 @@ export function DigestPanel({
         {info.summary && (
           <details className="digest-summary compact">
             <summary>
-              <BookOpen /> 강의 전체 요약{s.summaryOutdated ? ' (이전 요약)' : ''}
+              <BookOpen /> {m.wholeSummary(s.summaryOutdated)}
             </summary>
             {outdatedNote}
             <Markdown text={info.summary} />
@@ -309,13 +297,13 @@ export function DigestPanel({
         {info.summary ? (
           <section className="digest-summary">
             <h3>
-              <BookOpen /> 강의 요약
+              <BookOpen /> {m.summary}
             </h3>
             {outdatedNote}
             <Markdown text={info.summary} />
           </section>
         ) : (
-          s.complete && <div className="digest-missing muted small">강의 요약이 아직 없어요.</div>
+          s.complete && <div className="digest-missing muted small">{m.noSummary}</div>
         )}
         {rows}
       </>
@@ -325,12 +313,12 @@ export function DigestPanel({
   return (
     <div className="digest-panel">
       <div className="notes-toolbar">
-        <div className="segmented" role="group" aria-label="정리본 보기 방식">
+        <div className="segmented" role="group" aria-label={m.mode}>
           <button type="button" aria-pressed={mode === 'current'} onClick={() => onModeChange('current')}>
-            현재 슬라이드
+            {m.modeCurrent}
           </button>
           <button type="button" aria-pressed={mode === 'all'} onClick={() => onModeChange('all')}>
-            전체
+            {m.modeAll}
           </button>
         </div>
         <span className="spacer" />
@@ -339,8 +327,8 @@ export function DigestPanel({
           className="ghost-btn small"
           onClick={() => void digest.refresh()}
           disabled={loading}
-          title="새로고침"
-          aria-label="새로고침"
+          title={shared.refresh}
+          aria-label={shared.refresh}
         >
           <RefreshCw />
         </button>
@@ -359,8 +347,8 @@ export function DigestPanel({
               </span>
             )}
             {info.usage && (
-              <span className="muted small digest-usage" title={usageTitle(info.usage, '이번 정리본 만들기에 쓴 토큰 (실패한 호출 포함)')}>
-                토큰 {formatTokens(totalTokens(info.usage))}
+              <span className="muted small digest-usage" title={usageTitle(info.usage, m.tokensTitle)}>
+                {m.tokens(formatTokens(totalTokens(info.usage)))}
               </span>
             )}
             <span className="spacer" />
@@ -371,7 +359,7 @@ export function DigestPanel({
                 onClick={() => void digest.abort()}
                 disabled={pending !== null}
               >
-                <Square fill="currentColor" /> 중지
+                <Square fill="currentColor" /> {shared.stop}
               </button>
             ) : (
               <>
@@ -393,7 +381,7 @@ export function DigestPanel({
                   disabled={startDisabled}
                   title={startTitle}
                 >
-                  다시 만들기
+                  {m.redo}
                 </button>
               </>
             )}
@@ -417,7 +405,7 @@ export function DigestPanel({
           <div className="digest-file">
             {s.hasAny ? (
               <a className="notes-file-link" href={digestMarkdownUrl(doc.id)} target="_blank" rel="noreferrer">
-                <FileText /> DIGEST.md 열기
+                <FileText /> {m.openFile}
               </a>
             ) : (
               <span className="muted">
@@ -429,14 +417,14 @@ export function DigestPanel({
                 type="button"
                 className="path"
                 onClick={copyPath}
-                title={remote ? '서버 컴퓨터의 경로예요. 클릭해서 복사' : '클릭해서 경로 복사'}
+                title={remote ? shared.pathTitleRemote : shared.pathTitle}
               >
                 {info.markdownPath}
               </button>
             )}
           </div>
           <div className="digest-hint">
-            <Zap /> 정리본은 새 세션을 시작할 때 슬라이드 이미지 대신 재사용돼서 더 빠르고 저렴해요.
+            <Zap /> {m.hint}
           </div>
         </div>
       )}
@@ -444,7 +432,7 @@ export function DigestPanel({
       <div className="digest-scroll" ref={scrollRef}>
         {info && error && (
           <div className="inline-error">
-            <TriangleAlert /> 새로고침 실패: {error}
+            <TriangleAlert /> {m.refreshFailed(error)}
           </div>
         )}
         {content}
@@ -470,6 +458,8 @@ interface DigestEntryProps {
 }
 
 const DigestEntry = memo(function DigestEntry({ entry, focused, onGoToSlide, register, standalone }: DigestEntryProps) {
+  useLang(); // memo(): re-render on a change of the language
+  const m = msg().chat;
   const { slide } = entry;
   const setRef = useCallback((el: HTMLElement | null) => register?.(slide, el), [register, slide]);
   const cls = ['digest-entry', focused && 'is-focused', entry.failed && 'is-failed', !standalone && 'is-clickable']
@@ -482,14 +472,14 @@ const DigestEntry = memo(function DigestEntry({ entry, focused, onGoToSlide, reg
       onClick={standalone ? undefined : (e) => isPlainClick(e) && onGoToSlide(slide)}
     >
       <header className="digest-entry-head">
-        <button type="button" className="slide-chip" onClick={() => onGoToSlide(slide)} title="이 슬라이드로 이동">
+        <button type="button" className="slide-chip" onClick={() => onGoToSlide(slide)} title={m.shared.goToThisSlide}>
           p.{slide}
         </button>
-        <span className="digest-entry-title">{entry.title || <span className="muted">(제목 없음)</span>}</span>
+        <span className="digest-entry-title">{entry.title || <span className="muted">{m.digest.untitled}</span>}</span>
       </header>
       {entry.failed && (
         <div className="msg-error">
-          <TriangleAlert /> 이 슬라이드는 정리하지 못했어요 — ‘이어서 만들기’로 다시 시도할 수 있어요
+          <TriangleAlert /> {m.digest.slideFailed}
         </div>
       )}
       {entry.markdown && (
@@ -520,7 +510,7 @@ function MissingRow({
       <button type="button" className="slide-chip" onClick={() => onGoToSlide(slide)}>
         p.{slide}
       </button>
-      <span className="muted small">{running ? '정리 대기 중…' : '아직 정리되지 않았어요'}</span>
+      <span className="muted small">{running ? msg().chat.digest.waiting : msg().chat.digest.notDigested}</span>
     </div>
   );
 }

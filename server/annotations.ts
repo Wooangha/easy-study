@@ -49,6 +49,7 @@ import type {
   TextFont,
 } from '../shared/types.ts';
 import { HttpError } from './config.ts';
+import { smsg } from './i18n.ts';
 import { MAX_MEMO_CHARS, MAX_TUTOR_MEMOS, truncateText } from './context.ts';
 import type { StudentMemo } from './internal-types.ts';
 import { createKeyedQueue, docPaths, isNotFound, listStoredDocs, readJsonFile, readStoredDoc, withFsRetry, writeJsonAtomic } from './library.ts';
@@ -59,12 +60,8 @@ import type { SseTarget } from './recordings/events.ts';
 import { currentLiveRecording } from './recordings/service.ts';
 import { onSessionsChanged } from './sessions.ts';
 
-const NOT_FOUND_DOC = '문서를 찾을 수 없습니다';
-const NOT_FOUND_SLIDE = '슬라이드를 찾을 수 없습니다';
-/** 409 of PUT / PATCH when `baseRev` is not the stored rev (or an op names an id the document does not have). */
-export const ANNOTATION_CONFLICT = '다른 곳에서 이 슬라이드의 필기가 바뀌었습니다. 새로 불러온 뒤 다시 시도해 주세요';
-/** 400 when the JSON of the slide document after a write would exceed MAX_SLIDE_ANNOTATION_BYTES. */
-export const ANNOTATIONS_TOO_LARGE = '이 슬라이드의 필기가 너무 많아요 (일부를 지워 주세요)';
+/** The texts of this store's errors, in the request's language (DESIGN §27). */
+const texts = () => smsg().library.annotations;
 /** Longest accepted TextHighlightItem.engine. */
 const MAX_ENGINE_CHARS = 32;
 /** Decimals a stored coordinate keeps (the client sends 4; clamping must not add floating-point noise). */
@@ -173,19 +170,19 @@ function bad(message: string, value: unknown): HttpError {
 function normalizeRect(raw: unknown, context: unknown): RegionRect {
   const rect = raw as Partial<RegionRect> | null;
   if (!isObject(rect) || ![rect.x, rect.y, rect.w, rect.h].every(isFiniteNumber)) {
-    throw bad('필기의 위치(rect: x, y, w, h)가 올바르지 않습니다', context);
+    throw bad(texts().rectInvalid, context);
   }
   const x = coord(rect.x as number);
   const y = coord(rect.y as number);
   const w = coord(coord((rect.x as number) + (rect.w as number)) - x);
   const h = coord(coord((rect.y as number) + (rect.h as number)) - y);
-  if (!(w > 0 && h > 0)) throw bad('필기는 슬라이드 안(0–1)에 있고 넓이가 있어야 합니다', context);
+  if (!(w > 0 && h > 0)) throw bad(texts().rectOutside, context);
   return { x, y, w, h };
 }
 
 function normalizePoint(raw: unknown, context: unknown): { x: number; y: number } {
   const point = raw as { x?: unknown; y?: unknown } | null;
-  if (!isObject(point) || !isFiniteNumber(point.x) || !isFiniteNumber(point.y)) throw bad('메모의 위치(at: x, y)가 올바르지 않습니다', context);
+  if (!isObject(point) || !isFiniteNumber(point.x) || !isFiniteNumber(point.y)) throw bad(texts().pointInvalid, context);
   return { x: coord(point.x), y: coord(point.y) };
 }
 
@@ -196,9 +193,9 @@ function cleanText(text: string): string {
 }
 
 function normalizeText(raw: unknown, context: unknown): string {
-  if (typeof raw !== 'string') throw bad('필기의 글(text)이 올바르지 않습니다', context);
+  if (typeof raw !== 'string') throw bad(texts().textInvalid, context);
   const text = cleanText(raw);
-  if (text.length > MAX_ANNOTATION_TEXT_CHARS) throw bad(`필기의 글이 너무 깁니다 (최대 ${MAX_ANNOTATION_TEXT_CHARS}자)`, context);
+  if (text.length > MAX_ANNOTATION_TEXT_CHARS) throw bad(texts().textTooLong(MAX_ANNOTATION_TEXT_CHARS), context);
   return text;
 }
 
@@ -215,61 +212,61 @@ export function normalizeTag(raw: string): string {
 
 function normalizeTags(raw: unknown, context: unknown): string[] {
   if (raw === undefined) return [];
-  if (!Array.isArray(raw) || !raw.every((tag) => typeof tag === 'string')) throw bad('메모의 태그(tags)는 문자열 배열이어야 합니다', context);
+  if (!Array.isArray(raw) || !raw.every((tag) => typeof tag === 'string')) throw bad(texts().tagsInvalid, context);
   const tags: string[] = [];
   for (const value of raw as string[]) {
     const tag = normalizeTag(value);
     if (!tag || tags.includes(tag)) continue;
-    if (tag.length > MAX_TAG_CHARS) throw bad(`태그가 너무 깁니다 (최대 ${MAX_TAG_CHARS}자)`, context);
+    if (tag.length > MAX_TAG_CHARS) throw bad(texts().tagTooLong(MAX_TAG_CHARS), context);
     tags.push(tag);
   }
-  if (tags.length > MAX_MEMO_TAGS) throw bad(`태그는 메모마다 최대 ${MAX_MEMO_TAGS}개까지 붙일 수 있습니다`, context);
+  if (tags.length > MAX_MEMO_TAGS) throw bad(texts().tooManyTags(MAX_MEMO_TAGS), context);
   return tags;
 }
 
 function normalizeLink(raw: unknown, pageCount: number, context: unknown): MemoLink {
   const link = raw as { kind?: unknown; slide?: unknown; docId?: unknown; rid?: unknown; t?: unknown } | null;
-  if (!isObject(link)) throw bad('메모의 연결(links)이 올바르지 않습니다', context);
+  if (!isObject(link)) throw bad(texts().linkInvalid, context);
   switch (link.kind) {
     case 'slide':
       if (!Number.isInteger(link.slide) || (link.slide as number) < 1 || (link.slide as number) > pageCount) {
-        throw bad(`연결한 슬라이드 번호가 올바르지 않습니다 (1–${pageCount})`, context);
+        throw bad(texts().linkSlideOutOfRange(pageCount), context);
       }
       return { kind: 'slide', slide: link.slide as number };
     case 'doc': {
-      if (typeof link.docId !== 'string' || !DOC_ID_RE.test(link.docId)) throw bad('연결한 강의 id가 올바르지 않습니다', context);
+      if (typeof link.docId !== 'string' || !DOC_ID_RE.test(link.docId)) throw bad(texts().linkDocInvalid, context);
       if (link.slide === undefined) return { kind: 'doc', docId: link.docId };
-      if (!Number.isInteger(link.slide) || (link.slide as number) < 1) throw bad('연결한 슬라이드 번호가 올바르지 않습니다', context);
+      if (!Number.isInteger(link.slide) || (link.slide as number) < 1) throw bad(texts().linkSlideInvalid, context);
       return { kind: 'doc', docId: link.docId, slide: link.slide as number };
     }
     case 'recording':
       if (typeof link.rid !== 'string' || !RECORDING_ID_RE.test(link.rid) || !isFiniteNumber(link.t) || link.t < 0) {
-        throw bad('연결한 녹음 시점이 올바르지 않습니다', context);
+        throw bad(texts().linkRecordingInvalid, context);
       }
       return { kind: 'recording', rid: link.rid, t: round3(link.t) };
     default:
-      throw bad('메모의 연결(links)이 올바르지 않습니다', context);
+      throw bad(texts().linkInvalid, context);
   }
 }
 
 function normalizeLinks(raw: unknown, pageCount: number, context: unknown): MemoLink[] {
   if (raw === undefined) return [];
-  if (!Array.isArray(raw)) throw bad('메모의 연결(links)은 배열이어야 합니다', context);
-  if (raw.length > MAX_MEMO_LINKS) throw bad(`연결은 메모마다 최대 ${MAX_MEMO_LINKS}개까지 둘 수 있습니다`, context);
+  if (!Array.isArray(raw)) throw bad(texts().linksNotArray, context);
+  if (raw.length > MAX_MEMO_LINKS) throw bad(texts().tooManyLinks(MAX_MEMO_LINKS), context);
   return raw.map((link) => normalizeLink(link, pageCount, context));
 }
 
 function normalizeRecordedAt(raw: unknown, context: unknown): RecordedAt {
   const stamp = raw as { rid?: unknown; t?: unknown } | null;
   if (!isObject(stamp) || typeof stamp.rid !== 'string' || !RECORDING_ID_RE.test(stamp.rid) || !isFiniteNumber(stamp.t) || stamp.t < 0) {
-    throw bad('녹음 시점(recordedAt)이 올바르지 않습니다', context);
+    throw bad(texts().recordedAtInvalid, context);
   }
   return { rid: stamp.rid, t: round3(stamp.t) };
 }
 
 function normalizeBoolean(raw: unknown, fallback: boolean, what: string, context: unknown): boolean {
   if (raw === undefined) return fallback;
-  if (typeof raw !== 'boolean') throw bad(`${what}은(는) true/false여야 합니다`, context);
+  if (typeof raw !== 'boolean') throw bad(texts().notBoolean(what), context);
   return raw;
 }
 
@@ -283,13 +280,13 @@ const MAX_TEXT_SIZE = MAX_TEXT_SIZE_PT / SLIDE_PT_HEIGHT;
  */
 function normalizeSize(raw: unknown, context: unknown): number | undefined {
   if (raw === undefined || raw === null) return undefined;
-  if (!isFiniteNumber(raw)) throw bad('글자 크기(size)가 올바르지 않습니다', context);
+  if (!isFiniteNumber(raw)) throw bad(texts().sizeInvalid, context);
   return coord(Math.min(MAX_TEXT_SIZE, Math.max(MIN_TEXT_SIZE, raw)));
 }
 
 function normalizeFont(raw: unknown, context: unknown): TextFont | undefined {
   if (raw === undefined || raw === null) return undefined;
-  if (typeof raw !== 'string' || !TEXT_FONTS.includes(raw as TextFont)) throw bad('글꼴(font)이 올바르지 않습니다', context);
+  if (typeof raw !== 'string' || !TEXT_FONTS.includes(raw as TextFont)) throw bad(texts().fontInvalid, context);
   return raw as TextFont;
 }
 
@@ -312,11 +309,11 @@ function defined<T extends Record<string, unknown>>(fields: T): { [K in keyof T]
  * HttpError 400 (Korean, with a snippet) for anything wrong.
  */
 export function normalizeItem(raw: unknown, pageCount: number, now: string): AnnotationItem {
-  if (!isObject(raw)) throw bad('필기 항목이 올바르지 않습니다', raw);
+  if (!isObject(raw)) throw bad(texts().itemInvalid, raw);
   const id = raw.id;
-  if (typeof id !== 'string' || !ANNOTATION_ID_RE.test(id)) throw bad('필기 id가 올바르지 않습니다', raw);
+  if (typeof id !== 'string' || !ANNOTATION_ID_RE.test(id)) throw bad(texts().idInvalid, raw);
   const color = raw.color;
-  if (typeof color !== 'string' || !ANNOTATION_COLORS.includes(color as AnnotationColor)) throw bad('필기 색이 올바르지 않습니다', raw);
+  if (typeof color !== 'string' || !ANNOTATION_COLORS.includes(color as AnnotationColor)) throw bad(texts().colorInvalid, raw);
   const base = {
     id,
     color: color as AnnotationColor,
@@ -338,13 +335,13 @@ export function normalizeItem(raw: unknown, pageCount: number, now: string): Ann
         ...defined({ size: normalizeSize(raw.size, raw), font: normalizeFont(raw.font, raw), bold: optionalBoolean(raw.bold, 'bold', raw) }),
       };
     case 'textHighlight': {
-      if (!Array.isArray(raw.rects) || raw.rects.length === 0) throw bad('텍스트 형광의 위치(rects)가 올바르지 않습니다', raw);
-      if (raw.rects.length > MAX_TEXT_HIGHLIGHT_RECTS) throw bad(`텍스트 형광이 너무 큽니다 (최대 ${MAX_TEXT_HIGHLIGHT_RECTS}줄)`, raw);
+      if (!Array.isArray(raw.rects) || raw.rects.length === 0) throw bad(texts().textHighlightRectsInvalid, raw);
+      if (raw.rects.length > MAX_TEXT_HIGHLIGHT_RECTS) throw bad(texts().textHighlightTooLarge(MAX_TEXT_HIGHLIGHT_RECTS), raw);
       const chars = raw.chars as unknown[];
       if (!Array.isArray(chars) || chars.length !== 2 || !Number.isInteger(chars[0]) || !Number.isInteger(chars[1]) || (chars[0] as number) < 0 || (chars[0] as number) >= (chars[1] as number)) {
-        throw bad('텍스트 형광의 글자 범위(chars)가 올바르지 않습니다', raw);
+        throw bad(texts().textHighlightCharsInvalid, raw);
       }
-      if (typeof raw.engine !== 'string' || !raw.engine.trim() || raw.engine.length > MAX_ENGINE_CHARS) throw bad('텍스트 형광의 engine이 올바르지 않습니다', raw);
+      if (typeof raw.engine !== 'string' || !raw.engine.trim() || raw.engine.length > MAX_ENGINE_CHARS) throw bad(texts().textHighlightEngineInvalid, raw);
       return {
         ...base,
         type: 'textHighlight',
@@ -367,7 +364,7 @@ export function normalizeItem(raw: unknown, pageCount: number, now: string): Ann
         ...defined({ size: normalizeSize(raw.size, raw) }),
       };
     default:
-      throw bad('알 수 없는 필기 종류입니다', raw);
+      throw bad(texts().unknownType, raw);
   }
 }
 
@@ -383,7 +380,7 @@ export function normalizeMarkerKey(raw: unknown): MarkerKey {
     typeof key.attachmentId !== 'string' ||
     !ATTACHMENT_ID_RE.test(key.attachmentId)
   ) {
-    throw bad('질문 표시 키가 올바르지 않습니다', raw);
+    throw bad(texts().markerKeyInvalid, raw);
   }
   return { sessionId: key.sessionId, messageId: key.messageId, attachmentId: key.attachmentId };
 }
@@ -393,13 +390,13 @@ function sameKey(a: MarkerKey, b: MarkerKey): boolean {
 }
 
 function normalizeMarkerKeys(raw: unknown, context: unknown): MarkerKey[] {
-  if (!Array.isArray(raw)) throw bad('hiddenMarkers는 배열이어야 합니다', context);
+  if (!Array.isArray(raw)) throw bad(texts().hiddenMarkersNotArray, context);
   const keys: MarkerKey[] = [];
   for (const value of raw) {
     const key = normalizeMarkerKey(value);
     if (!keys.some((known) => sameKey(known, key))) keys.push(key);
   }
-  if (keys.length > MAX_HIDDEN_MARKERS) throw bad(`숨긴 질문 표시는 슬라이드마다 최대 ${MAX_HIDDEN_MARKERS}개까지입니다`, context);
+  if (keys.length > MAX_HIDDEN_MARKERS) throw bad(texts().tooManyHiddenMarkers(MAX_HIDDEN_MARKERS), context);
   return keys;
 }
 
@@ -409,9 +406,9 @@ export function annotationBytes(doc: SlideAnnotations): number {
 }
 
 function checkCaps(items: AnnotationItem[], hiddenMarkers: MarkerKey[], doc: SlideAnnotations): void {
-  if (items.length > MAX_ANNOTATION_ITEMS) throw new HttpError(400, `필기는 슬라이드마다 최대 ${MAX_ANNOTATION_ITEMS}개까지 둘 수 있습니다`);
-  if (hiddenMarkers.length > MAX_HIDDEN_MARKERS) throw new HttpError(400, `숨긴 질문 표시는 슬라이드마다 최대 ${MAX_HIDDEN_MARKERS}개까지입니다`);
-  if (annotationBytes(doc) > MAX_SLIDE_ANNOTATION_BYTES) throw new HttpError(400, ANNOTATIONS_TOO_LARGE);
+  if (items.length > MAX_ANNOTATION_ITEMS) throw new HttpError(400, texts().tooManyItems(MAX_ANNOTATION_ITEMS));
+  if (hiddenMarkers.length > MAX_HIDDEN_MARKERS) throw new HttpError(400, texts().tooManyHiddenMarkers(MAX_HIDDEN_MARKERS));
+  if (annotationBytes(doc) > MAX_SLIDE_ANNOTATION_BYTES) throw new HttpError(400, texts().tooLarge);
 }
 
 // ---------------------------------------------------------------------------
@@ -476,12 +473,12 @@ async function readSlideFile(docId: string, slide: number, pageCount: number): P
 
 async function requireDoc(docId: string): Promise<StoredDocMeta> {
   const doc = await readStoredDoc(docId);
-  if (!doc) throw new HttpError(404, NOT_FOUND_DOC);
+  if (!doc) throw new HttpError(404, smsg().common.notFound.doc);
   return doc;
 }
 
 function checkSlide(slide: number, pageCount: number): void {
-  if (!Number.isInteger(slide) || slide < 1 || slide > pageCount) throw new HttpError(404, NOT_FOUND_SLIDE);
+  if (!Number.isInteger(slide) || slide < 1 || slide > pageCount) throw new HttpError(404, smsg().common.notFound.slide);
 }
 
 /**
@@ -501,7 +498,7 @@ async function ensureAnnotationsDir(docId: string): Promise<string> {
     await withFsRetry(() => fs.mkdir(dir));
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'EEXIST') return dir;
-    if (isNotFound(err)) throw new HttpError(404, NOT_FOUND_DOC);
+    if (isNotFound(err)) throw new HttpError(404, smsg().common.notFound.doc);
     throw err;
   }
   return dir;
@@ -512,7 +509,7 @@ async function writeSlideFile(docId: string, doc: SlideAnnotations, pageCount: n
   try {
     await writeJsonAtomic(path.join(dir, annotationFileName(doc.slide, pageCount)), doc);
   } catch (err) {
-    if (isNotFound(err)) throw new HttpError(404, NOT_FOUND_DOC);
+    if (isNotFound(err)) throw new HttpError(404, smsg().common.notFound.doc);
     throw err;
   }
 }
@@ -523,12 +520,12 @@ async function writeSlideFile(docId: string, doc: SlideAnnotations, pageCount: n
 
 function parseBaseRev(body: Record<string, unknown>, current: SlideAnnotations): void {
   const baseRev = body.baseRev;
-  if (!Number.isInteger(baseRev) || (baseRev as number) < 0) throw new HttpError(400, 'baseRev(0 이상의 정수)가 필요합니다');
-  if (baseRev !== current.rev) throw new HttpError(409, ANNOTATION_CONFLICT, { current });
+  if (!Number.isInteger(baseRev) || (baseRev as number) < 0) throw new HttpError(400, texts().baseRevRequired);
+  if (baseRev !== current.rev) throw new HttpError(409, texts().conflict, { current });
 }
 
 function jsonBody(body: unknown): Record<string, unknown> {
-  if (!isObject(body)) throw new HttpError(400, '요청 본문이 올바르지 않습니다');
+  if (!isObject(body)) throw new HttpError(400, smsg().common.http.bodyInvalid);
   return body;
 }
 
@@ -570,8 +567,8 @@ async function liveFor(docId: string, wanted: boolean): Promise<RecordedAt | nul
 }
 
 async function buildPut(docId: string, current: SlideAnnotations, body: Record<string, unknown>, pageCount: number, now: string): Promise<WriteOutcome> {
-  if (!Array.isArray(body.items)) throw new HttpError(400, 'items 배열이 필요합니다');
-  if (body.items.length > MAX_ANNOTATION_ITEMS) throw new HttpError(400, `필기는 슬라이드마다 최대 ${MAX_ANNOTATION_ITEMS}개까지 둘 수 있습니다`);
+  if (!Array.isArray(body.items)) throw new HttpError(400, texts().itemsRequired);
+  if (body.items.length > MAX_ANNOTATION_ITEMS) throw new HttpError(400, texts().tooManyItems(MAX_ANNOTATION_ITEMS));
   const before = new Map(current.items.map((item) => [item.id, item]));
   const live = await liveFor(
     docId,
@@ -581,7 +578,7 @@ async function buildPut(docId: string, current: SlideAnnotations, body: Record<s
   const ids = new Set<string>();
   for (const entry of body.items) {
     let item = normalizeItem(entry, pageCount, now);
-    if (ids.has(item.id)) throw bad('필기 id가 겹칩니다', entry);
+    if (ids.has(item.id)) throw bad(texts().duplicateId, entry);
     ids.add(item.id);
     const previous = before.get(item.id);
     if (previous) {
@@ -602,8 +599,8 @@ async function buildPut(docId: string, current: SlideAnnotations, body: Record<s
 
 async function buildPatch(docId: string, current: SlideAnnotations, body: Record<string, unknown>, pageCount: number, now: string): Promise<WriteOutcome> {
   const ops = body.ops;
-  if (!Array.isArray(ops) || ops.length === 0) throw new HttpError(400, 'ops 배열이 필요합니다');
-  if (ops.length > MAX_ANNOTATION_OPS) throw new HttpError(400, `한 번에 최대 ${MAX_ANNOTATION_OPS}개의 작업만 보낼 수 있습니다`);
+  if (!Array.isArray(ops) || ops.length === 0) throw new HttpError(400, texts().opsRequired);
+  if (ops.length > MAX_ANNOTATION_OPS) throw new HttpError(400, texts().tooManyOps(MAX_ANNOTATION_OPS));
   const live = await liveFor(
     docId,
     ops.some((op) => isObject(op) && op.op === 'add' && isObject(op.item) && !op.item.recordedAt),
@@ -612,24 +609,24 @@ async function buildPatch(docId: string, current: SlideAnnotations, body: Record
   let hiddenMarkers = current.hiddenMarkers.slice();
   const applied: AnnotationOp[] = [];
   for (const raw of ops) {
-    if (!isObject(raw)) throw bad('필기 작업이 올바르지 않습니다', raw);
+    if (!isObject(raw)) throw bad(texts().opInvalid, raw);
     switch (raw.op) {
       case 'add': {
         const item = stampRecording({ ...normalizeItem(raw.item, pageCount, now), updatedAt: now }, live);
-        if (items.some((known) => known.id === item.id)) throw new HttpError(409, ANNOTATION_CONFLICT, { current });
+        if (items.some((known) => known.id === item.id)) throw new HttpError(409, texts().conflict, { current });
         items.push(item);
         applied.push({ op: 'add', item });
         break;
       }
       case 'update': {
-        if (typeof raw.id !== 'string') throw bad('필기 작업의 id가 올바르지 않습니다', raw);
+        if (typeof raw.id !== 'string') throw bad(texts().opIdInvalid, raw);
         const index = items.findIndex((known) => known.id === raw.id);
-        if (index < 0) throw new HttpError(409, ANNOTATION_CONFLICT, { current });
+        if (index < 0) throw new HttpError(409, texts().conflict, { current });
         const previous = items[index];
-        if (!isObject(raw.patch)) throw bad('필기 작업의 patch가 올바르지 않습니다', raw);
+        if (!isObject(raw.patch)) throw bad(texts().opPatchInvalid, raw);
         const allowed = PATCHABLE_FIELDS[previous.type];
         for (const key of Object.keys(raw.patch)) {
-          if (key !== 'updatedAt' && !allowed.includes(key)) throw bad(`이 필기에 없는 항목입니다: ${key}`, raw);
+          if (key !== 'updatedAt' && !allowed.includes(key)) throw bad(texts().unknownField(key), raw);
         }
         const { updatedAt: _updatedAt, ...changes } = raw.patch;
         const next = { ...normalizeItem({ ...previous, ...changes, id: previous.id, type: previous.type, createdAt: previous.createdAt }, pageCount, now), updatedAt: now };
@@ -644,7 +641,7 @@ async function buildPatch(docId: string, current: SlideAnnotations, body: Record
         break;
       }
       case 'remove': {
-        if (typeof raw.id !== 'string' || !ANNOTATION_ID_RE.test(raw.id)) throw bad('필기 작업의 id가 올바르지 않습니다', raw);
+        if (typeof raw.id !== 'string' || !ANNOTATION_ID_RE.test(raw.id)) throw bad(texts().opIdInvalid, raw);
         const index = items.findIndex((known) => known.id === raw.id);
         if (index >= 0) items.splice(index, 1);
         applied.push({ op: 'remove', id: raw.id });
@@ -663,7 +660,7 @@ async function buildPatch(docId: string, current: SlideAnnotations, body: Record
         break;
       }
       default:
-        throw bad('알 수 없는 필기 작업입니다', raw);
+        throw bad(texts().unknownOp, raw);
     }
   }
   const doc: SlideAnnotations = { version: 1, slide: current.slide, rev: current.rev + 1, updatedAt: now, items, hiddenMarkers };
@@ -870,7 +867,7 @@ async function rebuildIndexNow(docId: string): Promise<AnnotationSummary> {
     rebuildFailures.delete(docId);
     return summary;
   } catch (err) {
-    const error = err instanceof HttpError ? err : new HttpError(500, `필기 목록을 읽지 못했습니다: ${errorText(err)}`);
+    const error = err instanceof HttpError ? err : new HttpError(500, texts().listUnreadable(errorText(err)));
     rebuildFailures.set(docId, { at: Date.now(), error });
     throw error;
   }

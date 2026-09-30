@@ -3,6 +3,7 @@
 // Floated next to its button (a memo card near an edge would clip it).
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import type { DocMeta, MemoLink } from '../../../../shared/types.ts';
+import { msg } from '../../i18n/index.ts';
 import { clamp } from '../../lib/format.ts';
 import { useLayerEnv } from './context.ts';
 import { Floating } from './Floating.tsx';
@@ -62,12 +63,13 @@ export function LinkPicker({ anchor, onPick, onClose }: LinkPickerProps) {
     onClose();
   };
 
+  const m = msg().viewer.linkPicker;
   return (
-    <Floating ref={rootRef} anchor={anchor} width={LINK_PICKER_WIDTH} className="link-picker" role="dialog" label="메모에 연결할 슬라이드" onScrollAway={scrolled}>
+    <Floating ref={rootRef} anchor={anchor} width={LINK_PICKER_WIDTH} className="link-picker" role="dialog" label={m.label} onScrollAway={scrolled}>
       <form onSubmit={submit} onPointerDown={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
         <label className="link-picker-row">
           <input type="radio" name="link-kind" checked={kind === 'slide'} onChange={() => setKind('slide')} />
-          <span>이 강의</span>
+          <span>{m.thisLecture}</span>
           <span className="link-picker-p">p.</span>
           <input
             className="page-jump-input"
@@ -76,12 +78,12 @@ export function LinkPicker({ anchor, onPick, onClose }: LinkPickerProps) {
             autoFocus
             onFocus={() => setKind('slide')}
             onChange={(e) => setSlide(e.target.value.replace(/[^0-9]/g, ''))}
-            aria-label="이 강의의 슬라이드 번호"
+            aria-label={m.thisLectureSlide}
           />
         </label>
         <label className="link-picker-row">
           <input type="radio" name="link-kind" checked={kind === 'doc'} onChange={() => setKind('doc')} disabled={others.length === 0} />
-          <span>다른 강의</span>
+          <span>{m.otherLecture}</span>
           <select
             className="picker small"
             value={otherId}
@@ -91,9 +93,9 @@ export function LinkPicker({ anchor, onPick, onClose }: LinkPickerProps) {
               setOtherId(e.target.value);
               setKind('doc');
             }}
-            aria-label="다른 강의"
+            aria-label={m.otherLecture}
           >
-            <option value="">{others.length === 0 ? '(다른 강의 없음)' : '강의 선택…'}</option>
+            <option value="">{others.length === 0 ? m.noOthers : m.chooseLecture}</option>
             {others.map((d) => (
               <option key={d.id} value={d.id}>
                 {d.title}
@@ -109,15 +111,15 @@ export function LinkPicker({ anchor, onPick, onClose }: LinkPickerProps) {
             disabled={others.length === 0}
             onFocus={() => setKind('doc')}
             onChange={(e) => setOtherSlide(e.target.value.replace(/[^0-9]/g, ''))}
-            aria-label="다른 강의의 슬라이드 번호 (선택)"
+            aria-label={m.otherLectureSlide}
           />
         </label>
         <div className="link-picker-actions">
           <button type="button" className="ghost-btn small" onClick={onClose}>
-            취소
+            {msg().common.cancel}
           </button>
           <button type="submit" className="primary-btn small" disabled={kind === 'doc' && otherId === ''}>
-            연결
+            {m.link}
           </button>
         </div>
       </form>

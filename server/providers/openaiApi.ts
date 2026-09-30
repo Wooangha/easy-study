@@ -32,6 +32,7 @@ import type {
   ResumeHandle,
 } from './types.ts';
 import { ProviderError } from './types.ts';
+import { smsg } from '../i18n.ts';
 import { abortError, errorMessage, loadInlineImage } from './proc.ts';
 import { openaiUsage } from './usage.ts';
 
@@ -126,7 +127,7 @@ export class OpenAIStreamState {
         this.responseId = event.response.id;
         break;
       case 'response.output_item.added':
-        if (event.item.type === 'reasoning') this.onStatus('생각하는 중…');
+        if (event.item.type === 'reasoning') this.onStatus(smsg().chat.providers.thinking);
         break;
       case 'response.output_text.delta':
       case 'response.refusal.delta':
@@ -143,13 +144,13 @@ export class OpenAIStreamState {
         this.completed = true;
         this.reportUsage(event.response.usage);
         const reason = event.response.incomplete_details?.reason;
-        if (reason) this.onStatus(`응답이 중간에 끝났습니다 (${reason})`);
+        if (reason) this.onStatus(smsg().chat.providers.openai.endedEarly(reason));
         break;
       }
       case 'response.failed': {
         this.reportUsage(event.response.usage);
         const error = event.response.error;
-        const message = error?.message ?? '응답 생성에 실패했습니다.';
+        const message = error?.message ?? smsg().chat.providers.openai.failed;
         throw openaiFailure({ code: error?.code ?? null, message }, false);
       }
       case 'error':
@@ -206,33 +207,30 @@ export function classifyOpenAIError(info: OpenAIErrorInfo, resumed: boolean): Pr
   return 'other';
 }
 
-/** ProviderError with a Korean message for an OpenAI failure. */
+/** ProviderError with a message (in the turn's language) for an OpenAI failure. */
 function openaiFailure(info: OpenAIErrorInfo, resumed: boolean, cause?: unknown): ProviderError {
   const kind = classifyOpenAIError(info, resumed);
   const detail = info.message;
+  const m = smsg().chat.providers.openai;
   let message: string;
   switch (kind) {
     case 'resume_invalid':
-      message = `OpenAI API: 이전 응답(previous_response_id)을 찾을 수 없습니다. 저장된 대화가 만료되었거나 삭제되었습니다 (${detail})`;
+      message = m.previousResponseNotFound(detail);
       break;
     case 'context_overflow':
-      message = `OpenAI API: 대화가 모델의 컨텍스트 한도를 넘었습니다 (${detail})`;
+      message = m.contextOverflow(detail);
       break;
     case 'auth':
-      message =
-        info.status === 403
-          ? `OpenAI API 권한 오류: ${detail}`
-          : 'OpenAI API 인증에 실패했습니다. OPENAI_API_KEY를 확인하세요.';
+      message = info.status === 403 ? m.permissionDenied(detail) : m.authFailed;
       break;
     case 'model_unavailable':
-      message = `OpenAI API: 모델을 찾을 수 없거나 사용할 수 없습니다 (${detail})`;
+      message = m.modelUnavailable(detail);
       break;
     default:
-      if (info.status === 429) message = `OpenAI API 요청 한도를 초과했습니다: ${detail}`;
-      else if (info.status === 400) message = `OpenAI API 요청 오류: ${detail}`;
-      else if (info.status === 404) message = `OpenAI API: 요청한 항목을 찾을 수 없습니다 (${detail})`;
-      else if (info.status) message = `OpenAI API 오류 (${info.status}): ${detail}`;
-      else message = `OpenAI API 오류: ${detail}`;
+      if (info.status === 429) message = m.rateLimited(detail);
+      else if (info.status === 400) message = m.badRequest(detail);
+      else if (info.status === 404) message = m.notFound(detail);
+      else message = m.error(info.status ?? 0, detail);
       break;
   }
   return new ProviderError(message, kind, cause === undefined ? undefined : { cause });
@@ -257,7 +255,7 @@ function loadOpenAISdk(): Promise<OpenAISdk> {
 function toProviderError(OpenAI: OpenAISdk, err: unknown, resumed: boolean): Error {
   if (err instanceof ProviderError) return err;
   if (err instanceof OpenAI.APIConnectionError) {
-    return new ProviderError(`OpenAI API에 연결할 수 없습니다: ${err.message}`, 'other', { cause: err });
+    return new ProviderError(smsg().chat.providers.openai.connectFailed(err.message), 'other', { cause: err });
   }
   if (err instanceof OpenAI.APIError) {
     return openaiFailure({ status: err.status, code: err.code, param: err.param, message: err.message }, resumed, err);
@@ -266,7 +264,7 @@ function toProviderError(OpenAI: OpenAISdk, err: unknown, resumed: boolean): Err
 }
 
 async function runOpenAI(input: ProviderRunInput): Promise<ProviderRunResult> {
-  if (!process.env.OPENAI_API_KEY) throw new ProviderError('OPENAI_API_KEY 환경 변수가 설정되지 않았습니다.', 'auth');
+  if (!process.env.OPENAI_API_KEY) throw new ProviderError(smsg().chat.providers.apiKeyMissing('OPENAI_API_KEY'), 'auth');
   if (input.signal.aborted) throw abortError();
 
   const params = await buildOpenAIRequest({
@@ -290,16 +288,25 @@ async function runOpenAI(input: ProviderRunInput): Promise<ProviderRunResult> {
   }
   // The SDK may end the stream quietly instead of throwing when the request is aborted.
   if (input.signal.aborted) throw abortError();
-  if (!state.completed) throw new Error('OpenAI API 응답이 완료되지 않았습니다.');
-  if (!state.responseId) throw new Error('OpenAI API가 response id를 알려주지 않았습니다.');
+  if (!state.completed) throw new Error(smsg().chat.providers.openai.incomplete);
+  if (!state.responseId) throw new Error(smsg().chat.providers.openai.noResponseId);
   const out: ProviderRunResult = { text: state.text, resume: { previousResponseId: state.responseId } };
   if (state.usage) out.usage = state.usage;
   return out;
 }
 
+/** Available with an API key; checked once for every language (the reason is worded when the result is). */
+async function probeOpenAI(): Promise<() => ProviderAvailability> {
+  const hasKey = !!process.env.OPENAI_API_KEY;
+  return () => (hasKey ? { available: true } : { available: false, reason: smsg().chat.providers.apiKeyMissing('OPENAI_API_KEY') });
+}
+
 export const openaiApiProvider: Provider = {
   id: 'openai-api',
-  label: 'OpenAI API (API 키)',
+  // In the request's language (DESIGN §27).
+  get label(): string {
+    return smsg().chat.providers.label['openai-api'];
+  },
   kind: 'api',
   get models(): ModelOption[] {
     return modelOptions();
@@ -309,9 +316,8 @@ export const openaiApiProvider: Provider = {
   },
   maxImagesPerConversation: 150,
   async detect(): Promise<ProviderAvailability> {
-    return process.env.OPENAI_API_KEY
-      ? { available: true }
-      : { available: false, reason: 'OPENAI_API_KEY 환경 변수가 설정되지 않았습니다.' };
+    return (await probeOpenAI())();
   },
+  probe: probeOpenAI,
   run: runOpenAI,
 };

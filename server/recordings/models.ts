@@ -9,6 +9,8 @@ import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import type { AsrModelInfo } from '../../shared/types.ts';
 import { HttpError, desktopMode, libraryDir, repoRoot } from '../config.ts';
+import { smsg } from '../i18n.ts';
+import type { ServerMessages } from '../i18n.ts';
 
 export interface ModelFile {
   file: string;
@@ -19,7 +21,10 @@ export interface ModelFile {
 
 export interface CatalogModel extends ModelFile {
   id: string;
+  /** The name shown for the model when it has no `labelKey` (catalogs of tests). */
   label: string;
+  /** Its name in the request's language (messages `recordings.models.labels`); `label` when absent. */
+  labelKey?: keyof ServerMessages['recordings']['models']['labels'];
   /**
    * A chunk of a long upload gets the end of the previous chunk's text as whisper's prompt (the context a whole-file
    * run would have). Measured: small-q5_1 needs it (a chunk transcribed alone went from 7 % to 16 % Hangul error with
@@ -38,11 +43,12 @@ const HF_WHISPER = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861
 export const TURBO_MODEL_ID = 'large-v3-turbo-q5_0';
 export const SMALL_MODEL_ID = 'small-q5_1';
 
-export const DEFAULT_CATALOG: Readonly<ModelCatalog> = Object.freeze({
+export const DEFAULT_CATALOG: Readonly<ModelCatalog> = Object.freeze<ModelCatalog>({
   models: [
     {
       id: TURBO_MODEL_ID,
-      label: '정확 (large-v3-turbo)',
+      label: 'large-v3-turbo',
+      labelKey: 'turbo',
       file: 'ggml-large-v3-turbo-q5_0.bin',
       url: `${HF_WHISPER}/ggml-large-v3-turbo-q5_0.bin`,
       sizeBytes: 574_041_195,
@@ -50,7 +56,8 @@ export const DEFAULT_CATALOG: Readonly<ModelCatalog> = Object.freeze({
     },
     {
       id: SMALL_MODEL_ID,
-      label: '빠름 (small)',
+      label: 'small',
+      labelKey: 'small',
       file: 'ggml-small-q5_1.bin',
       url: `${HF_WHISPER}/ggml-small-q5_1.bin`,
       sizeBytes: 190_085_487,
@@ -154,11 +161,12 @@ export class ModelStore {
   }
 
   list(recommended: string): AsrModelInfo[] {
+    const labels = smsg().recordings.models.labels;
     return this.catalog.models.map((m) => {
       const d = this.downloads.get(m.id);
       const info: AsrModelInfo = {
         id: m.id,
-        label: m.label,
+        label: m.labelKey ? labels[m.labelKey] : m.label,
         sizeBytes: m.sizeBytes,
         installed: this.isInstalled(m.id),
         recommended: m.id === recommended,
@@ -182,7 +190,7 @@ export class ModelStore {
    */
   async startDownload(id: string): Promise<void> {
     const m = this.model(id);
-    if (!m) throw new HttpError(404, `알 수 없는 모델입니다: ${id}`);
+    if (!m) throw new HttpError(404, smsg().recordings.models.unknown(id));
     if (this.downloads.has(id) || this.isInstalled(id)) return;
     const files = this.missing(m);
     const controller = new AbortController();
@@ -218,7 +226,7 @@ export class ModelStore {
         this.onInstalled?.(id);
       } catch (err) {
         this.downloads.delete(id);
-        const message = controller.signal.aborted ? '다운로드를 취소했습니다' : errorText(err);
+        const message = controller.signal.aborted ? smsg().recordings.models.downloadCanceled : errorText(err);
         this.lastErrors.set(id, message);
         if (!controller.signal.aborted) console.warn(`[asr] download of ${id} failed: ${message}`);
         failedToStart(err);
@@ -228,7 +236,7 @@ export class ModelStore {
       await startedPromise;
     } catch (err) {
       if (err instanceof HttpError) throw err;
-      throw new HttpError(502, `모델을 내려받을 수 없습니다: ${errorText(err)}`);
+      throw new HttpError(502, smsg().recordings.models.downloadFailed(errorText(err)));
     }
   }
 
@@ -261,11 +269,11 @@ export class ModelStore {
     for (let attempt = 1; ; attempt++) {
       const resumed = await this.fetchPart(file, part, signal, onProgress, onStarted);
       const size = sizeOf(part);
-      if (size !== file.sizeBytes) throw new Error(`다운로드가 끝나지 않았습니다 (${size}/${file.sizeBytes} 바이트). 다시 시도하면 이어서 받습니다`);
+      if (size !== file.sizeBytes) throw new Error(smsg().recordings.models.incomplete(size, file.sizeBytes));
       const digest = await sha256Of(part);
       if (digest === file.sha256) break;
       await fs.rm(part, { force: true });
-      if (!resumed || attempt >= 2) throw new Error(`내려받은 파일이 손상되었습니다 (sha256 불일치: ${file.file}). 다시 시도해 주세요`);
+      if (!resumed || attempt >= 2) throw new Error(smsg().recordings.models.corrupt(file.file));
       console.warn(`[asr] ${file.file}: the partial download was corrupt, fetching it again from the start`);
       onProgress(0);
     }
@@ -305,7 +313,7 @@ export class ModelStore {
       await res.body?.cancel();
       throw new Error(`HTTP ${res.status} (${file.url})`);
     }
-    if (!res.body) throw new Error('빈 응답');
+    if (!res.body) throw new Error(smsg().recordings.models.emptyResponse);
     const append = res.status === 206 && have > 0;
     if (!append) have = 0;
     onStarted();
@@ -316,7 +324,7 @@ export class ModelStore {
     try {
       for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
         received += chunk.length;
-        if (received > file.sizeBytes) throw new Error('파일이 예상보다 큽니다');
+        if (received > file.sizeBytes) throw new Error(smsg().recordings.models.largerThanExpected);
         await fh.write(chunk);
         onProgress(received);
       }
@@ -329,7 +337,7 @@ export class ModelStore {
   /** Cancels a running download and removes the model file (the VAD model stays: other models use it). */
   async delete(id: string): Promise<void> {
     const m = this.model(id);
-    if (!m) throw new HttpError(404, `알 수 없는 모델입니다: ${id}`);
+    if (!m) throw new HttpError(404, smsg().recordings.models.unknown(id));
     const running = this.downloads.get(id);
     if (running) {
       running.controller.abort();

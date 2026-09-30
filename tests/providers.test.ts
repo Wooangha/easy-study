@@ -35,9 +35,9 @@ import {
   CODEX_DISABLED_INTEGRATIONS,
   CODEX_DISABLED_TOOLS,
   CODEX_PERMISSION_PROFILE,
-  CONFINEMENT_HINT,
   CodexStreamState,
   classifyCodexFailure,
+  confinementHint,
   codexArgs,
   codexConfinementEnabled,
   codexExecutable,
@@ -1278,18 +1278,18 @@ describe('codex provider', () => {
     const confined = await run(codexProvider);
     assert.ok(confined.error instanceof ProviderError);
     assert.equal(providerErrorKind(confined.error), 'other');
-    assert.ok(confined.error.message.includes(CONFINEMENT_HINT), confined.error.message);
+    assert.ok(confined.error.message.includes(confinementHint()), confined.error.message);
     assert.match(confined.error.message, /EASY_STUDY_CODEX_CONFINE=0/);
     assert.match(confined.error.message, /failed to load AGENTS\.md/);
     process.env.EASY_STUDY_CODEX_CONFINE = '0';
     const legacy = await run(codexProvider);
     assert.ok(legacy.error);
-    assert.ok(!legacy.error.message.includes(CONFINEMENT_HINT));
+    assert.ok(!legacy.error.message.includes(confinementHint()));
     // Ordinary failures of a confined run get no such hint.
     delete process.env.EASY_STUDY_CODEX_CONFINE;
     process.env.FAKE_CLI_MODE = 'exit1';
     const other = await run(codexProvider);
-    assert.ok(other.error && !other.error.message.includes(CONFINEMENT_HINT));
+    assert.ok(other.error && !other.error.message.includes(confinementHint()));
   });
 
   test("the MCP servers of the user's config.toml are disabled by name", FAKE_CLI, async () => {

@@ -98,7 +98,7 @@ describe('real whisper-cli / ffmpeg (EASY_STUDY_REAL_ASR=1)', { skip: !enabled &
   test('upload: converted by ffmpeg, transcribed, playable', { skip: !process.env.EASY_STUDY_REAL_ASR_UPLOAD && 'EASY_STUDY_REAL_ASR_UPLOAD not set' }, async () => {
     const file = process.env.EASY_STUDY_REAL_ASR_UPLOAD as string;
     const t0 = Date.now();
-    const res = await api(`/docs/${DOC}/recordings/upload`, { method: 'POST', headers: { 'X-Filename': encodeURIComponent(path.basename(file)) }, body: await fs.readFile(file) });
+    const res = await api(`/docs/${DOC}/recordings/upload`, { method: 'POST', headers: { 'X-Filename': encodeURIComponent(path.basename(file)), 'X-Language': 'auto' }, body: await fs.readFile(file) });
     const created = (await res.json()) as RecordingInfo;
     assert.equal(res.status, 201, JSON.stringify(created));
     const transcript = await waitReady(created.id, 600_000);

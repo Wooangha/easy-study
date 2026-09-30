@@ -31,6 +31,7 @@ import type { DigestSlide, DigestStatus, DocMeta } from '../shared/types.ts';
 import { readTokenUsage } from '../shared/usage.ts';
 import { VIEW_WIDTHS, inlinePathFor, thumbPath, viewPath } from './assets.ts';
 import { HttpError, libraryDir } from './config.ts';
+import { isLang, smsg } from './i18n.ts';
 import { isImageWorkerStopped, runImageWorker, runPdfWorker, runTextWorker } from './imageWorker.ts';
 import type { ImageJob, ImageWorkerOptions, ImageWorkerRun, PdfInfo, PdfWorkerHandlers, SheetEntry } from './imageWorker.ts';
 import { TEXT_ENGINE, TEXT_ENGINE_FILE, slideFileName, textFileName } from './pageNames.ts';
@@ -99,7 +100,7 @@ export function isDocId(docId: string): boolean {
  * unvalidated id can never reach the filesystem.
  */
 export function docPaths(docId: string): DocPaths {
-  if (!isDocId(docId)) throw new HttpError(404, '문서를 찾을 수 없습니다');
+  if (!isDocId(docId)) throw new HttpError(404, smsg().common.notFound.doc);
   const dir = path.join(libraryDir(), docId);
   return {
     dir,
@@ -129,7 +130,7 @@ export function coursesDir(): string {
 
 /** Paths of a course directory. Throws (404) for ids that do not match COURSE_ID_RE. */
 export function coursePaths(courseId: string): CoursePaths {
-  if (!COURSE_ID_RE.test(courseId)) throw new HttpError(404, '과목을 찾을 수 없습니다');
+  if (!COURSE_ID_RE.test(courseId)) throw new HttpError(404, smsg().common.notFound.course);
   const dir = path.join(coursesDir(), courseId);
   return { dir, courseJson: path.join(dir, 'course.json'), courseMd: path.join(dir, 'COURSE.md') };
 }
@@ -279,8 +280,8 @@ export async function readStoredDoc(docId: string): Promise<StoredDocMeta | null
  */
 export function cleanDocTitle(value: unknown): string {
   const title = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
-  if (!title) throw new HttpError(400, '강의 이름을 입력해 주세요');
-  if (title.length > MAX_TITLE_CHARS) throw new HttpError(400, `강의 이름이 너무 깁니다 (최대 ${MAX_TITLE_CHARS}자)`);
+  if (!title) throw new HttpError(400, smsg().library.docs.titleRequired);
+  if (title.length > MAX_TITLE_CHARS) throw new HttpError(400, smsg().library.docs.titleTooLong(MAX_TITLE_CHARS));
   return title;
 }
 
@@ -291,10 +292,10 @@ export function cleanDocTitle(value: unknown): string {
  */
 export async function renameDoc(docId: string, title: unknown): Promise<DocMeta> {
   const cleaned = cleanDocTitle(title);
-  if (!(await readStoredDoc(docId))) throw new HttpError(404, '문서를 찾을 수 없습니다');
+  if (!(await readStoredDoc(docId))) throw new HttpError(404, smsg().common.notFound.doc);
   await updateMeta(docId, { title: cleaned });
   const doc = await getDoc(docId);
-  if (!doc) throw new HttpError(404, '문서를 찾을 수 없습니다');
+  if (!doc) throw new HttpError(404, smsg().common.notFound.doc);
   return doc;
 }
 
@@ -348,18 +349,22 @@ async function updateMeta(docId: string, patch: Partial<StoredDocMeta>): Promise
 }
 
 /**
+ * HttpError 409 for a document that is not ready (DESIGN §14): its conversion failed (with the stored reason), or it is
+ * still being converted.
+ */
+export function notReadyError(doc: { status: string; error?: string }): HttpError {
+  const m = smsg().library.docs;
+  return new HttpError(409, doc.status === 'error' ? m.failed(doc.error ?? m.unknownError) : m.processing);
+}
+
+/**
  * Everything the context builder needs, including the digest and the course context.
  * Throws (HttpError 404/409) unless the document is ready.
  */
 export async function loadDocAssets(docId: string): Promise<DocAssets> {
   const stored = await readStoredDoc(docId);
-  if (!stored) throw new HttpError(404, '문서를 찾을 수 없습니다');
-  if (stored.status !== 'ready') {
-    throw new HttpError(
-      409,
-      stored.status === 'error' ? `문서 처리에 실패했습니다: ${stored.error ?? '알 수 없는 오류'}` : '문서를 아직 처리하는 중입니다',
-    );
-  }
+  if (!stored) throw new HttpError(404, smsg().common.notFound.doc);
+  if (stored.status !== 'ready') throw notReadyError(stored);
   const paths = docPaths(docId);
   const pageCount = stored.pageCount;
   const [texts, sheetEntries, courses, digestRecord] = await Promise.all([
@@ -390,6 +395,7 @@ export async function loadDocAssets(docId: string): Promise<DocAssets> {
     sheets,
     digest: digestSlides.length > 0 ? digestSlides : null,
     digestComplete: isDigestComplete(digestSlides, pageCount),
+    digestLang: digestRecord?.lang,
     course: courseRecord ? await buildCourseContext(courseRecord, docId) : null,
   };
 }
@@ -510,6 +516,7 @@ function normalizeDigestRecord(value: unknown): DigestRecord | null {
   if (raw.summaryStale === true) record.summaryStale = true;
   const usage = readTokenUsage(raw.usage);
   if (usage) record.usage = usage;
+  if (isLang(raw.lang)) record.lang = raw.lang;
   return record;
 }
 
@@ -622,7 +629,7 @@ export function slugify(title: string, fallback = 'doc'): string {
  * Resolves right away with the `processing` DocMeta.
  */
 export async function importPdf(bytes: Buffer, fileName: string): Promise<DocMeta> {
-  if (!looksLikePdf(bytes)) throw new HttpError(400, 'PDF 파일이 아닙니다 (%PDF 헤더가 없습니다)');
+  if (!looksLikePdf(bytes)) throw new HttpError(400, smsg().library.docs.notPdf);
   const name = cleanFileName(fileName);
   const title = titleFromFileName(name);
   const slug = slugify(title);
@@ -705,17 +712,18 @@ export async function resumePendingIngests(): Promise<void> {
  */
 export async function retryIngest(docId: string): Promise<DocMeta> {
   const stored = await readStoredDoc(docId);
-  if (!stored) throw new HttpError(404, '문서를 찾을 수 없습니다');
+  if (!stored) throw new HttpError(404, smsg().common.notFound.doc);
   // Check and start without an await in between (startIngest registers the ingest synchronously).
-  if (deletingDocs.has(docId)) throw new HttpError(404, '문서를 찾을 수 없습니다');
+  if (deletingDocs.has(docId)) throw new HttpError(404, smsg().common.notFound.doc);
   if (stored.status !== 'error' || activeIngests.has(docId)) {
-    throw new HttpError(409, stored.status === 'ready' ? '이미 변환이 끝난 문서입니다' : '문서를 이미 변환하고 있습니다');
+    const m = smsg().library.docs;
+    throw new HttpError(409, stored.status === 'ready' ? m.alreadyConverted : m.alreadyConverting);
   }
   void startIngest(docId);
   // ingest() first marks the document 'processing' (through the same queue): answer with that state.
   await metaQueue(docId, async () => undefined);
   const meta = await getDoc(docId);
-  if (!meta) throw new HttpError(404, '문서를 찾을 수 없습니다');
+  if (!meta) throw new HttpError(404, smsg().common.notFound.doc);
   return meta;
 }
 
@@ -728,9 +736,9 @@ export async function retryIngest(docId: string): Promise<DocMeta> {
  * files). Throws 404 for unknown documents.
  */
 export async function deleteDoc(docId: string, busyReason: () => string | null = () => null): Promise<void> {
-  if ((await readStoredDoc(docId)) === null) throw new HttpError(404, '문서를 찾을 수 없습니다');
-  if (deletingDocs.has(docId)) throw new HttpError(404, '문서를 찾을 수 없습니다');
-  const reason = isIngestRunning(docId) ? 'PDF를 변환하는 중에는 지울 수 없습니다. 변환이 끝난 뒤에 다시 시도해 주세요' : busyReason();
+  if ((await readStoredDoc(docId)) === null) throw new HttpError(404, smsg().common.notFound.doc);
+  if (deletingDocs.has(docId)) throw new HttpError(404, smsg().common.notFound.doc);
+  const reason = isIngestRunning(docId) ? smsg().library.docs.deleteWhileConverting : busyReason();
   if (reason) throw new HttpError(409, reason);
   deletingDocs.add(docId);
   try {

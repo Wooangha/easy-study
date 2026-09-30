@@ -18,7 +18,7 @@
     "active": true,
     "publisher": "easy-study",
     "category": "Education",
-    "shortDescription": "강의 PDF를 슬라이드별로 LLM 튜터와 함께 공부하는 앱",
+    "shortDescription": "강의 PDF를 슬라이드별로 LLM 튜터와 함께 공부하는 앱 · Study lecture PDFs with an LLM tutor",
     "longDescription": "easy-study: study lecture PDFs slide by slide with an LLM tutor (Claude Code, Codex, Claude API, OpenAI API). The app runs its own easy-study server on this computer or connects to one on another computer.",
     "copyright": "easy-study",
     "icon": [

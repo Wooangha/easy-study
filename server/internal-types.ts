@@ -14,6 +14,7 @@ import type {
   TokenUsage,
   UsageLimits,
 } from '../shared/types.ts';
+import type { Lang } from '../shared/i18n.ts';
 import type { HistoryTurn, Part, ResumeHandle } from './providers/types.ts';
 
 /** State of the conversation held *inside the provider* (CLI session / API thread). */
@@ -61,6 +62,11 @@ export interface SessionRecord {
   limits?: UsageLimits;
   /** Changes of the session's LLM (SessionSummary.switches); absent when it never changed. */
   switches?: LlmSwitch[];
+  /**
+   * The language of the latest turn (DESIGN §27): an answer the server stopped mid-turn is marked in it by the startup
+   * sweep. Absent (sessions without a turn since languages existed) = Korean.
+   */
+  lang?: Lang;
 }
 
 export interface ContextSettings {
@@ -128,6 +134,8 @@ export interface DocAssets {
   digest: DigestSlide[] | null;
   /** Every slide has a non-failed digest entry. */
   digestComplete: boolean;
+  /** The language the digest was made in (DigestRecord.lang: its "핵심:" or "Key point:" lines). Absent = Korean. */
+  digestLang?: Lang;
   /** Course context, or null when the document is not in a course. */
   course: CourseContext | null;
 }
@@ -238,6 +246,11 @@ export interface DigestRecord {
   summaryStale?: boolean;
   /** Tokens of the latest run (DigestInfo.usage). */
   usage?: TokenUsage;
+  /**
+   * The language the latest run was made in (DESIGN §27): the model's figure descriptions, takeaways and summary, the
+   * stored notes and the headings of DIGEST.md. Absent (records written before languages) = Korean.
+   */
+  lang?: Lang;
 }
 
 /** Persisted as library/courses/<courseId>/course.json (the Course type from shared/types.ts plus a version). */

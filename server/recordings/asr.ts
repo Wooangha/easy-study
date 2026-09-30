@@ -12,6 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { trackChild } from '../children.ts';
 import { childProcessEnv, desktopMode, repoRoot } from '../config.ts';
+import { smsg } from '../i18n.ts';
 import { stopProcess } from '../providers/proc.ts';
 
 /** Time between SIGTERM and SIGKILL when a whisper / ffmpeg run is stopped. */
@@ -118,17 +119,22 @@ interface VersionProbe {
   error?: string;
 }
 
-const versionCache = new Map<string, VersionProbe>();
+/** A cached probe: a missing file is kept as such (its error is written in the language of each request). */
+const versionCache = new Map<string, VersionProbe & { missing?: boolean }>();
+
+function probeResult(bin: string, probe: VersionProbe & { missing?: boolean }): VersionProbe {
+  return probe.missing ? { at: probe.at, ok: false, error: smsg().recordings.engine.fileMissing(bin) } : probe;
+}
 
 /** `<tool> <flag>` → first line matching `pattern` (cached 60 s per path). */
 export function probeVersion(bin: string, flag: string, pattern: RegExp): Promise<VersionProbe> {
   const key = `${bin}\u0000${flag}`;
   const cached = versionCache.get(key);
-  if (cached && Date.now() - cached.at < VERSION_CACHE_MS) return Promise.resolve(cached);
+  if (cached && Date.now() - cached.at < VERSION_CACHE_MS) return Promise.resolve(probeResult(bin, cached));
   if (!existsSync(bin)) {
-    const probe = { at: Date.now(), ok: false, error: `파일이 없습니다: ${bin}` };
+    const probe = { at: Date.now(), ok: false, missing: true };
     versionCache.set(key, probe);
-    return Promise.resolve(probe);
+    return Promise.resolve(probeResult(bin, probe));
   }
   const cmd = commandFor(bin, [flag]);
   return new Promise((resolve) => {
@@ -672,7 +678,7 @@ export async function runWhisper(run: WhisperRun): Promise<WhisperResult> {
     try {
       text = await fs.readFile(json, 'utf8');
     } catch {
-      throw new Error('whisper-cli가 결과 파일을 만들지 않았습니다');
+      throw new Error(smsg().recordings.transcription.noOutputFile);
     }
     return parseWhisperJson(text);
   } finally {
@@ -721,7 +727,7 @@ export function parseWhisperJson(text: string): WhisperResult {
   try {
     data = JSON.parse(text);
   } catch {
-    throw new Error('whisper-cli 결과를 읽을 수 없습니다');
+    throw new Error(smsg().recordings.transcription.unreadableOutput);
   }
   const segments: WhisperSegment[] = [];
   let previous = '';
