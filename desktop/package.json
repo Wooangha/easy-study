@@ -1,6 +1,6 @@
 {
   "name": "easy-study-desktop",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "private": true,
   "description": "easy-study desktop app (Tauri 2): starts the bundled server or connects to another computer's (DESIGN §19)",
   "type": "module",
