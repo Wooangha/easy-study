@@ -28,10 +28,10 @@ The user writes short casual Korean. Keep replies in Korean, short, plain; lead 
 
 ## Repository state (at the time of writing)
 
-- `main`: released up to **v0.6.6** (the headless Linux server `easy-study server` / `update`; 0.6.5: lectures can be renamed; 0.6.4: Vulkan GPU transcription on Windows/Linux x64, Lucide icons, a one-line top bar) (in-app updates from 0.5.0; LAN sharing + the loopback relay in 0.5.1). Pushed; no
-  other branches. Tags v0.1.0 … v0.6.6. Releases up to v0.4.2 are drafts in the private repo (the user may publish
-  them); v0.5.0 … v0.6.6 are published there AND in the public repo `Wooangha/easy-study-releases` (installers +
-  latest.json, signed on this Mac with `publish-release.mjs`). `packaging/arch/PKGBUILD` + `.SRCINFO` are at 0.6.6.
+- `main`: released up to **v0.6.7** (English next to Korean: web, server, desktop shell, tutor/digest language; 0.6.6: the headless Linux server `easy-study server` / `update`; 0.6.5: lectures can be renamed; 0.6.4: Vulkan GPU transcription on Windows/Linux x64, Lucide icons, a one-line top bar) (in-app updates from 0.5.0; LAN sharing + the loopback relay in 0.5.1). Pushed; no
+  other branches. Tags v0.1.0 … v0.6.7. Releases up to v0.4.2 are drafts in the private repo (the user may publish
+  them); v0.5.0 … v0.6.7 are published there AND in the public repo `Wooangha/easy-study-releases` (installers +
+  latest.json, signed on this Mac with `publish-release.mjs`). `packaging/arch/PKGBUILD` + `.SRCINFO` are at 0.6.7.
 - `gh` is installed and logged in. SSH push to origin works.
 
 ## Commands
