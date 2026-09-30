@@ -1,6 +1,6 @@
 pkgbase = easy-study-bin
 	pkgdesc = Study lecture PDFs slide by slide with an LLM tutor (Claude Code, Codex, Claude API, OpenAI API): desktop app
-	pkgver = 0.6.2
+	pkgver = 0.6.3
 	pkgrel = 1
 	url = https://github.com/Wooangha/easy-study-releases
 	arch = x86_64
@@ -27,9 +27,9 @@ pkgbase = easy-study-bin
 	conflicts = easy-study
 	options = !strip
 	options = !debug
-	source_x86_64 = easy-study_0.6.2_amd64.deb::https://github.com/Wooangha/easy-study-releases/releases/download/v0.6.2/easy-study_0.6.2_amd64.deb
-	sha256sums_x86_64 = a54389e558d1d118ef076f00b256b3e1593263d6874d121851d133254be9f907
-	source_aarch64 = easy-study_0.6.2_arm64.deb::https://github.com/Wooangha/easy-study-releases/releases/download/v0.6.2/easy-study_0.6.2_arm64.deb
-	sha256sums_aarch64 = 825454fd03d8f76412ae3d3cabbc26b81cdfea73440b76bf382ba8586a7dc131
+	source_x86_64 = easy-study_0.6.3_amd64.deb::https://github.com/Wooangha/easy-study-releases/releases/download/v0.6.3/easy-study_0.6.3_amd64.deb
+	sha256sums_x86_64 = 4b71ed0d018fbe3d04e9dee1a60baf4732850906aff1f0a9aa1ca3c4b4dbc86f
+	source_aarch64 = easy-study_0.6.3_arm64.deb::https://github.com/Wooangha/easy-study-releases/releases/download/v0.6.3/easy-study_0.6.3_arm64.deb
+	sha256sums_aarch64 = ca83cfe830058634b2f62a40ff9267e3b15056589fa44513d9eac1f9dcb54475
 
 pkgname = easy-study-bin
