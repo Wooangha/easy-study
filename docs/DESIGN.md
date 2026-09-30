@@ -1544,7 +1544,10 @@ the chooser, where no page is asked, still installs). Menu "연결 대상 바꾸
   artifacts, dmg/deb/rpm, the Arch package and its PKGBUILD (whose sources point there), the FFmpeg source (LGPL), and
   SHA256SUMS.txt and latest.json made by the script. latest.json has exactly the keys darwin-aarch64, darwin-x86_64,
   windows-x86_64, windows-x86_64-nsis, linux-x86_64-appimage, linux-aarch64-appimage (never a bare linux-<arch>, which
-  deb/rpm installs would fall back to).
+  deb/rpm installs would fall back to), and from 0.6.6 on also linux-x86_64-server and linux-aarch64-server (the server
+  tarballs of §26: the app's updater only looks up its own key, so it never picks them; `release-assets.mjs` requires
+  them only for versions ≥ 0.6.6, so republishing an older tag keeps working). `serverArchiveProblems` checks a server
+  tarball's contents before it is signed.
 - `publish-release.mjs` (dry run by default; `--publish --commit <sha> --notes <file>` for real) refuses unless: the
   draft and every asset were uploaded by github-actions[bot] (state uploaded, a sha256 digest) during a successful
   desktop.yml run for the tag's commit; the tag commit on GitHub equals the local tag, is an ancestor of origin/main and
@@ -2385,3 +2388,37 @@ EASY_STUDY_AUTO_DIGEST=0 npm run dev` in the background with its log under the s
 exercise draw / snap / undo / memo + tags + links / 📎 첨부 chip → question → marker → jump / filters / 메모 tab / 그때 필기 재생 at
 desktop and 360 px widths, then stop the server. Docs: final wording of this section from what shipped, HANDOFF status, and the 설정 ›
 정보 shortcut rows verified.
+
+## 26. Linux server CLI — `easy-study server`, `easy-study update` (0.6.6)
+
+The user: "linux cli 버전으로도 내줘. 대신 이거는 서버만 열 수 있게 … easy-study server 뭐 이렇게해서 서버 여는 거임" and
+"easy-study update 하면 업뎃 되고". A headless build for Linux x64 / arm64: no GUI libraries, everything else as the desktop
+app ships it.
+
+- **Tarball** `easy-study-server-<version>-linux-<x64|arm64>.tar.gz`, one top folder `easy-study-server/` (the same for every
+  version, so an update keeps the folder the user linked to): `VERSION`, the packed server of pack-server.mjs (`package.json`,
+  `dist-server/`, `web/dist/`, `node_modules/` for linux-<arch>-glibc without `.bin`, `LICENSE`, `THIRD_PARTY_NOTICES.md`),
+  `bin/easy-study` (a POSIX sh launcher, `packaging/server/easy-study`: resolves its own path through symlinks and runs the
+  bundled Node on `dist-server/server/cli.js`), `node/bin/node` (the official Node of fetch-node.mjs), `whisper/whisper-cli`
+  and on x64 `whisper/whisper-cli-vulkan` (asr.ts's sibling rule finds the GPU build), `ffmpeg/ffmpeg` with their licenses.
+  No symlinks or hard links, owner 0, sorted. Built by `desktop/scripts/server-tarball.mjs` from what prepare.mjs left in
+  `desktop/resources` in the linux-x64 / linux-arm64 CI jobs, uploaded with the other Linux bundles and smoke-tested on the
+  runner (extract, `version`, `server` on a free port, 401 without login, `/api/health` and `/api/asr` with the access code,
+  Ctrl+C, nothing left running).
+- **CLI** (`server/cli.ts`): `server [--port 5350] [--host <addr>] [--local] [--library <dir>] [--models <dir>]
+  [--reset-access-code]`, `update [--check]`, `version`, `help`. `server` runs the same server as `npm run serve:remote`
+  (0.0.0.0 with the access code; `--local` = 127.0.0.1 without login): flags beat the environment, which beats the defaults;
+  the library and the models live in `$XDG_DATA_HOME/easy-study/` (default `~/.local/share/easy-study/`), outside the
+  install (a library inside it is refused: an update would delete it); `EASY_STUDY_WHISPER` / `EASY_STUDY_FFMPEG` point at the
+  bundled tools unless the user set them; the desktop shell's variables are dropped. The banner (addresses, access code,
+  login link) is the server's own; its hints name `easy-study server …` instead of npm commands (`serverMain(args,
+  restartCommand)`).
+- **Update** (`server/selfUpdate.ts`, verification in `server/minisign.ts`, a port of desktop/scripts/minisign.mjs): reads
+  the app's `latest.json`, takes `linux-<x86_64|aarch64>-server`, compares versions (never a downgrade), requires the URL of
+  that exact asset, downloads into a hidden staging folder next to the install, verifies the signature with the app's
+  updater key (key id, prehashed Ed25519, `file:` and `version:` in the trusted comment) before anything is extracted,
+  extracts with the system tar, checks `VERSION`, `package.json` and that the new `bin/easy-study version` runs, then swaps the
+  folders (the old one set aside, renamed back if the second rename fails) and removes the old one. It refuses first when
+  a server from this install is running (`/proc/*/exe`), when the install folder holds anything outside the tarball
+  layout (it would be deleted), or when the folder is not writable; signals during the download clean up, and are held
+  during the swap. It never touches the library or the models.

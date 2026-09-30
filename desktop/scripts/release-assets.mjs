@@ -1,7 +1,8 @@
-// Release assets of the desktop app (DESIGN §24): which files of CI's draft release (private repo) may go public,
-// which updater platform key each one serves, the latest.json the in-app updater reads, and the checks the publish
-// script runs on a draft before it signs anything (who uploaded it, from which run, what is inside). Pure helpers
-// (plus readTarGz) for publish-release.mjs and update-e2e.mjs; tested in desktop.test.mjs.
+// Release assets of the desktop app and the Linux server CLI (DESIGN §24, §26): which files of CI's draft release
+// (private repo) may go public, which updater platform key each one serves, the latest.json the in-app updater (and
+// `easy-study update`) reads, and the checks the publish script runs on a draft before it signs anything (who
+// uploaded it, from which run, what is inside). Pure helpers (plus readTarGz) for publish-release.mjs,
+// update-e2e.mjs and server-tarball.mjs; tested in desktop.test.mjs.
 import fs from 'node:fs';
 import zlib from 'node:zlib';
 
@@ -19,19 +20,54 @@ export const UPDATER_KEY_ID = '8428B81A03E58D53';
 export const CI_UPLOADER = 'github-actions[bot]';
 export const CI_WORKFLOW = '.github/workflows/desktop.yml';
 
+/** The one top folder of the Linux server tarball, the same for every version and arch (an in-place update keeps it). */
+export const SERVER_TOP_DIR = 'easy-study-server';
+
+/** The Linux server tarball of `version` for `cpu` (process.arch, targets.mjs `cpu`: x64 or arm64). */
+export function serverTarballName(version, cpu) {
+  if (cpu !== 'x64' && cpu !== 'arm64') throw new Error(`no Linux server build for cpu "${cpu}" (x64 or arm64)`);
+  return `${SERVER_TOP_DIR}-${version}-linux-${cpu}.tar.gz`;
+}
+
+/** The first release with the Linux server tarballs: 0.6.5 and earlier were published without them. */
+export const SERVER_SINCE = '0.6.6';
+
 /**
- * The updater artifacts: file name suffix → tauri-plugin-updater platform keys (`{os}-{arch}[-{installer}]`).
- * Never a bare "linux-x86_64"/"linux-aarch64": the plugin falls back to it for deb/rpm installs, which would then
- * try to install an AppImage. deb, rpm and Arch installs are check-only through the appimage key (update.rs).
+ * The updater artifacts: the file name of a version → the platform keys it serves in latest.json, and `since`: the
+ * first version that has it (none: every version; see updaterArtifacts).
+ * The app's keys are tauri-plugin-updater's (`{os}-{arch}[-{installer}]`). Never a bare "linux-x86_64" /
+ * "linux-aarch64": the plugin falls back to it for deb/rpm installs, which would then try to install an AppImage.
+ * deb, rpm and Arch installs are check-only through the appimage key (update.rs).
+ * The server tarballs' `linux-<arch>-server` keys are read by `easy-study update` (server/selfUpdate.ts) only: the
+ * plugin looks up `{os}-{arch}-{installer}` and then `{os}-{arch}`, and the app always asks for
+ * `linux-<arch>-appimage`, so it never selects them (and parses the extra keys fine).
  */
 export const UPDATER_ARTIFACTS = [
-  { suffix: '_aarch64.app.tar.gz', keys: ['darwin-aarch64'] },
-  { suffix: '_x64.app.tar.gz', keys: ['darwin-x86_64'] },
+  { name: (v) => `easy-study_${v}_aarch64.app.tar.gz`, keys: ['darwin-aarch64'] },
+  { name: (v) => `easy-study_${v}_x64.app.tar.gz`, keys: ['darwin-x86_64'] },
   // The NSIS installer itself (the plugin runs non-zip bytes as the installer).
-  { suffix: '_x64-setup.exe', keys: ['windows-x86_64-nsis', 'windows-x86_64'] },
-  { suffix: '_amd64.AppImage', keys: ['linux-x86_64-appimage'] },
-  { suffix: '_aarch64.AppImage', keys: ['linux-aarch64-appimage'] },
+  { name: (v) => `easy-study_${v}_x64-setup.exe`, keys: ['windows-x86_64-nsis', 'windows-x86_64'] },
+  { name: (v) => `easy-study_${v}_amd64.AppImage`, keys: ['linux-x86_64-appimage'] },
+  { name: (v) => `easy-study_${v}_aarch64.AppImage`, keys: ['linux-aarch64-appimage'] },
+  // The Linux server CLI (server-tarball.mjs), updated in place by `easy-study update`.
+  { name: (v) => serverTarballName(v, 'x64'), keys: ['linux-x86_64-server'], since: SERVER_SINCE },
+  { name: (v) => serverTarballName(v, 'arm64'), keys: ['linux-aarch64-server'], since: SERVER_SINCE },
 ];
+
+/**
+ * The updater artifacts of a release of `version` (x.y.z[-pre]): those without `since`, and those whose `since` is at
+ * most the version's x.y.z (a prerelease such as 0.6.6-e2e.1 is built by the same workflow as 0.6.6). The publish
+ * script run again for an older tag (a retry of 0.6.5) then asks only for what that tag's CI built.
+ */
+export function updaterArtifacts(version) {
+  const core = String(version).replace(/^v/, '').replace(/-.*$/, '');
+  return UPDATER_ARTIFACTS.filter((a) => !a.since || compareVersions(core, a.since) >= 0);
+}
+
+/** The platform keys a complete latest.json of `version` has. */
+export function updaterKeys(version) {
+  return updaterArtifacts(version).flatMap((a) => a.keys);
+}
 
 /** Files the publish script makes itself (never taken from a draft). latest.json goes up last. */
 export const GENERATED_ASSETS = ['SHA256SUMS.txt', 'latest.json'];
@@ -45,7 +81,7 @@ const escape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 function allowlist(version) {
   const v = escape(version);
   return [
-    ...UPDATER_ARTIFACTS.map((a) => [`updater ${a.keys[0]}`, new RegExp(`^easy-study_${v}${escape(a.suffix)}$`), true]),
+    ...updaterArtifacts(version).map((a) => [`updater ${a.keys[0]}`, new RegExp(`^${escape(a.name(version))}$`), true]),
     ['macOS dmg (Apple silicon)', new RegExp(`^easy-study_${v}_aarch64\\.dmg$`), true],
     ['macOS dmg (Intel)', new RegExp(`^easy-study_${v}_x64\\.dmg$`), true],
     ['deb (x86_64)', new RegExp(`^easy-study_${v}_amd64\\.deb$`), true],
@@ -67,7 +103,7 @@ function allowlist(version) {
 export function classifyAsset(name, version) {
   const hit = allowlist(version).find(([, re]) => re.test(name));
   if (!hit) throw new Error(`unexpected asset "${name}" in the draft of ${version} (not in release-assets.mjs's allowlist)`);
-  const updater = UPDATER_ARTIFACTS.find((a) => name === `easy-study_${version}${a.suffix}`);
+  const updater = updaterArtifacts(version).find((a) => name === a.name(version));
   return { name, label: hit[0], keys: updater ? [...updater.keys] : [] };
 }
 
@@ -97,8 +133,9 @@ export function latestJson({ version, notes, pubDate, baseUrl, artifacts }) {
   if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version)) throw new Error(`version "${version}": x.y.z without "v"`);
   if (Number.isNaN(Date.parse(pubDate)) || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z$/.test(pubDate)) throw new Error(`pub_date "${pubDate}": RFC 3339 in UTC`);
   const platforms = {};
-  for (const { suffix, keys } of UPDATER_ARTIFACTS) {
-    const name = `easy-study_${version}${suffix}`;
+  const ofVersion = updaterArtifacts(version);
+  for (const { name: nameOf, keys } of ofVersion) {
+    const name = nameOf(version);
     const a = artifacts.find((x) => x.name === name);
     if (!a) continue;
     const signature = String(a.signature).trim();
@@ -106,17 +143,17 @@ export function latestJson({ version, notes, pubDate, baseUrl, artifacts }) {
     for (const key of keys) platforms[key] = { url: `${baseUrl}/${name}`, signature };
   }
   for (const a of artifacts) {
-    if (!UPDATER_ARTIFACTS.some(({ suffix }) => a.name === `easy-study_${version}${suffix}`)) throw new Error(`${a.name} is not an updater artifact of ${version}`);
+    if (!ofVersion.some(({ name }) => a.name === name(version))) throw new Error(`${a.name} is not an updater artifact of ${version}`);
   }
   return { version, notes: String(notes ?? ''), pub_date: pubDate, platforms };
 }
 
-/** Every platform key a complete latest.json has. */
+/** Every updater platform key (a version from SERVER_SINCE on has them all; updaterKeys(version) for one version). */
 export const UPDATER_KEYS = UPDATER_ARTIFACTS.flatMap((a) => a.keys);
 
 /**
  * Problems of a latest.json about to be published (or read back): the version, exactly the platform keys of
- * UPDATER_KEYS, every url https and naming an updater asset of this version under `baseUrl` that is in
+ * updaterKeys(version), every url https and naming an updater asset of this version under `baseUrl` that is in
  * `uploaded` (names of the release's assets).
  */
 export function latestJsonProblems(json, { version, baseUrl, uploaded }) {
@@ -124,13 +161,14 @@ export function latestJsonProblems(json, { version, baseUrl, uploaded }) {
   if (json?.version !== version) problems.push(`version ${JSON.stringify(json?.version)}, expected ${version}`);
   if (typeof json?.notes !== 'string') problems.push('notes is not a string');
   if (Number.isNaN(Date.parse(json?.pub_date))) problems.push(`pub_date ${JSON.stringify(json?.pub_date)}`);
+  const expected = updaterKeys(version);
   const keys = Object.keys(json?.platforms ?? {});
-  const extra = keys.filter((k) => !UPDATER_KEYS.includes(k));
-  const missing = UPDATER_KEYS.filter((k) => !keys.includes(k));
+  const extra = keys.filter((k) => !expected.includes(k));
+  const missing = expected.filter((k) => !keys.includes(k));
   if (extra.length) problems.push(`unexpected platform keys ${extra.join(', ')}`);
   if (missing.length) problems.push(`missing platform keys ${missing.join(', ')}`);
-  for (const { suffix, keys: group } of UPDATER_ARTIFACTS) {
-    const name = `easy-study_${version}${suffix}`;
+  for (const { name: nameOf, keys: group } of updaterArtifacts(version)) {
+    const name = nameOf(version);
     for (const key of group) {
       const p = json?.platforms?.[key];
       if (!p) continue;
@@ -243,6 +281,53 @@ export function appArchiveProblems({ entries, files }, version) {
 }
 
 /**
+ * Problems of a Linux server tarball (server-tarball.mjs), from readTarGz() with SERVER_TOP_DIR/VERSION and
+ * SERVER_TOP_DIR/package.json: `easy-study update` (server/selfUpdate.ts) swaps the one top folder in for the
+ * install, so everything lies under easy-study-server/, as plain files and folders (no symbolic or hard link, which
+ * could point out of the install), with the version in VERSION and package.json and the programs executable.
+ * `arch`: x64 or arm64 (x64 also has whisper-cli's Vulkan build).
+ */
+export function serverArchiveProblems({ entries, files }, version, arch) {
+  const problems = [];
+  const top = SERVER_TOP_DIR;
+  if (arch !== 'x64' && arch !== 'arm64') problems.push(`arch ${arch}: expected x64 or arm64`);
+  if (entries.length === 0) problems.push('empty archive');
+  for (const e of entries) {
+    const name = e.name.replace(/\/$/, '');
+    if (name !== top && !name.startsWith(`${top}/`)) problems.push(`${e.name}: not under ${top}/`);
+    if (e.name.startsWith('/') || name.split('/').some((p) => p === '..' || p === '.' || p === '')) problems.push(`${e.name}: path leaves the folder`);
+    if (e.type === 'symlink') problems.push(`${e.name}: symbolic link (to ${e.link})`);
+    else if (e.type === 'hardlink') problems.push(`${e.name}: hard link (to ${e.link})`);
+    else if (e.type !== 'file' && e.type !== 'dir') problems.push(`${e.name}: neither a file nor a folder`);
+    else if (name === top && e.type !== 'dir') problems.push(`${e.name}: not a folder`);
+  }
+  const file = (rel) => entries.find((e) => e.name === `${top}/${rel}` && e.type === 'file');
+  const programs = ['bin/easy-study', 'node/bin/node', 'whisper/whisper-cli', ...(arch === 'x64' ? ['whisper/whisper-cli-vulkan'] : []), 'ffmpeg/ffmpeg'];
+  for (const rel of programs) {
+    const e = file(rel);
+    if (!e) problems.push(`no ${top}/${rel}`);
+    else if (!(e.mode & 0o100)) problems.push(`${top}/${rel} is not executable (mode ${e.mode.toString(8)})`);
+  }
+  const plain = ['VERSION', 'package.json', 'dist-server/server/cli.js', 'dist-server/server/index.js', 'web/dist/index.html', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'node/LICENSE', 'whisper/LICENSE'];
+  for (const rel of plain) if (!file(rel)) problems.push(`no ${top}/${rel}`);
+  const versionFile = files[`${top}/VERSION`]?.toString('utf8');
+  if (versionFile !== undefined && versionFile !== `${version}\n`) problems.push(`VERSION ${JSON.stringify(versionFile)}, expected ${JSON.stringify(`${version}\n`)}`);
+  const pkg = files[`${top}/package.json`];
+  if (pkg !== undefined) {
+    let found;
+    try {
+      found = JSON.parse(pkg.toString('utf8')).version;
+    } catch {
+      found = '(not JSON)';
+    }
+    if (found !== version) problems.push(`package.json version ${found}, expected ${version}`);
+  }
+  if (file('VERSION') && versionFile === undefined) problems.push(`${top}/VERSION was not read`);
+  if (file('package.json') && pkg === undefined) problems.push(`${top}/package.json was not read`);
+  return problems;
+}
+
+/**
  * Where the resources of a Windows program (PE) are in the file: the .rsrc section of the section table. `head`: the
  * first bytes of the file (the headers; 64 KiB is plenty). null for anything but a PE file with resources.
  */
@@ -310,7 +395,7 @@ function octal(h, at, len) {
 const TAR_TYPES = { 0: 'file', '': 'file', 7: 'file', 1: 'hardlink', 2: 'symlink', 5: 'dir' };
 
 /**
- * Reads a .tar.gz (ustar, pax and GNU long names) in one streamed pass: every entry's { name, type, size, link },
+ * Reads a .tar.gz (ustar, pax and GNU long names) in one streamed pass: every entry's { name, type, size, link, mode },
  * and the contents of the entries named in `want` as files[name]. Type: file, dir, symlink, hardlink or other.
  */
 export async function readTarGz(file, want = []) {
@@ -356,6 +441,7 @@ export async function readTarGz(file, want = []) {
         type: TAR_TYPES[flag] ?? 'other',
         size: next.size ?? size,
         link: next.linkpath ?? field(h, 157, 100),
+        mode: octal(h, 100, 8),
       };
       const data = header.size;
       let done;

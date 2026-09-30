@@ -89,6 +89,10 @@ macOS has no `timeout` command.
   `arch-x64` (AppImage + pacman package on Arch) → draft release in the PRIVATE repo with all installers,
   `easy-study-bin-*.pkg.tar.zst`, a PKGBUILD and the FFmpeg source. Manual run: `gh workflow run desktop.yml --ref main`.
   CI never signs anything for the updater and never sees the updater key.
+  From 0.6.6 the Linux jobs also build and smoke-test the headless server tarballs
+  (`easy-study-server-<v>-linux-<x64|arm64>.tar.gz`, DESIGN §26); publish-release checks their contents, signs them and
+  puts them in latest.json (`linux-*-server`) like the other updater artifacts, so `easy-study update` finds them. The
+  public easy-study-releases README's download list mentions them only after a manual edit, with the user's consent.
   Fast releases: tag directly (one CI run, ~11 min; the tests run beside the builds and only the release waits for
   them). CI caches are per git ref and a tag run restores main's, and only main's runs save them (`save-if`), so run
   CI ON MAIN first (`gh workflow run desktop.yml --ref main`) only when a cache input changed since the last main run:

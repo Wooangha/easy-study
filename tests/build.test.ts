@@ -53,6 +53,10 @@ describe('compiled server (dist-server)', () => {
     // The PDF engine is compiled too, and the worker imports it as JavaScript (DESIGN §17).
     await fs.access(path.join(outDir, 'server', 'pdf.js'));
     assert.match(await fs.readFile(path.join(outDir, 'server', 'imageWorker.js'), 'utf8'), /import\('\.\/pdf\.js'\)/);
+    // The Linux server CLI (bin/easy-study, DESIGN §26) loads the compiled server lazily and answers `version` alone.
+    assert.match(await fs.readFile(path.join(outDir, 'server', 'cli.js'), 'utf8'), /import\('\.\/index\.js'\)/);
+    const pkg = JSON.parse(await fs.readFile(path.join(repoRoot(), 'package.json'), 'utf8')) as { version: string };
+    assert.equal((await run(process.execPath, [path.join(outDir, 'server', 'cli.js'), 'version'])).stdout, `${pkg.version}\n`);
     await fs.access(path.join(outDir, 'shared', 'types.js'));
     // The slide aligner of lecture recordings runs its compiled file as a worker thread (DESIGN §22).
     const aligner = (await import(pathToFileURL(path.join(outDir, 'server', 'recordings', 'align', 'worker.js')).href)) as typeof import('../server/recordings/align/worker.ts');

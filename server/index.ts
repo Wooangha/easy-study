@@ -1336,10 +1336,18 @@ export function envCommand(vars: Record<string, string>, command: string, platfo
   return `${entries.map(([name, value]) => `${name}=${/[\s<>'"$&|;]/.test(value) ? `'${value}'` : value} `).join('')}${command}`;
 }
 
+/**
+ * The command line that starts the server again with a change (another port, another library, a new access code), for
+ * the messages of serverMain. `easy-study server` (server/cli.ts) passes one; without it they name the npm scripts.
+ */
+export type RestartCommand = (change: { port?: number; library?: string; resetAccessCode?: boolean }) => string;
+
 /** Why the server did not start because another one uses the library, and what to do about it. */
-function libraryLockedMessage(err: LibraryLockedError, dev: boolean): string {
+function libraryLockedMessage(err: LibraryLockedError, dev: boolean, restartCommand?: RestartCommand): string {
   const { holder } = err;
-  const again = envCommand({ EASY_STUDY_LIBRARY: '<다른 폴더>', PORT: String(holder.port + 1) }, `npm run ${dev ? 'dev' : 'serve'}`);
+  const again = restartCommand
+    ? restartCommand({ library: '<다른 폴더>', port: holder.port + 1 })
+    : envCommand({ EASY_STUDY_LIBRARY: '<다른 폴더>', PORT: String(holder.port + 1) }, `npm run ${dev ? 'dev' : 'serve'}`);
   return [
     `easy-study가 이미 이 라이브러리로 실행 중입니다 (pid ${holder.pid}, 포트 ${holder.port})`,
     `  라이브러리: ${libraryDir()}`,
@@ -1353,10 +1361,10 @@ function libraryLockedMessage(err: LibraryLockedError, dev: boolean): string {
 /**
  * Command line flags: --dev (Vite + HMR), --remote (remote mode: bind 0.0.0.0 with the login on unless
  * EASY_STUDY_HOST / EASY_STUDY_AUTH say otherwise; the npm scripts then work the same in every shell,
- * PowerShell included), --reset-access-code (DESIGN §16).
+ * PowerShell included), --reset-access-code (DESIGN §16). `easy-study server` (server/cli.ts, DESIGN §26) calls it
+ * with its own flags and `restartCommand` for the commands it prints.
  */
-async function main(): Promise<void> {
-  const args = process.argv.slice(2);
+export async function serverMain(args: readonly string[] = process.argv.slice(2), restartCommand?: RestartCommand): Promise<void> {
   // The desktop app's server (DESIGN §19): ready line, stop on stdin EOF, errors for the app (server/desktop.ts).
   if (desktopMode(process.env, args)) {
     await runDesktopServer(startServer);
@@ -1386,12 +1394,12 @@ async function main(): Promise<void> {
     if (err instanceof ConfigError) {
       console.error(`설정 오류: ${err.message}`);
     } else if (err instanceof LibraryLockedError) {
-      console.error(libraryLockedMessage(err, dev));
+      console.error(libraryLockedMessage(err, dev, restartCommand));
     } else if ((err as NodeJS.ErrnoException).code === 'EADDRINUSE') {
       // Not an easy-study on this library (the library lock would have said so).
       console.error(
         `포트 ${port()}을(를) 다른 프로그램(또는 다른 라이브러리로 실행 중인 easy-study)이 쓰고 있습니다. ` +
-          `다른 포트로 실행하세요: ${envCommand({ PORT: String(port() + 1) }, `npm run ${script}`)}`,
+          `다른 포트로 실행하세요: ${restartCommand ? restartCommand({ port: port() + 1 }) : envCommand({ PORT: String(port() + 1) }, `npm run ${script}`)}`,
       );
     } else {
       console.error('서버를 시작하지 못했습니다:', err);
@@ -1407,7 +1415,11 @@ async function main(): Promise<void> {
         ...running.access,
         store: running.access,
         dev,
-        resetCommand: underWatch ? `${authFilePath()} 을(를) 지우고 다시 시작` : `npm run ${script} -- --reset-access-code`,
+        resetCommand: underWatch
+          ? `${authFilePath()} 을(를) 지우고 다시 시작`
+          : restartCommand
+            ? restartCommand({ resetAccessCode: true })
+            : `npm run ${script} -- --reset-access-code`,
       }),
     );
   } else if (resetAccessCode) {
@@ -1436,5 +1448,5 @@ async function main(): Promise<void> {
 }
 
 if (import.meta.main) {
-  await main();
+  await serverMain();
 }

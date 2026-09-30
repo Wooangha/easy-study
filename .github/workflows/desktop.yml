@@ -3,6 +3,7 @@
 # Vulkan GPU build on Windows x64 and Linux x64, and a minimal LGPL ffmpeg, built here for every target and cached).
 # The repo's tests run first. Bundles are uploaded as workflow artifacts; the x86_64 Linux bundles are also tested on
 # current Arch Linux, which builds the Arch package.
+# The Linux builds also pack the server CLI alone (DESIGN §26): easy-study-server-<version>-linux-<arch>.tar.gz.
 # A `v*` tag also creates a DRAFT GitHub release with all of them (and FFmpeg's source). Unsigned by default (macOS ad-hoc signature, no
 # notarization; unsigned Windows installer): macOS signing and notarization turn on when the APPLE_* secrets exist.
 # In-app updates (DESIGN §24): the macOS builds also pack the .app as the updater's .app.tar.gz; the Windows installer
@@ -280,7 +281,8 @@ jobs:
           codesign -d --entitlements - "$app" > "$RUNNER_TEMP/entitlements.txt"
           grep com.apple.security.device.audio-input "$RUNNER_TEMP/entitlements.txt"
           codesign -dv "$app" 2>&1 | grep -E '^CodeDirectory .*flags=.*runtime'
-          test -x "$app/Contents/Resources/whisper/whisper-cli" && test -x "$app/Contents/Resources/ffmpeg/ffmpeg"
+          test -x "$app/Contents/Resources/whisper/whisper-cli"
+          test -x "$app/Contents/Resources/ffmpeg/ffmpeg"
 
       # The in-app updater's macOS artifact (DESIGN §24): the .app as built (not re-signed) in a .tar.gz with exactly
       # one top folder, since tauri-plugin-updater drops the first path segment of every entry ("-C dir ." would add a
@@ -312,6 +314,13 @@ jobs:
         if: runner.os == 'Linux'
         run: node desktop/scripts/appimage.mjs --check "$BUNDLE"/appimage/*.AppImage
 
+      # The Linux server CLI (DESIGN §26): this build's Node, packed server and recording tools in one tarball with the
+      # top folder easy-study-server/ and no GUI libraries (server-tarball.mjs checks it as the publish script does).
+      # publish-release.mjs signs it like the updater artifacts, and `easy-study update` finds it through latest.json.
+      - name: Server tarball (Linux)
+        if: runner.os == 'Linux'
+        run: node desktop/scripts/server-tarball.mjs --target ${{ matrix.target }} --out "$BUNDLE/server"
+
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: easy-study-${{ matrix.name }}
@@ -322,6 +331,7 @@ jobs:
             ${{ env.BUNDLE }}/deb/*.deb
             ${{ env.BUNDLE }}/rpm/*.rpm
             ${{ env.BUNDLE }}/appimage/*.AppImage
+            ${{ env.BUNDLE }}/server/*.tar.gz
           if-no-files-found: error
 
       # Smoke tests (EASY_STUDY_DESKTOP_SMOKE, src-tauri/src/main.rs): =chooser-local submits the chooser's own
@@ -375,6 +385,48 @@ jobs:
           if pgrep -af 'dist-server/server/index.js'; then exit 1; fi
           node "$GITHUB_WORKSPACE/desktop/scripts/asr-smoke.mjs" --whisper squashfs-root/usr/bin/es-whisper \
             --ffmpeg squashfs-root/usr/bin/es-ffmpeg --models "$GITHUB_WORKSPACE/.cache/asr-smoke"
+      # The server tarball as a user installs it (README): unpacked into a dot folder and run through a symlink, with
+      # the data under XDG_DATA_HOME. `easy-study server` opens the server for other devices: the access code from its
+      # terminal output, /api/health refused without it and answered with it, the bundled whisper-cli and ffmpeg found
+      # (the server's own GPU probe included), and Ctrl+C (SIGINT) ends it with exit 0 and nothing left running.
+      - name: Smoke test (Linux, server tarball)
+        if: matrix.smoke && runner.os == 'Linux'
+        run: |
+          v=$(node -p "require('./package.json').version")
+          case "${{ matrix.target }}" in x86_64-*) a=x64 ;; *) a=arm64 ;; esac
+          mkdir -p "$RUNNER_TEMP/.es-server"
+          tar -xzf "$BUNDLE/server/easy-study-server-${v}-linux-${a}.tar.gz" -C "$RUNNER_TEMP/.es-server"
+          root="$RUNNER_TEMP/.es-server/easy-study-server"
+          ln -s "$root/bin/easy-study" "$RUNNER_TEMP/easy-study"
+          es="$RUNNER_TEMP/easy-study"
+          test "$("$es" version)" = "$v"
+          test "$(cat "$root/VERSION")" = "$v"
+          test -x "$root/node/bin/node"
+          test -x "$root/whisper/whisper-cli"
+          test -x "$root/ffmpeg/ffmpeg"
+          if [ "$a" = x64 ]; then test -x "$root/whisper/whisper-cli-vulkan"; fi
+          port=$(node -e "const s = require('net').createServer().listen(0, '127.0.0.1', () => { console.log(s.address().port); s.close(); })")
+          XDG_DATA_HOME="$RUNNER_TEMP/.es-data" "$es" server --port "$port" > "$RUNNER_TEMP/server.txt" 2>&1 &
+          pid=$!
+          for i in $(seq 90); do
+            if grep -q 'login?code=' "$RUNNER_TEMP/server.txt"; then break; fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/server.txt"
+          code=$(grep -o 'login?code=[0-9A-Za-z-]*' "$RUNNER_TEMP/server.txt" | head -n 1 | cut -d= -f2)
+          test -n "$code"
+          test "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/api/health")" = 401
+          curl -fsS -H "Authorization: Bearer $code" "http://127.0.0.1:$port/api/health" > "$RUNNER_TEMP/health.json"
+          grep -F "\"version\":\"$v\"" "$RUNNER_TEMP/health.json"
+          curl -fsS -H "Authorization: Bearer $code" "http://127.0.0.1:$port/api/asr" > "$RUNNER_TEMP/asr.json"
+          cat "$RUNNER_TEMP/asr.json"
+          grep -qF '"engineAvailable":true' "$RUNNER_TEMP/asr.json"
+          grep -qF '"ffmpegAvailable":true' "$RUNNER_TEMP/asr.json"
+          test -f "$RUNNER_TEMP/.es-data/easy-study/library/.auth.json"
+          kill -INT "$pid"
+          wait "$pid"
+          sleep 1
+          if pgrep -af "$root/"; then exit 1; fi
       # whisper-cli's Vulkan build (/usr/bin/es-whisper-vulkan) transcribing on Mesa's software Vulkan device,
       # lavapipe: ggml leaves CPU-type devices alone unless GGML_VK_VISIBLE_DEVICES names one, so this runs the Vulkan
       # code path on a runner without a GPU. Then the AppImage's copy (extracted above) finds the device through the

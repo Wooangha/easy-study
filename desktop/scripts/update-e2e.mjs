@@ -43,7 +43,7 @@ export function e2eConfig({ version, pubkey, port }) {
 
 /** Writes <dir>/latest.json for the updater artifacts of `version` in `dir` that have a .sig; returns it. */
 export function writeLatest({ dir, version, port, notes = `easy-study ${version} (e2e)` }) {
-  const artifacts = UPDATER_ARTIFACTS.map(({ suffix }) => `easy-study_${version}${suffix}`)
+  const artifacts = UPDATER_ARTIFACTS.map(({ name }) => name(version))
     .filter((name) => fs.existsSync(path.join(dir, name)) && fs.existsSync(path.join(dir, `${name}.sig`)))
     .map((name) => ({ name, signature: fs.readFileSync(path.join(dir, `${name}.sig`), 'utf8') }));
   if (artifacts.length === 0) throw new Error(`no signed updater artifact of ${version} in ${dir}`);

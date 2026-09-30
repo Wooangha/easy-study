@@ -20,9 +20,11 @@
 //   (nothing else is ever made public) with all required assets present;
 // - the PKGBUILD downloads from the public repo, for this version, with the draft's .deb checksums;
 // - after the download: sha256 = GitHub's digest; the macOS archives have one top folder, no hard link or "._" file
-//   and Info.plist's version; the Windows installer's version resource (ProductVersion) is the version (the AppImages
-//   are squashfs images: they are only checked by name, CI run and digest); every signature verifies with the key the installed apps trust (the tag's, and the
-//   public latest release's), names its file and version (trusted comment file:/version:).
+//   and Info.plist's version; the Windows installer's version resource (ProductVersion) is the version; the Linux
+//   server tarballs have the one top folder easy-study-server/, only files and folders, VERSION and package.json of
+//   the version and the programs executable (serverArchiveProblems) (the AppImages are squashfs images: they are
+//   only checked by name, CI run and digest); every signature verifies with the key the installed apps trust (the
+//   tag's, and the public latest release's), names its file and version (trusted comment file:/version:).
 // Signing: `tauri signer sign -f <key> --app-version <v>`. The script passes the key's path to the
 // Tauri CLI and never reads, prints or copies the key itself.
 // Publishing: a DRAFT public release gets every allowlisted asset, SHA256SUMS.txt and latest.json (last); only then
@@ -40,6 +42,7 @@ import {
   CI_WORKFLOW,
   PRIVATE_REPO,
   PUBLIC_REPO,
+  SERVER_TOP_DIR,
   UPDATER_ENDPOINT,
   UPDATER_KEY_ID,
   appArchiveProblems,
@@ -55,6 +58,7 @@ import {
   publicAssetList,
   readTarGz,
   releaseDownloadUrl,
+  serverArchiveProblems,
   sha256sums,
   versionInfoString,
 } from './release-assets.mjs';
@@ -418,6 +422,13 @@ async function publishDraft(opt, ctx, state, save) {
     if (found !== version) throw new Error(`${c.name}: ProductVersion ${found ?? '(none)'}, expected ${version}`);
     console.log(`  ✓ ${c.name}: ProductVersion ${version}`);
   }
+  for (const c of updater.filter((u) => u.name.startsWith(`${SERVER_TOP_DIR}-`))) {
+    const arch = /-linux-(x64|arm64)\.tar\.gz$/.exec(c.name)?.[1];
+    const archive = await readTarGz(path.join(work, 'assets', c.name), [`${SERVER_TOP_DIR}/VERSION`, `${SERVER_TOP_DIR}/package.json`]);
+    const problems = serverArchiveProblems(archive, version, arch);
+    if (problems.length) throw new Error(`${c.name}: ${problems.join('; ')}`);
+    console.log(`  ✓ ${c.name}: one top folder ${SERVER_TOP_DIR}/, files and folders only, VERSION and package.json ${version}, programs executable`);
+  }
   for (const c of updater.filter((u) => u.name.endsWith('.AppImage'))) {
     console.log(`  - ${c.name}: not looked into (a squashfs image): name, CI run and digest only`);
   }
@@ -614,7 +625,7 @@ async function main() {
         ? ['check the published release against the draft (digests, SHA256SUMS.txt, latest.json signatures) and change nothing']
         : [
             `download ${n} assets (${mb(total)}) by asset id to ${opt.work}/assets and compare each sha256 with GitHub's digest`,
-            'check both macOS archives (one top folder, no hard links, Info.plist version) and the Windows installer (ProductVersion)',
+            'check both macOS archives (one top folder, no hard links, Info.plist version), the Windows installer (ProductVersion) and both Linux server tarballs (one top folder, no links, VERSION, programs executable)',
             `sign ${updater.length} updater artifacts with ${opt.key} (tauri signer sign --app-version ${opt.version}) and verify them with key ${UPDATER_KEY_ID}`,
             'write latest.json and SHA256SUMS.txt',
             `${pub ? `reuse the public draft ${pub.id}` : `create a public draft ${opt.tag} (target main)`} and upload ${n + 2} assets, latest.json last`,

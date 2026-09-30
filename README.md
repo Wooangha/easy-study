@@ -209,6 +209,38 @@ npm run desktop:test         # 앱 설정 검사 (IPC는 시작 화면에만, �
 
 앱을 시험할 때 알아 둘 것: 스모크 실행은 이미 켜진 easy-study에 넘기지 않고 따로 실행돼요. 하지만 보통 실행은 컴퓨터 전체에서 하나만 돼요(두 번째 실행은 켜진 창을 앞으로 가져오고 끝나요). WebView의 쿠키·저장소는 `EASY_STUDY_DESKTOP_HOME`과 상관없이 OS의 앱 폴더를 같이 써요. 그러니 앱 시험은 한 번에 하나씩 하세요. macOS에서 `CFFIXED_USER_HOME`으로 WebView 데이터를 옮기면 쿠키가 저장되지 않으니 로그인 유지 시험에는 쓰지 마세요. Linux에서 WebDriver(tauri-driver)로 시험하면 `target=_blank` 링크의 새 창이 열리지 않고, 시작 화면 스크린숏이 스크립트 실행 전 모습으로 찍혀요. 새 창과 화면 모습은 앱을 직접 실행해서 xdotool과 X 스크린숏으로 확인하세요. Docker 같은 곳에서 Linux 패키지를 빌드할 때는 `xdg-utils`(AppImage에 `xdg-open`이 들어가요)와 `squashfs-tools`도 설치하세요. 구조와 계약은 [docs/DESIGN.md](docs/DESIGN.md) §19(앱), §22(강의 녹음), §24(업데이트, 설정)에 있어요.
 
+## 리눅스 서버 (CLI)
+
+화면 없는 Linux 컴퓨터(홈 서버, 미니 PC, 클라우드)에서 **서버만** 켜 두고, 다른 컴퓨터의 easy-study 앱(연결 선택 화면의 **다른 컴퓨터에 연결**)이나 브라우저로 쓰는 버전이에요 (0.6.6부터). Node, 서버, 받아쓰기 도구(whisper, ffmpeg)가 다 들어 있어서 따로 설치할 게 없어요. x64와 arm64가 있어요.
+
+```bash
+# 설치: 공개 릴리스 페이지에서 받아 풀고, 명령을 PATH에 연결해요 (<버전> 예: 0.6.6, <arch> = x64 또는 arm64)
+curl -LO https://github.com/Wooangha/easy-study-releases/releases/download/v<버전>/easy-study-server-<버전>-linux-<arch>.tar.gz
+mkdir -p ~/.local/opt ~/.local/bin
+tar -xzf easy-study-server-<버전>-linux-<arch>.tar.gz -C ~/.local/opt
+ln -sf ~/.local/opt/easy-study-server/bin/easy-study ~/.local/bin/easy-study
+```
+
+```bash
+easy-study server
+```
+
+- 다른 기기에서 접속할 수 있게 **5350 포트**로 열리고, 터미널에 주소와 **접속 코드**, 바로 로그인 링크가 나와요. 코드는 다시 켜도 그대로예요.
+- 옵션: `--port <번호>`, `--library <폴더>`, `--models <폴더>`, `--host <주소>`(로그인은 그대로 켜져 있어요), `--local`(이 컴퓨터에서만, 로그인 없이), `--reset-access-code`(새 코드, 모든 로그인 끊기).
+- 강의 자료와 기록은 `~/.local/share/easy-study/library`, 받아쓰기 모델은 `~/.local/share/easy-study/models`에 저장돼요 (`XDG_DATA_HOME`이 있으면 그 아래). 설치 폴더 밖이라 업데이트해도 그대로예요.
+- LLM은 그 컴퓨터에 로그인된 Claude Code·Codex CLI나 `ANTHROPIC_API_KEY`·`OPENAI_API_KEY`를 써요. `EASY_STUDY_PASSWORD`와 HTTPS 인증서 변수(`EASY_STUDY_TLS_CERT`, `EASY_STUDY_TLS_KEY`)도 [원격 모드](#다른-컴퓨터에서-쓰기-원격-모드)와 똑같이 먹어요.
+- x64에서 그래픽카드가 있으면 받아쓰기에 GPU(Vulkan)를 써요. `libvulkan1`(Arch: `vulkan-icd-loader`)이 없으면 CPU로 받아써요.
+- 필요한 것: glibc, libstdc++, libatomic1 (대부분의 배포판에 이미 있어요).
+- 터미널을 닫으면 서버도 꺼져요. 계속 켜 두려면 `tmux`나 systemd 사용자 서비스로 켜세요. systemd로 켤 때는 `claude`/`codex`가 있는 폴더가 PATH에 들어가게 해 주세요.
+
+```bash
+easy-study update --check   # 새 버전이 있는지만 확인
+easy-study update           # 받아서 서명을 확인하고 제자리에서 바꿔요
+easy-study version
+```
+
+업데이트는 앱과 같은 서명 키로 서명된 파일만 설치해요. 서버가 켜져 있으면 먼저 끄라고 알려주고, 설치 폴더 안에 모르는 파일이 있으면(지워질 수 있어서) 바꾸지 않아요. 끝나면 `easy-study server`로 다시 켜세요.
+
 ## 강의 녹음
 
 수업 중에 앱에서 바로 녹음하면 이 컴퓨터에서 받아쓰고([whisper.cpp](https://github.com/ggml-org/whisper.cpp)), 받아쓴 말을 슬라이드마다 나눠요. 튜터는 지금 슬라이드에서 교수님이 한 말까지 알고 답하고, 나중에는 녹음을 슬라이드와 맞춰 다시 들을 수 있어요. 이미 녹음해 둔 파일도 올릴 수 있어요. 받아쓰기는 API 키 없이 이 컴퓨터에서만 해요.

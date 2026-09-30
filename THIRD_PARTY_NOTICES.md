@@ -7,7 +7,9 @@ binary or bundled distributions. It covers the PDF engine (DESIGN §17) and the 
 models](#models-downloaded-on-first-use-silero-vad-v620-and-openai-whisper--mit)), the [libvips binaries of
 sharp](#image-processing-sharp-0354-with-libvips-8186--lgpl-30-or-later), the [code highlighting of the web
 client](#web-client-highlightjs-1112--bsd-3-clause) and its [icons](#web-client-icons-lucide-1490--isc); the other npm dependencies (sharp itself, Express, the SDKs, …)
-carry their own license files in `node_modules`.
+carry their own license files in `node_modules`. The Linux server tarball (`easy-study-server-<version>-linux-<arch>.tar.gz`,
+DESIGN §26) holds the same server, web client and recording tools as the desktop app, the official Node.js with its
+`node/LICENSE`, and this file.
 
 ## PDF engine: `@embedpdf/pdfium` 2.15.1 (PDFium compiled to WebAssembly)
 
@@ -769,7 +771,8 @@ jloup@gzip.org          madler@alumni.caltech.edu
 The desktop app ships `whisper-cli` from [whisper.cpp](https://github.com/ggml-org/whisper.cpp) v1.9.4 (commit
 `927cfce34f31707e17f2bff35c349632fb9e2c3a`, which includes the ggml library), built by `desktop/scripts/whisper.mjs`
 (macOS: `easy-study.app/Contents/Resources/whisper/`, Windows: `whisper\` in the install folder with its DLLs, Linux:
-`/usr/bin/es-whisper`, license in `/usr/lib/easy-study/whisper/LICENSE`). Web mode (`npm start`) builds the same
+`/usr/bin/es-whisper`, license in `/usr/lib/easy-study/whisper/LICENSE`; the Linux server tarball:
+`easy-study-server/whisper/whisper-cli` with `whisper/LICENSE`). Web mode (`npm start`) builds the same
 source with `npm run setup:whisper`. `whisper-cli` also compiles in two single-file libraries of its examples,
 miniaudio (public domain or MIT-0) and stb_vorbis (public domain or MIT), which ask for no notice.
 On Windows it is built with OpenMP and ships Microsoft's OpenMP runtime `vcomp140.dll` next to it, one of the
@@ -801,7 +804,7 @@ SOFTWARE.
 ```
 
 For speech recognition on the GPU, the x64 builds for Windows and Linux also ship ggml's Vulkan backend (same source
-and license): Windows `whisper\es-ggml-vulkan.dll`, Linux `/usr/bin/es-whisper-vulkan` (a second `whisper-cli`
+and license): Windows `whisper\es-ggml-vulkan.dll`, Linux `/usr/bin/es-whisper-vulkan` and the server tarball's `whisper/whisper-cli-vulkan` (a second `whisper-cli`
 with the backend). They use the computer's own Vulkan loader and GPU driver (`vulkan-1.dll`, `libvulkan.so.1`), which
 are not part of easy-study. The backend is built with the Vulkan SDK 1.4.363.0 from LunarG and compiles in two sets
 of Khronos headers from it: the Vulkan headers (Vulkan-Headers `vulkan.h` and Vulkan-Hpp `vulkan.hpp`, generated
@@ -839,7 +842,8 @@ its output.
 ## Audio conversion: FFmpeg 8.1 with libopus 1.5.2 — LGPL-2.1-or-later
 
 The desktop app ships an `ffmpeg` program (macOS: `easy-study.app/Contents/Resources/ffmpeg/`, Windows: `ffmpeg\` in
-the install folder, Linux: `/usr/bin/es-ffmpeg` with the files below in `/usr/lib/easy-study/ffmpeg/`). It converts
+the install folder, Linux: `/usr/bin/es-ffmpeg` with the files below in `/usr/lib/easy-study/ffmpeg/`, the Linux server
+tarball: `easy-study-server/ffmpeg/ffmpeg` with the same files next to it). It converts
 uploaded lecture recordings; it runs as a separate program and is not linked into easy-study.
 
 It is **FFmpeg 8.1, licensed under the GNU Lesser General Public License version 2.1 or later**, built from the

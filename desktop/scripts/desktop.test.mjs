@@ -18,6 +18,9 @@ import {
   CI_UPLOADER,
   CI_WORKFLOW,
   PUBLIC_REPO,
+  SERVER_TOP_DIR,
+  SERVER_SINCE,
+  UPDATER_ARTIFACTS,
   UPDATER_ENDPOINT,
   UPDATER_KEYS,
   UPDATER_KEY_ID,
@@ -34,9 +37,14 @@ import {
   publicAssetList,
   readTarGz,
   releaseDownloadUrl,
+  serverArchiveProblems,
+  serverTarballName,
   sha256sums,
+  updaterKeys,
   versionInfoString,
 } from './release-assets.mjs';
+import { LAUNCHER, gnuTar, serverTarball, stageServerTree } from './server-tarball.mjs';
+import { INSTALL_ENTRIES } from '../../server/selfUpdate.ts';
 import {
   DESKTOP_DIR,
   LINUX_EXTERNAL_BINS,
@@ -1190,8 +1198,9 @@ test('PKGBUILD: the sources come from the public releases repo', () => {
   assert.match(pkgbuildProblems(private_, { version, debs }).join(), /must come from https:\/\/github\.com\/Wooangha\/easy-study-releases/);
 });
 
-// The asset names of CI's v0.4.2 draft plus the macOS updater archives of later drafts.
-const draftNames = (v) => [
+// The asset names of CI's v0.4.2 draft plus the Linux server tarballs (from 0.6.6 on) and the macOS updater archives
+// of later drafts.
+const draftNames = (v, { server = compareVersions(v, '0.6.6') >= 0 } = {}) => [
   `easy-study-${v}-1.aarch64.rpm`,
   `easy-study-${v}-1.x86_64.rpm`,
   `easy-study-bin-${v}-1-x86_64.pkg.tar.zst`,
@@ -1204,6 +1213,7 @@ const draftNames = (v) => [
   `easy-study_${v}_x64-setup.exe`,
   `easy-study_${v}_x64.dmg`,
   'PKGBUILD',
+  ...(server ? [`easy-study-server-${v}-linux-x64.tar.gz`, `easy-study-server-${v}-linux-arm64.tar.gz`] : []),
   `easy-study_${v}_aarch64.app.tar.gz`,
   `easy-study_${v}_x64.app.tar.gz`,
 ];
@@ -1216,9 +1226,40 @@ test('release assets: an allowlist (nothing unexpected goes public), updater key
   assert.deepEqual(keys['easy-study_0.5.0_x64-setup.exe'], ['windows-x86_64-nsis', 'windows-x86_64']);
   assert.deepEqual(keys['easy-study_0.5.0_amd64.AppImage'], ['linux-x86_64-appimage']);
   assert.deepEqual(keys['easy-study_0.5.0_aarch64.AppImage'], ['linux-aarch64-appimage']);
+  // The Linux server tarballs (from 0.6.6 on): keys only `easy-study update` reads (the app asks for
+  // linux-<arch>-appimage).
+  assert.deepEqual(classifyAsset('easy-study-server-0.6.6-linux-x64.tar.gz', '0.6.6').keys, ['linux-x86_64-server']);
+  assert.deepEqual(classifyAsset('easy-study-server-0.6.6-linux-arm64.tar.gz', '0.6.6').keys, ['linux-aarch64-server']);
   for (const n of ['easy-study_0.5.0_amd64.deb', 'easy-study-0.5.0-1.x86_64.rpm', 'easy-study_0.5.0_x64.dmg', 'PKGBUILD']) assert.deepEqual(keys[n], [], n);
-  assert.deepEqual(UPDATER_KEYS, ['darwin-aarch64', 'darwin-x86_64', 'windows-x86_64-nsis', 'windows-x86_64', 'linux-x86_64-appimage', 'linux-aarch64-appimage']);
+  assert.deepEqual(UPDATER_KEYS, [
+    'darwin-aarch64',
+    'darwin-x86_64',
+    'windows-x86_64-nsis',
+    'windows-x86_64',
+    'linux-x86_64-appimage',
+    'linux-aarch64-appimage',
+    'linux-x86_64-server',
+    'linux-aarch64-server',
+  ]);
   assert.ok(!UPDATER_KEYS.includes('linux-x86_64') && !UPDATER_KEYS.includes('linux-aarch64'), 'deb/rpm would fall back to a bare linux key');
+  // The app's names are unchanged; each artifact is its own required allowlist entry.
+  assert.deepEqual(UPDATER_ARTIFACTS.map((a) => a.name('0.5.0')), [
+    'easy-study_0.5.0_aarch64.app.tar.gz',
+    'easy-study_0.5.0_x64.app.tar.gz',
+    'easy-study_0.5.0_x64-setup.exe',
+    'easy-study_0.5.0_amd64.AppImage',
+    'easy-study_0.5.0_aarch64.AppImage',
+    'easy-study-server-0.5.0-linux-x64.tar.gz',
+    'easy-study-server-0.5.0-linux-arm64.tar.gz',
+  ]);
+  assert.equal(serverTarballName('0.7.0', 'x64'), 'easy-study-server-0.7.0-linux-x64.tar.gz');
+  assert.equal(serverTarballName('0.7.0', 'arm64'), 'easy-study-server-0.7.0-linux-arm64.tar.gz');
+  assert.throws(() => serverTarballName('0.7.0', 'aarch64'), /x64 or arm64/);
+  assert.equal(SERVER_TOP_DIR, 'easy-study-server');
+  assert.deepEqual(missingAssets(draftNames('0.6.6').filter((n) => !n.includes('-linux-arm64')), '0.6.6'), ['updater linux-aarch64-server']);
+  for (const bad of ['easy-study-server-0.6.6-linux-x86_64.tar.gz', 'easy-study-server-0.6.7-linux-x64.tar.gz', 'easy-study-server-0.6.6-linux-x64.tgz', 'easy-study-server-0.6.6-linux-x64.tar.gz.sig']) {
+    assert.throws(() => classifyAsset(bad, '0.6.6'), /unexpected asset/, bad);
+  }
   assert.deepEqual(missingAssets(names, '0.5.0'), []);
   // v0.4.2's draft (before the updater) lacks the macOS archives.
   assert.deepEqual(missingAssets(draftNames('0.4.2').slice(0, -2), '0.4.2'), ['updater darwin-aarch64', 'updater darwin-x86_64']);
@@ -1236,19 +1277,23 @@ test('release assets: an allowlist (nothing unexpected goes public), updater key
 });
 
 test('release assets: latest.json for tauri-plugin-updater, and its checks before publishing', () => {
-  const version = '0.5.0';
-  const baseUrl = releaseDownloadUrl('v0.5.0');
-  assert.equal(baseUrl, `https://github.com/${PUBLIC_REPO}/releases/download/v0.5.0`);
+  const version = '0.6.6';
+  const baseUrl = releaseDownloadUrl('v0.6.6');
+  assert.equal(baseUrl, `https://github.com/${PUBLIC_REPO}/releases/download/v0.6.6`);
   const updater = draftNames(version).filter((n) => classifyAsset(n, version).keys.length > 0);
   const artifacts = updater.map((name) => ({ name, signature: `${Buffer.from(`sig of ${name}`).toString('base64')}\n` }));
   const latest = latestJson({ version, notes: '노트', pubDate: '2026-10-05T09:00:00Z', baseUrl, artifacts });
   assert.deepEqual(Object.keys(latest), ['version', 'notes', 'pub_date', 'platforms']);
   assert.deepEqual(Object.keys(latest.platforms), UPDATER_KEYS);
   assert.deepEqual(latest.platforms['darwin-aarch64'], {
-    url: `${baseUrl}/easy-study_0.5.0_aarch64.app.tar.gz`,
-    signature: Buffer.from('sig of easy-study_0.5.0_aarch64.app.tar.gz').toString('base64'),
+    url: `${baseUrl}/easy-study_0.6.6_aarch64.app.tar.gz`,
+    signature: Buffer.from('sig of easy-study_0.6.6_aarch64.app.tar.gz').toString('base64'),
   });
   assert.deepEqual(latest.platforms['windows-x86_64'], latest.platforms['windows-x86_64-nsis']);
+  assert.equal(latest.platforms['linux-x86_64-server'].url, `${baseUrl}/easy-study-server-0.6.6-linux-x64.tar.gz`);
+  assert.equal(latest.platforms['linux-aarch64-server'].url, `${baseUrl}/easy-study-server-0.6.6-linux-arm64.tar.gz`);
+  assert.equal(latest.platforms['linux-x86_64-server'].url, `https://github.com/Wooangha/easy-study-releases/releases/download/v0.6.6/${serverTarballName('0.6.6', 'x64')}`);
+  assert.equal(latest.platforms['linux-aarch64-server'].signature, Buffer.from('sig of easy-study-server-0.6.6-linux-arm64.tar.gz').toString('base64'));
   assert.deepEqual(latestJsonProblems(latest, { version, baseUrl, uploaded: draftNames(version) }), []);
   // What would make it unsafe or broken.
   const broken = (edit) => {
@@ -1261,10 +1306,12 @@ test('release assets: latest.json for tauri-plugin-updater, and its checks befor
   assert.match(broken((j) => delete j.platforms['darwin-x86_64']), /missing platform keys darwin-x86_64/);
   assert.match(broken((j) => (j.platforms['darwin-aarch64'].url = j.platforms['darwin-x86_64'].url)), /darwin-aarch64: url/);
   assert.match(broken((j) => (j.platforms['linux-aarch64-appimage'].url = j.platforms['linux-aarch64-appimage'].url.replace('https:', 'http:'))), /not https/);
+  assert.match(broken((j) => (j.platforms['linux-x86_64-server'].url = j.platforms['linux-aarch64-server'].url)), /linux-x86_64-server: url/);
+  assert.match(broken((j) => delete j.platforms['linux-aarch64-server']), /missing platform keys linux-aarch64-server/);
   assert.match(latestJsonProblems(latest, { version, baseUrl, uploaded: [] }).join(), /not among the release's assets/);
-  assert.throws(() => latestJson({ version: 'v0.5.0', notes: '', pubDate: '2026-10-05T09:00:00Z', baseUrl, artifacts }), /without "v"/);
+  assert.throws(() => latestJson({ version: 'v0.6.6', notes: '', pubDate: '2026-10-05T09:00:00Z', baseUrl, artifacts }), /without "v"/);
   assert.throws(() => latestJson({ version, notes: '', pubDate: '2026-10-05 09:00', baseUrl, artifacts }), /RFC 3339/);
-  assert.throws(() => latestJson({ version, notes: '', pubDate: '2026-10-05T09:00:00Z', baseUrl, artifacts: [{ name: 'easy-study_0.5.0_x64.dmg', signature: 'x' }] }), /not an updater artifact/);
+  assert.throws(() => latestJson({ version, notes: '', pubDate: '2026-10-05T09:00:00Z', baseUrl, artifacts: [{ name: 'easy-study_0.6.6_x64.dmg', signature: 'x' }] }), /not an updater artifact/);
   assert.throws(() => latestJson({ version, notes: '', pubDate: '2026-10-05T09:00:00Z', baseUrl, artifacts: [{ ...artifacts[0], signature: 'a b' }] }), /one-line/);
   // Notes: the first paragraph that is not a heading, as plain text.
   assert.equal(notesSummary('# easy-study 0.5.0\n\n<!-- draft -->\n앱 안에서 **업데이트**할 수 있어요.\n[설정](https://x) 화면도 생겼어요.\n\n- 둘째 문단'), '앱 안에서 업데이트할 수 있어요.\n설정 화면도 생겼어요.');
@@ -1277,6 +1324,43 @@ test('release assets: latest.json for tauri-plugin-updater, and its checks befor
   assert.ok(compareVersions('0.5.0-e2e.1', '0.5.0-e2e.2') < 0);
   assert.ok(compareVersions('0.5.0-e2e.2', '0.5.0') < 0);
   assert.ok(compareVersions('0.5.0-e2e.10', '0.5.0-e2e.9') > 0);
+});
+
+test('release assets: the server tarballs from 0.6.6 on (0.6.5 was published without them)', () => {
+  assert.equal(SERVER_SINCE, '0.6.6');
+  const appKeys = UPDATER_KEYS.filter((k) => !k.endsWith('-server'));
+  const pubDate = '2026-10-05T09:00:00Z';
+  const latestOf = (version, names) => {
+    const artifacts = names.filter((n) => classifyAsset(n, version).keys.length > 0).map((name) => ({ name, signature: 'c2ln' }));
+    return latestJson({ version, notes: '', pubDate, baseUrl: releaseDownloadUrl(`v${version}`), artifacts });
+  };
+  // 0.6.5 (published): its draft and latest.json pass again (a retry of the publish script), a server tarball is not
+  // one of its assets.
+  const old = draftNames('0.6.5');
+  assert.ok(!old.some((n) => n.startsWith(`${SERVER_TOP_DIR}-`)));
+  assert.deepEqual(missingAssets(old, '0.6.5'), []);
+  for (const n of [serverTarballName('0.6.5', 'x64'), serverTarballName('0.6.5', 'arm64')]) assert.throws(() => classifyAsset(n, '0.6.5'), /unexpected asset/, n);
+  assert.deepEqual(updaterKeys('0.6.5'), appKeys);
+  const latest65 = latestOf('0.6.5', old);
+  assert.deepEqual(Object.keys(latest65.platforms), appKeys);
+  assert.deepEqual(latestJsonProblems(latest65, { version: '0.6.5', baseUrl: releaseDownloadUrl('v0.6.5'), uploaded: old }), []);
+  assert.throws(
+    () => latestJson({ version: '0.6.5', notes: '', pubDate, baseUrl: releaseDownloadUrl('v0.6.5'), artifacts: [{ name: serverTarballName('0.6.5', 'x64'), signature: 'c2ln' }] }),
+    /not an updater artifact of 0\.6\.5/,
+  );
+  // 0.6.6: both are required, in the draft and in latest.json.
+  const withoutServer = draftNames('0.6.6', { server: false });
+  assert.deepEqual(missingAssets(withoutServer, '0.6.6'), ['updater linux-x86_64-server', 'updater linux-aarch64-server']);
+  assert.deepEqual(missingAssets(draftNames('0.6.6'), '0.6.6'), []);
+  assert.deepEqual(updaterKeys('0.6.6'), UPDATER_KEYS);
+  const baseUrl = releaseDownloadUrl('v0.6.6');
+  assert.deepEqual(latestJsonProblems(latestOf('0.6.6', draftNames('0.6.6')), { version: '0.6.6', baseUrl, uploaded: draftNames('0.6.6') }), []);
+  assert.deepEqual(latestJsonProblems(latestOf('0.6.6', withoutServer), { version: '0.6.6', baseUrl, uploaded: withoutServer }), [
+    'missing platform keys linux-x86_64-server, linux-aarch64-server',
+  ]);
+  // Later versions, and prereleases of 0.6.6 (built by the same workflow), have them too.
+  for (const v of ['0.6.6-e2e.1', '0.6.7', '0.7.0', '1.0.0-rc.1']) assert.deepEqual(updaterKeys(v), UPDATER_KEYS, v);
+  for (const v of ['0.6.5-e2e.1', '0.6.4', '0.5.0']) assert.deepEqual(updaterKeys(v), appKeys, v);
 });
 
 test('release assets: a draft counts only when CI uploaded every file during a successful run of the tag', () => {
@@ -1550,4 +1634,417 @@ test('update e2e: a throwaway key only, latest.json from the same helper, one fo
     server?.close();
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// The Linux server CLI (DESIGN §26): the tarball, its launcher, its checks, CI
+// ---------------------------------------------------------------------------------------------------------------
+
+const repoVersion = JSON.parse(fs.readFileSync(path.join(REPO_DIR, 'package.json'), 'utf8')).version;
+const serverWanted = [`${SERVER_TOP_DIR}/VERSION`, `${SERVER_TOP_DIR}/package.json`];
+
+/** Writes `text` to <root>/<rel> with `mode` (the folders on the way are made). */
+function put(root, rel, text, mode = 0o644) {
+  const p = path.join(root, rel);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, text);
+  fs.chmodSync(p, mode);
+  return p;
+}
+
+/** A server tarball's tree as server-tarball.mjs lays it out (fake files) in <dir>/<top>; returns that folder. */
+function fakeServerTree(dir, { version = '0.7.0', vulkan = true, top = SERVER_TOP_DIR } = {}) {
+  const root = path.join(dir, top);
+  put(root, 'VERSION', `${version}\n`);
+  put(root, 'package.json', JSON.stringify({ name: 'easy-study', version }));
+  for (const f of ['LICENSE', 'THIRD_PARTY_NOTICES.md', 'dist-server/server/cli.js', 'dist-server/server/index.js', 'web/dist/index.html', 'node/LICENSE', 'whisper/LICENSE', 'ffmpeg/BUILD.txt']) put(root, f, f);
+  for (const f of ['bin/easy-study', 'node/bin/node', 'whisper/whisper-cli', 'ffmpeg/ffmpeg', ...(vulkan ? ['whisper/whisper-cli-vulkan'] : [])]) put(root, f, f, 0o755);
+  return root;
+}
+
+/** <out>.tar.gz of <dir>/<top> with this system's tar (no AppleDouble files on macOS). */
+function systemTarGz(dir, out, top = SERVER_TOP_DIR) {
+  const r = spawnSync('tar', ['-czf', out, '-C', dir, top], { env: { ...process.env, COPYFILE_DISABLE: '1' }, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  return out;
+}
+
+/** A desktop/resources tree as `prepare.mjs --target <Linux target> --require-tools` leaves it (fake programs). */
+function fakeResources(dir, target, { tools, version = repoVersion } = {}) {
+  const info = targetInfo(target);
+  put(dir, 'target.json', JSON.stringify({ target, os: info.os, cpu: info.cpu, tools: tools ?? { whisper: true, ffmpeg: true, ...(info.vulkan ? { 'whisper-vulkan': true } : {}) } }));
+  put(dir, 'server/package.json', JSON.stringify({ name: 'easy-study', version }));
+  put(dir, 'server/package-lock.json', '{}');
+  put(dir, 'server/LICENSE', 'MIT');
+  put(dir, 'server/THIRD_PARTY_NOTICES.md', 'notices');
+  put(dir, 'server/dist-server/server/cli.js', 'cli');
+  put(dir, 'server/dist-server/server/index.js', 'index');
+  put(dir, 'server/web/dist/index.html', '<!doctype html>');
+  put(dir, 'server/web/dist/assets/app.js', 'app', 0o600);
+  fs.chmodSync(path.join(dir, 'server/web/dist/assets'), 0o700);
+  put(dir, 'server/node_modules/sharp/lib/index.js', 'sharp');
+  put(dir, 'server/node_modules/sharp/bin.js', '#!/usr/bin/env node', 0o755);
+  put(dir, 'server/node_modules/a/node_modules/b/index.js', 'b');
+  // npm's command links (node_modules/.bin, also nested): never shipped.
+  fs.mkdirSync(path.join(dir, 'server/node_modules/.bin'));
+  fs.symlinkSync('../sharp/bin.js', path.join(dir, 'server/node_modules/.bin/sharp'));
+  fs.mkdirSync(path.join(dir, 'server/node_modules/a/node_modules/.bin'));
+  fs.symlinkSync('../b/index.js', path.join(dir, 'server/node_modules/a/node_modules/.bin/b'));
+  put(dir, `bin/es-node-${target}`, 'node', 0o755);
+  put(dir, `bin/es-whisper-${target}`, 'whisper-cli', 0o755);
+  if (info.vulkan) put(dir, `bin/es-whisper-vulkan-${target}`, 'whisper-cli-vulkan', 0o755);
+  put(dir, `bin/es-ffmpeg-${target}`, 'ffmpeg', 0o755);
+  put(dir, 'node/LICENSE', 'node license');
+  put(dir, 'whisper/LICENSE', 'whisper license');
+  for (const f of ['BUILD.txt', 'COPYING.LGPLv2.1', 'LICENSE.md', 'opus-COPYING']) put(dir, `ffmpeg/${f}`, f);
+  return dir;
+}
+
+/** "<file|dir|link> <mode>" of every path under `root`, by its path relative to `root`. */
+function listTree(root) {
+  const out = {};
+  const walk = (dir) => {
+    for (const name of fs.readdirSync(dir)) {
+      const p = path.join(dir, name);
+      const st = fs.lstatSync(p);
+      out[path.relative(root, p).split(path.sep).join('/')] = `${st.isSymbolicLink() ? 'link' : st.isDirectory() ? 'dir' : 'file'} ${(st.mode & 0o777).toString(8)}`;
+      if (st.isDirectory() && !st.isSymbolicLink()) walk(p);
+    }
+  };
+  walk(root);
+  return out;
+}
+
+/** The tree of the tarball of the fake resources: section 1 of the contract (DESIGN §26). */
+const expectedServerTree = (vulkan) => ({
+  LICENSE: 'file 644',
+  'THIRD_PARTY_NOTICES.md': 'file 644',
+  VERSION: 'file 644',
+  bin: 'dir 755',
+  'bin/easy-study': 'file 755',
+  'dist-server': 'dir 755',
+  'dist-server/server': 'dir 755',
+  'dist-server/server/cli.js': 'file 644',
+  'dist-server/server/index.js': 'file 644',
+  ffmpeg: 'dir 755',
+  'ffmpeg/BUILD.txt': 'file 644',
+  'ffmpeg/COPYING.LGPLv2.1': 'file 644',
+  'ffmpeg/LICENSE.md': 'file 644',
+  'ffmpeg/ffmpeg': 'file 755',
+  'ffmpeg/opus-COPYING': 'file 644',
+  node: 'dir 755',
+  'node/LICENSE': 'file 644',
+  'node/bin': 'dir 755',
+  'node/bin/node': 'file 755',
+  node_modules: 'dir 755',
+  'node_modules/a': 'dir 755',
+  'node_modules/a/node_modules': 'dir 755',
+  'node_modules/a/node_modules/b': 'dir 755',
+  'node_modules/a/node_modules/b/index.js': 'file 644',
+  'node_modules/sharp': 'dir 755',
+  'node_modules/sharp/bin.js': 'file 755',
+  'node_modules/sharp/lib': 'dir 755',
+  'node_modules/sharp/lib/index.js': 'file 644',
+  'package-lock.json': 'file 644',
+  'package.json': 'file 644',
+  web: 'dir 755',
+  'web/dist': 'dir 755',
+  'web/dist/assets': 'dir 755',
+  'web/dist/assets/app.js': 'file 644',
+  'web/dist/index.html': 'file 644',
+  whisper: 'dir 755',
+  'whisper/LICENSE': 'file 644',
+  'whisper/whisper-cli': 'file 755',
+  ...(vulkan ? { 'whisper/whisper-cli-vulkan': 'file 755' } : {}),
+});
+
+test('server tarball: the launcher runs the bundled Node on the CLI, also through a symbolic link', () => {
+  assert.equal(LAUNCHER, path.join(REPO_DIR, 'packaging', 'server', 'easy-study'));
+  const text = fs.readFileSync(LAUNCHER, 'utf8');
+  assert.ok(text.startsWith('#!/bin/sh\n'));
+  assert.match(text, /^set -eu$/m);
+  assert.match(text, /^self=\$\(readlink -f -- "\$0"\)$/m);
+  assert.match(text, /^root=\$\(dirname -- "\$\(dirname -- "\$self"\)"\)$/m);
+  assert.match(text, /^unset NODE_OPTIONS WATCH_REPORT_DEPENDENCIES$/m);
+  assert.ok(text.endsWith('\nexec "$root/node/bin/node" --max-semi-space-size=2 "$root/dist-server/server/cli.js" "$@"\n'));
+  if (process.platform === 'win32') return;
+  const syntax = spawnSync('sh', ['-n', LAUNCHER], { encoding: 'utf8' });
+  assert.equal(syntax.status, 0, syntax.stderr);
+  assert.ok(fs.statSync(LAUNCHER).mode & 0o100, 'executable (git mode 100755)');
+  // Installed as the README says (a symbolic link on PATH), with a stand-in for Node that prints what it got.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'es-launcher-'));
+  try {
+    const root = path.join(tmp, 'opt', SERVER_TOP_DIR);
+    fs.mkdirSync(path.join(root, 'bin'), { recursive: true });
+    fs.copyFileSync(LAUNCHER, path.join(root, 'bin', 'easy-study'));
+    fs.chmodSync(path.join(root, 'bin', 'easy-study'), 0o755);
+    put(root, 'node/bin/node', '#!/bin/sh\nprintf \'%s\\n\' "$0" "$@" "${NODE_OPTIONS-unset}" "${WATCH_REPORT_DEPENDENCIES-unset}"\n', 0o755);
+    fs.mkdirSync(path.join(tmp, 'bin'));
+    fs.symlinkSync(path.join(root, 'bin', 'easy-study'), path.join(tmp, 'bin', 'easy-study'));
+    const env = { ...process.env, NODE_OPTIONS: '--require /x.js', WATCH_REPORT_DEPENDENCIES: '1' };
+    const r = spawnSync(path.join(tmp, 'bin', 'easy-study'), ['server', '--library', 'a b', '--port=6000'], { env, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    const real = fs.realpathSync(root);
+    assert.deepEqual(r.stdout.split('\n').slice(0, -1), [
+      `${real}/node/bin/node`,
+      '--max-semi-space-size=2',
+      `${real}/dist-server/server/cli.js`,
+      'server',
+      '--library',
+      'a b',
+      '--port=6000',
+      'unset',
+      'unset',
+    ]);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('server tarball: the publish check takes one top folder of files and folders, the version, executable programs', { skip: process.platform === 'win32' && 'tar with symbolic and hard links' }, async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'es-servertar-'));
+  try {
+    let n = 0;
+    /** The problems of a tarball of the tree `build(dir)` makes (its top folder: SERVER_TOP_DIR unless returned). */
+    const check = async (build, { version = '0.7.0', arch = 'x64' } = {}) => {
+      const dir = path.join(tmp, `t${++n}`);
+      fs.mkdirSync(dir);
+      const top = build(dir);
+      const file = systemTarGz(dir, path.join(tmp, `t${n}.tar.gz`), typeof top === 'string' && !top.includes(path.sep) ? top : SERVER_TOP_DIR);
+      return serverArchiveProblems(await readTarGz(file, serverWanted), version, arch).join('; ');
+    };
+    assert.equal(await check((d) => fakeServerTree(d)), '');
+    // arm64 has no Vulkan build of whisper-cli; x64 must have it.
+    assert.equal(await check((d) => fakeServerTree(d, { vulkan: false }), { arch: 'arm64' }), '');
+    assert.equal(await check((d) => fakeServerTree(d, { vulkan: false })), 'no easy-study-server/whisper/whisper-cli-vulkan');
+    // A versioned top folder: the update keeps the install's folder name, so every version has the same one.
+    const versioned = await check((d) => {
+      fakeServerTree(d, { top: 'easy-study-server-0.7.0' });
+      return 'easy-study-server-0.7.0';
+    });
+    assert.match(versioned, /^easy-study-server-0\.7\.0\/: not under easy-study-server\//);
+    assert.match(versioned, /no easy-study-server\/bin\/easy-study/);
+    // Links: a symbolic link could point out of the install, a hard link breaks unpacking into another folder.
+    const symlink = await check((d) => {
+      const root = fakeServerTree(d);
+      fs.mkdirSync(path.join(root, 'node_modules', '.bin'), { recursive: true });
+      fs.symlinkSync('../../node/bin/node', path.join(root, 'node_modules', '.bin', 'node'));
+    });
+    assert.equal(symlink, 'easy-study-server/node_modules/.bin/node: symbolic link (to ../../node/bin/node)');
+    // Two names of a file the check does not require: tar stores whichever it reads first (the folder's order, which
+    // on ext4 depends on the filesystem) as the file and the other as the link, and nothing else is reported.
+    const hardlink = await check((d) => {
+      const root = fakeServerTree(d);
+      fs.linkSync(path.join(root, 'ffmpeg', 'BUILD.txt'), path.join(root, 'ffmpeg', 'BUILD-copy.txt'));
+    });
+    assert.match(hardlink, /^easy-study-server\/ffmpeg\/BUILD(-copy)?\.txt: hard link \(to easy-study-server\/ffmpeg\/BUILD(-copy)?\.txt\)$/);
+    // Another version's files.
+    assert.equal(
+      await check((d) => fakeServerTree(d, { version: '0.6.9' })),
+      'VERSION "0.6.9\\n", expected "0.7.0\\n"; package.json version 0.6.9, expected 0.7.0',
+    );
+    assert.equal(
+      await check((d) => fs.writeFileSync(path.join(fakeServerTree(d), 'VERSION'), '0.7.0')),
+      'VERSION "0.7.0", expected "0.7.0\\n"',
+    );
+    assert.equal(await check((d) => fs.chmodSync(path.join(fakeServerTree(d), 'node', 'bin', 'node'), 0o644)), 'easy-study-server/node/bin/node is not executable (mode 644)');
+    assert.equal(await check((d) => fs.rmSync(path.join(fakeServerTree(d), 'dist-server', 'server', 'cli.js'))), 'no easy-study-server/dist-server/server/cli.js');
+    // VERSION and package.json must have been read (readTarGz's `want`).
+    const plain = path.join(tmp, 'plain');
+    fakeServerTree(plain);
+    const archive = await readTarGz(systemTarGz(plain, path.join(tmp, 'plain.tar.gz')), []);
+    assert.equal(serverArchiveProblems(archive, '0.7.0', 'x64').join('; '), 'easy-study-server/VERSION was not read; easy-study-server/package.json was not read');
+    assert.ok(archive.entries.some((e) => e.name === 'easy-study-server/bin/easy-study' && e.mode === 0o755));
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+  // Entries no tar here writes.
+  const entry = (name, type = 'file') => ({ name, type, size: 0, link: '', mode: 0o644 });
+  const problems = (entries, arch = 'x64') => serverArchiveProblems({ entries, files: {} }, '0.7.0', arch).join('; ');
+  assert.match(problems([]), /^empty archive; no easy-study-server\/bin\/easy-study/);
+  assert.match(problems([entry('easy-study-server/../x')]), /easy-study-server\/\.\.\/x: path leaves the folder/);
+  assert.match(problems([entry('/easy-study-server/x')]), /\/easy-study-server\/x: not under easy-study-server\/; \/easy-study-server\/x: path leaves the folder/);
+  assert.match(problems([entry('easy-study-server/./x')]), /path leaves the folder/);
+  assert.match(problems([entry('easy-study-server/fifo', 'other')]), /easy-study-server\/fifo: neither a file nor a folder/);
+  assert.match(problems([entry('easy-study-server')]), /easy-study-server: not a folder/);
+  assert.match(problems([], 'aarch64'), /^arch aarch64: expected x64 or arm64/);
+});
+
+test('server tarball: the tree comes from prepare.mjs\'s resources of one Linux target (layout, modes, no links)', { skip: process.platform === 'win32' && 'POSIX modes and symbolic links' }, () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'es-serverstage-'));
+  try {
+    let n = 0;
+    const stage = (target, resources) => {
+      const dir = path.join(tmp, `stage${++n}`);
+      fs.mkdirSync(dir);
+      return stageServerTree({ target, resources, stage: dir });
+    };
+    for (const target of ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu']) {
+      const resources = fakeResources(path.join(tmp, target), target);
+      // A tool's note when it was left out (prepare.mjs without --require-tools) never ships.
+      put(resources, 'whisper/NOT-BUNDLED.txt', 'not bundled');
+      const { top, version, info } = stage(target, resources);
+      assert.equal(path.basename(top), SERVER_TOP_DIR);
+      assert.equal(version, repoVersion);
+      assert.equal(info, targetInfo(target));
+      assert.deepEqual(listTree(top), expectedServerTree(info.vulkan === true), target);
+      // `easy-study update` refuses an install folder holding anything else at its top (server/selfUpdate.ts).
+      assert.deepEqual(fs.readdirSync(top).filter((name) => !INSTALL_ENTRIES.includes(name)), [], target);
+      assert.equal(fs.statSync(top).mode & 0o777, 0o755);
+      assert.equal(fs.readFileSync(path.join(top, 'VERSION'), 'utf8'), `${repoVersion}\n`);
+      assert.equal(fs.readFileSync(path.join(top, 'bin', 'easy-study'), 'utf8'), fs.readFileSync(LAUNCHER, 'utf8'));
+      for (const [rel, text] of [['node/bin/node', 'node'], ['whisper/whisper-cli', 'whisper-cli'], ['ffmpeg/ffmpeg', 'ffmpeg'], ['node/LICENSE', 'node license']]) {
+        assert.equal(fs.readFileSync(path.join(top, rel), 'utf8'), text, rel);
+      }
+      if (info.vulkan) assert.equal(fs.readFileSync(path.join(top, 'whisper', 'whisper-cli-vulkan'), 'utf8'), 'whisper-cli-vulkan');
+    }
+    const x64 = 'x86_64-unknown-linux-gnu';
+    const fresh = (name, target = x64, opts) => fakeResources(path.join(tmp, name), target, opts);
+    assert.throws(() => stage('aarch64-apple-darwin', fresh('mac')), /for Linux targets only/);
+    assert.throws(() => stage(x64, fresh('arm', 'aarch64-unknown-linux-gnu')), /prepared for aarch64-unknown-linux-gnu, not x86_64-unknown-linux-gnu/);
+    assert.throws(() => stage(x64, fresh('cpu-only', x64, { tools: { whisper: true, ffmpeg: true, 'whisper-vulkan': false } })), /has no whisper-vulkan/);
+    assert.throws(() => stage(x64, fresh('no-ffmpeg', x64, { tools: { whisper: true, ffmpeg: false, 'whisper-vulkan': true } })), /has no ffmpeg/);
+    assert.throws(() => stage(x64, fresh('old', x64, { version: '0.0.1' })), /version 0\.0\.1, the repo /);
+    const linked = fresh('linked');
+    fs.symlinkSync('index.html', path.join(linked, 'server', 'web', 'dist', 'start.html'));
+    assert.throws(() => stage(x64, linked), /easy-study-server\/web\/dist\/start\.html: symbolic link/);
+    const noFfmpeg = fresh('no-es-ffmpeg');
+    fs.rmSync(path.join(noFfmpeg, 'bin', `es-ffmpeg-${x64}`));
+    assert.throws(() => stage(x64, noFfmpeg), /es-ffmpeg-x86_64-unknown-linux-gnu missing/);
+    const noCli = fresh('no-cli');
+    fs.rmSync(path.join(noCli, 'server', 'dist-server', 'server', 'cli.js'));
+    assert.throws(() => stage(x64, noCli), /dist-server\/server\/cli\.js missing/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('server tarball: GNU tar packs easy-study-server/ sorted, owned by 0:0, as the publish check wants it', { skip: process.platform === 'win32' && 'POSIX modes and symbolic links' }, async () => {
+  const src = fs.readFileSync(path.join(DESKTOP_DIR, 'scripts', 'server-tarball.mjs'), 'utf8');
+  assert.match(src, /\[\s*'--sort=name', '--owner=0', '--group=0', '--numeric-owner', '-czf', file, '-C', stage, SERVER_TOP_DIR\]/);
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'es-servertarball-'));
+  try {
+    const target = 'x86_64-unknown-linux-gnu';
+    const resources = fakeResources(path.join(tmp, 'resources'), target);
+    const out = path.join(tmp, 'out');
+    const tar = gnuTar();
+    if (!tar) {
+      // macOS (bsdtar): the tree is staged and checked, then the build stops.
+      await assert.rejects(serverTarball({ target, resources, out, selfCheck: false }), /GNU tar is required/);
+      assert.ok(!fs.existsSync(out));
+      return;
+    }
+    const r = await serverTarball({ target, resources, out, selfCheck: false });
+    assert.equal(r.name, serverTarballName(repoVersion, 'x64'));
+    assert.equal(r.file, path.join(out, r.name));
+    assert.equal(r.bytes, fs.statSync(r.file).size);
+    assert.equal(r.sha256, crypto.createHash('sha256').update(fs.readFileSync(r.file)).digest('hex'));
+    const archive = await readTarGz(r.file, serverWanted);
+    assert.deepEqual(serverArchiveProblems(archive, repoVersion, 'x64'), []);
+    // One folder, entries sorted by name within each folder (depth first), the modes of the staged tree.
+    const names = archive.entries.map((e) => e.name.replace(/\/$/, ''));
+    const bySegments = (a, b) => {
+      const [x, y] = [a.split('/'), b.split('/')];
+      for (let i = 0; i < Math.min(x.length, y.length); i++) if (x[i] !== y[i]) return x[i] < y[i] ? -1 : 1;
+      return x.length - y.length;
+    };
+    assert.deepEqual(names, [...names].sort(bySegments));
+    assert.equal(names[0], SERVER_TOP_DIR);
+    const listed = Object.fromEntries(archive.entries.slice(1).map((e) => [e.name.replace(/\/$/, '').slice(SERVER_TOP_DIR.length + 1), `${e.type} ${e.mode.toString(8)}`]));
+    assert.deepEqual(listed, expectedServerTree(true));
+    assert.equal(archive.entries[0].mode, 0o755);
+    const owners = spawnSync(tar, ['--numeric-owner', '-tvzf', r.file], { encoding: 'utf8' });
+    assert.equal(owners.status, 0, owners.stderr);
+    for (const line of owners.stdout.trim().split('\n')) assert.match(line, /^\S+ 0\/0 /, line);
+    // The staging folder is gone.
+    assert.deepEqual(fs.readdirSync(out), [r.name]);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('server tarball: publish-release.mjs checks it and update-e2e.mjs serves it like the other updater artifacts', () => {
+  const src = fs.readFileSync(path.join(DESKTOP_DIR, 'scripts', 'publish-release.mjs'), 'utf8');
+  assert.match(src, /for \(const c of updater\.filter\(\(u\) => u\.name\.startsWith\(`\$\{SERVER_TOP_DIR\}-`\)\)\) \{/);
+  assert.match(src, /const arch = \/-linux-\(x64\|arm64\)\\\.tar\\\.gz\$\/\.exec\(c\.name\)\?\.\[1\];/);
+  assert.match(src, /readTarGz\(path\.join\(work, 'assets', c\.name\), \[`\$\{SERVER_TOP_DIR\}\/VERSION`, `\$\{SERVER_TOP_DIR\}\/package\.json`\]\)/);
+  assert.match(src, /serverArchiveProblems\(archive, version, arch\)/);
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'es-e2e-server-'));
+  try {
+    const name = serverTarballName('0.6.6-e2e.2', 'x64');
+    fs.writeFileSync(path.join(tmp, name), 'tarball');
+    fs.writeFileSync(path.join(tmp, `${name}.sig`), `${Buffer.from('sig').toString('base64')}\n`);
+    const latest = writeLatest({ dir: tmp, version: '0.6.6-e2e.2', port: 8777 });
+    assert.deepEqual(latest.platforms, { 'linux-x86_64-server': { url: `http://127.0.0.1:8777/${name}`, signature: Buffer.from('sig').toString('base64') } });
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('CI: the Linux builds pack the server tarball, upload it with the bundles and run it as a user installs it', () => {
+  const wf = workflow();
+  assert.match(wf.slice(0, wf.indexOf('\nname: desktop\n')), /\n# The Linux builds also pack the server CLI alone \(DESIGN §26\): easy-study-server-<version>-linux-<arch>\.tar\.gz\.\n/);
+  const build = /\n {2}build:\n([\s\S]*?)\n {2}arch:/.exec(wf)?.[1];
+  const step = /- name: Server tarball \(Linux\)\n\s+if: ([^\n]+)\n\s+run: ([^\n]+)\n/.exec(build);
+  assert.ok(step, 'step "Server tarball (Linux)"');
+  assert.equal(step[1], "runner.os == 'Linux'");
+  assert.equal(step[2], 'node desktop/scripts/server-tarball.mjs --target ${{ matrix.target }} --out "$BUNDLE/server"');
+  const at = (s) => {
+    assert.ok(build.includes(s), s);
+    return build.indexOf(s);
+  };
+  assert.ok(at('- name: AppImage without host libraries (Linux)') < at('- name: Server tarball (Linux)'));
+  assert.ok(at('- name: Server tarball (Linux)') < at('- uses: actions/upload-artifact'));
+  // The last path of the bundles' upload: it lands in easy-study-linux-*, where the release job's `find dist -type f`
+  // takes it (the arch job looks for dist/deb and *_amd64.AppImage only).
+  assert.match(build, /\n {12}\$\{\{ env\.BUNDLE \}\}\/appimage\/\*\.AppImage\n {12}\$\{\{ env\.BUNDLE \}\}\/server\/\*\.tar\.gz\n {10}if-no-files-found: error\n/);
+  const smoke = /- name: Smoke test \(Linux, server tarball\)\n {8}if: ([^\n]+)\n {8}run: \|\n((?: {10}[^\n]*\n)+)/.exec(build);
+  assert.ok(smoke, 'step "Smoke test (Linux, server tarball)"');
+  assert.equal(smoke[1], "matrix.smoke && runner.os == 'Linux'");
+  assert.ok(at('- name: Smoke test (Linux, AppImage from a dot folder)') < at('- name: Smoke test (Linux, server tarball)'));
+  const lines = smoke[2].split('\n').map((l) => l.trim());
+  // Unpacked into a dot folder, run through a symbolic link, the file name server-tarball.mjs gives it.
+  assert.ok(lines.includes('case "${{ matrix.target }}" in x86_64-*) a=x64 ;; *) a=arm64 ;; esac'));
+  assert.equal(serverTarballName('${v}', 'x64').replace('-x64.', '-${a}.'), 'easy-study-server-${v}-linux-${a}.tar.gz');
+  for (const line of [
+    'tar -xzf "$BUNDLE/server/easy-study-server-${v}-linux-${a}.tar.gz" -C "$RUNNER_TEMP/.es-server"',
+    'root="$RUNNER_TEMP/.es-server/easy-study-server"',
+    'ln -s "$root/bin/easy-study" "$RUNNER_TEMP/easy-study"',
+    'es="$RUNNER_TEMP/easy-study"',
+    'test "$("$es" version)" = "$v"',
+    'test "$(cat "$root/VERSION")" = "$v"',
+    // One check per line: bash -e does not stop on a failed command inside an && list (only on its last one).
+    'test -x "$root/node/bin/node"',
+    'test -x "$root/whisper/whisper-cli"',
+    'test -x "$root/ffmpeg/ffmpeg"',
+    'if [ "$a" = x64 ]; then test -x "$root/whisper/whisper-cli-vulkan"; fi',
+    // A free port (never the app's 5350), the data under XDG_DATA_HOME, the access code from the terminal.
+    'XDG_DATA_HOME="$RUNNER_TEMP/.es-data" "$es" server --port "$port" > "$RUNNER_TEMP/server.txt" 2>&1 &',
+    'pid=$!',
+    'for i in $(seq 90); do',
+    "if grep -q 'login?code=' \"$RUNNER_TEMP/server.txt\"; then break; fi",
+    "code=$(grep -o 'login?code=[0-9A-Za-z-]*' \"$RUNNER_TEMP/server.txt\" | head -n 1 | cut -d= -f2)",
+    'test -n "$code"',
+    // Login on for other devices; the version and the bundled tools behind it.
+    'test "$(curl -s -o /dev/null -w \'%{http_code}\' "http://127.0.0.1:$port/api/health")" = 401',
+    'curl -fsS -H "Authorization: Bearer $code" "http://127.0.0.1:$port/api/health" > "$RUNNER_TEMP/health.json"',
+    'grep -F "\\"version\\":\\"$v\\"" "$RUNNER_TEMP/health.json"',
+    'curl -fsS -H "Authorization: Bearer $code" "http://127.0.0.1:$port/api/asr" > "$RUNNER_TEMP/asr.json"',
+    "grep -qF '\"engineAvailable\":true' \"$RUNNER_TEMP/asr.json\"",
+    "grep -qF '\"ffmpegAvailable\":true' \"$RUNNER_TEMP/asr.json\"",
+    'test -f "$RUNNER_TEMP/.es-data/easy-study/library/.auth.json"',
+    // Ctrl+C: exit 0 (bash -e fails the step on `wait`'s status), nothing of the install left running.
+    'kill -INT "$pid"',
+    'wait "$pid"',
+    'if pgrep -af "$root/"; then exit 1; fi',
+  ]) {
+    assert.ok(lines.includes(line), line);
+  }
+  assert.match(smoke[2], /port=\$\(node -e "const s = require\('net'\)\.createServer\(\)\.listen\(0, /);
+  assert.ok(lines.indexOf('kill -INT "$pid"') + 1 === lines.indexOf('wait "$pid"'));
+  // Not another ASR or Vulkan check (their counts are asserted above), no negated command.
+  assert.doesNotMatch(smoke[2], /asr-smoke\.mjs"? --whisper|es-whisper-vulkan"? --version|GGML_BACKEND_PATH|--port 5350|5180/);
+  assert.doesNotMatch(smoke[2], /^\s*!\s/m);
+  assert.doesNotMatch(smoke[2], /&&\s*test /);
+  assert.doesNotMatch(wf, /signer/);
 });

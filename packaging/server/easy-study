@@ -1,0 +1,8 @@
+#!/bin/sh
+# easy-study server (Linux): runs the bundled Node on the CLI (dist-server/server/cli.js). Works through a symlink,
+# e.g. ~/.local/bin/easy-study -> <install>/bin/easy-study.
+set -eu
+self=$(readlink -f -- "$0")
+root=$(dirname -- "$(dirname -- "$self")")
+unset NODE_OPTIONS WATCH_REPORT_DEPENDENCIES
+exec "$root/node/bin/node" --max-semi-space-size=2 "$root/dist-server/server/cli.js" "$@"
