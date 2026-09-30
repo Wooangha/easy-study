@@ -1,7 +1,8 @@
 # Desktop app (DESIGN §19): Tauri 2 shell + official Node runtime + the packed server, for macOS (arm64, x64),
-# Windows (x64) and Linux (x64, arm64), with the recording tools of DESIGN §22 (whisper.cpp's whisper-cli and a
-# minimal LGPL ffmpeg, built here for every target and cached). The repo's tests run first. Bundles are uploaded as
-# workflow artifacts; the x86_64 Linux bundles are also tested on current Arch Linux, which builds the Arch package.
+# Windows (x64) and Linux (x64, arm64), with the recording tools of DESIGN §22 (whisper.cpp's whisper-cli, with a
+# Vulkan GPU build on Windows x64 and Linux x64, and a minimal LGPL ffmpeg, built here for every target and cached).
+# The repo's tests run first. Bundles are uploaded as workflow artifacts; the x86_64 Linux bundles are also tested on
+# current Arch Linux, which builds the Arch package.
 # A `v*` tag also creates a DRAFT GitHub release with all of them (and FFmpeg's source). Unsigned by default (macOS ad-hoc signature, no
 # notarization; unsigned Windows installer): macOS signing and notarization turn on when the APPLE_* secrets exist.
 # In-app updates (DESIGN §24): the macOS builds also pack the .app as the updater's .app.tar.gz; the Windows installer
@@ -190,26 +191,40 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev \
             libayatana-appindicator3-dev librsvg2-dev xdg-utils squashfs-tools xvfb espeak-ng cmake
+      # es-whisper-vulkan links the Vulkan loader: the AppImage bundler must find it (appimage.mjs takes it out of the
+      # image again), and Mesa's software Vulkan device (lavapipe) runs the GPU ASR check on this runner without a GPU.
+      - name: Vulkan loader and Mesa's software Vulkan driver (Linux x64)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: sudo apt-get install -y libvulkan1 mesa-vulkan-drivers
 
       - run: npm ci
       - run: npm ci
         working-directory: desktop
 
       # The recording tools (DESIGN §22): ffmpeg from the ffmpeg job; whisper.cpp's whisper-cli built here with this
-      # runner's compiler (MSVC on Windows; Metal on Apple silicon, CPU elsewhere) and cached until its version,
-      # flags or checks change. prepare.mjs puts both next to Node in the bundle.
+      # runner's compiler (MSVC on Windows; Metal on Apple silicon; on Windows x64 and Linux x64 the CPU build plus a
+      # Vulkan GPU backend the app uses only where it finds a GPU; CPU elsewhere) and cached until its version, flags,
+      # Vulkan SDK or checks change. prepare.mjs puts both next to Node in the bundle.
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: ffmpeg-${{ matrix.target }}
           path: .cache/ffmpeg/${{ matrix.target }}
       - uses: actions/cache@a7833574556fa59680c1b7cb190c1735db73ebf0 # v5.0.0
+        id: whisper-cache
         with:
           path: |
             .cache/whisper/${{ matrix.target }}/bin
             .cache/whisper/${{ matrix.target }}/stamp.json
-          key: whisper-${{ matrix.target }}-${{ hashFiles('desktop/scripts/whisper.mjs', 'desktop/scripts/binaries.mjs') }}
+          key: whisper-${{ matrix.target }}-${{ hashFiles('desktop/scripts/whisper.mjs', 'desktop/scripts/binaries.mjs', 'desktop/scripts/targets.mjs') }}
+      # LunarG's Vulkan SDK (pinned and SHA-256 checked in whisper.mjs: its version is part of the key above, and so is
+      # targets.mjs, which says which targets have a Vulkan build) for the Vulkan build, only when whisper-cli is built
+      # here. Nothing of it ships. Without it whisper.mjs (--require-vulkan; CI=true too) and prepare.mjs --require-tools
+      # fail instead of building whisper-cli CPU only.
+      - name: Vulkan SDK (whisper-cli's GPU build)
+        if: steps.whisper-cache.outputs.cache-hit != 'true' && (matrix.target == 'x86_64-pc-windows-msvc' || matrix.target == 'x86_64-unknown-linux-gnu')
+        run: node desktop/scripts/whisper.mjs --install-vulkan-sdk
       - name: whisper.cpp (whisper-cli)
-        run: node desktop/scripts/whisper.mjs --target ${{ matrix.target }}
+        run: node desktop/scripts/whisper.mjs --target ${{ matrix.target }} --require-vulkan
 
       # web/dist + dist-server, then the official Node runtime (SHASUMS256-checked), the packed server with
       # production node_modules for THIS target (sharp's @img/sharp-<os>-<cpu>) and the recording tools
@@ -291,7 +306,8 @@ jobs:
           ls -l "$out"
 
       # build.mjs has taken the libraries out of the AppImage that must come from the user's system
-      # (desktop/scripts/appimage.mjs: libwayland-client, which the user's Mesa needs in its own version).
+      # (desktop/scripts/appimage.mjs: libwayland-client, which the user's Mesa needs in its own version, and the
+      # Vulkan loader, which must find the user's GPU drivers).
       - name: AppImage without host libraries (Linux)
         if: runner.os == 'Linux'
         run: node desktop/scripts/appimage.mjs --check "$BUNDLE"/appimage/*.AppImage
@@ -359,6 +375,30 @@ jobs:
           if pgrep -af 'dist-server/server/index.js'; then exit 1; fi
           node "$GITHUB_WORKSPACE/desktop/scripts/asr-smoke.mjs" --whisper squashfs-root/usr/bin/es-whisper \
             --ffmpeg squashfs-root/usr/bin/es-ffmpeg --models "$GITHUB_WORKSPACE/.cache/asr-smoke"
+      # whisper-cli's Vulkan build (/usr/bin/es-whisper-vulkan) transcribing on Mesa's software Vulkan device,
+      # lavapipe: ggml leaves CPU-type devices alone unless GGML_VK_VISIBLE_DEVICES names one, so this runs the Vulkan
+      # code path on a runner without a GPU. Then the AppImage's copy (extracted above) finds the device through the
+      # system's Vulkan loader (appimage.mjs took the bundled one out). Vulkan is built into es-whisper-vulkan, and
+      # ggml sets it up only when asked (by a model; --version alone lists no device): GGML_BACKEND_PATH asks, here
+      # with a file it cannot load (one error line, exit 0). Last, the server's own device probe
+      # (server/recordings/asr.ts) as it runs it: an empty model file, which whisper-cli refuses (exit 3, "bad magic")
+      # after setting up Vulkan and listing the devices.
+      - name: Smoke test (Linux x64, Vulkan on lavapipe)
+        if: matrix.smoke && matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          GGML_VK_VISIBLE_DEVICES=0 node desktop/scripts/asr-smoke.mjs --whisper /usr/bin/es-whisper-vulkan \
+            --ffmpeg /usr/bin/es-ffmpeg --expect-backend vulkan
+          GGML_VK_VISIBLE_DEVICES=0 GGML_BACKEND_PATH=/dev/null \
+            "$RUNNER_TEMP/.mount_easy-study/squashfs-root/usr/bin/es-whisper-vulkan" --version 2> "$RUNNER_TEMP/vulkan.txt"
+          cat "$RUNNER_TEMP/vulkan.txt"
+          grep -q '^ggml_vulkan: 0 = ' "$RUNNER_TEMP/vulkan.txt"
+          empty=$(mktemp)
+          code=0
+          GGML_VK_VISIBLE_DEVICES=0 timeout 120 /usr/bin/es-whisper-vulkan -m "$empty" -f "$empty" > "$RUNNER_TEMP/probe.txt" 2>&1 || code=$?
+          cat "$RUNNER_TEMP/probe.txt"
+          if [ "$code" != 3 ]; then echo "::error::GPU probe: exit $code, not 3"; exit 1; fi
+          grep -q '^ggml_vulkan: 0 = ' "$RUNNER_TEMP/probe.txt"
+          grep -q 'bad magic' "$RUNNER_TEMP/probe.txt"
       - name: Smoke test (Windows)
         if: matrix.smoke && runner.os == 'Windows'
         shell: pwsh
@@ -376,6 +416,22 @@ jobs:
           }
           node desktop/scripts/asr-smoke.mjs --whisper "$release\whisper\whisper-cli.exe" --ffmpeg "$release\ffmpeg\ffmpeg.exe"
           if ($LASTEXITCODE -ne 0) { throw "ASR smoke failed" }
+          # The GPU command as the server runs it where it found a GPU: the Vulkan backend, which ggml never loads by
+          # itself (never under its own name), asked for with GGML_BACKEND_PATH. This runner has no GPU (and no
+          # vulkan-1.dll without the SDK), so ggml goes on without it and the CPU must still transcribe.
+          if (Test-Path "$release\whisper\ggml-vulkan.dll") { throw "whisper\ggml-vulkan.dll would be loaded on every run" }
+          $env:GGML_BACKEND_PATH = (Resolve-Path "$release\whisper\es-ggml-vulkan.dll").Path
+          node desktop/scripts/asr-smoke.mjs --whisper "$release\whisper\whisper-cli.exe" --ffmpeg "$release\ffmpeg\ffmpeg.exe"
+          if ($LASTEXITCODE -ne 0) { throw "ASR smoke with the Vulkan backend failed" }
+          # The server's device probe (server/recordings/asr.ts) as it runs it: the same GGML_BACKEND_PATH and an empty
+          # model file. This runner has no GPU: whatever it lists, it only has to end (0, or 3: the model refused), in time.
+          $empty = (New-TemporaryFile).FullName
+          $probe = Start-Process -FilePath "$release\whisper\whisper-cli.exe" -ArgumentList @('-m', "`"$empty`"", '-f', "`"$empty`"") `
+            -NoNewWindow -PassThru -RedirectStandardOutput "$env:RUNNER_TEMP\probe-out.txt" -RedirectStandardError "$env:RUNNER_TEMP\probe.txt"
+          $null = $probe.Handle # keeps the exit code readable after the process ends
+          if (-not $probe.WaitForExit(120000)) { $probe.Kill(); throw "GPU probe did not end within 120 s" }
+          Get-Content "$env:RUNNER_TEMP\probe.txt", "$env:RUNNER_TEMP\probe-out.txt"
+          if ($probe.ExitCode -notin 0, 3) { throw "GPU probe exited with $($probe.ExitCode)" }
 
   # The Linux bundles are built on Ubuntu 22.04, where the libraries inside the AppImage are the system's own. On a
   # rolling distribution they meet a newer Mesa, Wayland… (v0.2.1's AppImage opened a blank window on Arch:
@@ -396,9 +452,12 @@ jobs:
         run: |
           # pacman's syscall sandbox fails under x86_64 emulation (Rosetta, where this job was tried out); harmless here.
           sed -i '0,/^\[options\]/s//&\nDisableSandboxSyscalls/' /etc/pacman.conf
-          # nodejs + espeak-ng: the ASR check of the package's es-whisper and es-ffmpeg.
+          # nodejs + espeak-ng: the ASR check of the package's es-whisper and es-ffmpeg; vulkan-icd-loader +
+          # vulkan-swrast: the Vulkan loader and Mesa's software Vulkan device (lavapipe) for es-whisper-vulkan (the
+          # AppImage's before the package is there; with the loader installed, namcap also requires the package to
+          # depend on it).
           pacman -Syu --noconfirm --needed base-devel namcap pacman-contrib xorg-server-xvfb fontconfig fribidi harfbuzz \
-            nodejs espeak-ng
+            nodejs espeak-ng vulkan-icd-loader vulkan-swrast
           useradd -m tester
 
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -423,6 +482,15 @@ jobs:
           done
           sleep 1
           if pgrep -af 'dist-server/server/index.js'; then exit 1; fi
+          # The AppImage's es-whisper-vulkan with the system's Vulkan loader and this Mesa (its own libraries come from
+          # Ubuntu 22.04): reported only, since without a device the app transcribes on the CPU as before.
+          # (GGML_BACKEND_PATH: see the build job's Vulkan smoke test.)
+          cd /tmp && /home/tester/easy-study.AppImage --appimage-extract >/dev/null
+          GGML_VK_VISIBLE_DEVICES=0 GGML_BACKEND_PATH=/dev/null squashfs-root/usr/bin/es-whisper-vulkan --version \
+            2> vulkan-appimage.txt || true
+          cat vulkan-appimage.txt
+          grep -q '^ggml_vulkan: 0 = ' vulkan-appimage.txt || echo "::warning::the AppImage's es-whisper-vulkan finds no Vulkan device on Arch Linux"
+          rm -rf squashfs-root
 
       - name: Arch package (packaging/arch/PKGBUILD)
         run: |
@@ -450,9 +518,14 @@ jobs:
           sleep 1
           if pgrep -af 'dist-server/server/index.js'; then exit 1; fi
           node desktop/scripts/asr-smoke.mjs --whisper /usr/bin/es-whisper --ffmpeg /usr/bin/es-ffmpeg
+          # The Vulkan build with the package's dependencies lists Mesa's software device (forced: ggml skips CPU devices;
+          # GGML_BACKEND_PATH: see the build job's Vulkan smoke test).
+          GGML_VK_VISIBLE_DEVICES=0 GGML_BACKEND_PATH=/dev/null /usr/bin/es-whisper-vulkan --version 2> /tmp/vulkan.txt
+          cat /tmp/vulkan.txt
+          grep -q '^ggml_vulkan: 0 = ' /tmp/vulkan.txt
           pacman -R --noconfirm easy-study-bin
           test ! -e /usr/bin/easy-study && test ! -e /usr/bin/es-node && test ! -e /usr/lib/easy-study
-          test ! -e /usr/bin/es-whisper && test ! -e /usr/bin/es-ffmpeg
+          test ! -e /usr/bin/es-whisper && test ! -e /usr/bin/es-whisper-vulkan && test ! -e /usr/bin/es-ffmpeg
 
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:

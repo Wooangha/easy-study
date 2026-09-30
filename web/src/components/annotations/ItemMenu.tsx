@@ -1,7 +1,7 @@
 // The floating menu of the selected annotation item(s) (DESIGN §25), like the region menu: the four colors, the text
 // look of a text box (size in points with a slider, the font, bold) or the text size of a memo — inline on a wide
-// pane, in a small popover on a narrow one —, 📎 첨부 (a chip in the composer, sent with the next question — nothing
-// is sent now), 🗑 삭제, for a memo the eye of 튜터에게 보이기 and 접기/펴기 (on a narrow pane / touch, where the card
+// pane, in a small popover on a narrow one —, 첨부 (a chip in the composer, sent with the next question — nothing
+// is sent now), 삭제, for a memo the eye of 튜터에게 보이기 and 접기/펴기 (on a narrow pane / touch, where the card
 // is always a pill, 펴기 opens the bottom sheet instead), and how many questions were asked with the item. With
 // several items selected the colors, 첨부 and 삭제 act on all of them at once (one write, one undo step).
 //
@@ -10,6 +10,7 @@
 // room, else above, never over a memo card, inside the slide sideways; measured again when the items, the slide's
 // size (zoom) or the menu's own size change. Rendered in `.slide` outside the slide box.
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ChangeEvent, type CSSProperties, type KeyboardEvent, type ReactNode } from 'react';
+import { Paperclip, Trash, X } from 'lucide-react';
 import {
   ANNOTATION_COLORS,
   MAX_TEXT_SIZE_PT,
@@ -167,7 +168,7 @@ export function ItemMenu({ slide, items, questions }: ItemMenuProps) {
         onClick={() => (single ? actions.attach(slide, single.id) : actions.attachMany(slide, ids))}
         title={many ? '선택한 필기를 하나씩 질문에 첨부해요 (입력창 위에 표시돼요)' : '이 필기를 질문에 첨부해요 (입력창 위에 표시돼요)'}
       >
-        📎 첨부
+        <Paperclip /> 첨부
       </button>
       {memo && (
         <>
@@ -203,7 +204,7 @@ export function ItemMenu({ slide, items, questions }: ItemMenuProps) {
         onClick={() => (single ? actions.remove(slide, single.id) : actions.removeMany(slide, ids))}
         title={many ? `선택한 필기 ${items.length}개 삭제 (Delete)` : '이 필기 삭제 (Delete)'}
       >
-        🗑 삭제
+        <Trash /> 삭제
       </button>
       {!many && questions > 0 && (
         <span className="annot-menu-note" role="img" aria-label={`질문 ${questions}개`} title={`이 필기를 첨부해서 물어본 질문 ${questions}개 (선택을 풀면 모서리의 파란 점)`}>
@@ -212,7 +213,7 @@ export function ItemMenu({ slide, items, questions }: ItemMenuProps) {
         </span>
       )}
       <button type="button" className="region-menu-btn is-close" onClick={() => actions.select(slide, null)} aria-label="선택 해제" title="선택 해제 (Esc)">
-        ✕
+        <X />
       </button>
     </div>
   );
@@ -223,8 +224,9 @@ export function ItemMenu({ slide, items, questions }: ItemMenuProps) {
 // ---------------------------------------------------------------------------
 
 /**
- * A number field (with the browser's ▲▼) and a small slider for a size in points, 8–72. Typing commits as soon as
- * the number is valid (so "24" is applied when the 4 lands, not "2" clamped to 8); blur / Enter clamps what is left.
+ * A number field for a size in points (MIN_TEXT_SIZE_PT–MAX_TEXT_SIZE_PT) between − and + buttons (0.6.4 dropped the
+ * slider: the user found it fiddly). Typing commits as soon as the number is valid (so "24" is applied when the 4 lands,
+ * not "2" clamped); blur / Enter clamps what is left; ↑ / ↓ in the field step by one like the buttons.
  */
 function SizeField({ pt, label, onPt }: { pt: number; label: string; onPt: (pt: number) => void }) {
   const [typed, setTyped] = useState<string | null>(null);
@@ -240,6 +242,11 @@ function SizeField({ pt, label, onPt }: { pt: number; label: string; onPt: (pt: 
     }
     if (n >= MIN_TEXT_SIZE_PT && n <= MAX_TEXT_SIZE_PT && n !== pt) onPt(n);
   };
+  const step = (by: number) => {
+    setTyped(null);
+    const next = clampPt(pt + by);
+    if (next !== pt) onPt(next);
+  };
   const onKey = (e: KeyboardEvent<HTMLInputElement>) => {
     e.stopPropagation();
     if (e.key === 'Enter') {
@@ -250,40 +257,49 @@ function SizeField({ pt, label, onPt }: { pt: number; label: string; onPt: (pt: 
       e.preventDefault();
       setTyped(null);
       e.currentTarget.blur();
+    } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      step(e.key === 'ArrowUp' ? 1 : -1);
     }
   };
   return (
     <span className="annot-size" role="group" aria-label={label}>
+      <button
+        type="button"
+        className="annot-size-step"
+        onClick={() => step(-1)}
+        disabled={pt <= MIN_TEXT_SIZE_PT}
+        aria-label={`${label} 줄이기`}
+        title={`${label} 줄이기`}
+      >
+        −
+      </button>
       <input
-        type="number"
+        type="text"
+        inputMode="numeric"
         className="annot-size-input"
-        min={MIN_TEXT_SIZE_PT}
-        max={MAX_TEXT_SIZE_PT}
-        step={1}
         value={shown}
         aria-label={`${label} (pt)`}
         title={`${label}: ${MIN_TEXT_SIZE_PT}–${MAX_TEXT_SIZE_PT} pt (슬라이드 기준)`}
         onChange={(e: ChangeEvent<HTMLInputElement>) => {
-          setTyped(e.target.value);
-          commit(e.target.value, false);
+          const raw = e.target.value.replace(/[^0-9]/g, '').slice(0, 2);
+          setTyped(raw);
+          commit(raw, false);
         }}
+        onFocus={(e) => e.currentTarget.select()}
         onBlur={(e) => commit(e.currentTarget.value, true)}
         onKeyDown={onKey}
       />
-      <input
-        type="range"
-        className="annot-size-range"
-        min={MIN_TEXT_SIZE_PT}
-        max={MAX_TEXT_SIZE_PT}
-        step={1}
-        value={pt}
-        aria-label={`${label} 슬라이더`}
-        onChange={(e) => {
-          setTyped(null);
-          onPt(Number(e.target.value));
-        }}
-        onKeyDown={(e) => e.stopPropagation()}
-      />
+      <button
+        type="button"
+        className="annot-size-step"
+        onClick={() => step(1)}
+        disabled={pt >= MAX_TEXT_SIZE_PT}
+        aria-label={`${label} 키우기`}
+        title={`${label} 키우기`}
+      >
+        +
+      </button>
     </span>
   );
 }

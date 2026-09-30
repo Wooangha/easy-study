@@ -240,7 +240,7 @@ export function classifyDragTypes(itemTypes: readonly string[]): DragKinds {
   return kinds;
 }
 
-/** An image dropped where no lecture is open (the library): the overlay says it (with 🖼), and so does the toast. */
+/** An image dropped where no lecture is open (the library): the overlay says it (with the image icon), and so does the toast. */
 export const IMAGE_NEEDS_LECTURE = '이미지는 강의를 연 뒤 놓으면 질문에 첨부돼요';
 
 export interface DropPlan<T> {
@@ -273,19 +273,28 @@ export function planDrop<T extends FileLike>(files: readonly T[], attachOpen: bo
   return { pdfs, images: attachOpen ? images : [], notices };
 }
 
-/** Copy of the window-wide drop overlay. `attachOpen` = a lecture is open, so images can be attached to a question. */
-export function dropOverlayCopy(
-  kinds: DragKinds,
-  pdfTarget: string,
-  attachOpen: boolean,
-): { title: string; sub: string | null } {
-  const image = '🖼 이미지를 놓으면 질문에 첨부해요';
+/** What the drop overlay shows. The text has no emoji: `titleIcon` / `subIcon` = that line starts with the image icon. */
+export interface DropOverlayCopy<P> {
+  title: P | string;
+  titleIcon: 'image' | null;
+  sub: string | null;
+  subIcon: 'image' | null;
+}
+
+/**
+ * Copy of the window-wide drop overlay. `pdfTarget` is the caller's line about PDFs (text, or a node with its own
+ * icons). `attachOpen` = a lecture is open, so images can be attached to a question.
+ */
+export function dropOverlayCopy<P = string>(kinds: DragKinds, pdfTarget: P, attachOpen: boolean): DropOverlayCopy<P> {
+  const image = '이미지를 놓으면 질문에 첨부해요';
   if (kinds.image && !kinds.pdf && !kinds.unknown) {
-    return attachOpen ? { title: image, sub: null } : { title: `🖼 ${IMAGE_NEEDS_LECTURE}`, sub: null };
+    return { title: attachOpen ? image : IMAGE_NEEDS_LECTURE, titleIcon: 'image', sub: null, subIcon: null };
   }
   // PDFs and images together: the images go with this lecture's question, so the new lecture is not opened.
-  if (kinds.image && attachOpen) return { title: pdfTarget, sub: `${image} (PDF는 강의 목록에 추가만 해요)` };
-  return { title: pdfTarget, sub: attachOpen && kinds.unknown ? '이미지는 질문에 첨부돼요' : null };
+  if (kinds.image && attachOpen) {
+    return { title: pdfTarget, titleIcon: null, sub: `${image} (PDF는 강의 목록에 추가만 해요)`, subIcon: 'image' };
+  }
+  return { title: pdfTarget, titleIcon: null, sub: attachOpen && kinds.unknown ? '이미지는 질문에 첨부돼요' : null, subIcon: null };
 }
 
 /** Names browsers give a pasted screenshot: not worth showing. */

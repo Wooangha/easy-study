@@ -12,6 +12,9 @@
 // wl_display_dispatch_queue_timeout. WebKitWebProcess aborts ("Could not create default EGL display:
 // EGL_BAD_PARAMETER") and the window stays blank. Mesa links libwayland-client only (libEGL_mesa), so the image
 // keeps libwayland-cursor, -egl and -server for its own GTK and WebKit (as upstream's excludelist does).
+// The same for the Vulkan loader, libvulkan.so.1 (x86_64: es-whisper-vulkan, whisper.cpp's GPU build, links it): it
+// must be the user's, which finds the user's GPU drivers (ICDs) and is as new as they are; linuxdeploy would copy
+// the build host's (Ubuntu 22.04) into the image.
 //
 // How: an AppImage is its runtime (an ELF executable) followed by a squashfs image, which starts where the
 // ELF's section header table ends (that is how the runtime finds it). The image is unpacked with unsquashfs, the
@@ -24,7 +27,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 /** Libraries that must come from the user's system, not the image's usr/lib (see above). */
-export const HOST_LIBRARIES = ['libwayland-client.so.0'];
+export const HOST_LIBRARIES = ['libwayland-client.so.0', 'libvulkan.so.1'];
 
 /** A file name in usr/lib that is one of `libs`, or a versioned file of one (libwayland-client.so.0.20.0). */
 export function isHostLibrary(name, libs = HOST_LIBRARIES) {

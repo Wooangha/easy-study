@@ -1,5 +1,7 @@
-// The live recording in the app's chrome (DESIGN §22): the 🎙 control in the top bar (record / timer, level meter,
-// pause, stop) and the strip under it (the live transcript, a recording a reload interrupted, microphone problems).
+// The live recording in the app's chrome (DESIGN §22): the top bar's round microphone button, which becomes the running
+// recording (timer, level meter, pause, stop — seen from every page, the library included) in the same place, and the
+// strip under the bar (the live transcript, a recording a reload interrupted, microphone problems).
+import { ChevronDown, ChevronUp, Mic, NotebookPen, Pause, Play, Save, Smartphone, Square, TriangleAlert } from 'lucide-react';
 import { useState } from 'react';
 import type { DocMeta } from '../../../../shared/types.ts';
 import { useRecorder, useRecorderLevel } from '../../hooks/useRecorder.ts';
@@ -29,7 +31,10 @@ interface RecordControlProps {
   onShowRecordings: () => void;
 }
 
-/** 🎙 in the top bar: the record button, or the running recording's timer and controls. */
+/**
+ * In the top bar: the record button — a round microphone, no text (0.6.4: the bar had grown too long) — or, in its
+ * place, the running recording's timer and controls.
+ */
 export function RecordControl({ doc, focusedSlide, docs, onOpenDoc, onShowRecordings }: RecordControlProps) {
   const rec = useRecorder();
   const [busy, setBusy] = useState(false);
@@ -45,12 +50,13 @@ export function RecordControl({ doc, focusedSlide, docs, onOpenDoc, onShowRecord
     return (
       <button
         type="button"
-        className={unavailable ? 'ghost-btn rec-start is-unavailable' : 'ghost-btn rec-start'}
+        className={unavailable ? 'rec-start is-unavailable' : 'rec-start'}
         onClick={() => run(() => startRecording(doc.id, focusedSlide))}
         disabled={busy}
-        title={unavailable ?? '이 강의를 녹음하고 바로 받아쓰기해요 (교수님이 한 말을 튜터가 함께 알게 돼요)'}
+        aria-label="녹음 시작"
+        title={unavailable ?? '녹음 시작 — 이 강의를 녹음하고 바로 받아써요 (교수님이 한 말을 튜터가 함께 알게 돼요)'}
       >
-        <span aria-hidden>🎙</span> 녹음
+        <Mic />
       </button>
     );
   }
@@ -58,7 +64,7 @@ export function RecordControl({ doc, focusedSlide, docs, onOpenDoc, onShowRecord
   if (rec.phase === 'starting') {
     return (
       <span className="rec-bar is-starting" role="status">
-        <span aria-hidden>🎙</span> 마이크 준비 중…
+        <Mic /> 마이크 준비 중…
       </span>
     );
   }
@@ -67,7 +73,7 @@ export function RecordControl({ doc, focusedSlide, docs, onOpenDoc, onShowRecord
   if (rec.phase === 'stopping') {
     return (
       <span className="rec-bar is-stopping" role="status" title="남은 녹음을 서버로 보내고 있어요">
-        <span aria-hidden>💾</span> 녹음 저장 중{rec.unsentSeconds > 0 ? ` · ${formatSpan(rec.unsentSeconds)} 남음` : '…'}
+        <Save /> 녹음 저장 중{rec.unsentSeconds > 0 ? ` · ${formatSpan(rec.unsentSeconds)} 남음` : '…'}
       </span>
     );
   }
@@ -98,12 +104,13 @@ export function RecordControl({ doc, focusedSlide, docs, onOpenDoc, onShowRecord
       {!paused && <LevelMeter />}
       {trouble && (
         <span className="rec-trouble" title={rec.uploadError ?? trouble}>
-          ⚠️<span className="rec-trouble-text"> {trouble}</span>
+          <TriangleAlert />
+          <span className="rec-trouble-text"> {trouble}</span>
         </span>
       )}
       {paused ? (
         <button type="button" className="icon-btn small" onClick={() => run(resumeRecording)} disabled={busy} title="녹음 계속" aria-label="녹음 계속">
-          ▶
+          <Play fill="currentColor" />
         </button>
       ) : (
         <button
@@ -114,7 +121,7 @@ export function RecordControl({ doc, focusedSlide, docs, onOpenDoc, onShowRecord
           title="일시정지 (쉬는 시간 등)"
           aria-label="녹음 일시정지"
         >
-          ⏸
+          <Pause fill="currentColor" />
         </button>
       )}
       <button
@@ -125,7 +132,7 @@ export function RecordControl({ doc, focusedSlide, docs, onOpenDoc, onShowRecord
         title="녹음 끝내기 — 남은 받아쓰기와 슬라이드 정렬이 이어서 진행돼요"
         aria-label="녹음 끝내기"
       >
-        ■
+        <Square fill="currentColor" />
       </button>
     </div>
   );
@@ -160,7 +167,7 @@ export function RecordingStrip({ onShowRecordings }: { onShowRecordings: () => v
       {interrupted.map((r) => (
         <div key={r.id} className="rec-strip-row is-interrupted">
           <span>
-            🎙 <b>‘{r.title}’</b> 녹음이 중간에 멈췄어요 ({formatClock(r.seconds)}까지 저장됨
+            <Mic /> <b>‘{r.title}’</b> 녹음이 중간에 멈췄어요 ({formatClock(r.seconds)}까지 저장됨
             {r.unsentSeconds > 0 ? ` · 서버로 보내는 중 ${formatSpan(r.unsentSeconds)}` : ''}).
           </span>
           <span className="spacer" />
@@ -173,7 +180,7 @@ export function RecordingStrip({ onShowRecordings }: { onShowRecordings: () => v
               void continueRecording(r.id).finally(() => setBusy(null));
             }}
           >
-            🎙 이어서 녹음
+            <Mic /> 이어서 녹음
           </button>
           <button
             type="button"
@@ -190,20 +197,35 @@ export function RecordingStrip({ onShowRecordings }: { onShowRecordings: () => v
         </div>
       ))}
 
-      {live && rec.micProblem && <div className="rec-strip-row is-warn">⚠️ {rec.micProblem}</div>}
+      {live && rec.micProblem && (
+        <div className="rec-strip-row is-warn">
+          <span>
+            <TriangleAlert /> {rec.micProblem}
+          </span>
+        </div>
+      )}
       {live && !rec.persistent && (
         <div className="rec-strip-row is-warn">
-          ⚠️ 이 브라우저는 녹음을 기기에 임시 저장하지 못해요. 새로고침하거나 창을 닫으면 아직 서버로 못 보낸 부분을 잃을 수 있어요.
+          <span>
+            <TriangleAlert /> 이 브라우저는 녹음을 기기에 임시 저장하지 못해요. 새로고침하거나 창을 닫으면 아직 서버로 못 보낸 부분을
+            잃을 수 있어요.
+          </span>
         </div>
       )}
       {live && ios && (
-        <div className="rec-strip-row is-note">📱 녹음하는 동안 이 화면을 켠 채로 열어 두세요 (다른 앱으로 가거나 화면이 꺼지면 녹음이 멈춰요).</div>
+        <div className="rec-strip-row is-note">
+          <span>
+            <Smartphone /> 녹음하는 동안 이 화면을 켠 채로 열어 두세요 (다른 앱으로 가거나 화면이 꺼지면 녹음이 멈춰요).
+          </span>
+        </div>
       )}
 
       {live && (
         <div className={collapsed ? 'rec-live is-collapsed' : 'rec-live'}>
           <div className="rec-live-head">
-            <span className="rec-live-title">📝 실시간 받아쓰기</span>
+            <span className="rec-live-title">
+              <NotebookPen /> 실시간 받아쓰기
+            </span>
             {rec.liveTranscribe ? (
               <span className="muted small">
                 {segments.length === 0
@@ -227,7 +249,15 @@ export function RecordingStrip({ onShowRecordings }: { onShowRecordings: () => v
                 aria-expanded={!collapsed}
                 title={collapsed ? '최근 문장 몇 줄 더 보기' : '마지막 한 줄만 보기'}
               >
-                {collapsed ? '펼치기 ▾' : '접기 ▴'}
+                {collapsed ? (
+                  <>
+                    펼치기 <ChevronDown />
+                  </>
+                ) : (
+                  <>
+                    접기 <ChevronUp />
+                  </>
+                )}
               </button>
             )}
           </div>

@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type KeyboardEvent, type ReactNode } from 'react';
+import { FileText, NotebookPen, Paperclip, Pin, Square } from 'lucide-react';
 import { MAX_ATTACHMENTS } from '../../../shared/types.ts';
 import { useAnnotations } from '../hooks/useAnnotations.ts';
 import type { AttachmentsApi } from '../hooks/useAttachments.ts';
@@ -59,7 +60,7 @@ function fitTextarea(el: HTMLTextAreaElement, placeholder: string): void {
 }
 
 /**
- * "📝 메모 N개 포함" (DESIGN §25): the memos on the target slide and its neighbours that the next question carries as
+ * "메모 N개 포함" (DESIGN §25, after a notebook icon): the memos on the target slide and its neighbours that the next question carries as
  * "학생의 메모" — those with 튜터에게 보이기 (the eye) on, while the device's switch is on. Counted from the annotation summary.
  */
 function StudentMemosChip({ docId, targetSlide, neighbors, pageCount }: { docId: string; targetSlide: number; neighbors: number; pageCount: number }) {
@@ -73,7 +74,7 @@ function StudentMemosChip({ docId, targetSlide, neighbors, pageCount }: { docId:
   return (
     <div className="composer-context">
       <span className="speech-chip memo-chip" title="이 슬라이드와 앞뒤 슬라이드의 메모를 튜터에게 함께 보내요 (설정 › 공부에서 끌 수 있어요)">
-        📝 메모 {count}개 포함
+        <NotebookPen /> 메모 {count}개 포함
       </span>
     </div>
   );
@@ -246,7 +247,7 @@ export function Composer({
               : '이미지 첨부 — 붙여넣기(⌘/Ctrl+V)나 끌어다 놓기도 돼요. 슬라이드에서 끌면 그 영역을 첨부해요'
           }
         >
-          📎
+          <Paperclip />
         </button>
         <button
           type="button"
@@ -257,7 +258,7 @@ export function Composer({
             withNeighbors
           }
         >
-          {pinned ? '📌' : '📄'} p.{targetSlide}
+          {pinned ? <Pin /> : <FileText />} p.{targetSlide}
           {to > from && <span className="target-neighbors">±{neighbors}</span>}
         </button>
         <textarea
@@ -274,7 +275,7 @@ export function Composer({
         />
         {running ? (
           <button type="button" className="send-btn stop" onClick={onStop} disabled={!canStop} title="답변 중지">
-            ■ 중지
+            <Square fill="currentColor" /> 중지
           </button>
         ) : (
           <button

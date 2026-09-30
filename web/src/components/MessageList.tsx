@@ -1,4 +1,21 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import {
+  ArrowDown,
+  ArrowUp,
+  ClipboardList,
+  GraduationCap,
+  Hourglass,
+  ImageIcon,
+  Library,
+  NotebookPen,
+  Paperclip,
+  RefreshCw,
+  RotateCcw,
+  Shuffle,
+  Square,
+  TriangleAlert,
+  type LucideIcon,
+} from 'lucide-react';
 import type { Attachment, ChatMessage, LlmSwitch, MessageStatus, ProviderInfo } from '../../../shared/types.ts';
 import { PENDING_ASSISTANT_ID, PENDING_USER_ID } from '../hooks/useStudySession.ts';
 import { CHAT_WINDOW, chatWindowStart, switchAtWindowStart, windowStartFor } from '../lib/chatWindow.ts';
@@ -11,6 +28,9 @@ import {
   providerWithModel,
   switchMarkerText,
   switchMarkerTitle,
+  type ContextChip,
+  type ContextChipKind,
+  type PrimeCardIcon,
 } from '../lib/format.ts';
 import { toast } from '../lib/toast.ts';
 import { usageLine, usageTitle } from '../lib/usage.ts';
@@ -235,7 +255,7 @@ export function MessageList({
           {start > 0 && (
             <div className="older-messages">
               <button type="button" className="ghost-btn small" onClick={() => showOlder(false)}>
-                ↑ 이전 메시지 {start - nextStart}개 보기
+                <ArrowUp /> 이전 메시지 {start - nextStart}개 보기
               </button>
               {nextStart > 0 && (
                 <button type="button" className="ghost-btn small" onClick={() => showOlder(true)}>
@@ -249,7 +269,7 @@ export function MessageList({
       </div>
       {showJump && messages.length > 0 && (
         <button type="button" className="jump-bottom" onClick={() => scrollToBottom('smooth')}>
-          ↓ 최신 메시지
+          <ArrowDown /> 최신 메시지
         </button>
       )}
     </div>
@@ -281,6 +301,31 @@ const MessageItem = memo(function MessageItem(props: MessageItemProps) {
   return <AssistantMessage {...props} />;
 });
 
+/** The icon before each chip of the context line (the chip texts are plain). */
+const CONTEXT_ICONS: Record<ContextChipKind, LucideIcon | null> = {
+  recovered: RefreshCw,
+  switched: Shuffle,
+  rollover: RefreshCw,
+  primed: Library,
+  overview: null,
+  attached: ImageIcon,
+  reused: RotateCcw,
+  attachments: Paperclip,
+  memos: NotebookPen,
+};
+
+/** A context chip's text after its icon. */
+function ContextChipText({ chip }: { chip: ContextChip }) {
+  const Icon = CONTEXT_ICONS[chip.kind];
+  return Icon ? (
+    <>
+      <Icon /> {chip.text}
+    </>
+  ) : (
+    chip.text
+  );
+}
+
 function ContextLine({ message }: { message: ChatMessage }) {
   const chips = describeContext(message.context);
   if (chips.length === 0) return null;
@@ -288,7 +333,7 @@ function ContextLine({ message }: { message: ChatMessage }) {
     <div className="context-line" title="이 질문과 함께 LLM에게 전달된 내용">
       {chips.map((c) => (
         <span key={c.kind} className={`context-chip chip-${c.kind}`} title={c.title}>
-          {c.text}
+          <ContextChipText chip={c} />
         </span>
       ))}
     </div>
@@ -316,24 +361,45 @@ function UserBubble({ message: m, onGoToSlide }: MessageItemProps) {
 function SwitchMarker({ change, providers }: { change: LlmSwitch; providers: ProviderInfo[] | undefined }) {
   return (
     <div className="msg system-card is-switch" title={switchMarkerTitle(providers, change)}>
-      <div className="system-card-title">{switchMarkerText(providers, change)}</div>
+      <div className="system-card-title">
+        <Shuffle /> {switchMarkerText(providers, change)}
+      </div>
     </div>
   );
+}
+
+/** The icon before a priming card's title. */
+function PrimeIcon({ icon }: { icon: PrimeCardIcon }) {
+  switch (icon) {
+    case 'failed':
+      return <TriangleAlert />;
+    case 'stopped':
+      return <Square fill="currentColor" />;
+    default:
+      return <Library />;
+  }
 }
 
 function PrimeCard({ message: m, pageCount, pairStatus }: MessageItemProps) {
   const state = primeCardState(pageCount, m.id === PENDING_USER_ID || !m.context, pairStatus);
   // What was attached is only worth listing once it actually reached the model.
-  const extra = state.delivered
-    ? describeContext(m.context)
-        .filter((c) => c.kind !== 'primed')
-        .map((c) => c.text)
-    : [];
+  const extra = state.delivered ? describeContext(m.context).filter((c) => c.kind !== 'primed') : [];
   const cls = state.tone === 'normal' ? 'msg system-card' : `msg system-card is-${state.tone}`;
   return (
     <div className={cls} data-msg-id={m.id}>
-      <div className="system-card-title">{state.title}</div>
-      {extra.length > 0 && <div className="system-card-detail">{extra.join(' · ')}</div>}
+      <div className="system-card-title">
+        <PrimeIcon icon={state.icon} /> {state.title}
+      </div>
+      {extra.length > 0 && (
+        <div className="system-card-detail">
+          {extra.map((c, i) => (
+            <Fragment key={c.kind}>
+              {i > 0 && ' · '}
+              <ContextChipText chip={c} />
+            </Fragment>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -366,7 +432,7 @@ function AssistantMessage({
     <div className={`msg msg-assistant status-${m.status}`} data-msg-id={m.id}>
       <div className="msg-assistant-head">
         <span className="assistant-avatar" aria-hidden>
-          {m.kind === 'prime' ? '📋' : '🎓'}
+          {m.kind === 'prime' ? <ClipboardList /> : <GraduationCap />}
         </span>
         <span className="assistant-title">{m.kind === 'prime' ? '슬라이드 개요' : '튜터'}</span>
         {meta.length > 0 && <span className="msg-meta">{meta.join(' · ')}</span>}
@@ -396,15 +462,25 @@ function AssistantMessage({
       )}
 
       {streaming && live && (status || stopping) && (
-        <div className="live-status">⏳ {stopping ? '중지하는 중…' : status}</div>
+        <div className="live-status">
+          <Hourglass /> {stopping ? '중지하는 중…' : status}
+        </div>
       )}
       {streaming && !live && (
-        <div className="msg-note">⏳ 답변이 아직 완료되지 않았어요 (다른 창에서 진행 중이거나 중단됨)</div>
+        <div className="msg-note">
+          <Hourglass /> 답변이 아직 완료되지 않았어요 (다른 창에서 진행 중이거나 중단됨)
+        </div>
       )}
       {m.status === 'error' && (
-        <div className="msg-error">⚠️ 답변 실패{m.error ? `: ${m.error}` : ''}</div>
+        <div className="msg-error">
+          <TriangleAlert /> 답변 실패{m.error ? `: ${m.error}` : ''}
+        </div>
       )}
-      {m.status === 'aborted' && <div className="msg-note">⏹ 중단된 답변이에요</div>}
+      {m.status === 'aborted' && (
+        <div className="msg-note">
+          <Square fill="currentColor" /> 중단된 답변이에요
+        </div>
+      )}
       {m.usage && (
         <div className="msg-usage" title={usageTitle(m.usage)}>
           {usageLine(m.usage)}
@@ -417,7 +493,7 @@ function AssistantMessage({
           onClick={() => onRetry(retryText, retrySlide, retryAttachments)}
           title={retryAttachments?.length ? `첨부 ${retryAttachments.length}개와 함께 다시 보내요` : undefined}
         >
-          ↻ 다시 질문하기
+          <RefreshCw /> 다시 질문하기
         </button>
       )}
       {onRetryPrime && (
@@ -427,7 +503,7 @@ function AssistantMessage({
           onClick={onRetryPrime}
           title="슬라이드를 LLM에게 다시 전달해요 (바로 질문해도 첫 질문과 함께 전달돼요)"
         >
-          📚 다시 전달하기
+          <Library /> 다시 전달하기
         </button>
       )}
     </div>

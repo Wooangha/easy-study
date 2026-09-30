@@ -11,6 +11,7 @@
 // on a marker near the image's left or top edge would be cut. The tip's × (also a right-click) hides the marker —
 // the Q&A itself stays.
 import { Fragment, useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { X } from 'lucide-react';
 import { markerId, regionLabelPlace, type QuestionMarker } from '../../lib/annotations/markers.ts';
 import { percentStyle, type Frame } from '../../lib/attachments.ts';
 import { formatTime } from '../../lib/format.ts';
@@ -257,7 +258,7 @@ export function MarkerButton({ slide, marker, className, style, children, onLit 
             </button>
             <span className="spacer" />
             <button type="button" className="ghost-btn tiny" onPointerDown={(e) => e.stopPropagation()} onClick={hide} title="이 표시를 슬라이드에서 지워요 (질문과 답은 그대로예요)">
-              ✕ 이 표시 지우기
+              <X /> 이 표시 지우기
             </button>
           </div>
         </Floating>

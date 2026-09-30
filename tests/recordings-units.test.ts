@@ -12,7 +12,7 @@ import { DEFAULT_DP, emissions, viterbi } from '../server/recordings/align/dp.ts
 import { features, skeletons, tokens } from '../server/recordings/align/text.ts';
 import { alignInWorker } from '../server/recordings/align/worker.ts';
 import { buildAlignPrompt, deckLines, parseAlignRuns } from '../server/recordings/aiPrompt.ts';
-import { acceleration, contextPrompt, findFfmpeg, findWhisper, parseWhisperJson, progressReader, promptFitsArgs, whisperArgs } from '../server/recordings/asr.ts';
+import { contextPrompt, findFfmpeg, findWhisper, parseWhisperJson, progressReader, promptFitsArgs, usesMetal, whisperArgs } from '../server/recordings/asr.ts';
 import { repoRoot } from '../server/config.ts';
 import { existsSync } from 'node:fs';
 import { conversionError, ffmpegArgs, parseDuration, sniffMedia } from '../server/recordings/ffmpeg.ts';
@@ -667,9 +667,10 @@ describe('engine glue', () => {
     assert.deepEqual(findFfmpeg({ EASY_STUDY_FFMPEG: '/opt/f/ffmpeg' }), { path: path.resolve('/opt/f/ffmpeg'), source: 'env' });
     assert.deepEqual(findFfmpeg({ PATH: bin }), { path: exe('ffmpeg'), source: 'path' });
     assert.equal(findFfmpeg({ PATH: path.join(tmp, 'nothing-here') }), null);
-    assert.equal(acceleration('darwin', 'arm64'), 'metal');
-    assert.equal(acceleration('darwin', 'x64'), 'cpu');
-    assert.equal(acceleration('linux', 'arm64'), 'cpu');
+    assert.equal(usesMetal('darwin', 'arm64'), true);
+    assert.equal(usesMetal('darwin', 'x64'), false);
+    assert.equal(usesMetal('linux', 'arm64'), false);
+    assert.equal(usesMetal('win32', 'x64'), false);
   });
 
   test('whisper-cli arguments follow the ASR spike (beam default, forced language, VAD, -ojf)', () => {

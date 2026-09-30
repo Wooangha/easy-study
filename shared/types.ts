@@ -680,8 +680,18 @@ export interface AsrStatus {
   engineVersion?: string;
   /** Why the engine is unavailable (Korean, actionable). */
   reason?: string;
-  /** 'metal' on Apple Silicon builds, otherwise 'cpu'. */
-  acceleration: 'metal' | 'cpu';
+  /**
+   * What transcription runs on: 'metal' on Apple Silicon builds; 'vulkan' when the engine found a GPU through
+   * Vulkan (Windows x64 / Linux x64 builds, see `gpu`); otherwise 'cpu' (also after the GPU failed, see `gpuError`).
+   */
+  acceleration: 'metal' | 'vulkan' | 'cpu';
+  /** The GPU (present when acceleration is 'vulkan'). integrated: built-in graphics sharing the system memory. */
+  gpu?: { name: string; integrated: boolean };
+  /**
+   * A GPU was found but a run on it failed, so everything runs on the CPU until the server restarts: why (the first
+   * error line; acceleration is 'cpu').
+   */
+  gpuError?: string;
   /** ffmpeg found (needed for uploads only). */
   ffmpegAvailable: boolean;
   models: AsrModelInfo[];
@@ -794,7 +804,7 @@ export const TEXT_FONTS: readonly TextFont[] = ['sans', 'serif', 'mono'];
  * the server; 4 decimals.
  */
 export const SLIDE_PT_HEIGHT = 540;
-export const MIN_TEXT_SIZE_PT = 8;
+export const MIN_TEXT_SIZE_PT = 4;
 export const MAX_TEXT_SIZE_PT = 72;
 /** The size of a text box without `size` (files written before 0.6.2). */
 export const DEFAULT_TEXT_SIZE_PT = 16;

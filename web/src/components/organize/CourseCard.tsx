@@ -1,5 +1,6 @@
 import { useDroppable } from '@dnd-kit/core';
 import { useId, useState, type DragEvent, type MouseEvent } from 'react';
+import { FileText, Folder, GripVertical, NotebookPen, Pencil, Trash } from 'lucide-react';
 import type { Course, DocMeta } from '../../../../shared/types.ts';
 import { courseSummaryUrl } from '../../api.ts';
 import type { UploadItem } from '../../hooks/useDocs.ts';
@@ -143,9 +144,7 @@ export function CourseCard(props: CourseCardProps) {
         {editing ? (
           <>
             <Chevron className="collapse-chevron is-static" />
-            <span className="course-icon" aria-hidden>
-              📁
-            </span>
+            <Folder className="course-icon" />
             <RenameInput
               initial={course.title}
               label="과목 이름"
@@ -168,9 +167,7 @@ export function CourseCard(props: CourseCardProps) {
               }}
             >
               <Chevron />
-              <span className="course-icon" aria-hidden>
-                📁
-              </span>
+              <Folder className="course-icon" />
               <span className="course-title-text">{course.title}</span>
             </button>
             {!compact && (
@@ -181,7 +178,7 @@ export function CourseCard(props: CourseCardProps) {
                 title="과목 이름 바꾸기"
                 aria-label={`‘${course.title}’ 과목 이름 바꾸기`}
               >
-                ✎
+                <Pencil />
               </button>
             )}
           </>
@@ -208,7 +205,7 @@ export function CourseCard(props: CourseCardProps) {
                     : '사용할 수 있는 LLM이 없어요'
                 }
               >
-                📝 정리본 <span className="hide-narrow">없는 강의 </span>
+                <NotebookPen /> 정리본 <span className="hide-narrow">없는 강의 </span>
                 {withoutDigest.length}개 만들기
               </button>
             )}
@@ -219,7 +216,7 @@ export function CourseCard(props: CourseCardProps) {
               rel="noreferrer"
               title="과목 정리 파일(COURSE.md) 열기 — 강의별 요약과 정리본 링크"
             >
-              📄 COURSE.md
+              <FileText /> COURSE.md
             </a>
             <button type="button" className="ghost-btn small" onClick={props.onPickFiles} title="이 과목에 강의 PDF 추가">
               ＋ 강의 추가
@@ -231,7 +228,7 @@ export function CourseCard(props: CourseCardProps) {
               title="과목 삭제 (강의는 남아요)"
               aria-label={`‘${course.title}’ 과목 삭제`}
             >
-              🗑
+              <Trash />
             </button>
           </div>
         )}
@@ -279,7 +276,9 @@ export function CourseCard(props: CourseCardProps) {
 
       {over && (
         <div className="course-drop-hint" aria-hidden>
-          📄 놓으면 ‘{course.title}’에 강의로 추가해요
+          <span>
+            <FileText /> 놓으면 ‘{course.title}’에 강의로 추가해요
+          </span>
         </div>
       )}
     </section>
@@ -291,11 +290,9 @@ export function CourseGhost({ course, lectures }: { course: Course; lectures: nu
   return (
     <div className="drag-ghost course-ghost">
       <span className="drag-ghost-handle" aria-hidden>
-        ≡
+        <GripVertical />
       </span>
-      <span className="course-icon" aria-hidden>
-        📁
-      </span>
+      <Folder className="course-icon" />
       <span className="drag-ghost-title">{course.title}</span>
       <span className="course-count">강의 {lectures}개</span>
     </div>

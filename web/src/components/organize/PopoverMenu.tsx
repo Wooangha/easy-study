@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { Ellipsis, type LucideIcon } from 'lucide-react';
 import { createPortal } from 'react-dom';
 
 export interface MenuItem {
   key: string;
   label: string;
+  /** Drawn before the label (the label itself is plain text: no emoji). */
+  icon?: LucideIcon;
   onSelect: () => void;
   danger?: boolean;
   /** Shown after the label, dimmed (e.g. the group of a course). */
@@ -25,7 +28,7 @@ const GAP = 4;
 const MARGIN = 8;
 
 /**
- * "⋯" button with a small menu (role="menu"): ↑/↓/Home/End move between items, Enter selects, Esc or a click
+ * "⋯" (Ellipsis icon) button with a small menu (role="menu"): ↑/↓/Home/End move between items, Enter selects, Esc or a click
  * outside closes it and focus returns to the button. Rendered in <body> with fixed positioning, so it is never
  * clipped by the library's scroll area.
  */
@@ -147,7 +150,7 @@ export function PopoverMenu({ label, sections }: { label: string; sections: Menu
           }
         }}
       >
-        <span aria-hidden>⋯</span>
+        <Ellipsis />
       </button>
       {open &&
         createPortal(
@@ -184,7 +187,15 @@ export function PopoverMenu({ label, sections }: { label: string; sections: Menu
                         item.onSelect();
                       }}
                     >
-                      <span className="popover-item-label">{item.label}</span>
+                      <span className="popover-item-label">
+                        {item.icon ? (
+                          <>
+                            <item.icon /> {item.label}
+                          </>
+                        ) : (
+                          item.label
+                        )}
+                      </span>
                       {item.hint && <span className="popover-item-hint">{item.hint}</span>}
                     </button>
                   ))}

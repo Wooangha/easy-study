@@ -1,4 +1,5 @@
 import { useCallback, useState, type ReactNode } from 'react';
+import { Check, ChevronDown, Folder, GraduationCap, Hourglass, Library, NotebookPen, Pin, TriangleAlert, X } from 'lucide-react';
 import type { Attachment, DigestInfo, DocMeta, ProviderInfo, SessionSummary } from '../../../shared/types.ts';
 import { courseSummaryUrl } from '../api.ts';
 import type { AttachmentsApi } from '../hooks/useAttachments.ts';
@@ -92,11 +93,15 @@ function DigestTabBadge({ info }: { info: DigestInfo | null }) {
     case 'running':
       return (
         <span className="tab-count is-running">
-          ⏳ {info.done}/{info.total}
+          <Hourglass /> {info.done}/{info.total}
         </span>
       );
     case 'ready':
-      return <span className="tab-count is-ok">✓</span>;
+      return (
+        <span className="tab-count is-ok" role="img" aria-label="완성">
+          <Check />
+        </span>
+      );
     case 'aborted':
     case 'error':
       return info.slides.length > 0 ? <span className="tab-count is-warn">일부</span> : null;
@@ -204,7 +209,7 @@ export function ChatPanel({
   ) : !study.sessionId ? (
     <div className="chat-empty">
       <div className="chat-empty-icon" aria-hidden>
-        🎓
+        <GraduationCap strokeWidth={1.5} />
       </div>
       <h3>무엇이든 물어보세요</h3>
       <p>
@@ -216,6 +221,7 @@ export function ChatPanel({
       {course && earlier && earlier.total > 0 && (
         <div className="course-context-note">
           <p className="muted small">
+            <Folder />{' '}
             {courseContextSentence(
               course.course.title,
               course.index,
@@ -225,7 +231,7 @@ export function ChatPanel({
           </p>
           {earlier.missing.length > 0 && choice && (
             <button type="button" className="ghost-btn small" onClick={() => onDigestLectures(earlier.missing)}>
-              📝 이전 강의 {earlier.missing.length}개 정리본 만들기
+              <NotebookPen /> 이전 강의 {earlier.missing.length}개 정리본 만들기
             </button>
           )}
         </div>
@@ -235,13 +241,17 @@ export function ChatPanel({
           ＋ 새 세션 시작 (슬라이드 전달)
         </button>
       ) : (
-        <p className="warn-text">⚠️ {providerProblem ?? '사용 가능한 LLM이 없어요.'}</p>
+        <p className="warn-text">
+          <TriangleAlert /> {providerProblem ?? '사용 가능한 LLM이 없어요.'}
+        </p>
       )}
       <ul className="tips">
         <li>
           <kbd>j</kbd>/<kbd>k</kbd> 또는 <kbd>↑</kbd>/<kbd>↓</kbd> 로 슬라이드 이동, <kbd>/</kbd> 로 입력창 포커스
         </li>
-        <li>📌 고정하면 스크롤해도 같은 슬라이드에 대해 계속 질문해요</li>
+        <li>
+          <Pin /> 고정하면 스크롤해도 같은 슬라이드에 대해 계속 질문해요
+        </li>
         <li>모든 Q&amp;A는 파일로 저장되고 ‘노트’ 탭에서 슬라이드별로 다시 볼 수 있어요</li>
         <li>‘정리본’ 탭에서 LLM이 슬라이드를 옮겨 적고 설명한 정리본을 슬라이드별로 읽을 수 있어요</li>
       </ul>
@@ -254,11 +264,11 @@ export function ChatPanel({
   ) : !session.primed && !running ? (
     <div className="chat-empty">
       <div className="chat-empty-icon" aria-hidden>
-        📚
+        <Library strokeWidth={1.5} />
       </div>
       <p>이 세션은 아직 슬라이드를 전달받지 않았어요.</p>
       <button type="button" className="primary-btn" onClick={() => void study.primeCurrent(targetSlide)}>
-        📚 전체 슬라이드 전달하기
+        <Library /> 전체 슬라이드 전달하기
       </button>
       <p className="muted small">바로 질문해도 괜찮아요 — 첫 질문과 함께 전달돼요.</p>
     </div>
@@ -343,7 +353,7 @@ export function ChatPanel({
                 : '지금 슬라이드를 고정 — 스크롤해도 이 슬라이드에 대해 질문해요'
             }
           >
-            📌 {pinnedSlide !== null ? `p.${pinnedSlide} 고정됨` : '고정'}
+            <Pin /> {pinnedSlide !== null ? `p.${pinnedSlide} 고정됨` : '고정'}
           </button>
           <label
             className="neighbor-picker"
@@ -376,7 +386,7 @@ export function ChatPanel({
                   : `과목 ‘${course.course.title}’의 ${course.index}번째 강의 (클릭하면 COURSE.md)`
               }
             >
-              📁 {course.course.title} · {course.index}/{course.total}강
+              <Folder /> {course.course.title} · {course.index}/{course.total}강
             </a>
           )}
           {session && (
@@ -394,7 +404,7 @@ export function ChatPanel({
             >
               {providerWithModel(providers, session.provider, session.model, session.effort)}
               <span className="provider-badge-caret" aria-hidden>
-                ▾
+                <ChevronDown />
               </span>
             </button>
           )}
@@ -403,8 +413,8 @@ export function ChatPanel({
         {notice && notice.key === scrollKey && (
           <div className="chat-notice" role="status">
             <span>{notice.text}</span>
-            <button type="button" className="ghost-btn tiny" onClick={() => setNotice(null)} aria-label="알림 닫기">
-              ✕
+            <button type="button" className="ghost-btn tiny" onClick={() => setNotice(null)} aria-label="알림 닫기" title="알림 닫기">
+              <X />
             </button>
           </div>
         )}

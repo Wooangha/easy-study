@@ -1,5 +1,6 @@
 import { useDroppable } from '@dnd-kit/core';
 import { useId, useState, type ReactNode } from 'react';
+import { Folder, Folders, GripVertical, Pencil, Trash } from 'lucide-react';
 import type { Course, CourseGroup } from '../../../../shared/types.ts';
 import { confirmDialog } from '../../lib/confirm.ts';
 import { withParticle } from '../../lib/korean.ts';
@@ -87,9 +88,7 @@ export function GroupCard({ group, courses, collapsed, onToggle, onExpand, canDr
         {editing ? (
           <>
             <Chevron className="collapse-chevron is-static" />
-            <span className="course-icon" aria-hidden>
-              🗂
-            </span>
+            <Folders className="course-icon" />
             <RenameInput
               initial={group.title}
               label="그룹 이름"
@@ -112,9 +111,7 @@ export function GroupCard({ group, courses, collapsed, onToggle, onExpand, canDr
               }}
             >
               <Chevron />
-              <span className="course-icon" aria-hidden>
-                🗂
-              </span>
+              <Folders className="course-icon" />
               <span className="course-title-text">{group.title}</span>
             </button>
             {!compact && (
@@ -125,7 +122,7 @@ export function GroupCard({ group, courses, collapsed, onToggle, onExpand, canDr
                 title="그룹 이름 바꾸기"
                 aria-label={`‘${group.title}’ 그룹 이름 바꾸기`}
               >
-                ✎
+                <Pencil />
               </button>
             )}
           </>
@@ -158,7 +155,7 @@ export function GroupCard({ group, courses, collapsed, onToggle, onExpand, canDr
               title="그룹 삭제 (과목과 강의는 남아요)"
               aria-label={`‘${group.title}’ 그룹 삭제`}
             >
-              🗑
+              <Trash />
             </button>
           </div>
         )}
@@ -169,7 +166,7 @@ export function GroupCard({ group, courses, collapsed, onToggle, onExpand, canDr
           {courses.map((c) => renderCourse(c))}
           {creating && (
             <NewTitleForm
-              icon="📁"
+              icon={Folder}
               placeholder="과목 이름 (예: Compiler)"
               label={`‘${group.title}’ 그룹에 만들 과목 이름`}
               onCancel={() => setCreating(false)}
@@ -180,9 +177,13 @@ export function GroupCard({ group, courses, collapsed, onToggle, onExpand, canDr
           )}
           {courses.length === 0 && !creating && (
             <p className={`group-empty${drag.active?.kind === 'course' ? ' is-target' : ''}`}>
-              {drag.active?.kind === 'course'
-                ? '여기에 놓으면 이 그룹에 들어가요'
-                : '비어 있는 그룹이에요 — 과목의 ≡ 손잡이를 끌어다 놓거나 ‘＋ 과목’으로 만드세요'}
+              {drag.active?.kind === 'course' ? (
+                '여기에 놓으면 이 그룹에 들어가요'
+              ) : (
+                <>
+                  비어 있는 그룹이에요 — 과목의 <GripVertical /> 손잡이를 끌어다 놓거나 ‘＋ 과목’으로 만드세요
+                </>
+              )}
             </p>
           )}
         </div>
@@ -196,11 +197,9 @@ export function GroupGhost({ group }: { group: CourseGroup }) {
   return (
     <div className="drag-ghost group-ghost">
       <span className="drag-ghost-handle" aria-hidden>
-        ≡
+        <GripVertical />
       </span>
-      <span className="course-icon" aria-hidden>
-        🗂
-      </span>
+      <Folders className="course-icon" />
       <span className="drag-ghost-title">{group.title}</span>
       <span className="course-count">과목 {group.courseIds.length}개</span>
     </div>

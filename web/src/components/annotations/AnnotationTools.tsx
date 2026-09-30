@@ -5,6 +5,7 @@
 // colors, and the ⋯ 필기 menu (필기 보기/숨기기, 표시 있는 슬라이드만, a tag filter, 질문 표시 보기, 그때 필기 재생). On a
 // narrow pane the tools and colors fold into one button showing the active tool and color, so the toolbar keeps one row.
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
+import { Ellipsis, Mic } from 'lucide-react';
 import { ANNOTATION_COLORS, type AnnotationColor } from '../../../../shared/types.ts';
 import { ANNOTATION_TOOLS, CLICK_TOOLS, type AnnotationTool } from '../../lib/annotations/geometry.ts';
 import { ToolIcon } from './icons.tsx';
@@ -152,7 +153,8 @@ export function AnnotationTools(props: AnnotationToolsProps) {
         label="필기 메뉴"
         button={
           <>
-            ⋯<span className="annot-menu-text"> {layerShown ? '필기' : '필기 숨김'}</span>
+            <Ellipsis />
+            <span className="annot-menu-text">{layerShown ? '필기' : '필기 숨김'}</span>
           </>
         }
         title="필기 보기/숨기기 · 표시 있는 슬라이드만 · 태그 · 질문 표시 · 그때 필기 재생"
@@ -210,7 +212,7 @@ export function AnnotationTools(props: AnnotationToolsProps) {
       )}
       {replaying && (
         <span className="annot-replay-badge" title="녹음 탭의 재생 위치까지 쓴 필기만 보여요 (⋯ 필기 메뉴에서 끌 수 있어요)">
-          🎙 그때 필기 재생 중
+          <Mic /> 그때 필기 재생 중
         </span>
       )}
     </>

@@ -25,13 +25,17 @@ export const CACHE_DIR = path.join(REPO_DIR, '.cache');
  *         'externalBin' = /usr/bin/es-node next to the app binary (Linux: never "node", which would clash
  *         with the distribution's nodejs package in deb/rpm). whisper-cli and ffmpeg ship the same way
  *         (resources/whisper/, resources/ffmpeg/ or /usr/bin/es-whisper, /usr/bin/es-ffmpeg).
+ * vulkan: whisper-cli also transcribes on the GPU through Vulkan (whisper.mjs; the Vulkan SDK there): Windows
+ *         whisper\es-ggml-vulkan.dll, loaded only on request; Linux a second whisper-cli, /usr/bin/es-whisper-vulkan.
+ *         The CPU build always ships too (alone from a local build without the Vulkan SDK). No SDK for Linux arm64;
+ *         Windows arm64 stays as it is.
  */
 export const TARGETS = {
   'aarch64-apple-darwin': { node: 'darwin-arm64', os: 'darwin', cpu: 'arm64', nodeAs: 'resource', bundles: ['app', 'dmg'] },
   'x86_64-apple-darwin': { node: 'darwin-x64', os: 'darwin', cpu: 'x64', nodeAs: 'resource', bundles: ['app', 'dmg'] },
-  'x86_64-pc-windows-msvc': { node: 'win-x64', os: 'win32', cpu: 'x64', nodeAs: 'resource', bundles: ['nsis'] },
+  'x86_64-pc-windows-msvc': { node: 'win-x64', os: 'win32', cpu: 'x64', nodeAs: 'resource', bundles: ['nsis'], vulkan: true },
   'aarch64-pc-windows-msvc': { node: 'win-arm64', os: 'win32', cpu: 'arm64', nodeAs: 'resource', bundles: ['nsis'] },
-  'x86_64-unknown-linux-gnu': { node: 'linux-x64', os: 'linux', cpu: 'x64', libc: 'glibc', nodeAs: 'externalBin', bundles: ['deb', 'rpm', 'appimage'] },
+  'x86_64-unknown-linux-gnu': { node: 'linux-x64', os: 'linux', cpu: 'x64', libc: 'glibc', nodeAs: 'externalBin', bundles: ['deb', 'rpm', 'appimage'], vulkan: true },
   'aarch64-unknown-linux-gnu': { node: 'linux-arm64', os: 'linux', cpu: 'arm64', libc: 'glibc', nodeAs: 'externalBin', bundles: ['deb', 'rpm', 'appimage'] },
 };
 
@@ -57,15 +61,34 @@ export function targetInfo(triple) {
 }
 
 /**
- * Linux: tauri.linux.conf.json lists the externalBins of a complete build (es-node, es-whisper, es-ffmpeg); a local
- * build that left a recording tool out (prepare.mjs: `tools` of target.json) has no file for it, so build.mjs
- * overrides the list (`tauri build --config`).
+ * Linux: the externalBins (resources/bin/<name>-<triple> → /usr/bin/<name>) of a build of `info` with the recording
+ * tools `tools` (prepare.mjs: `tools` of target.json; a tool left out has no file). whisper brings its Vulkan build
+ * (es-whisper-vulkan) only on the targets that have one (x86_64) and only when prepare.mjs placed it
+ * (tools['whisper-vulkan']: not without the Vulkan SDK).
+ */
+export function linuxExternalBins(info, tools = {}) {
+  const bins = ['es-node'];
+  if (tools.whisper !== false) bins.push('es-whisper', ...(info.vulkan && tools['whisper-vulkan'] === true ? ['es-whisper-vulkan'] : []));
+  if (tools.ffmpeg !== false) bins.push('es-ffmpeg');
+  return bins;
+}
+
+/**
+ * The externalBin names in tauri.linux.conf.json: what every Linux build has (never es-whisper-vulkan, which aarch64
+ * and a build without the Vulkan SDK lack: `cd desktop && npm run dev` and a plain cargo build take this list).
+ */
+export const LINUX_EXTERNAL_BINS = ['es-node', 'es-whisper', 'es-ffmpeg'];
+
+/**
+ * tauri.linux.conf.json lists the externalBins every complete Linux build has (es-node, es-whisper, es-ffmpeg).
+ * build.mjs overrides the list (`tauri build|dev --config`) where the build differs: x86_64 adds es-whisper-vulkan
+ * when prepare.mjs placed it, and a local build that left a recording tool out drops it.
  */
 export function externalBinOverride(info, tools = {}) {
   if (info.os !== 'linux') return [];
-  const kept = ['whisper', 'ffmpeg'].filter((t) => tools[t] !== false);
-  if (kept.length === 2) return [];
-  return ['--config', JSON.stringify({ bundle: { externalBin: ['es-node', ...kept.map((t) => `es-${t}`)].map((b) => `../resources/bin/${b}`) } })];
+  const bins = linuxExternalBins(info, tools);
+  if (bins.join() === LINUX_EXTERNAL_BINS.join()) return [];
+  return ['--config', JSON.stringify({ bundle: { externalBin: bins.map((b) => `../resources/bin/${b}`) } })];
 }
 
 /** `name` as an executable file name of `os` (name.exe on Windows). */

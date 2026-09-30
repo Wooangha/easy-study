@@ -61,10 +61,13 @@ export function isAllowedImageSrc(src: string, origin: string = currentOrigin())
   return url.origin === origin && url.pathname.startsWith('/api/');
 }
 
+/** Class of what stands in for an image that is not loaded automatically (components/Markdown.tsx draws an image icon in the link). */
+export const BLOCKED_IMAGE_CLASS = 'md-blocked-image';
+
 /** Text shown instead of an image that is not loaded automatically. */
 function blockedImageLabel(alt: string, url: URL | null): string {
   const name = alt.trim() || '외부 이미지';
-  return url ? `🖼 ${name} (${url.host})` : `🖼 ${name}`;
+  return url ? `${name} (${url.host})` : name;
 }
 
 /** Replace an `<img>` whose source is not allowed with a link (http/https) or plain text. */
@@ -79,13 +82,13 @@ function blockedImage(img: Element): ElementContent {
     /* relative or malformed: no link */
   }
   const text: ElementContent = { type: 'text', value: blockedImageLabel(alt, url) };
-  if (!url) return { type: 'element', tagName: 'span', properties: { className: ['md-blocked-image'] }, children: [text] };
+  if (!url) return { type: 'element', tagName: 'span', properties: { className: [BLOCKED_IMAGE_CLASS] }, children: [text] };
   return {
     type: 'element',
     tagName: 'a',
     properties: {
       href: url.href,
-      className: ['md-blocked-image'],
+      className: [BLOCKED_IMAGE_CLASS],
       title: `외부 이미지는 자동으로 불러오지 않아요 — 클릭하면 새 탭에서 열려요: ${url.href}`,
     },
     children: [text],

@@ -1,5 +1,6 @@
 import { useDroppable } from '@dnd-kit/core';
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
+import { ArrowLeft, FileText, Folder, Folders, GripVertical, Hourglass, RefreshCw, TriangleAlert } from 'lucide-react';
 import type { Course, DocMeta, LayoutItem, LibraryLayout } from '../../../shared/types.ts';
 import type { CoursesState } from '../hooks/useCourses.ts';
 import { useCollapsed } from '../hooks/useCollapsed.ts';
@@ -238,14 +239,15 @@ export function LibraryView(props: LibraryViewProps) {
             onDragLeave={() => setOver(false)}
             onDrop={onDrop}
           >
-            <span className="dropzone-icon" aria-hidden>
-              📄
-            </span>
+            <FileText className="dropzone-icon" strokeWidth={1.5} />
             <span className="dropzone-title">PDF를 끌어다 놓거나 클릭해서 업로드</span>
             <span className="dropzone-sub">
               {uploadTarget ? (
                 <>
-                  <b>📁 {uploadTarget.title}</b> 과목에 강의로 추가돼요
+                  <b>
+                    <Folder /> {uploadTarget.title}
+                  </b>{' '}
+                  과목에 강의로 추가돼요
                 </>
               ) : (
                 '슬라이드를 이미지로 변환해 두고, 질문할 때 LLM이 그림·도표까지 볼 수 있게 해요'
@@ -273,7 +275,7 @@ export function LibraryView(props: LibraryViewProps) {
 
         {loadError && (
           <div className="inline-error">
-            ⚠️ 문서 목록을 불러오지 못했어요: {loadError}{' '}
+            <TriangleAlert /> 문서 목록을 불러오지 못했어요: {loadError}{' '}
             <button type="button" className="ghost-btn small" onClick={props.onRetryLoad}>
               다시 시도
             </button>
@@ -298,7 +300,9 @@ export function LibraryView(props: LibraryViewProps) {
                 과목
               </h2>
               {courseList.length > 1 && !saving && (
-                <span className="muted small section-tip">≡ 를 끌어서 순서·위치를 바꿔요</span>
+                <span className="muted small section-tip">
+                  <GripVertical /> 를 끌어서 순서·위치를 바꿔요
+                </span>
               )}
               {saving && (
                 <span className="muted small section-tip" role="status">
@@ -331,10 +335,14 @@ export function LibraryView(props: LibraryViewProps) {
                 </button>
               </span>
             </div>
-            {org.loadError && <div className="inline-error">⚠️ 과목 목록을 불러오지 못했어요: {org.loadError}</div>}
+            {org.loadError && (
+              <div className="inline-error">
+                <TriangleAlert /> 과목 목록을 불러오지 못했어요: {org.loadError}
+              </div>
+            )}
             {!org.loadError && org.layoutError && (
               <div className="inline-error">
-                ⚠️ 과목 배치(그룹·순서)를 불러오지 못해서 과목을 만든 순서대로 보여 줘요: {org.layoutError}{' '}
+                <TriangleAlert /> 과목 배치(그룹·순서)를 불러오지 못해서 과목을 만든 순서대로 보여 줘요: {org.layoutError}{' '}
                 <button type="button" className="ghost-btn small" onClick={() => void org.refresh()}>
                   다시 시도
                 </button>
@@ -342,7 +350,7 @@ export function LibraryView(props: LibraryViewProps) {
             )}
             {creating === 'group' && (
               <NewTitleForm
-                icon="🗂"
+                icon={Folders}
                 placeholder="그룹 이름 (예: 2026-2학기)"
                 label="새 그룹 이름"
                 onCancel={() => setCreating(null)}
@@ -357,7 +365,7 @@ export function LibraryView(props: LibraryViewProps) {
             )}
             {creating === 'course' && (
               <NewTitleForm
-                icon="📁"
+                icon={Folder}
                 placeholder="과목 이름 (예: Compiler)"
                 label="새 과목 이름"
                 onCancel={() => setCreating(null)}
@@ -484,9 +492,13 @@ function UncategorizedSection({
         <h2 className="library-heading">{hasCourses ? '미분류' : '내 문서'}</h2>
         {hasCourses && (
           <span className="muted small">
-            {draggingFromCourse
-              ? '여기에 놓으면 과목에서 빠져요'
-              : '과목에 넣으려면 ≡ 를 끌어다 과목에 놓거나 ‘과목으로 이동’을 고르세요'}
+            {draggingFromCourse ? (
+              '여기에 놓으면 과목에서 빠져요'
+            ) : (
+              <>
+                과목에 넣으려면 <GripVertical /> 를 끌어다 과목에 놓거나 ‘과목으로 이동’을 고르세요
+              </>
+            )}
           </span>
         )}
       </div>
@@ -528,8 +540,8 @@ export function DocStatusView({
     <div className="library">
       <div className="library-inner status-view">
         <div className="status-card">
-          <div className="status-icon" aria-hidden>
-            {doc.status === 'error' ? '⚠️' : '⏳'}
+          <div className={`status-icon${doc.status === 'error' ? ' is-error' : ''}`} aria-hidden>
+            {doc.status === 'error' ? <TriangleAlert strokeWidth={1.5} /> : <Hourglass strokeWidth={1.5} />}
           </div>
           <h2>{doc.title}</h2>
           <p className="muted small">{doc.fileName}</p>
@@ -549,7 +561,7 @@ export function DocStatusView({
               </p>
               <div className="status-actions">
                 <button type="button" className="primary-btn small" onClick={onRetry}>
-                  ↻ 다시 변환
+                  <RefreshCw /> 다시 변환
                 </button>
                 <button type="button" className="ghost-btn danger" onClick={onDelete}>
                   삭제
@@ -558,7 +570,7 @@ export function DocStatusView({
             </>
           )}
           <button type="button" className="ghost-btn" onClick={onBack}>
-            ← 라이브러리
+            <ArrowLeft /> 라이브러리
           </button>
         </div>
       </div>

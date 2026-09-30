@@ -2,6 +2,7 @@
 // rules of web/src/lib/providerChoice.ts. Shared by the top bar's "새 세션" choice (TopBar.tsx) and the LLM switch of
 // the open session (LlmSwitchDialog.tsx).
 import { useId, useState } from 'react';
+import { Info } from 'lucide-react';
 import type { ProviderId, ProviderInfo } from '../../../shared/types.ts';
 import type { ProviderChoice, ProviderChoiceUpdate } from '../hooks/useProviderChoice.ts';
 import { effortOptions, withModel } from '../lib/providerChoice.ts';
@@ -134,11 +135,17 @@ export function ProviderPicker({ providers, loading = false, choice, onChange, l
           )}
         </>
       )}
-      {unavailable.length > 0 && (
-        <span className="provider-warn" title={unavailableTitle} aria-label={`사용 불가 LLM: ${unavailableTitle}`}>
-          ⓘ
-        </span>
-      )}
+      {unavailable.length > 0 &&
+        (className?.includes('is-stacked') ? (
+          // Stacked (a panel or dialog): room for words — which LLMs cannot be used; why is in the tooltip.
+          <span className="provider-warn is-text" title={unavailableTitle}>
+            <Info /> 사용할 수 없음: {unavailable.map((p) => p.label).join(', ')}
+          </span>
+        ) : (
+          <span className="provider-warn" role="img" title={unavailableTitle} aria-label={`사용 불가 LLM: ${unavailableTitle}`}>
+            <Info />
+          </span>
+        ))}
     </div>
   );
 }

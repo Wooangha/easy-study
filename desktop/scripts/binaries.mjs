@@ -33,7 +33,10 @@ export function machoInfo(buf) {
   return { cpu, dylibs };
 }
 
-/** ELF64 little-endian: the CPU and the shared libraries it needs (none for a static binary). */
+/**
+ * ELF64 little-endian: the CPU, the shared libraries it needs (none for a static binary) and its library search
+ * paths (DT_RPATH, DT_RUNPATH).
+ */
 export function elfInfo(buf) {
   const machine = buf.readUInt16LE(0x12);
   const cpu = ELF_MACHINE[machine] ?? `e_machine ${machine}`;
@@ -41,17 +44,18 @@ export function elfInfo(buf) {
   const dynamic = sections.find((s) => s.name === '.dynamic');
   const dynstr = sections.find((s) => s.name === '.dynstr');
   const needed = [];
+  const runpath = [];
   if (dynamic && dynstr) {
     for (let at = dynamic.offset; at + 16 <= dynamic.offset + dynamic.size; at += 16) {
       const tag = buf.readBigInt64LE(at);
       if (tag === 0n) break;
-      if (tag === 1n) {
+      if (tag === 1n || tag === 15n || tag === 29n) {
         const name = dynstr.offset + Number(buf.readBigUInt64LE(at + 8));
-        needed.push(buf.toString('utf8', name, buf.indexOf(0, name)));
+        (tag === 1n ? needed : runpath).push(buf.toString('utf8', name, buf.indexOf(0, name)));
       }
     }
   }
-  return { cpu, needed };
+  return { cpu, needed, runpath };
 }
 
 /** PE32+ (64-bit Windows): the CPU and the DLLs it imports. */
@@ -101,14 +105,17 @@ const ALLOWED = {
 
 /**
  * Checks that `file` runs on `cpu` ('x64' | 'arm64') of `os` ('darwin' | 'linux' | 'win32') and loads only the OS's
- * libraries, plus `own` (file names shipped next to it, e.g. whisper.dll). Returns the file's libraries.
+ * libraries, plus `own` (file names shipped next to it, e.g. whisper.dll) and `allow` (system libraries this one
+ * file may need because the packages declare them, e.g. libvulkan.so.1 for the Linux Vulkan build of whisper-cli,
+ * which a computer without the Vulkan loader simply cannot start: the CPU build is used there). Returns the file's
+ * libraries.
  */
-export function checkBinary(file, { os, cpu, own = [] }) {
+export function checkBinary(file, { os, cpu, own = [], allow = [] }) {
   const buf = fs.readFileSync(file);
   const info = os === 'darwin' ? machoInfo(buf) : os === 'linux' ? elfInfo(buf) : peInfo(buf);
   if (info.cpu !== cpu) throw new Error(`${file}: built for ${info.cpu}, not ${cpu}`);
   const libs = info.dylibs ?? info.needed ?? info.imports;
-  const ownSet = new Set(own.map((n) => n.toLowerCase()));
+  const ownSet = new Set([...own, ...allow].map((n) => n.toLowerCase()));
   const foreign = libs.filter((lib) => !ownSet.has(lib.toLowerCase()) && !ALLOWED[os](lib));
   if (foreign.length > 0) throw new Error(`${file}: links libraries a user's computer may not have: ${foreign.join(', ')}`);
   return libs;

@@ -2,6 +2,7 @@
 // bubble coming out of it, with a 0.5×–3× slider and a box to type any rate. The slider's thumb follows the pointer
 // and is drawn onto the tick marks near it; arrow keys move in 0.05 steps (PageUp / PageDown: the next mark,
 // Home / End, double-click: 1×). The rules are in lib/recording/rate.ts.
+import { RotateCcw } from 'lucide-react';
 import {
   useCallback,
   useEffect,
@@ -220,7 +221,7 @@ export function PlaybackRate({ rate, onChange }: { rate: number; onChange: (rate
                 sliderRef.current?.focus({ preventScroll: true });
               }}
             >
-              ↺ 1×
+              <RotateCcw /> 1×
             </button>
           </div>
           <RateSlider rate={rate} onChange={onChange} sliderRef={sliderRef} />

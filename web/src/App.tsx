@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { FileText, Folder, ImageIcon, TriangleAlert } from 'lucide-react';
 import type { AnnotationItem, Attachment, DocMeta, RegionRect } from '../../shared/types.ts';
 import { ApiError, errorMessage, startDigest } from './api.ts';
 import { AttachmentContext, AttachmentPreview, type AttachmentActions } from './components/Attachments.tsx';
@@ -246,7 +247,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
     },
     [addRegion],
   );
-  /** 📎 첨부 of an annotation item (DESIGN §25): a chip in the composer, sent with the next question. */
+  /** 첨부 of an annotation item (DESIGN §25): a chip in the composer, sent with the next question. */
   const attachItem = useCallback(
     (slide: number, item: AnnotationItem) => {
       setTab('chat');
@@ -254,7 +255,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
     },
     [addAnnotation],
   );
-  /** 📎 첨부 of a group selection: the chat tab once, the free slots counted once. */
+  /** 첨부 of a group selection: the chat tab once, the free slots counted once. */
   const attachItems = useCallback(
     (slide: number, items: AnnotationItem[]) => {
       setTab('chat');
@@ -325,7 +326,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
   const [playRequest, setPlayRequest] = useState<PlayRequest | null>(null);
   const playSeq = useRef(0);
   const recordingsRef = useLatest(recordings);
-  /** A memo's 🎙 chip: play that moment in the 녹음 tab. */
+  /** A memo's recording chip (the mic icon): play that moment in the 녹음 tab. */
   const playRecording = useCallback(
     (rid: string, t: number) => {
       const list = recordingsRef.current.list;
@@ -399,11 +400,11 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
       if (stay) {
         const what = created.length === 1 ? `‘${last.title}’ 강의` : `강의 ${created.length}개`;
         toast(
-          `${what}를 ${courseTitle ? `📁 ${courseTitle} 과목에 ` : ''}추가했어요. 입력창의 첨부를 지키려고 지금 강의에 그대로 있어요 — 상단 문서 목록에서 열 수 있어요.`,
+          `${what}를 ${courseTitle ? `${courseTitle} 과목에 ` : ''}추가했어요. 입력창의 첨부를 지키려고 지금 강의에 그대로 있어요 — 상단 문서 목록에서 열 수 있어요.`,
           'success',
         );
       } else {
-        if (courseTitle) toast(`📁 ${courseTitle} 과목에 강의 ${created.length}개를 추가했어요`, 'success');
+        if (courseTitle) toast(`${courseTitle} 과목에 강의 ${created.length}개를 추가했어요`, 'success');
         if (open) setDocId(last.id);
       }
     },
@@ -530,7 +531,8 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
     };
   }, [uploadCountRef, studyRef]);
 
-  // 설정 (⚙, the app menu "설정…" through __easyStudyOpenSettings). Under the login screen it opens after the login.
+  // 설정 (the top bar's gear, the app menu "설정…" through __easyStudyOpenSettings). Under the login screen it opens
+  // after the login.
   const [settings, setSettings] = useState<{ section: SettingsSection | null } | null>(null);
   const pendingSettings = useRef<{ section: SettingsSection | null } | null>(null);
   useEffect(() => {
@@ -655,9 +657,9 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
         ? '사용 가능한 LLM이 없어요 — 상단 ⓘ 에서 이유를 확인하세요'
         : null;
 
-  // "💬 이 부분 설명해줘" on a selected region: the same rule as the composer's send button.
+  // "이 부분 설명해줘" on a selected region: the same rule as the composer's send button.
   const askDisabledReason = study.running
-    ? '답변이 끝난 뒤에 질문할 수 있어요 (📎 첨부는 지금도 돼요)'
+    ? '답변이 끝난 뒤에 질문할 수 있어요 (첨부는 지금도 돼요)'
     : !study.session && !choice
       ? (providerProblem ?? '사용 가능한 LLM이 없어요')
       : null;
@@ -875,7 +877,9 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
 
       {healthError && (
         <div className="banner banner-error" role="alert">
-          ⚠️ 서버에 연결할 수 없어요: {healthError}
+          <span>
+            <TriangleAlert /> 서버에 연결할 수 없어요: {healthError}
+          </span>
           <button
             type="button"
             className="ghost-btn small"
@@ -891,8 +895,10 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
       )}
       {!healthError && noProvider && (
         <div className="banner banner-warn" role="alert">
-          ⚠️ 사용 가능한 LLM이 없어요.{' '}
-          {providers?.map((p) => `${p.label}: ${p.reason ?? '사용 불가'}`).join(' · ')}
+          <span>
+            <TriangleAlert /> 사용 가능한 LLM이 없어요.{' '}
+            {providers?.map((p) => `${p.label}: ${p.reason ?? '사용 불가'}`).join(' · ')}
+          </span>
           <button type="button" className="ghost-btn small" onClick={() => void reloadHealth()}>
             다시 확인
           </button>
@@ -935,13 +941,29 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
             {(() => {
               const copy = dropOverlayCopy(
                 dragOver,
-                uploadTarget ? `📄 PDF를 놓으면 📁 ${uploadTarget.title}에 강의로 추가해요` : '📄 PDF를 놓으면 업로드해요',
+                uploadTarget ? (
+                  <>
+                    <FileText /> PDF를 놓으면 <Folder /> {uploadTarget.title}에 강의로 추가해요
+                  </>
+                ) : (
+                  <>
+                    <FileText /> PDF를 놓으면 업로드해요
+                  </>
+                ),
                 readyDocId !== null,
               );
               return (
                 <>
+                  {copy.titleIcon === 'image' && <ImageIcon />}
+                  {copy.titleIcon && ' '}
                   {copy.title}
-                  {copy.sub && <div className="drop-overlay-sub">{copy.sub}</div>}
+                  {copy.sub && (
+                    <div className="drop-overlay-sub">
+                      {copy.subIcon === 'image' && <ImageIcon />}
+                      {copy.subIcon && ' '}
+                      {copy.sub}
+                    </div>
+                  )}
                 </>
               );
             })()}

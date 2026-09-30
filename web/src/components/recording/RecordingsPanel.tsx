@@ -2,6 +2,25 @@
 // recognition settings with the model download, and for the selected recording a player (speed, "슬라이드
 // 따라가기"), its transcript (focused slide or all, click → play from there), "여기부터 p.N" markers, "AI 정밀
 // 정렬", rename and delete.
+import {
+  Bot,
+  Check,
+  CircleSmall,
+  Files,
+  Hourglass,
+  Lock,
+  MapPin,
+  MessageCircle,
+  Mic,
+  Pause,
+  Play,
+  RefreshCw,
+  Settings,
+  TriangleAlert,
+  Upload,
+  X,
+  type LucideIcon,
+} from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DocMeta, ProviderId, ProviderInfo, RecordingInfo } from '../../../../shared/types.ts';
 import * as api from '../../api.ts';
@@ -25,6 +44,8 @@ import {
   recordingLanguageLabel,
   recordingStatus,
   transcriptFraction,
+  type RecordingStatus,
+  type StatusIcon,
 } from '../../lib/recording/labels.ts';
 import type { MarkerAction } from '../../lib/recording/markers.ts';
 import { markerLabel } from '../../lib/recording/markers.ts';
@@ -44,7 +65,9 @@ import { Transcript, type TranscriptMode } from './Transcript.tsx';
 
 const isMode = (v: unknown): v is TranscriptMode => v === 'current' || v === 'all';
 
-/** "Play this moment" (a memo's 🎙 chip, DESIGN §25): the recording and the time; `seq` makes repeats distinct. */
+/**
+ * "Play this moment" (a memo's recording chip, DESIGN §25): the recording and the time; `seq` makes repeats distinct.
+ */
 export interface PlayRequest {
   rid: string;
   t: number;
@@ -111,7 +134,7 @@ export function RecordingsPanel({ doc, focusedSlide, active, providers, choice, 
             onClick={() => void startRecording(doc.id, focusedSlide)}
             title={recordingElsewhere ? '다른 강의를 녹음하고 있어요' : (recorder.unavailableReason() ?? '이 강의를 녹음하고 바로 받아쓰기해요')}
           >
-            🎙 녹음 시작
+            <Mic /> 녹음 시작
           </button>
         )}
         <button
@@ -125,7 +148,7 @@ export function RecordingsPanel({ doc, focusedSlide, active, providers, choice, 
               : '이미 녹음한 파일(음성·동영상)을 올려서 받아쓰고 슬라이드에 맞춰요'
           }
         >
-          ⬆ 녹음 파일 올리기
+          <Upload /> 녹음 파일 올리기
         </button>
         <span className="spacer" />
         <button
@@ -135,10 +158,16 @@ export function RecordingsPanel({ doc, focusedSlide, active, providers, choice, 
           onClick={() => setSettingsOpen((o) => !o)}
           title="받아쓰기 설정 (모델·언어·실시간 받아쓰기)"
         >
-          ⚙ 설정
+          <Settings /> 설정
         </button>
-        <button type="button" className="ghost-btn small" onClick={() => void recordings.refresh()} title="새로고침">
-          ↻
+        <button
+          type="button"
+          className="ghost-btn small"
+          onClick={() => void recordings.refresh()}
+          title="새로고침"
+          aria-label="새로고침"
+        >
+          <RefreshCw />
         </button>
       </div>
       <input
@@ -160,7 +189,9 @@ export function RecordingsPanel({ doc, focusedSlide, active, providers, choice, 
         {uploads.map((u) => (
           <div key={u.id} className="rec-upload">
             <div className="rec-upload-line">
-              <span className="rec-upload-name">⬆ {u.name}</span>
+              <span className="rec-upload-name">
+                <Upload /> {u.name}
+              </span>
               <span className="muted small">{Math.round(u.fraction * 100)}%</span>
               <button type="button" className="ghost-btn tiny" onClick={() => cancelRecordingUpload(u.id)}>
                 취소
@@ -171,7 +202,7 @@ export function RecordingsPanel({ doc, focusedSlide, active, providers, choice, 
         ))}
         {recordings.error && (
           <div className="inline-error">
-            ⚠️ 녹음 목록을 불러오지 못했어요: {recordings.error}{' '}
+            <TriangleAlert /> 녹음 목록을 불러오지 못했어요: {recordings.error}{' '}
             <button type="button" className="ghost-btn small" onClick={() => void recordings.refresh()}>
               다시 시도
             </button>
@@ -181,18 +212,18 @@ export function RecordingsPanel({ doc, focusedSlide, active, providers, choice, 
         {list !== null && list.length === 0 && uploads.length === 0 && (
           <div className="rec-empty">
             <div className="chat-empty-icon" aria-hidden>
-              🎙
+              <Mic />
             </div>
             <h3>아직 녹음이 없어요</h3>
             <p>
-              수업 중에 <b>🎙 녹음 시작</b>을 누르면 강의를 녹음하면서 바로 받아써요. 이미 녹음한 파일은 <b>⬆ 녹음 파일 올리기</b>로
+              수업 중에 <b><Mic /> 녹음 시작</b>을 누르면 강의를 녹음하면서 바로 받아써요. 이미 녹음한 파일은 <b><Upload /> 녹음 파일 올리기</b>로
               올리면 돼요.
             </p>
             <ul className="tips">
-              <li>💬 녹음하는 동안 질문하면 최근 몇 분 동안 교수님이 한 말도 튜터에게 함께 전달돼요</li>
-              <li>📑 받아쓴 문장은 슬라이드별로 나뉘고, 튜터가 그 슬라이드에서 한 말을 알고 설명해요</li>
-              <li>▶ 나중에 문장을 누르면 그 부분부터 다시 들을 수 있고, 슬라이드도 따라 넘어가요</li>
-              <li>🔒 받아쓰기는 서버 컴퓨터에서 해요 (녹음을 인터넷으로 보내지 않아요)</li>
+              <li><MessageCircle /> 녹음하는 동안 질문하면 최근 몇 분 동안 교수님이 한 말도 튜터에게 함께 전달돼요</li>
+              <li><Files /> 받아쓴 문장은 슬라이드별로 나뉘고, 튜터가 그 슬라이드에서 한 말을 알고 설명해요</li>
+              <li><Play /> 나중에 문장을 누르면 그 부분부터 다시 들을 수 있고, 슬라이드도 따라 넘어가요</li>
+              <li><Lock /> 받아쓰기는 서버 컴퓨터에서 해요 (녹음을 인터넷으로 보내지 않아요)</li>
             </ul>
           </div>
         )}
@@ -222,6 +253,32 @@ export function RecordingsPanel({ doc, focusedSlide, active, providers, choice, 
   );
 }
 
+const STATUS_ICONS: Record<StatusIcon, LucideIcon> = {
+  live: CircleSmall,
+  paused: Pause,
+  waiting: Hourglass,
+  warning: TriangleAlert,
+  done: Check,
+};
+
+/** The status icons drawn solid, like the media glyphs they replace (● ⏸). */
+const SOLID_STATUS: ReadonlySet<StatusIcon> = new Set(['live', 'paused']);
+
+/** A recording's status badge: its icon and text. */
+function StatusBadge({ status }: { status: RecordingStatus }) {
+  const Icon = status.icon ? STATUS_ICONS[status.icon] : null;
+  return (
+    <span className={`rec-badge tone-${status.tone}`} title={status.title}>
+      {Icon && (
+        <>
+          <Icon fill={status.icon && SOLID_STATUS.has(status.icon) ? 'currentColor' : 'none'} />{' '}
+        </>
+      )}
+      {status.text}
+    </span>
+  );
+}
+
 function RecordingRow({ info, selected, onSelect }: { info: RecordingInfo; selected: boolean; onSelect: () => void }) {
   // The feed (when open) has the freshest status of the selected / live recording.
   const feed = useRecordingFeed(selected ? info.docId : null, selected ? info.id : null, info);
@@ -232,12 +289,10 @@ function RecordingRow({ info, selected, onSelect }: { info: RecordingInfo; selec
     <li className={selected ? 'rec-row is-selected' : 'rec-row'}>
       <button type="button" className="rec-row-main" onClick={onSelect} aria-current={selected ? 'true' : undefined}>
         <span className="rec-row-title">
-          <span aria-hidden>{r.source === 'live' ? '🎙' : '⬆'}</span> {r.title}
+          {r.source === 'live' ? <Mic /> : <Upload />} {r.title}
         </span>
         <span className="rec-row-sub">
-          <span className={`rec-badge tone-${status.tone}`} title={status.title}>
-            {status.text}
-          </span>
+          <StatusBadge status={status} />
           <span className="muted small">
             {formatDate(r.createdAt)} {formatTime(r.createdAt)} · {durationLine(r)}
             {r.language === 'auto' && r.detectedLanguage ? ` · ${recordingLanguageLabel(r)}` : ''}
@@ -356,8 +411,8 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
     else audio.pause();
   };
 
-  // A memo's 🎙 chip asked for a moment of this recording: play from there (the audio may still be loading: then
-  // the seek is applied once its metadata is known).
+  // A memo's recording chip asked for a moment of this recording: play from there (the audio may still be loading:
+  // then the seek is applied once its metadata is known).
   const playedSeq = useRef(0);
   useEffect(() => {
     if (!playRequest || playRequest.rid !== info.id || playedSeq.current === playRequest.seq) return;
@@ -523,20 +578,30 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
                 : 'LLM이 받아쓴 글과 슬라이드를 비교해서 더 정확하게 나눠요'
           }
         >
-          {aligning ? '⏳ AI 정렬 중…' : '🤖 AI 정밀 정렬'}
+          {aligning ? (
+            <>
+              <Hourglass /> AI 정렬 중…
+            </>
+          ) : (
+            <>
+              <Bot /> AI 정밀 정렬
+            </>
+          )}
         </button>
         <PopoverMenu label={`‘${info.title}’ 녹음 메뉴`} sections={menuSections} />
       </div>
       <div className="rec-detail-meta">
-        <span className={`rec-badge tone-${status.tone}`} title={status.title}>
-          {status.text}
-        </span>
+        <StatusBadge status={status} />
         {align && (
           <span className="rec-badge tone-muted" title={align.title}>
             {align.text}
           </span>
         )}
-        {info.hasManualMarkers && <span className="rec-badge tone-muted">📍 직접 표시</span>}
+        {info.hasManualMarkers && (
+          <span className="rec-badge tone-muted">
+            <MapPin /> 직접 표시
+          </span>
+        )}
         <span className="muted small">
           {recordingLanguageLabel(info)} · {info.model}
         </span>
@@ -557,7 +622,9 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
       )}
 
       {info.hasManualMarkers && markers.length === 0 && (
-        <p className="msg-note">📍 다른 기기(또는 브라우저)에서 직접 표시한 구간이 있어요. 여기서 새로 표시하면 그 표시를 대신해요.</p>
+        <p className="msg-note">
+          <MapPin /> 다른 기기(또는 브라우저)에서 직접 표시한 구간이 있어요. 여기서 새로 표시하면 그 표시를 대신해요.
+        </p>
       )}
       {markers.length > 0 && (
         <div className="rec-markers">
@@ -574,7 +641,7 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
                 aria-label={`${formatClock(m.t)} 표시 지우기`}
                 title="이 표시 지우기"
               >
-                ×
+                <X size="1em" />
               </button>
             </span>
           ))}
@@ -596,7 +663,7 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
       <div className="rec-transcript" ref={scrollRef}>
         {feed?.error && (
           <div className="inline-error">
-            ⚠️ 받아쓴 글을 불러오지 못했어요: {feed.error}{' '}
+            <TriangleAlert /> 받아쓴 글을 불러오지 못했어요: {feed.error}{' '}
             <button type="button" className="ghost-btn small" onClick={() => recordingFeed(doc.id, info.id).reload()}>
               다시 시도
             </button>
@@ -644,7 +711,7 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
                   setTime(t);
                   if (seek.play) {
                     void audio.play().catch((err: unknown) => {
-                      if (!(err instanceof DOMException && err.name === 'AbortError')) setAudioError('재생하지 못했어요. ▶를 눌러 주세요.');
+                      if (!(err instanceof DOMException && err.name === 'AbortError')) setAudioError('재생하지 못했어요. 재생 버튼을 눌러 주세요.');
                     });
                   }
                 }
@@ -658,7 +725,7 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
               onError={() => setAudioError('녹음 파일을 불러오지 못했어요.')}
             />
             <button type="button" className="rec-play" onClick={togglePlay} aria-label={playing ? '일시정지' : '재생'}>
-              {playing ? '⏸' : '▶'}
+              {playing ? <Pause fill="currentColor" /> : <Play fill="currentColor" />}
             </button>
             <span className="rec-player-time">
               {formatClock(time)} / {formatClock(total)}
@@ -696,7 +763,7 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
                 onClick={() => setAudioEpoch((n) => n + 1)}
                 title="녹음 중인 부분까지 다시 불러와요"
               >
-                ↻ 최신
+                <RefreshCw /> 최신
               </button>
             )}
             {audioError && <span className="rec-player-error">{audioError}</span>}
@@ -751,10 +818,12 @@ function AiAlignForm({
     <div className="rec-ai">
       <p className="small">
         LLM이 받아쓴 글과 슬라이드(정리본이 있으면 정리본)를 직접 비교해서, 어느 문장이 어느 슬라이드 설명인지 다시 나눠요. 직접 표시한
-        구간(📍)은 그대로 지켜요. 몇 분 걸리고 LLM 사용량이 들어요.
+        구간(<MapPin />)은 그대로 지켜요. 몇 분 걸리고 LLM 사용량이 들어요.
       </p>
       {available.length === 0 ? (
-        <p className="warn-text">⚠️ 사용할 수 있는 LLM이 없어요.</p>
+        <p className="warn-text">
+          <TriangleAlert /> 사용할 수 있는 LLM이 없어요.
+        </p>
       ) : (
         <div className="rec-ai-actions">
           <select

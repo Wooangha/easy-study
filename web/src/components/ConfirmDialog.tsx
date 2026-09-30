@@ -29,7 +29,7 @@ export function ConfirmHost({ suspended = false }: { suspended?: boolean }) {
   }, [request]);
 
   // A layout effect: the modal dialog makes the rest of the page inert, so it must be closed before the effects
-  // of the answer run — e.g. the library focusing the next card after a delete (the 🗑 that had the focus is gone).
+  // of the answer run — e.g. the library focusing the next card after a delete (the trash button that had the focus is gone).
   useLayoutEffect(() => {
     if (request) return;
     const dialog = dialogRef.current;

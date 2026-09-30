@@ -1,3 +1,4 @@
+import { Folder, GripVertical, Hourglass, Mic, TriangleAlert } from 'lucide-react';
 import type { DocMeta } from '../../../../shared/types.ts';
 import { thumbUrl } from '../../api.ts';
 import { formatDate } from '../../lib/format.ts';
@@ -37,7 +38,7 @@ export function LectureRow({ doc, index, courseId, entries, onOpen, onMove, onRe
 
   const sections: MenuSection[] = [
     ...(ready && pickRecording
-      ? [{ items: [{ key: 'recording', label: '🎙 녹음 파일 올리기', hint: '음성·동영상', onSelect: () => pickRecording(doc) }] }]
+      ? [{ items: [{ key: 'recording', label: '녹음 파일 올리기', icon: Mic, hint: '음성·동영상', onSelect: () => pickRecording(doc) }] }]
       : []),
     {
       items: [
@@ -50,8 +51,9 @@ export function LectureRow({ doc, index, courseId, entries, onOpen, onMove, onRe
         .filter((e) => e.course.id !== courseId)
         .map((e) => ({
           key: e.course.id,
-          label: `📁 ${e.course.title}`,
-          hint: e.group ? `🗂 ${e.group.title}` : undefined,
+          label: e.course.title,
+          icon: Folder,
+          hint: e.group?.title,
           onSelect: () => onMove(e.course.id),
         })),
     },
@@ -97,8 +99,10 @@ function LectureThumb({ doc }: { doc: DocMeta }) {
     <span className="lecture-thumb" style={{ aspectRatio: doc.aspectRatio > 0 ? doc.aspectRatio : 16 / 9 }}>
       {doc.status === 'ready' ? (
         <SlideImage docId={doc.id} slide={1} src={thumbUrl(doc.id, 1)} alt="" draggable={false} />
+      ) : doc.status === 'error' ? (
+        <TriangleAlert />
       ) : (
-        <span aria-hidden>{doc.status === 'error' ? '⚠️' : '⏳'}</span>
+        <Hourglass />
       )}
     </span>
   );
@@ -109,7 +113,7 @@ export function LectureGhost({ doc }: { doc: DocMeta }) {
   return (
     <div className="drag-ghost lecture-ghost">
       <span className="drag-ghost-handle" aria-hidden>
-        ≡
+        <GripVertical />
       </span>
       <LectureThumb doc={doc} />
       <span className="lecture-main">

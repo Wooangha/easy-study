@@ -1,6 +1,7 @@
-// Small pieces that show a live recording elsewhere (DESIGN §22): the composer chip "🎙 최근 N분 포함" (questions
+// Small pieces that show a live recording elsewhere (DESIGN §22): the composer chip "최근 N분 포함" (questions
 // during a live recording of the lecture carry the recent speech) and the 녹음 tab badge. Each subscribes to the
 // recorder itself, so the timer ticking does not re-render the chat.
+import { CircleSmall, Mic, Pause } from 'lucide-react';
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { LIVE_SPEECH_IDLE_MS } from '../../../../shared/types.ts';
 import { useRecordingFeed } from '../../hooks/useRecordingFeed.ts';
@@ -47,13 +48,13 @@ export function LectureSpeechChip({ docId }: { docId: string }) {
         className="speech-chip"
         title="녹음 중인 강의에서 교수님이 최근에 한 말(받아쓴 글)을 질문과 함께 튜터에게 전달해요. 받아쓰기에는 오류가 있을 수 있어요."
       >
-        🎙 최근 {Math.max(1, speech.minutes)}분 포함{speech.paused ? ' · 녹음 일시정지' : ''}
+        <Mic /> 최근 {Math.max(1, speech.minutes)}분 포함{speech.paused ? ' · 녹음 일시정지' : ''}
       </span>
     </div>
   );
 }
 
-/** "녹음" tab badge: ● while this lecture is being recorded, else the number of recordings. */
+/** "녹음" tab badge: a red dot and REC while this lecture is being recorded, else the number of recordings. */
 export function RecordingTabBadge({ docId, count }: { docId: string; count: number | null }) {
   const live = useSyncExternalStore(recorder.subscribe, () => {
     const s = recorder.getSnapshot();
@@ -62,11 +63,17 @@ export function RecordingTabBadge({ docId, count }: { docId: string; count: numb
   if (live === 'recording' || live === 'starting') {
     return (
       <span className="tab-count is-live" title="녹음 중">
-        ● REC
+        <CircleSmall fill="currentColor" /> REC
       </span>
     );
   }
-  if (live === 'paused') return <span className="tab-count is-warn">⏸</span>;
+  if (live === 'paused') {
+    return (
+      <span className="tab-count is-warn" role="img" aria-label="일시정지" title="일시정지">
+        <Pause fill="currentColor" />
+      </span>
+    );
+  }
   if (count && count > 0) return <span className="tab-count">{count}</span>;
   return null;
 }

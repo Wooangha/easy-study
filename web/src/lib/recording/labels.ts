@@ -34,31 +34,41 @@ export function transcriptFraction(info: Pick<RecordingInfo, 'durationSec' | 'tr
   return Math.min(1, Math.max(0, info.transcribedSec / info.durationSec));
 }
 
+/** The icon drawn before a status badge's text (the text itself has none, DESIGN §22). */
+export type StatusIcon = 'live' | 'paused' | 'waiting' | 'warning' | 'done';
+
+export interface RecordingStatus {
+  text: string;
+  tone: Tone;
+  icon?: StatusIcon;
+  title?: string;
+}
+
 /** The status badge of a recording in the list. */
-export function recordingStatus(info: RecordingInfo): { text: string; tone: Tone; title?: string } {
+export function recordingStatus(info: RecordingInfo): RecordingStatus {
   switch (info.status) {
     case 'recording':
-      return { text: '● 녹음 중', tone: 'live' };
+      return { text: '녹음 중', tone: 'live', icon: 'live' };
     case 'paused':
-      return { text: '⏸ 일시정지', tone: 'warn' };
+      return { text: '일시정지', tone: 'warn', icon: 'paused' };
     case 'converting':
-      return { text: '⏳ 변환 중', tone: 'running', title: '올린 파일에서 소리를 꺼내는 중이에요' };
+      return { text: '변환 중', tone: 'running', icon: 'waiting', title: '올린 파일에서 소리를 꺼내는 중이에요' };
     case 'error':
-      return { text: '⚠️ 오류', tone: 'error', title: info.error };
+      return { text: '오류', tone: 'error', icon: 'warning', title: info.error };
     case 'ready':
       break;
   }
   switch (info.transcriptStatus) {
     case 'queued':
-      return { text: '⏳ 받아쓰기 대기', tone: 'running', title: '다른 녹음을 받아쓰는 중이에요. 차례가 오면 시작해요' };
+      return { text: '받아쓰기 대기', tone: 'running', icon: 'waiting', title: '다른 녹음을 받아쓰는 중이에요. 차례가 오면 시작해요' };
     case 'running': {
       const f = transcriptFraction(info);
-      return { text: f === null ? '⏳ 받아쓰는 중' : `⏳ 받아쓰기 ${Math.round(f * 100)}%`, tone: 'running' };
+      return { text: f === null ? '받아쓰는 중' : `받아쓰기 ${Math.round(f * 100)}%`, tone: 'running', icon: 'waiting' };
     }
     case 'ready':
-      return { text: '✓ 받아쓰기 완료', tone: 'ok' };
+      return { text: '받아쓰기 완료', tone: 'ok', icon: 'done' };
     case 'error':
-      return { text: '⚠️ 받아쓰기 실패', tone: 'error', title: info.error };
+      return { text: '받아쓰기 실패', tone: 'error', icon: 'warning', title: info.error };
     case 'none':
       return { text: '받아쓰기 전', tone: 'muted' };
   }
@@ -202,7 +212,7 @@ export function micErrorMessage(error: unknown, platform: MicPlatform = 'other')
     case 'PermissionDeniedError':
     case 'SecurityError':
       return (
-        '마이크 사용이 허용되지 않았어요. 주소창의 마이크(🔒) 아이콘에서 이 사이트의 마이크를 허용하고, ' +
+        '마이크 사용이 허용되지 않았어요. 주소창의 마이크 아이콘에서 이 사이트의 마이크를 허용하고, ' +
         `${PRIVACY_SETTING[platform]}에서 이 앱(또는 브라우저)이 켜져 있는지 확인해 주세요.` +
         // macOS keeps the permission per signature: after an update of the desktop app (signed without a developer
         // ID) the switch can show "on" and still deny (DESIGN §24).

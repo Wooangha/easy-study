@@ -102,7 +102,7 @@ export function speechSecondsBySlide(segments: readonly TranscriptSegment[]): Ma
 
 /**
  * Minutes of recent speech the tutor gets while a live recording of the document runs (DESIGN §22: "The last N
- * minutes of the lecture", the composer chip "🎙 최근 3분 포함"): the elapsed recording time, rounded up, capped.
+ * minutes of the lecture", the composer chip "최근 3분 포함"): the elapsed recording time, rounded up, capped.
  */
 export function recentMinutes(elapsedSeconds: number, cap = 3): number {
   if (!Number.isFinite(elapsedSeconds) || elapsedSeconds <= 0) return 0;

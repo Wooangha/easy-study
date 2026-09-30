@@ -11,6 +11,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type Ref,
 } from 'react';
+import { Paperclip, Pin, X } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import type { AnnotationItem, AnnotationOp, DocMeta, MarkerKey, MemoItem, NotesResponse, Patchable, RegionRect, SlideAnnotations } from '../../../shared/types.ts';
 import { viewSrcSet, viewUrl } from '../api.ts';
@@ -216,19 +217,19 @@ interface SlideViewerProps {
   onFocusChange: (slide: number) => void;
   /** Badge click → open the Notes tab filtered to that slide. */
   onOpenNotes: (slide: number) => void;
-  /** "📎 첨부" on a selected region: attach it to the next question. */
+  /** "첨부" on a selected region: attach it to the next question. */
   onAttachRegion: (slide: number, rect: RegionRect) => void;
   /** "이 부분 설명해줘": attach the region and ask about it right away. */
   onAskRegion: (slide: number, rect: RegionRect) => void;
   /** Why a question cannot be sent right now (이 부분 설명해줘 is then disabled), or null. */
   askDisabledReason: string | null;
-  /** 📎 첨부 of an annotation item (DESIGN §25): a chip for the next question. */
+  /** 첨부 of an annotation item (DESIGN §25): a chip for the next question. */
   onAttachItem?: (slide: number, item: AnnotationItem) => void;
-  /** 📎 첨부 of several selected items at once (the free slots counted once, one toast). */
+  /** 첨부 of several selected items at once (the free slots counted once, one toast). */
   onAttachItems?: (slide: number, items: AnnotationItem[]) => void;
   /** A question marker was clicked: show that Q&A. */
   onOpenQa?: (sessionId: string, messageId: string) => void;
-  /** A memo's 🎙 chip: play that moment in the 녹음 tab. */
+  /** A memo's recording chip (the mic icon): play that moment in the 녹음 tab. */
   onPlayRecording?: (rid: string, t: number) => void;
   /** A memo's link to another lecture. */
   onOpenDoc?: (docId: string, slide?: number) => void;
@@ -1492,7 +1493,7 @@ export function SlideViewer({
                   <span className="slide-chip">p.{sheet.slide}</span>
                   <span className="spacer" />
                   <button type="button" className="icon-btn small" onClick={() => setSheet(null)} aria-label="닫기" title="닫기">
-                    ✕
+                    <X />
                   </button>
                 </div>
                 <MemoCard
@@ -1630,7 +1631,11 @@ const SlideItem = memo(function SlideItem({
           />
         )}
         <span className="slide-label">
-          {pinned && <span aria-label="고정됨">📌 </span>}
+          {pinned && (
+            <span role="img" aria-label="고정됨">
+              <Pin />{' '}
+            </span>
+          )}
           {slide}
         </span>
         {qaCount > 0 && (
@@ -1701,7 +1706,7 @@ function RegionMenu({
       aria-label={`슬라이드 ${slide}에서 선택한 영역`}
     >
       <button ref={attachRef} type="button" className="region-menu-btn" onClick={menu.attach} title="질문에 첨부해요 (입력창 위에 표시돼요)">
-        📎 첨부
+        <Paperclip /> 첨부
       </button>
       <button
         type="button"
@@ -1714,7 +1719,7 @@ function RegionMenu({
         이 부분 설명해줘
       </button>
       <button type="button" className="region-menu-btn is-close" onClick={menu.cancel} aria-label="선택 취소" title="선택 취소 (Esc)">
-        ✕
+        <X />
       </button>
     </div>
   );

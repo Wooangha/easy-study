@@ -589,7 +589,7 @@ export function downloadPercent(u: UpdateState): number | null {
   return Math.max(0, Math.min(100, Math.floor((u.received / u.total) * 100)));
 }
 
-/** An update is waiting to be installed (the ⚙ dot). */
+/** An update is waiting to be installed (the dot on the settings gear). */
 export function updatePending(u: UpdateState | null | undefined): boolean {
   return !!u && (u.phase === 'available' || u.phase === 'downloading' || u.phase === 'downloaded');
 }

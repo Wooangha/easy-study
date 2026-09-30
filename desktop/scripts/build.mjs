@@ -5,10 +5,12 @@
 //   node desktop/scripts/build.mjs --dev
 // (npm run desktop:build / npm run desktop:dev in the repo.) Steps: npm ci in desktop/ when the Tauri CLI is
 // missing → prepare.mjs (repo build + resources for the target, including the recording tools whisper-cli and
-// ffmpeg, built into <repo>/.cache when missing; --require-tools: fail instead of leaving one out) →
-// `tauri build --target <t> --bundles <b>` → Linux: appimage.mjs removes the libraries the AppImage must take
-// from the user's system (needs squashfs-tools). --tauri-config merges a config file over tauri.conf.json
-// (`tauri build --config`): only for local test builds such as the updater e2e (update-e2e.mjs); CI never uses it.
+// ffmpeg, built into <repo>/.cache when missing; --require-tools: fail instead of leaving one out, or whisper-cli's
+// Vulkan part) → `tauri build --target <t> --bundles <b>` (Linux: the externalBins that target.json's tools name,
+// externalBinOverride; x86_64's es-whisper-vulkan is not in tauri.linux.conf.json) → Linux: appimage.mjs removes
+// the libraries the AppImage must take from the user's system (needs squashfs-tools). --tauri-config merges a
+// config file over tauri.conf.json (`tauri build --config`): only for local test builds such as the updater e2e
+// (update-e2e.mjs); CI never uses it.
 // Output: desktop/src-tauri/target/<triple>/release/bundle/<kind>/…
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';

@@ -89,10 +89,10 @@ describe('📎 첨부 of a group selection (annotationAttachPlan)', () => {
 });
 
 describe('the memos context chip', () => {
-  test('📝 메모 N개 after the attachments chip; absent when none', () => {
+  test('메모 N개 after the attachments chip; absent when none', () => {
     const chips = describeContext({ primed: false, rollover: false, attachedSlides: [3], reusedSlides: [], overviewImages: 0, attachments: 1, memos: 2 });
     assert.deepEqual(chips.map((c) => c.kind), ['attached', 'attachments', 'memos']);
-    assert.equal(chips[2].text, '📝 메모 2개');
+    assert.equal(chips[2].text, '메모 2개');
     assert.ok(chips[2].title && chips[2].title.includes('튜터'));
     const none = describeContext({ primed: false, rollover: false, attachedSlides: [], reusedSlides: [], overviewImages: 0, memos: 0 });
     assert.equal(none.length, 0);

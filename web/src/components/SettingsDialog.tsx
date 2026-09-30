@@ -1,8 +1,9 @@
-// 설정 (⚙ in the top bar; inside the desktop app also the menu "설정…", DESIGN §24): a modal over the app, so the open
+// 설정 (the gear in the top bar; inside the desktop app also the menu "설정…", DESIGN §24): a modal over the app, so the open
 // lecture stays as it is. Sections 화면 · 공부 · 녹음 · 데스크톱 앱 (inside the app only) · 정보, stacked; on wide
 // screens a list on the left jumps to them. What is set here is this device's (browser storage), except the theme
 // inside the app, which the shell keeps for all of its windows.
 import { useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { ExternalLink, Settings, TriangleAlert, X } from 'lucide-react';
 import type { HealthResponse } from '../../../shared/types.ts';
 import { useAsrStatus } from '../hooks/useAsrStatus.ts';
 import { useLatest } from '../hooks/useLatest.ts';
@@ -162,7 +163,7 @@ function SettingsContent({ section, onClose, health, busy }: Omit<SettingsDialog
           설정
         </h2>
         <button type="button" className="icon-btn" aria-label="닫기" title="닫기 (Esc)" onClick={onClose}>
-          ✕
+          <X />
         </button>
       </header>
       <div className="settings-layout">
@@ -262,7 +263,7 @@ function RecordingSection() {
   const asr = useAsrStatus(true);
   return (
     <>
-      {asr.error && !asr.status && <div className="inline-error">⚠️ 음성 인식 상태를 확인하지 못했어요: {asr.error}</div>}
+      {asr.error && !asr.status && <div className="inline-error"><TriangleAlert /> 음성 인식 상태를 확인하지 못했어요: {asr.error}</div>}
       <AsrSettings asr={asr} />
       <div className="settings-actions">
         <button
@@ -356,7 +357,7 @@ function ShareBlock({ share, busy }: { share: DesktopShare; busy: PageBusy }) {
                 <button type="button" className="ghost-btn tiny" onClick={() => desktopAction('share/reveal')}>
                   보기
                 </button>
-                <span className="settings-status">(연결 선택 화면의 ⚙ 앱 설정에도 있어요)</span>
+                <span className="settings-status">(연결 선택 화면의 <Settings /> 앱 설정에도 있어요)</span>
               </span>
             )}
           </p>
@@ -421,7 +422,7 @@ function DesktopSection({ marker, busy }: { marker: DesktopMarker; busy: PageBus
         {/* Also after an update that did not take (phase error: "다운로드 페이지에서 직접 설치해 주세요"). */}
         {(pending || update?.phase === 'error') && update.install === 'download' && update.releaseUrl && (
           <a className="ghost-btn small" href={update.releaseUrl} target="_blank" rel="noreferrer">
-            다운로드 페이지 열기 ↗
+            다운로드 페이지 열기 <ExternalLink />
           </a>
         )}
       </div>
@@ -429,7 +430,7 @@ function DesktopSection({ marker, busy }: { marker: DesktopMarker; busy: PageBus
       {pending && update.install === 'download' && <p className="settings-hint">{downloadHint(update)}</p>}
       {canInstall && mac && <p className="settings-hint">{MAC_MIC_HINT}</p>}
       {update?.auto === false && (
-        <p className="settings-hint">시작할 때 새 버전 확인은 꺼져 있어요 (연결 선택 화면의 ⚙ 앱 설정에서 켤 수 있어요).</p>
+        <p className="settings-hint">시작할 때 새 버전 확인은 꺼져 있어요 (연결 선택 화면의 <Settings /> 앱 설정에서 켤 수 있어요).</p>
       )}
 
       <h4 className="settings-sub">연결</h4>

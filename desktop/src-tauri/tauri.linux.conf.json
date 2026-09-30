@@ -13,11 +13,11 @@
     "linux": {
       "deb": {
         "depends": ["libatomic1", "libssl3"],
-        "recommends": ["fonts-noto-cjk", "fonts-noto-color-emoji", "xdg-utils", "gstreamer1.0-libav"]
+        "recommends": ["fonts-noto-cjk", "fonts-noto-color-emoji", "xdg-utils", "gstreamer1.0-libav", "libvulkan1"]
       },
       "rpm": {
         "depends": ["libatomic", "openssl-libs", "gstreamer1-plugins-base", "gstreamer1-plugins-good"],
-        "recommends": ["xdg-utils", "gstreamer1-plugin-libav"],
+        "recommends": ["xdg-utils", "gstreamer1-plugin-libav", "vulkan-loader"],
         "compression": {
           "type": "none"
         }

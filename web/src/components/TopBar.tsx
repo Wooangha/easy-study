@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { BookOpen, NotebookPen, Settings, Trash } from 'lucide-react';
 import type { Course, DocMeta, LibraryLayout, ProviderInfo, SessionSummary } from '../../../shared/types.ts';
 import { notesMarkdownUrl } from '../api.ts';
 import { indexCourses } from '../hooks/useCourses.ts';
@@ -6,7 +7,7 @@ import type { ProviderChoice, ProviderChoiceUpdate } from '../hooks/useProviderC
 import { confirmDialog } from '../lib/confirm.ts';
 import { formatTime, providerWithModel } from '../lib/format.ts';
 import { courseLabel, layoutEntries } from '../lib/libraryLayout.ts';
-import { ProviderPicker } from './ProviderPicker.tsx';
+import { NewSessionLlm } from './NewSessionLlm.tsx';
 
 const UPLOAD = '__upload__';
 const NEW_SESSION = '__new__';
@@ -38,11 +39,11 @@ interface TopBarProps {
   hasNotes: boolean;
   /** Remote mode (the server asks for an access code): "로그아웃" button. */
   onLogout?: () => void;
-  /** 🎙 record button / the running recording (DESIGN §22). */
+  /** Record button / the running recording (DESIGN §22). */
   recordControl?: ReactNode;
-  /** ⚙ 설정 (DESIGN §24). */
+  /** The gear: 설정 (DESIGN §24). */
   onOpenSettings: () => void;
-  /** Inside the desktop app: a new version waits (a dot on ⚙). */
+  /** Inside the desktop app: a new version waits (a dot on the gear). */
   updatePending?: boolean;
 }
 
@@ -53,12 +54,12 @@ function docOptionLabel(d: DocMeta, index?: number): string {
     return `${name} (처리 중 ${pct}%)`;
   }
   if (d.status === 'error') return `${name} (오류)`;
-  const badge = d.digestStatus === 'ready' ? ' · ✓ 정리본' : d.digestStatus === 'running' ? ' · ⏳ 정리 중' : '';
+  const badge = d.digestStatus === 'ready' ? ' · 정리본' : d.digestStatus === 'running' ? ' · 정리 중' : '';
   return `${name} · ${d.pageCount}장${badge}`;
 }
 
 /**
- * Document picker options: one <optgroup> per course in library order ("📁 그룹 › 과목" for grouped courses),
+ * Document picker options: one <optgroup> per course in library order ("그룹 › 과목" for grouped courses),
  * lectures in order, + "미분류" (only when courses exist).
  */
 function DocOptions({ docs, courses, layout }: { docs: DocMeta[]; courses: Course[]; layout: LibraryLayout }) {
@@ -81,7 +82,7 @@ function DocOptions({ docs, courses, layout }: { docs: DocMeta[]; courses: Cours
       .filter((d): d is DocMeta => d !== undefined);
     for (const d of lectures) placed.add(d.id);
     return (
-      <optgroup key={c.id} label={`📁 ${courseLabel(entry)}`}>
+      <optgroup key={c.id} label={courseLabel(entry)}>
         {lectures.length === 0 ? (
           <option disabled value={`__empty:${c.id}`}>
             (강의 없음)
@@ -120,7 +121,7 @@ export function TopBar(props: TopBarProps) {
   return (
     <header className="topbar">
       <button type="button" className="brand" onClick={() => props.onSelectDoc(null)} title="라이브러리로">
-        <span aria-hidden>📖</span> easy-study
+        <BookOpen /> easy-study
       </button>
 
       <select
@@ -133,9 +134,9 @@ export function TopBar(props: TopBarProps) {
           else props.onSelectDoc(v || null);
         }}
       >
-        <option value="">{docs && docs.length > 0 ? '📚 문서 선택…' : '📚 문서 없음'}</option>
+        <option value="">{docs && docs.length > 0 ? '문서 선택…' : '문서 없음'}</option>
         <DocOptions docs={docs ?? []} courses={props.courses ?? []} layout={props.layout} />
-        <option value={UPLOAD}>{props.uploadCourse ? `＋ PDF 추가 (📁 ${props.uploadCourse.title})` : '＋ PDF 추가'}</option>
+        <option value={UPLOAD}>{props.uploadCourse ? `＋ PDF 추가 (${props.uploadCourse.title})` : '＋ PDF 추가'}</option>
       </select>
 
       {ready && (
@@ -151,7 +152,7 @@ export function TopBar(props: TopBarProps) {
               else if (v) props.onSelectSession(v);
             }}
           >
-            {!sessionId && <option value="">{sessions === null ? '세션 불러오는 중…' : '💬 세션 없음'}</option>}
+            {!sessionId && <option value="">{sessions === null ? '세션 불러오는 중…' : '세션 없음'}</option>}
             {(sessions ?? []).map((s) => (
               <option key={s.id} value={s.id}>
                 {s.title} · {providerWithModel(providers, s.provider, s.model, s.effort)} · 메시지 {s.messageCount}개 ·{' '}
@@ -167,6 +168,7 @@ export function TopBar(props: TopBarProps) {
               type="button"
               className="icon-btn"
               title="이 세션 삭제"
+              aria-label="이 세션 삭제"
               disabled={props.sessionBusy}
               onClick={() => {
                 void confirmDialog({
@@ -179,7 +181,7 @@ export function TopBar(props: TopBarProps) {
                 });
               }}
             >
-              🗑
+              <Trash />
             </button>
           )}
         </div>
@@ -189,15 +191,8 @@ export function TopBar(props: TopBarProps) {
 
       <span className="spacer" />
 
-      {/* The LLM of new sessions; the open session's is changed from the chat header (ChatPanel.tsx). */}
-      <ProviderPicker
-        providers={providers}
-        loading={props.providersLoading}
-        choice={props.choice}
-        onChange={props.onChoiceChange}
-        label="새 세션"
-        title="새 세션에 사용할 LLM"
-      />
+      {/* The LLM of new sessions, folded into one button; the open session's is changed from the chat header. */}
+      <NewSessionLlm providers={providers} loading={props.providersLoading} choice={props.choice} onChange={props.onChoiceChange} />
 
       {ready && doc && (
         <a
@@ -211,7 +206,7 @@ export function TopBar(props: TopBarProps) {
           }}
           title={props.hasNotes ? 'STUDY_NOTES.md 열기' : '아직 저장된 Q&A가 없어요'}
         >
-          📝 노트 파일
+          <NotebookPen /> 노트 파일
         </a>
       )}
 
@@ -228,7 +223,7 @@ export function TopBar(props: TopBarProps) {
         title={props.updatePending ? '설정 · 새 버전 있음' : '설정'}
         onClick={props.onOpenSettings}
       >
-        <span aria-hidden>⚙</span>
+        <Settings />
         {props.updatePending && <span className="settings-dot" aria-hidden />}
       </button>
     </header>

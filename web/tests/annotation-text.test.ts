@@ -61,13 +61,14 @@ describe('units', () => {
     assert.equal(memoSheetFontSize({ size: ptToSize(20) }), '20pt');
   });
 
-  test('a memo without a size: the field starts at the points its 13 px text amounts to where it is shown, so the first ▲ step grows it', () => {
+  test('a memo without a size: the field starts at the points its 13 px text amounts to where it is shown, so the first + step grows it', () => {
     assert.equal(MEMO_UI_FONT_PX, 13);
     // Inline: 13 px of a 400-px slide = 17.55 → 18 pt of a 540-pt slide; the next step, 19 pt, renders 14.1 px there (no shrink).
     assert.equal(memoSizePt({}, { slideH: 400 }), 18);
     assert.ok((19 / SLIDE_PT_HEIGHT) * 400 > MEMO_UI_FONT_PX);
     assert.equal(memoSizePt({}, { slideH: 540 }), 13);
-    assert.equal(memoSizePt({}, { slideH: 1080 }), 8, 'clamped to the range on a big zoom (13 px would be 6.5 pt)');
+    assert.equal(memoSizePt({}, { slideH: 1080 }), 7, 'a big zoom: 13 px = 6.5 pt, rounded');
+    assert.equal(memoSizePt({}, { slideH: 2160 }), MIN_TEXT_SIZE_PT, 'clamped to the range on a bigger zoom (13 px would be 3.25 pt)');
     assert.equal(memoSizePt({}, { slideH: 90 }), 72);
     assert.equal(memoSizePt({}, { slideH: 0 }), DEFAULT_MEMO_TEXT_SIZE_PT, 'nothing measured yet');
     // The bottom sheet renders CSS points: 13 px = 9.75 → 10 pt.

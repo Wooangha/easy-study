@@ -38,7 +38,7 @@ describe('digest panel state', () => {
     assert.equal(v.summaryPending, false);
     assert.equal(label, null);
     assert.equal(note, null);
-    assert.equal(status, '✓ 정리본 완성 · 4장');
+    assert.deepEqual(status, { icon: 'ready', text: '정리본 완성 · 4장' });
   });
 
   test('the summary could not be rewritten after the slides changed: a summary-only run is offered (not only a redo)', () => {
@@ -47,23 +47,23 @@ describe('digest panel state', () => {
     assert.equal(v.complete, true);
     assert.equal(v.summaryPending, true);
     assert.equal(v.summaryOutdated, true);
-    assert.equal(label, '📘 강의 요약 다시 만들기');
-    assert.equal(note?.message, `⚠️ ${error}`, 'the server message is shown as it is, not prefixed a second time');
+    assert.deepEqual(label, { icon: 'summary', text: '강의 요약 다시 만들기' });
+    assert.equal(note?.message, error, 'the server message is shown as it is (the panel draws the warning icon)');
     assert.match(note?.hint ?? '', /바뀌기 전에 만든 거예요/);
-    assert.match(note?.hint ?? '', /‘📘 강의 요약 다시 만들기’로 요약만 다시 만들 수 있어요/);
-    assert.match(status, /요약 갱신 필요/);
+    assert.match(note?.hint ?? '', /‘강의 요약 다시 만들기’로 요약만 다시 만들 수 있어요/);
+    assert.match(status.text, /요약 갱신 필요/);
   });
 
-  test('no summary at all (its first call failed): 📘 강의 요약 만들기', () => {
+  test('no summary at all (its first call failed): 강의 요약 만들기', () => {
     const { v, label, note, status } = view(info({ summary: null, error: '강의 요약을 만들지 못했습니다: timeout' }));
     assert.equal(v.summaryPending, true);
     assert.equal(v.summaryOutdated, false);
-    assert.equal(label, '📘 강의 요약 만들기');
-    assert.equal(note?.message, '⚠️ 강의 요약을 만들지 못했습니다: timeout');
-    assert.equal(note?.hint, '‘📘 강의 요약 만들기’로 요약만 다시 만들 수 있어요.');
-    assert.match(status, /요약 없음/);
+    assert.deepEqual(label, { icon: 'summary', text: '강의 요약 만들기' });
+    assert.equal(note?.message, '강의 요약을 만들지 못했습니다: timeout');
+    assert.equal(note?.hint, '‘강의 요약 만들기’로 요약만 다시 만들 수 있어요.');
+    assert.match(status.text, /요약 없음/);
     // Without a note either (e.g. an empty summary answer was never stored).
-    assert.equal(view(info({ summary: null })).label, '📘 강의 요약 만들기');
+    assert.deepEqual(view(info({ summary: null })).label, { icon: 'summary', text: '강의 요약 만들기' });
   });
 
   test('failed slides: their note is shown as it is, without a summary prefix', () => {
@@ -71,23 +71,25 @@ describe('digest panel state', () => {
     const { v, label, note, status } = view(info({ slides: slides(4, [3]), error }));
     assert.equal(v.complete, false);
     assert.equal(v.summaryPending, false);
-    assert.equal(label, '↻ 실패한 슬라이드 다시');
-    assert.deepEqual(note, { message: `⚠️ ${error}`, hint: null });
-    assert.equal(status, '✓ 정리본 · 실패 1장');
+    assert.deepEqual(label, { icon: 'retry', text: '실패한 슬라이드 다시' });
+    assert.deepEqual(note, { message: error, hint: null });
+    assert.deepEqual(status, { icon: 'ready', text: '정리본 · 실패 1장' });
   });
 
   test('aborted / error / running', () => {
     const aborted = view(info({ status: 'aborted', done: 2, slides: slides(2), error: '사용자가 정리본 만들기를 중단했습니다' }));
-    assert.equal(aborted.label, '▶ 이어서 만들기');
-    assert.deepEqual(aborted.note, { message: '⚠️ 사용자가 정리본 만들기를 중단했습니다', hint: null });
+    assert.deepEqual(aborted.label, { icon: 'continue', text: '이어서 만들기' });
+    assert.deepEqual(aborted.note, { message: '사용자가 정리본 만들기를 중단했습니다', hint: null });
+    assert.deepEqual(aborted.status, { icon: 'paused', text: '중지됨' });
     // Aborted during the summary call (every slide done): resuming makes the summary.
-    assert.equal(view(info({ status: 'aborted', error: '중단' })).label, '▶ 이어서 만들기');
+    assert.deepEqual(view(info({ status: 'aborted', error: '중단' })).label, { icon: 'continue', text: '이어서 만들기' });
     const failed = view(info({ status: 'error', done: 0, slides: [], summary: null, error: 'boom' }));
-    assert.equal(failed.label, '▶ 이어서 만들기');
-    assert.deepEqual(failed.note, { message: '⚠️ boom', hint: null });
+    assert.deepEqual(failed.label, { icon: 'continue', text: '이어서 만들기' });
+    assert.deepEqual(failed.note, { message: 'boom', hint: null });
+    assert.deepEqual(failed.status, { icon: 'error', text: '오류로 멈춤' });
     const running = view(info({ status: 'running', done: 1, error: 'old note' }));
     assert.equal(running.label, null);
     assert.equal(running.note, null);
-    assert.equal(running.status, '⏳ 정리하는 중');
+    assert.deepEqual(running.status, { icon: 'running', text: '정리하는 중' });
   });
 });

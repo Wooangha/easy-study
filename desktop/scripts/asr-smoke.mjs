@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Speech-recognition plumbing check of the recording tools the app ships (DESIGN §22), for CI and local checks:
 //   node desktop/scripts/asr-smoke.mjs --whisper <whisper-cli> --ffmpeg <ffmpeg> [--models <dir>] [--speech auto|none]
+//                                      [--expect-backend vulkan]
 // 1. ffmpeg turns an input recording into the ASR WAV (16 kHz mono s16) and the AAC playback copy in one pass, as the
 //    server does with an upload, and decodes the copy again;
 // 2. whisper-cli transcribes the WAV with a small model and Silero VAD (the server's flags) and writes its JSON.
@@ -8,7 +9,9 @@
 // and then the transcript must contain one of its words; otherwise (or with --speech none) a generated tone with
 // noise, and only the plumbing is checked. Nothing comes from a microphone and nothing is committed: the models
 // (ggml-base-q5_1 60 MB, Silero VAD 0.9 MB; pinned revisions, SHA-256 checked) are downloaded into --models
-// (default <repo>/.cache/asr-smoke). Exit code 0 = fine.
+// (default <repo>/.cache/asr-smoke). --expect-backend vulkan: whisper-cli must also have transcribed on the GPU
+// device Vulkan0 (its "using Vulkan0 backend" line; CI forces Mesa's software device with GGML_VK_VISIBLE_DEVICES=0).
+// The tools get this process's environment (GGML_BACKEND_PATH, GGML_VK_*). Exit code 0 = fine.
 import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -145,11 +148,16 @@ function tool(file, args, { timeout = 300_000 } = {}) {
   return { ...r, ms };
 }
 
+/** What whisper-cli prints on stderr when its model runs on a backend (--expect-backend). */
+export const BACKEND_LINES = { vulkan: 'using Vulkan0 backend' };
+
 /**
  * Runs the check. `model` / `vad` (files) skip the download from `models` (a test with a fake whisper-cli).
- * Returns {spoken, text, segments}; throws on a failure.
+ * `expectBackend` (a BACKEND_LINES key): the transcription must have run there. Returns {spoken, text, segments};
+ * throws on a failure.
  */
-export async function asrSmoke({ whisper, ffmpeg, models = path.join(CACHE_DIR, 'asr-smoke'), model, vad, speechMode = 'auto' }) {
+export async function asrSmoke({ whisper, ffmpeg, models = path.join(CACHE_DIR, 'asr-smoke'), model, vad, speechMode = 'auto', expectBackend }) {
+  if (expectBackend !== undefined && !BACKEND_LINES[expectBackend]) throw new Error(`--expect-backend: one of ${Object.keys(BACKEND_LINES).join(', ')}`);
   for (const [name, file] of [['--whisper', whisper], ['--ffmpeg', ffmpeg]]) {
     if (!file || !fs.statSync(file, { throwIfNoEntry: false })?.isFile()) throw new Error(`${name}: no such file: ${file}`);
   }
@@ -192,9 +200,13 @@ export async function asrSmoke({ whisper, ffmpeg, models = path.join(CACHE_DIR, 
     //    the app's models).
     const outBase = path.join(dir, 'transcript');
     const threads = String(Math.max(1, Math.min(4, os.availableParallelism())));
-    const w = tool(whisper, ['-m', model, '-f', asrWav, '-l', 'en', '--vad', '-vm', vad, '-t', threads, '-ojf', '-of', outBase]);
-    const backend = w.stderr.split('\n').filter((l) => /Metal|GPU|using .* backend|CPU :|system_info/i.test(l)).slice(0, 6);
+    // (A software GPU compiles every shader it uses first: more time.)
+    const w = tool(whisper, ['-m', model, '-f', asrWav, '-l', 'en', '--vad', '-vm', vad, '-t', threads, '-ojf', '-of', outBase], { timeout: expectBackend ? 600_000 : 300_000 });
+    const backend = w.stderr.split('\n').filter((l) => /Metal|Vulkan|GPU|using .* backend|CPU :|system_info/i.test(l)).slice(0, 8);
     for (const l of backend) console.log(`   ${l.trim()}`);
+    if (expectBackend && !w.stderr.includes(BACKEND_LINES[expectBackend])) {
+      throw new Error(`whisper-cli did not run on ${expectBackend}: no "${BACKEND_LINES[expectBackend]}" on stderr`);
+    }
     const json = JSON.parse(fs.readFileSync(`${outBase}.json`, 'utf8'));
     if (!Array.isArray(json.transcription)) throw new Error('whisper JSON has no transcription array');
     const text = json.transcription.map((s) => s.text).join(' ').trim();
@@ -213,7 +225,13 @@ export async function asrSmoke({ whisper, ffmpeg, models = path.join(CACHE_DIR, 
 if (import.meta.main) {
   const str = (name) => (typeof arg(name) === 'string' ? arg(name) : undefined);
   try {
-    await asrSmoke({ whisper: str('whisper'), ffmpeg: str('ffmpeg'), models: str('models') ?? path.join(CACHE_DIR, 'asr-smoke'), speechMode: str('speech') ?? 'auto' });
+    await asrSmoke({
+      whisper: str('whisper'),
+      ffmpeg: str('ffmpeg'),
+      models: str('models') ?? path.join(CACHE_DIR, 'asr-smoke'),
+      speechMode: str('speech') ?? 'auto',
+      expectBackend: arg('expect-backend') === true ? '' : str('expect-backend'),
+    });
     console.log('ASR smoke: ok');
   } catch (e) {
     console.error(`ASR smoke: FAIL ${e.message}`);

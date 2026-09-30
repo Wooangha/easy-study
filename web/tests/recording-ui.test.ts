@@ -219,15 +219,33 @@ function info(patch: Partial<RecordingInfo> = {}): RecordingInfo {
 
 describe('recording status copy', () => {
   test('status badges', () => {
-    assert.equal(recordingStatus(info({ status: 'recording' })).text, '● 녹음 중');
-    assert.equal(recordingStatus(info({ status: 'paused' })).tone, 'warn');
-    assert.equal(recordingStatus(info({ status: 'converting' })).text, '⏳ 변환 중');
+    assert.deepEqual(recordingStatus(info({ status: 'recording' })), { text: '녹음 중', tone: 'live', icon: 'live' });
+    assert.deepEqual(recordingStatus(info({ status: 'paused' })), { text: '일시정지', tone: 'warn', icon: 'paused' });
+    assert.equal(recordingStatus(info({ status: 'converting' })).text, '변환 중');
+    assert.equal(recordingStatus(info({ status: 'converting' })).icon, 'waiting');
     assert.equal(recordingStatus(info({ status: 'error', error: '디코딩 실패' })).title, '디코딩 실패');
-    assert.equal(recordingStatus(info({ transcriptStatus: 'running', transcribedSec: 50 })).text, '⏳ 받아쓰기 25%');
-    assert.equal(recordingStatus(info({ transcriptStatus: 'queued' })).text, '⏳ 받아쓰기 대기');
-    assert.equal(recordingStatus(info()).text, '✓ 받아쓰기 완료');
+    assert.equal(recordingStatus(info({ status: 'error', error: '디코딩 실패' })).icon, 'warning');
+    assert.equal(recordingStatus(info({ transcriptStatus: 'running', transcribedSec: 50 })).text, '받아쓰기 25%');
+    assert.equal(recordingStatus(info({ transcriptStatus: 'queued' })).text, '받아쓰기 대기');
+    assert.deepEqual(recordingStatus(info()), { text: '받아쓰기 완료', tone: 'ok', icon: 'done' });
     assert.equal(recordingStatus(info({ transcriptStatus: 'error' })).tone, 'error');
-    assert.equal(recordingStatus(info({ transcriptStatus: 'none' })).tone, 'muted');
+    assert.deepEqual(recordingStatus(info({ transcriptStatus: 'none' })), { text: '받아쓰기 전', tone: 'muted' });
+  });
+
+  test('status badge text is plain words: the icon is a separate choice the JSX draws', () => {
+    const all = [
+      info({ status: 'recording' }),
+      info({ status: 'paused' }),
+      info({ status: 'converting' }),
+      info({ status: 'error' }),
+      info({ transcriptStatus: 'queued' }),
+      info({ transcriptStatus: 'running', transcribedSec: 50 }),
+      info({ transcriptStatus: 'running', durationSec: 0 }),
+      info(),
+      info({ transcriptStatus: 'error' }),
+      info({ transcriptStatus: 'none' }),
+    ];
+    for (const i of all) assert.doesNotMatch(recordingStatus(i).text, /[\u2190-\u2BFF\u{1F000}-\u{1FFFF}\uFE0F]/u);
   });
 
   test('language: the setting, or for auto what whisper detected', () => {

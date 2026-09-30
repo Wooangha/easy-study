@@ -23,6 +23,7 @@ import type {
 } from '../shared/types.ts';
 import { defaultChatDeps } from '../server/chat.ts';
 import type { ChatDeps } from '../server/chat.ts';
+import type { GpuOptions } from '../server/recordings/asr.ts';
 import { repoRoot } from '../server/config.ts';
 import { requestBodyDeadline, startServer } from '../server/index.ts';
 import type { RunningServer, ServerOptions } from '../server/index.ts';
@@ -300,6 +301,8 @@ describe('lecture recordings over HTTP (fake whisper-cli / ffmpeg)', () => {
     assert.equal(body.engineVersion, '1.9.4-fake');
     assert.equal(body.ffmpegAvailable, true);
     assert.equal(body.acceleration, process.platform === 'darwin' && process.arch === 'arm64' ? 'metal' : 'cpu');
+    assert.equal(body.gpu, undefined, 'the test engine has no Vulkan part');
+    assert.equal(body.gpuError, undefined);
     assert.deepEqual(
       body.models.map((m) => [m.id, m.installed]),
       [
@@ -955,6 +958,144 @@ describe('lecture recordings over HTTP (fake whisper-cli / ffmpeg)', () => {
       [...list.map((r) => r.createdAt)].sort().reverse(),
       'newest first',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// The GPU (Vulkan) with the fake engine: a Linux x64 build (whisper-cli-vulkan beside whisper-cli) on any machine
+// ---------------------------------------------------------------------------------------------------------------
+
+describe('transcription on the GPU (Vulkan) and its CPU fallback', () => {
+  const GPU_ENV = ['FAKE_WHISPER_VULKAN_DEVICES', 'FAKE_WHISPER_GPU_FAIL', 'FAKE_WHISPER_DELAY_MS', 'EASY_STUDY_WHISPER_GPU'];
+  let engineDir = '';
+  let server: RunningServer | undefined;
+
+  before(async () => {
+    engineDir = path.join(tmp, 'gpu-engine');
+    await fs.mkdir(engineDir, { recursive: true });
+    await fs.copyFile(FAKE_WHISPER, path.join(engineDir, 'whisper-cli.mjs'));
+    await fs.copyFile(FAKE_WHISPER, path.join(engineDir, 'whisper-cli-vulkan.mjs'));
+    process.env.EASY_STUDY_WHISPER = path.join(engineDir, 'whisper-cli.mjs');
+  });
+
+  after(async () => {
+    await server?.close();
+    for (const name of GPU_ENV) delete process.env[name];
+    process.env.EASY_STUDY_WHISPER = FAKE_WHISPER;
+  });
+
+  /** A server (a fresh GPU probe) as on `gpu`'s platform, with `env` set for its fake engine. */
+  async function start(env: Record<string, string>, gpu: GpuOptions = { platform: 'linux', arch: 'x64' }): Promise<Client> {
+    await server?.close();
+    for (const name of GPU_ENV) delete process.env[name];
+    Object.assign(process.env, env);
+    server = await startServer({
+      port: 0,
+      log: false,
+      resumeIngests: false,
+      resumeRecordings: false,
+      providerInfos: async () => infos,
+      recordings: { models: new ModelStore({ dir: () => modelsDir, catalog: catalog() }), statusThrottleMs: 20, liveRealignMs: 0, pingMs: 1000, gpu },
+    });
+    return new Client(server.url);
+  }
+
+  async function transcribedUpload(client: Client, tones: Array<{ start: number; end: number; hz: number }>): Promise<RecordingInfo> {
+    const pcm = tonesPcm(12, tones);
+    const res = await client.api(`/docs/${OTHER_DOC}/recordings/upload`, { method: 'POST', body: Buffer.concat([Buffer.from(riffHeader(pcm.length)), pcm]) });
+    const created = (await res.json()) as RecordingInfo;
+    assert.equal(res.status, 201, JSON.stringify(created));
+    await waitFor(async () => (await client.recording(OTHER_DOC, created.id)).transcriptStatus === 'ready', 20_000, 'transcription');
+    return client.recording(OTHER_DOC, created.id);
+  }
+
+  async function whisperRuns(): Promise<Array<{ args: string[]; gpu?: boolean }>> {
+    return (await fs.readFile(whisperLog, 'utf8')).trim().split('\n').map((l) => JSON.parse(l) as { args: string[]; gpu?: boolean });
+  }
+
+  test('a discrete GPU: status vulkan with its name, turbo recommended; language detection and transcription on it', async () => {
+    const client = await start({ FAKE_WHISPER_VULKAN_DEVICES: 'Intel UHD Graphics|1;NVIDIA GeForce RTX 4060 Laptop GPU|0' });
+    const asr = (await client.json<AsrStatus>('/asr')).body;
+    assert.equal(asr.engineAvailable, true);
+    assert.equal(asr.acceleration, 'vulkan');
+    assert.deepEqual(asr.gpu, { name: 'NVIDIA GeForce RTX 4060 Laptop GPU', integrated: false });
+    assert.equal(asr.gpuError, undefined);
+    assert.deepEqual(asr.models.filter((m) => m.recommended).map((m) => m.id), ['large-v3-turbo-q5_0']);
+    await fs.rm(whisperLog, { force: true });
+    const tones = spacedTones(5);
+    const info = await transcribedUpload(client, tones);
+    assert.equal(info.error, undefined);
+    assertEachToneOnce(await client.transcript(OTHER_DOC, info.id), tones);
+    const runs = await whisperRuns();
+    assert.deepEqual(runs.map((r) => [r.args.includes('-dl'), r.gpu ?? false]), [[true, true], [false, true]]);
+    for (const run of runs) assert.deepEqual(run.args.slice(-2), ['-dev', '1'], 'the discrete GPU is Vulkan device 1');
+    assert.equal((await client.json(`/docs/${OTHER_DOC}/recordings/${info.id}`, 'DELETE')).status, 204);
+  });
+
+  test('built-in graphics only: vulkan, integrated, small recommended', async () => {
+    const client = await start({ FAKE_WHISPER_VULKAN_DEVICES: 'Intel(R) UHD Graphics 770|1' });
+    const asr = (await client.json<AsrStatus>('/asr')).body;
+    assert.equal(asr.acceleration, 'vulkan');
+    assert.deepEqual(asr.gpu, { name: 'Intel(R) UHD Graphics 770', integrated: true });
+    assert.deepEqual(asr.models.filter((m) => m.recommended).map((m) => m.id), ['small-q5_1']);
+  });
+
+  test('the GPU fails: that run is done again on the CPU (no window attempt lost), later ones stay there; the status says why', async () => {
+    const client = await start({ FAKE_WHISPER_GPU_FAIL: '1' });
+    assert.equal((await client.json<AsrStatus>('/asr')).body.acceleration, 'vulkan');
+    await fs.rm(whisperLog, { force: true });
+    const tones = spacedTones(5);
+    const info = await transcribedUpload(client, tones);
+    assert.equal(info.error, undefined);
+    assert.equal(info.detectedLanguage, 'ko');
+    assertEachToneOnce(await client.transcript(OTHER_DOC, info.id), tones);
+    // Language detection failed on the GPU and was done again on the CPU; the transcription never tried the GPU.
+    assert.deepEqual((await whisperRuns()).map((r) => [r.args.includes('-dl'), r.gpu ?? false]), [[true, true], [true, false], [false, false]]);
+    const asr = (await client.json<AsrStatus>('/asr')).body;
+    assert.equal(asr.acceleration, 'cpu');
+    assert.equal(asr.gpu, undefined);
+    assert.match(asr.gpuError ?? '', /^exit code 134: ggml_vulkan: Device memory allocation of size \d+ failed\.$/);
+    assert.deepEqual(asr.models.filter((m) => m.recommended).map((m) => m.id), ['small-q5_1']);
+    assert.equal((await client.json(`/docs/${OTHER_DOC}/recordings/${info.id}`, 'DELETE')).status, 204);
+  });
+
+  test('a GPU run stopped by the app (the recording deleted) leaves the GPU on', async () => {
+    const client = await start({ FAKE_WHISPER_DELAY_MS: '3000' });
+    await fs.rm(whisperLog, { force: true });
+    const pcm = tonesPcm(12, spacedTones(5));
+    const res = await client.api(`/docs/${OTHER_DOC}/recordings/upload`, {
+      method: 'POST',
+      headers: { 'X-Language': 'en' },
+      body: Buffer.concat([Buffer.from(riffHeader(pcm.length)), pcm]),
+    });
+    const created = (await res.json()) as RecordingInfo;
+    assert.equal(res.status, 201, JSON.stringify(created));
+    await waitFor(async () => (await client.recording(OTHER_DOC, created.id)).transcriptStatus === 'running' && existsSync(whisperLog), 10_000, 'GPU run started');
+    assert.equal((await client.json(`/docs/${OTHER_DOC}/recordings/${created.id}`, 'DELETE')).status, 204);
+    const asr = (await client.json<AsrStatus>('/asr')).body;
+    assert.equal(asr.acceleration, 'vulkan');
+    assert.equal(asr.gpuError, undefined);
+    assert.deepEqual((await whisperRuns()).map((r) => r.gpu ?? false), [true], 'not done again on the CPU');
+  });
+
+  test('Apple Silicon stays Metal; EASY_STUDY_WHISPER_GPU=0 and other platforms stay on the CPU', async () => {
+    let client = await start({}, { platform: 'darwin', arch: 'arm64' });
+    let asr = (await client.json<AsrStatus>('/asr')).body;
+    assert.equal(asr.acceleration, 'metal');
+    assert.equal(asr.gpu, undefined);
+    assert.deepEqual(asr.models.filter((m) => m.recommended).map((m) => m.id), ['large-v3-turbo-q5_0']);
+    for (const [env, gpu] of [
+      [{ EASY_STUDY_WHISPER_GPU: '0' }, { platform: 'linux', arch: 'x64' }],
+      [{}, { platform: 'darwin', arch: 'x64' }],
+      [{}, { platform: 'win32', arch: 'x64' }],
+    ] as Array<[Record<string, string>, GpuOptions]>) {
+      client = await start(env, gpu);
+      asr = (await client.json<AsrStatus>('/asr')).body;
+      assert.equal(asr.acceleration, 'cpu', JSON.stringify([env, gpu]));
+      assert.equal(asr.gpu, undefined);
+      assert.equal(asr.gpuError, undefined);
+      assert.deepEqual(asr.models.filter((m) => m.recommended).map((m) => m.id), ['small-q5_1']);
+    }
   });
 });
 

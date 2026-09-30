@@ -1,3 +1,4 @@
+import { Hourglass, Mic, TriangleAlert } from 'lucide-react';
 import type { Course, DocMeta, LibraryLayout } from '../../../../shared/types.ts';
 import { viewUrl } from '../../api.ts';
 import { formatDate } from '../../lib/format.ts';
@@ -58,7 +59,7 @@ export function DocCard({ doc, courses, layout, onOpen, onMove, onRetry, onDelet
                   if (e.target.value) onMove(doc.id, e.target.value);
                 }}
               >
-                <option value="">📁 과목으로 이동…</option>
+                <option value="">과목으로 이동…</option>
                 <CourseOptions courses={courses} layout={layout} />
               </select>
             </div>
@@ -71,7 +72,8 @@ export function DocCard({ doc, courses, layout, onOpen, onMove, onRetry, onDelet
                   items: [
                     {
                       key: 'recording',
-                      label: '🎙 녹음 파일 올리기',
+                      label: '녹음 파일 올리기',
+                      icon: Mic,
                       hint: '음성·동영상',
                       onSelect: () => pickRecording?.(doc),
                     },
@@ -87,8 +89,10 @@ export function DocCard({ doc, courses, layout, onOpen, onMove, onRetry, onDelet
           {ready ? (
             // Cards are 250–500 CSS px wide: the 1000 px rendition, not the thumbnail.
             <SlideImage docId={doc.id} slide={1} src={viewUrl(doc.id, 1, 1000)} alt="" draggable={false} />
+          ) : doc.status === 'error' ? (
+            <TriangleAlert />
           ) : (
-            <span aria-hidden>{doc.status === 'error' ? '⚠️' : '⏳'}</span>
+            <Hourglass />
           )}
         </div>
         <div className="doc-card-body">

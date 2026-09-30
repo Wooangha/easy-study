@@ -17,27 +17,27 @@ describe('describeContext', () => {
   test('ordinary turn', () => {
     assert.deepEqual(
       describeContext(ctx).map((c) => c.text),
-      ['🖼 p.7 첨부', '↺ p.6·8 이미 전달됨'],
+      ['p.7 첨부', 'p.6·8 이미 전달됨'],
     );
   });
 
   test('a recovered turn says why a new conversation was started (instead of the plain rollover chip)', () => {
     const lost = describeContext({ ...ctx, primed: true, rollover: true, recoveredFrom: 'resume_invalid' });
     assert.deepEqual(lost.map((c) => c.kind), ['recovered', 'primed', 'attached', 'reused']);
-    assert.equal(lost[0].text, '🔄 이전 대화를 잃어 새 대화로 다시 전달');
+    assert.equal(lost[0].text, '이전 대화를 잃어 새 대화로 다시 전달');
     assert.ok(lost[0].title && lost[0].title.length > 10);
     const long = describeContext({ ...ctx, primed: true, recoveredFrom: 'context_overflow' });
-    assert.equal(long[0].text, '🔄 대화가 길어져 새 대화로 전달');
+    assert.equal(long[0].text, '대화가 길어져 새 대화로 전달');
     assert.deepEqual(
       describeContext({ ...ctx, primed: true, rollover: true }).map((c) => c.text).slice(0, 2),
-      ['🔄 새 대화로 이어감', '📚 전체 슬라이드 전달'],
+      ['새 대화로 이어감', '전체 슬라이드 전달'],
     );
   });
 
   test("the first turn after the session's LLM was changed says so (instead of the plain rollover chip)", () => {
     const chips = describeContext({ ...ctx, primed: true, rollover: true, switched: true });
     assert.deepEqual(chips.map((c) => c.kind), ['switched', 'primed', 'attached', 'reused']);
-    assert.equal(chips[0].text, '🔀 바꾼 LLM으로 새 대화 시작');
+    assert.equal(chips[0].text, '바꾼 LLM으로 새 대화 시작');
     assert.ok(chips[0].title && chips[0].title.includes('요약'));
     // A recovery reported on top of it still wins (it says what actually happened last).
     const lost = describeContext({ ...ctx, primed: true, rollover: true, switched: true, recoveredFrom: 'resume_invalid' });
@@ -54,8 +54,8 @@ describe('LLM switch texts (the marker between messages and the notice)', () => 
   };
 
   test('name the new LLM with its model and effort', () => {
-    assert.equal(switchMarkerText(undefined, change), '🔀 여기부터 Codex · gpt-5.5 · 추론 높음');
-    assert.equal(switchMarkerText(undefined, { ...change, to: { provider: 'claude-code', model: '' } }), '🔀 여기부터 Claude Code');
+    assert.equal(switchMarkerText(undefined, change), '여기부터 Codex · gpt-5.5 · 추론 높음');
+    assert.equal(switchMarkerText(undefined, { ...change, to: { provider: 'claude-code', model: '' } }), '여기부터 Claude Code');
     assert.match(switchMarkerTitle(undefined, change), /15:42에 LLM을 바꿨어요: Claude Code · sonnet → Codex · gpt-5\.5 · 추론 높음\./);
     assert.equal(
       llmSwitchNotice('Codex · gpt-5.5'),
@@ -67,13 +67,16 @@ describe('LLM switch texts (the marker between messages and the notice)', () => 
 describe('primeCardState', () => {
   test('the deck only counts as delivered when the priming answer completed', () => {
     assert.deepEqual(primeCardState(49, false, 'complete'), {
-      title: '📚 전체 슬라이드 49장을 LLM에게 전달했어요',
+      title: '전체 슬라이드 49장을 LLM에게 전달했어요',
+      icon: 'deck',
       tone: 'normal',
       delivered: true,
     });
-    assert.equal(primeCardState(49, false, 'error').title, '⚠️ 전체 슬라이드 49장을 LLM에게 전달하지 못했어요');
+    assert.equal(primeCardState(49, false, 'error').title, '전체 슬라이드 49장을 LLM에게 전달하지 못했어요');
+    assert.equal(primeCardState(49, false, 'error').icon, 'failed');
     assert.equal(primeCardState(49, false, 'error').delivered, false);
-    assert.equal(primeCardState(49, false, 'aborted').title, '⏹ 전체 슬라이드 49장 전달이 중단됐어요');
+    assert.equal(primeCardState(49, false, 'aborted').title, '전체 슬라이드 49장 전달이 중단됐어요');
+    assert.equal(primeCardState(49, false, 'aborted').icon, 'stopped');
     assert.match(primeCardState(49, false, 'streaming').title, /전달하는 중/);
     assert.match(primeCardState(49, true, undefined).title, /전달하는 중/);
     assert.equal(primeCardState(49, false, undefined).delivered, false);
@@ -127,7 +130,7 @@ describe('course context copy', () => {
     assert.match(some, /1개는 정리본을 만드는 중/);
     assert.match(some, /이전 강의 파일/);
     const all = courseContextSentence('Compiler', 2, { total: 1, withSummary: 1, running: 0, missing: [] }, false);
-    assert.equal(all, '📁 Compiler의 2강이라서 이전 강의 1개의 요약도 함께 전달해요.');
+    assert.equal(all, 'Compiler의 2강이라서 이전 강의 1개의 요약도 함께 전달해요.');
     assert.match(courseBadgeTitle('Compiler', 5, earlierLectures(course, 5, docs)), /4개 중 요약\(정리본\)이 있는 1개/);
   });
 

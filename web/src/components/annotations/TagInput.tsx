@@ -2,6 +2,7 @@
 // last one; suggestions come from this lecture's tags and the library's (asked at most once a minute while a tag
 // input has the focus), in a small list steered with ↑/↓/Enter. Plain text only.
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
+import { X } from 'lucide-react';
 import { MAX_MEMO_TAGS } from '../../../../shared/types.ts';
 import { normalizeTag, suggestTags } from '../../lib/annotations/geometry.ts';
 import { fetchLibraryTags } from '../../lib/annotations/store.ts';
@@ -86,7 +87,7 @@ export function TagInput({ tags, onChange, lectureTags, disabled = false }: TagI
           #{tag}
           {!disabled && (
             <button type="button" className="memo-tag-x" onClick={() => remove(tag)} aria-label={`태그 ${tag} 빼기`} title="태그 빼기">
-              ×
+              <X size="1em" />
             </button>
           )}
         </span>

@@ -368,7 +368,7 @@ describe('update wording', () => {
     assert.equal(updateStatusLine(update({})), '아직 확인하지 않았어요');
   });
 
-  test('download percentage, the ⚙ dot, the download-page hint, the toast', () => {
+  test('download percentage, the settings dot, the download-page hint, the toast', () => {
     assert.equal(downloadPercent(update({ received: 999, total: 1000 })), 99);
     assert.equal(downloadPercent(update({ received: 2000, total: 1000 })), 100);
     assert.equal(downloadPercent(update({ received: 10 })), null);

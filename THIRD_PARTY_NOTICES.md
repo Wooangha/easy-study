@@ -5,8 +5,8 @@ binary or bundled distributions. It covers the PDF engine (DESIGN §17) and the 
 (DESIGN §22: [whisper.cpp](#speech-recognition-whispercpp-v194-whisper-cli--mit),
 [FFmpeg](#audio-conversion-ffmpeg-81-with-libopus-152--lgpl-21-or-later), [Silero VAD and the Whisper
 models](#models-downloaded-on-first-use-silero-vad-v620-and-openai-whisper--mit)), the [libvips binaries of
-sharp](#image-processing-sharp-0354-with-libvips-8186--lgpl-30-or-later) and the [code highlighting of the web
-client](#web-client-highlightjs-1112--bsd-3-clause); the other npm dependencies (sharp itself, Express, the SDKs, …)
+sharp](#image-processing-sharp-0354-with-libvips-8186--lgpl-30-or-later), the [code highlighting of the web
+client](#web-client-highlightjs-1112--bsd-3-clause) and its [icons](#web-client-icons-lucide-1490--isc); the other npm dependencies (sharp itself, Express, the SDKs, …)
 carry their own license files in `node_modules`.
 
 ## PDF engine: `@embedpdf/pdfium` 2.15.1 (PDFium compiled to WebAssembly)
@@ -800,6 +800,42 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+For speech recognition on the GPU, the x64 builds for Windows and Linux also ship ggml's Vulkan backend (same source
+and license): Windows `whisper\es-ggml-vulkan.dll`, Linux `/usr/bin/es-whisper-vulkan` (a second `whisper-cli`
+with the backend). They use the computer's own Vulkan loader and GPU driver (`vulkan-1.dll`, `libvulkan.so.1`), which
+are not part of easy-study. The backend is built with the Vulkan SDK 1.4.363.0 from LunarG and compiles in two sets
+of Khronos headers from it: the Vulkan headers (Vulkan-Headers `vulkan.h` and Vulkan-Hpp `vulkan.hpp`, generated
+from the Vulkan API Registry; Copyright The Khronos Group Inc.; `SPDX-License-Identifier: Apache-2.0 OR MIT`, used
+here under the MIT License, whose text is the one above with this copyright line) and SPIRV-Headers (`spirv.hpp`;
+Copyright The Khronos Group Inc.), under this license:
+
+```text
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and/or associated documentation files (the "Materials"),
+to deal in the Materials without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Materials, and to permit persons to whom the
+Materials are furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Materials.
+
+MODIFICATIONS TO THIS FILE MAY MEAN IT NO LONGER ACCURATELY REFLECTS KHRONOS
+STANDARDS. THE UNMODIFIED, NORMATIVE VERSIONS OF KHRONOS SPECIFICATIONS AND
+HEADER INFORMATION ARE LOCATED AT https://www.khronos.org/registry/
+
+THE MATERIALS ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM,OUT OF OR IN CONNECTION WITH THE MATERIALS OR THE USE OR OTHER DEALINGS
+IN THE MATERIALS.
+```
+
+Its compute shaders (ggml's own, MIT) are compiled to SPIR-V with the SDK's `glslc` (shaderc), which adds no terms to
+its output.
+
 ## Audio conversion: FFmpeg 8.1 with libopus 1.5.2 — LGPL-2.1-or-later
 
 The desktop app ships an `ffmpeg` program (macOS: `easy-study.app/Contents/Resources/ffmpeg/`, Windows: `ffmpeg\` in
@@ -954,4 +990,55 @@ SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
 CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+## Web client icons: Lucide 1.49.0 — ISC
+
+The web client draws its icons with [Lucide](https://lucide.dev/) (`lucide-react` 1.49.0), bundled into the client.
+Some of its icons come from the Feather project (MIT), as its license says:
+
+```text
+ISC License
+
+Copyright (c) 2026 Lucide Icons and Contributors
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+---
+
+The following Lucide icons are derived from the Feather project:
+
+airplay, alert-circle, alert-octagon, alert-triangle, aperture, arrow-down-circle, arrow-down-left, arrow-down-right, arrow-down, arrow-left-circle, arrow-left, arrow-right-circle, arrow-right, arrow-up-circle, arrow-up-left, arrow-up-right, arrow-up, at-sign, calendar, cast, check, chevron-down, chevron-left, chevron-right, chevron-up, chevrons-down, chevrons-left, chevrons-right, chevrons-up, circle, clipboard, clock, code, columns, command, compass, corner-down-left, corner-down-right, corner-left-down, corner-left-up, corner-right-down, corner-right-up, corner-up-left, corner-up-right, crosshair, database, divide-circle, divide-square, dollar-sign, download, external-link, feather, frown, hash, headphones, help-circle, info, italic, key, layout, life-buoy, link-2, link, loader, lock, log-in, log-out, maximize, meh, minimize, minimize-2, minus-circle, minus-square, minus, monitor, moon, more-horizontal, more-vertical, move, music, navigation-2, navigation, octagon, pause-circle, percent, plus-circle, plus-square, plus, power, radio, rss, search, server, share, shopping-bag, sidebar, smartphone, smile, square, table-2, tablet, target, terminal, trash-2, trash, triangle, tv, type, upload, x-circle, x-octagon, x-square, x, zoom-in, zoom-out
+
+The MIT License (MIT) (for the icons listed above)
+
+Copyright (c) 2013-present Cole Bemis
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```

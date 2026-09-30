@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { ChevronRight, FileText, Hourglass, NotebookPen, Paperclip, RefreshCw, Square, TriangleAlert, X } from 'lucide-react';
 import type { NoteEntry, NotesResponse, ProviderInfo } from '../../../shared/types.ts';
 import { notesMarkdownUrl, thumbUrl } from '../api.ts';
 import { useAuth } from '../hooks/useAuth.ts';
@@ -69,7 +70,7 @@ export function NotesPanel({
         </label>
         {typeof filter === 'number' && (
           <button type="button" className="filter-chip" onClick={() => onFilterChange('all')} title="필터 해제">
-            p.{filter}만 보는 중 ✕
+            p.{filter}만 보는 중 <X size="1em" />
           </button>
         )}
         <span className="spacer" />
@@ -81,18 +82,20 @@ export function NotesPanel({
         >
           {expand.open ? '모두 접기' : '모두 펼치기'}
         </button>
-        <button type="button" className="ghost-btn small" onClick={onRefresh} disabled={loading} title="새로고침">
-          ↻
+        <button type="button" className="ghost-btn small" onClick={onRefresh} disabled={loading} title="새로고침" aria-label="새로고침">
+          <RefreshCw />
         </button>
       </div>
 
       <div className="notes-file">
         {hasNotes ? (
           <a className="notes-file-link" href={notesMarkdownUrl(docId)} target="_blank" rel="noreferrer">
-            📄 STUDY_NOTES.md 열기
+            <FileText /> STUDY_NOTES.md 열기
           </a>
         ) : (
-          <span className="muted">📄 STUDY_NOTES.md</span>
+          <span className="muted">
+            <FileText /> STUDY_NOTES.md
+          </span>
         )}
         {notes?.markdownPath && (
           <button
@@ -107,12 +110,16 @@ export function NotesPanel({
       </div>
 
       <div className="notes-scroll">
-        {error && <div className="inline-error">⚠️ 노트를 불러오지 못했어요: {error}</div>}
+        {error && (
+          <div className="inline-error">
+            <TriangleAlert /> 노트를 불러오지 못했어요: {error}
+          </div>
+        )}
         {!notes && !error && <div className="notes-empty muted">불러오는 중…</div>}
         {notes && !hasNotes && (
           <div className="notes-empty">
             <div className="chat-empty-icon" aria-hidden>
-              📝
+              <NotebookPen strokeWidth={1.5} />
             </div>
             <p>아직 저장된 Q&amp;A가 없어요.</p>
             <p className="muted small">채팅에서 질문하면 슬라이드별로 자동으로 기록돼요.</p>
@@ -178,10 +185,12 @@ function NoteCard({
     <details className="note-card" open={open} onToggle={(e) => setOpen(e.currentTarget.open)}>
       <summary>
         <span className="note-q">
+          <ChevronRight className="note-q-caret" size={14} />
           Q. {firstLine(question.text)}
           {attachmentCount > 0 && (
             <span className="note-att-count" title={`첨부 ${attachmentCount}개 (선택 영역·이미지)`}>
-              📎{attachmentCount}
+              <Paperclip />
+              {attachmentCount}
             </span>
           )}
         </span>
@@ -202,11 +211,19 @@ function NoteCard({
             <>
               {answer.text && <Markdown text={answer.text} />}
               <div className={answer.status === 'error' ? 'msg-error' : 'msg-note'}>
-                {answer.status === 'error'
-                  ? `⚠️ 답변 실패${answer.error ? `: ${answer.error}` : ''}`
-                  : answer.status === 'aborted'
-                    ? '⏹ 중단된 답변이에요'
-                    : '⏳ 답변이 아직 완료되지 않았어요'}
+                {answer.status === 'error' ? (
+                  <>
+                    <TriangleAlert /> 답변 실패{answer.error ? `: ${answer.error}` : ''}
+                  </>
+                ) : answer.status === 'aborted' ? (
+                  <>
+                    <Square fill="currentColor" /> 중단된 답변이에요
+                  </>
+                ) : (
+                  <>
+                    <Hourglass /> 답변이 아직 완료되지 않았어요
+                  </>
+                )}
               </div>
             </>
           )}

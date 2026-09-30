@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { Keyboard, Lightbulb, LockOpen, Settings, TriangleAlert } from 'lucide-react';
 import { ApiError, errorMessage, login } from '../api.ts';
 import { formatWait, hasHangul, isLoopbackHost, markLoggedIn, normalizeAccessCode, type LoginReason } from '../lib/auth.ts';
 import { desktopAction, desktopMarker, leaveConfirm, readPageBusy, useDesktopState } from '../lib/desktop.ts';
@@ -164,9 +165,13 @@ export function LoginScreen({ reason, overlay }: LoginScreenProps) {
             </button>
           </div>
           <p id="access-code-help" className="auth-field-hint">
-            {hangul
-              ? '⌨️ 한글이 입력됐어요. 한/영 키를 눌러 영문으로 바꾼 뒤 다시 입력해 주세요.'
-              : '대시(-)나 띄어쓰기는 있어도 없어도 괜찮아요. 붙여넣기도 돼요.'}
+            {hangul ? (
+              <>
+                <Keyboard /> 한글이 입력됐어요. 한/영 키를 눌러 영문으로 바꾼 뒤 다시 입력해 주세요.
+              </>
+            ) : (
+              '대시(-)나 띄어쓰기는 있어도 없어도 괜찮아요. 붙여넣기도 돼요.'
+            )}
           </p>
 
           <button type="submit" className="primary-btn auth-submit" disabled={busy || locked || code.trim() === ''}>
@@ -174,14 +179,19 @@ export function LoginScreen({ reason, overlay }: LoginScreenProps) {
           </button>
 
           <div className="auth-error" role="alert" aria-live="assertive">
-            {message && <p>⚠️ {message}</p>}
+            {message && (
+              <p>
+                <TriangleAlert /> {message}
+              </p>
+            )}
           </div>
         </form>
 
         <div className="auth-hint">
           <p>
-            💡 접속 코드는 <strong>easy-study 서버를 실행한 컴퓨터</strong>에 표시돼요 — easy-study 앱이면 ⚙ 설정 › 데스크톱 앱 ›
-            다른 기기에서 접속, 터미널이면 <code>npm run start:remote</code>의 출력. 터미널에 함께 나온 로그인 링크(
+            <Lightbulb /> 접속 코드는 <strong>easy-study 서버를 실행한 컴퓨터</strong>에 표시돼요 — easy-study 앱이면{' '}
+            <Settings /> 설정 › 데스크톱 앱 › 다른 기기에서 접속, 터미널이면 <code>npm run start:remote</code>의 출력. 터미널에
+            함께 나온 로그인 링크(
             <code>…/login?code=…</code>)를 열어도 바로 들어올 수 있어요.
           </p>
           <details className="auth-help">
@@ -204,7 +214,7 @@ export function LoginScreen({ reason, overlay }: LoginScreenProps) {
 
         {insecure && (
           <p className="auth-foot">
-            🔓 암호화되지 않은 연결(HTTP)이에요. 같은 네트워크의 누군가가 오가는 내용을 엿보거나 바꿀 수 있으니 같은 Wi‑Fi처럼
+            <LockOpen /> 암호화되지 않은 연결(HTTP)이에요. 같은 네트워크의 누군가가 오가는 내용을 엿보거나 바꿀 수 있으니 같은 Wi‑Fi처럼
             믿을 수 있는 네트워크에서만 사용하세요 (다른 곳에서는 Tailscale·HTTPS). 이 주소에서는 Chrome/Edge의 ‘앱 설치’도 되지
             않아요 (HTTPS가 필요해요: README의 ‘앱으로 설치하기’ 참고).
           </p>
@@ -234,7 +244,7 @@ export function SwitchServerButton() {
     <div className="auth-switch">
       {warning && (
         <p className="auth-switch-warning" role="alert">
-          ⚠️ {warning}
+          <TriangleAlert /> {warning}
         </p>
       )}
       <button type="button" className="auth-switch-btn" onClick={choose}>

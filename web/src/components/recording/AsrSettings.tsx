@@ -1,6 +1,7 @@
 // Speech recognition in the 녹음 tab (DESIGN §22): the model download prompt (size + progress) and the settings
 // of this device — model (turbo / small), language, live transcription on/off.
-import type { AsrModelInfo, RecordingLanguage } from '../../../../shared/types.ts';
+import { Download, TriangleAlert } from 'lucide-react';
+import type { AsrModelInfo, AsrStatus, RecordingLanguage } from '../../../../shared/types.ts';
 import type { AsrState } from '../../hooks/useAsrStatus.ts';
 import { useRecordingSettings } from '../../hooks/useRecorder.ts';
 import { confirmDialog } from '../../lib/confirm.ts';
@@ -9,8 +10,25 @@ import { setRecordingSettings } from '../../lib/recording/settings.ts';
 import { ProgressBar } from '../organize/parts.tsx';
 
 function modelOptionLabel(m: AsrModelInfo): string {
-  const state = m.installed ? '✓ 설치됨' : m.downloading ? '내려받는 중' : m.error ? '내려받기 실패' : '내려받기 필요';
+  const state = m.installed ? '설치됨' : m.downloading ? '내려받는 중' : m.error ? '내려받기 실패' : '내려받기 필요';
   return `${m.label} · ${formatSize(m.sizeBytes)} · ${state}${m.recommended ? ' · 추천' : ''}`;
+}
+
+/** What the engine runs on, for the engine line (`title`: why the GPU was turned off). */
+function accelerationLabel(status: AsrStatus): { text: string; title?: string } {
+  const accel = status.acceleration;
+  switch (accel) {
+    case 'metal':
+      return { text: 'GPU(Metal) 가속' };
+    case 'vulkan':
+      return { text: `GPU(Vulkan) 가속${status.gpu?.name ? ` · ${status.gpu.name}` : ''}` };
+    case 'cpu':
+      return status.gpuError ? { text: 'CPU · GPU 오류로 CPU로 받아써요', title: status.gpuError } : { text: 'CPU' };
+    default: {
+      const unknown: never = accel;
+      return { text: String(unknown) };
+    }
+  }
 }
 
 /** Engine problems and the "download the model" prompt (shown above the recordings). */
@@ -18,14 +36,18 @@ export function AsrNotice({ asr }: { asr: AsrState }) {
   const settings = useRecordingSettings();
   const status = asr.status;
   if (!status) {
-    return asr.error ? <div className="inline-error">⚠️ 음성 인식 상태를 확인하지 못했어요: {asr.error}</div> : null;
+    return asr.error ? (
+      <div className="inline-error">
+        <TriangleAlert /> 음성 인식 상태를 확인하지 못했어요: {asr.error}
+      </div>
+    ) : null;
   }
   const model = effectiveModel(status, settings.model);
   const problem = asrProblem(status, model);
   if (problem) {
     return (
       <div className="rec-notice is-warn">
-        ⚠️ {problem}
+        <TriangleAlert /> {problem}
         <div className="muted small">녹음과 파일 올리기는 되고, 받아쓰기는 엔진이 준비되면 시작돼요.</div>
       </div>
     );
@@ -36,7 +58,7 @@ export function AsrNotice({ asr }: { asr: AsrState }) {
     return (
       <div className="rec-notice">
         <div>
-          ⬇ 음성 인식 모델 <b>{model.label}</b> 내려받는 중 · {formatSize(model.downloading.receivedBytes)} /{' '}
+          <Download /> 음성 인식 모델 <b>{model.label}</b> 내려받는 중 · {formatSize(model.downloading.receivedBytes)} /{' '}
           {formatSize(model.downloading.totalBytes)}
         </div>
         <ProgressBar fraction={fraction} />
@@ -51,7 +73,7 @@ export function AsrNotice({ asr }: { asr: AsrState }) {
       </div>
       {model.error && (
         <div className="small" role="alert">
-          ⚠️ 지난번 내려받기가 실패했어요: {model.error}
+          <TriangleAlert /> 지난번 내려받기가 실패했어요: {model.error}
         </div>
       )}
       <div className="rec-notice-actions">
@@ -61,7 +83,7 @@ export function AsrNotice({ asr }: { asr: AsrState }) {
           disabled={asr.pending !== null}
           onClick={() => void asr.download(model.id)}
         >
-          ⬇ {model.error ? '다시 내려받기' : '내려받기'} ({formatSize(model.sizeBytes)})
+          <Download /> {model.error ? '다시 내려받기' : '내려받기'} ({formatSize(model.sizeBytes)})
         </button>
         <span className="muted small">모델은 서버 컴퓨터에만 저장되고, 받아쓰기도 거기서 해요 (인터넷으로 보내지 않아요).</span>
       </div>
@@ -69,13 +91,15 @@ export function AsrNotice({ asr }: { asr: AsrState }) {
   );
 }
 
-/** ⚙ settings of this device for new recordings. */
+/** The settings of this device for new recordings. */
 export function AsrSettings({ asr }: { asr: AsrState }) {
   const settings = useRecordingSettings();
   const status = asr.status;
   const model = effectiveModel(status, settings.model);
   const cpuOnly = status?.acceleration === 'cpu';
+  const builtInGpu = status?.acceleration === 'vulkan' && status.gpu?.integrated === true;
   const small = status?.models.find((m) => m.id !== model?.id && m.sizeBytes < (model?.sizeBytes ?? 0));
+  const accel = status ? accelerationLabel(status) : null;
 
   const removeModel = async (m: AsrModelInfo) => {
     const ok = await confirmDialog({
@@ -111,6 +135,12 @@ export function AsrSettings({ asr }: { asr: AsrState }) {
           몇 배 빨라요.
         </p>
       )}
+      {builtInGpu && small && model && !model.id.startsWith('small') && (
+        <p className="muted small">
+          이 컴퓨터는 내장 그래픽으로 받아써요. 느리면 더 작은 <b>{small.label}</b> 모델({formatSize(small.sizeBytes)})이 더
+          빨라요.
+        </p>
+      )}
       <label className="rec-setting">
         <span className="rec-setting-label">강의 언어</span>
         <select
@@ -140,7 +170,7 @@ export function AsrSettings({ asr }: { asr: AsrState }) {
         <div className="rec-settings-foot muted small">
           <span>
             엔진: {status.engineAvailable ? `whisper.cpp${status.engineVersion ? ` ${status.engineVersion}` : ''}` : '없음'} ·{' '}
-            {status.acceleration === 'metal' ? 'GPU(Metal) 가속' : 'CPU'} · 파일 변환(ffmpeg):{' '}
+            <span title={accel?.title}>{accel?.text}</span> · 파일 변환(ffmpeg):{' '}
             {status.ffmpegAvailable ? '있음' : '없음'}
           </span>
           {status.models

@@ -232,20 +232,34 @@ describe('what a drop, a paste or a pick contains', () => {
   });
 
   test('the drop overlay says what happens to PDFs and to images', () => {
-    const pdf = '📄 PDF를 놓으면 업로드해요';
+    const pdf = 'PDF를 놓으면 업로드해요';
     const kinds = (types: string[]) => classifyDragTypes(types);
-    assert.deepEqual(dropOverlayCopy(kinds(['application/pdf']), pdf, true), { title: pdf, sub: null });
+    const none = { titleIcon: null, subIcon: null };
+    assert.deepEqual(dropOverlayCopy(kinds(['application/pdf']), pdf, true), { ...none, title: pdf, sub: null });
+    // The image line is marked for the image icon (the text itself has no emoji).
     assert.deepEqual(dropOverlayCopy(kinds(['image/png']), pdf, true), {
-      title: '🖼 이미지를 놓으면 질문에 첨부해요',
+      title: '이미지를 놓으면 질문에 첨부해요',
+      titleIcon: 'image',
       sub: null,
+      subIcon: null,
     });
-    assert.equal(dropOverlayCopy(kinds(['image/png']), pdf, false).title, '🖼 이미지는 강의를 연 뒤 놓으면 질문에 첨부돼요');
+    assert.deepEqual(dropOverlayCopy(kinds(['image/png']), pdf, false), {
+      title: '이미지는 강의를 연 뒤 놓으면 질문에 첨부돼요',
+      titleIcon: 'image',
+      sub: null,
+      subIcon: null,
+    });
     assert.deepEqual(dropOverlayCopy(kinds(['application/pdf', 'image/png']), pdf, true), {
       title: pdf,
-      sub: '🖼 이미지를 놓으면 질문에 첨부해요 (PDF는 강의 목록에 추가만 해요)',
+      titleIcon: null,
+      sub: '이미지를 놓으면 질문에 첨부해요 (PDF는 강의 목록에 추가만 해요)',
+      subIcon: 'image',
     });
-    assert.deepEqual(dropOverlayCopy(kinds(['']), pdf, true), { title: pdf, sub: '이미지는 질문에 첨부돼요' });
-    assert.deepEqual(dropOverlayCopy(kinds(['']), pdf, false), { title: pdf, sub: null });
+    assert.deepEqual(dropOverlayCopy(kinds(['']), pdf, true), { ...none, title: pdf, sub: '이미지는 질문에 첨부돼요' });
+    assert.deepEqual(dropOverlayCopy(kinds(['']), pdf, false), { ...none, title: pdf, sub: null });
+    // The PDF line is the caller's own (it may carry its own icons): passed through as it is.
+    const node = { line: 'PDF' };
+    assert.equal(dropOverlayCopy(kinds(['application/pdf']), node, true).title, node);
   });
 
   test('a paste with text stays a text paste; a screenshot is attached', () => {
@@ -299,7 +313,7 @@ describe('labels and messages', () => {
     const ctx: ContextInfo = { primed: false, rollover: false, attachedSlides: [7], reusedSlides: [], overviewImages: 0 };
     assert.deepEqual(
       describeContext({ ...ctx, attachments: 2 }).map((c) => c.text),
-      ['🖼 p.7 첨부', '📎 첨부 2개'],
+      ['p.7 첨부', '첨부 2개'],
     );
     assert.deepEqual(describeContext({ ...ctx, attachments: 0 }).map((c) => c.kind), ['attached']);
   });

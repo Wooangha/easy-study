@@ -1,5 +1,6 @@
 // The transcript of a recording in the 녹음 tab (DESIGN §22): for the focused slide or all of it under slide
-// headers; a click plays from there; "📍 여기부터 p.N" sets a marker (the slide the viewer shows).
+// headers; a click plays from there; "여기부터 p.N" sets a marker (the slide the viewer shows).
+import { ChevronLeft, ChevronRight, MapPin, Play } from 'lucide-react';
 import { createContext, memo, useContext, useEffect, useLayoutEffect, useRef } from 'react';
 import type { AlignmentMarker, TranscriptSegment } from '../../../../shared/types.ts';
 import { markerAtSegment, markerLabel, type MarkerAction } from '../../lib/recording/markers.ts';
@@ -95,7 +96,7 @@ export function Transcript({
             onClick={() => onGoToSlide(focusedSlide - 1)}
             disabled={focusedSlide <= 1}
           >
-            ◀ p.{Math.max(1, focusedSlide - 1)}
+            <ChevronLeft /> p.{Math.max(1, focusedSlide - 1)}
           </button>
           <button
             type="button"
@@ -103,7 +104,7 @@ export function Transcript({
             onClick={() => onGoToSlide(focusedSlide + 1)}
             disabled={focusedSlide >= pageCount}
           >
-            p.{Math.min(pageCount, focusedSlide + 1)} ▶
+            p.{Math.min(pageCount, focusedSlide + 1)} <ChevronRight />
           </button>
         </div>
       </div>
@@ -126,7 +127,7 @@ export function Transcript({
               </button>
             )}
             <button type="button" className="tr-group-time" onClick={() => onPlayFrom(g.start)} title="여기부터 재생">
-              ▶ {formatClock(g.start)}
+              <Play fill="currentColor" /> {formatClock(g.start)}
             </button>
           </header>
           <ol className="tr-segs">
@@ -200,7 +201,8 @@ const Segment = memo(function Segment({
         <span className="tr-text">
           {marker && (
             <span className="tr-marker" title={`직접 표시한 구간: ${markerLabel(marker)}`}>
-              📍{marker.slide === null ? '밖' : `p.${marker.slide}`}
+              <MapPin />
+              {marker.slide === null ? '밖' : `p.${marker.slide}`}
             </span>
           )}
           {segment.text}

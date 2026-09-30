@@ -9,42 +9,58 @@
 //      plus resources/node/LICENSE;
 //   3. the packed server → resources/server (dist-server, web/dist, production node_modules for the target);
 //   4. the recording tools (DESIGN §22), from <repo>/.cache, built there when missing (whisper.mjs, ffmpeg.mjs):
-//        macOS / Windows → resources/whisper/whisper-cli[.exe] (+ its DLLs), resources/ffmpeg/ffmpeg[.exe]
-//        Linux           → resources/bin/es-whisper-<triple>, resources/bin/es-ffmpeg-<triple> (externalBins)
+//        macOS / Windows → resources/whisper/whisper-cli[.exe] (+ its DLLs; Windows x64: es-ggml-vulkan.dll too),
+//                          resources/ffmpeg/ffmpeg[.exe]
+//        Linux           → resources/bin/es-whisper-<triple>, resources/bin/es-ffmpeg-<triple> (externalBins; x64:
+//                          also resources/bin/es-whisper-vulkan-<triple>, whisper-cli's Vulkan build)
 //      plus their licenses in resources/whisper/ and resources/ffmpeg/ (ffmpeg: LGPL text, BUILD.txt). A tool that
 //      cannot be built here is left out with a warning (the app's server then looks for it on PATH, e.g.
-//      Homebrew's ffmpeg), unless --require-tools (CI, releases);
-//   5. resources/target.json, checked by build.mjs so a bundle never mixes targets.
+//      Homebrew's ffmpeg), and so is whisper-cli's Vulkan part without the Vulkan SDK (CPU only), unless
+//      --require-tools (CI, releases);
+//   5. resources/target.json, checked by build.mjs so a bundle never mixes targets; its `tools` say what is there
+//      (whisper, ffmpeg; on Vulkan targets whisper-vulkan), which build.mjs turns into the Linux externalBin list.
 import fs from 'node:fs';
 import path from 'node:path';
 import { buildFfmpeg } from './ffmpeg.mjs';
 import { fetchNode } from './fetch-node.mjs';
 import { packServer } from './pack-server.mjs';
 import { REPO_DIR, RESOURCES_DIR, arg, exeName, hostTarget, runNpm, shippedNodeVersion, targetInfo } from './targets.mjs';
-import { buildWhisper } from './whisper.mjs';
+import { buildWhisper, vulkanRequired } from './whisper.mjs';
 
 /**
  * The recording tools: `name` is the resources folder and, on Linux, the externalBin es-<name>; `exe` the program
- * file; `build` returns {files} (the program first or anywhere, its libraries and licenses) from the cache.
+ * file; `variants` other builds of the program that may come with it (<exe>-<variant>, on Linux the externalBin
+ * es-<name>-<variant>: whisper-cli-vulkan); `build(target, {required})` returns {files} (the program first or
+ * anywhere, its libraries and licenses) from the cache (whisper: also `vulkan`, its Vulkan file or null).
  */
 export const RECORDING_TOOLS = [
-  { name: 'whisper', exe: 'whisper-cli', label: 'whisper-cli (받아쓰기)', build: (target) => buildWhisper({ target }) },
-  { name: 'ffmpeg', exe: 'ffmpeg', label: 'ffmpeg (녹음 파일 변환)', build: (target) => buildFfmpeg({ target }) },
+  {
+    name: 'whisper',
+    exe: 'whisper-cli',
+    variants: ['vulkan'],
+    label: 'whisper-cli (받아쓰기)',
+    // --require-tools: the Vulkan part too (a missing Vulkan SDK fails instead of building CPU only).
+    build: (target, { required }) => buildWhisper({ target, requireVulkan: required || vulkanRequired() }),
+  },
+  { name: 'ffmpeg', exe: 'ffmpeg', variants: [], label: 'ffmpeg (녹음 파일 변환)', build: (target) => buildFfmpeg({ target }) },
 ];
 
 /**
  * Copies a tool's files into the resources for `info`'s platform: everything into resources/<name>/, except on
- * Linux, where the program becomes resources/bin/es-<name>-<triple> and the folder keeps the licenses.
+ * Linux, where the program and its variants become resources/bin/es-<name>[-<variant>]-<triple> and the folder keeps
+ * the licenses.
  */
 export function placeTool({ tool, files, target, info, resources = RESOURCES_DIR }) {
   const dir = path.join(resources, tool.name);
   const exe = exeName(tool.exe, info.os);
   if (!files.some((f) => path.basename(f) === exe)) throw new Error(`${tool.name}: ${exe} missing`);
+  // Program file → its externalBin name.
+  const programs = new Map([[exe, `es-${tool.name}`], ...(tool.variants ?? []).map((v) => [exeName(`${tool.exe}-${v}`, info.os), `es-${tool.name}-${v}`])]);
   const placed = [];
   for (const f of files) {
     const base = path.basename(f);
-    const program = base === exe || /\.dll$/i.test(base);
-    const dest = info.nodeAs === 'externalBin' && base === exe ? path.join(resources, 'bin', `es-${tool.name}-${target}`) : path.join(dir, base);
+    const program = programs.has(base) || /\.dll$/i.test(base);
+    const dest = info.nodeAs === 'externalBin' && programs.has(base) ? path.join(resources, 'bin', `${programs.get(base)}-${target}`) : path.join(dir, base);
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.copyFileSync(f, dest);
     fs.chmodSync(dest, program ? 0o755 : 0o644);
@@ -61,11 +77,15 @@ async function recordingTools({ target, info, required }) {
     fs.mkdirSync(dir, { recursive: true });
     let built = null;
     try {
-      built = await tool.build(target);
+      built = await tool.build(target, { required });
     } catch (e) {
       if (required) throw e;
       console.warn(`!! ${tool.label}: ${e.message}\n!! 이 빌드에는 넣지 않아요: 앱의 서버가 PATH에서 찾아요 (DESIGN §22).`);
     }
+    found[tool.name] = Boolean(built);
+    // whisper-cli's Vulkan part where the target has one: missing from a build without the Vulkan SDK. build.mjs lists
+    // the Linux externalBin es-whisper-vulkan only when it is here.
+    if (tool.name === 'whisper' && info.vulkan) found['whisper-vulkan'] = Boolean(built?.vulkan);
     if (!built) {
       // Tauri needs the resource folder; it says why it is empty.
       fs.writeFileSync(
@@ -73,12 +93,10 @@ async function recordingTools({ target, info, required }) {
         `This build of easy-study does not include ${tool.exe}: the server looks for it on PATH (DESIGN §22).\n` +
           `이 빌드에는 ${tool.exe}가 들어 있지 않아요. 서버가 PATH에서 찾아요.\n`,
       );
-      found[tool.name] = false;
       continue;
     }
     const placed = placeTool({ tool, files: built.files, target, info });
     console.log(`   ${tool.label}: ${placed.join(', ')}`);
-    found[tool.name] = true;
   }
   return found;
 }

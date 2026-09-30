@@ -89,7 +89,7 @@ export async function finishRecordingElsewhere(info: RecordingInfo, blocking = f
     notifyRecordingsChanged(info.docId);
     toast(
       blocking
-        ? `‘${info.title}’ 녹음을 끝냈어요. 이제 🎙 녹음 시작을 다시 누르세요.`
+        ? `‘${info.title}’ 녹음을 끝냈어요. 이제 녹음 시작을 다시 누르세요.`
         : `‘${info.title}’ 녹음을 끝냈어요. 남은 받아쓰기와 슬라이드 정렬이 끝나면 다시 들을 수 있어요.`,
       'success',
       8000,

@@ -37,7 +37,7 @@ export function canOpenFiles(providers: ProviderInfo[] | undefined, id: Provider
   return kind ? kind === 'cli' : id === 'claude-code' || id === 'codex';
 }
 
-/** One sentence about the course context of lecture `index` of `courseTitle`, for the chat empty state. */
+/** One sentence about the course context of lecture `index` of `courseTitle`, for the chat empty state (after a folder icon). */
 export function courseContextSentence(
   courseTitle: string,
   index: number,
@@ -45,16 +45,16 @@ export function courseContextSentence(
   opensFiles: boolean,
 ): string {
   const files = opensFiles ? ' 필요하면 이전 강의 파일(정리본·슬라이드)도 열어 봐요.' : '';
-  if (earlier.total === 0) return `📁 ${courseTitle}의 ${index}강이에요.`;
+  if (earlier.total === 0) return `${courseTitle}의 ${index}강이에요.`;
   if (earlier.withSummary === earlier.total) {
-    return `📁 ${courseTitle}의 ${index}강이라서 이전 강의 ${earlier.total}개의 요약도 함께 전달해요.${files}`;
+    return `${courseTitle}의 ${index}강이라서 이전 강의 ${earlier.total}개의 요약도 함께 전달해요.${files}`;
   }
   const running = earlier.running > 0 ? ` (${earlier.running}개는 정리본을 만드는 중)` : '';
   const summaries =
     earlier.withSummary === 0
       ? `이전 강의 ${earlier.total}개 중 요약이 있는 강의가 아직 없어서 제목만 전달해요${running}.`
       : `이전 강의 ${earlier.total}개 중 요약이 있는 ${earlier.withSummary}개만 요약을 전달하고, 나머지는 제목만 전달해요${running}.`;
-  return `📁 ${courseTitle}의 ${index}강 — ${summaries} 강의 요약은 그 강의의 정리본이 완성되면 생겨요.${files}`;
+  return `${courseTitle}의 ${index}강 — ${summaries} 강의 요약은 그 강의의 정리본이 완성되면 생겨요.${files}`;
 }
 
 /** Tooltip of the course badge in the chat header. */

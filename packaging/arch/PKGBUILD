@@ -30,6 +30,10 @@ optdepends=('noto-fonts-cjk: Korean (CJK) text in the app window'
             'gst-libav: play uploaded lecture recordings (AAC/m4a) in the app'
             'noto-fonts-emoji: color emoji'
             'xdg-utils: open links and the library folder in the default applications')
+# x86_64: /usr/bin/es-whisper-vulkan, speech recognition on the GPU, links the Vulkan loader; it runs on a GPU with a
+# Vulkan driver, and the app falls back to the CPU build (/usr/bin/es-whisper) without one.
+depends_x86_64=('vulkan-icd-loader')
+optdepends_x86_64=('vulkan-driver: GPU(Vulkan) speech recognition')
 provides=("$_pkgname")
 conflicts=("$_pkgname")
 # Prebuilt binaries: the official Node.js runtime and sharp/libvips are used as shipped.

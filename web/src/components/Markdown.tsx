@@ -1,16 +1,22 @@
 import { memo, useMemo } from 'react';
+import { ImageIcon } from 'lucide-react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import 'katex/dist/katex.min.css';
 import { normalizeMathDelimiters } from '../lib/mathDelimiters.ts';
-import { rehypePlugins, remarkPlugins, urlTransform } from '../lib/markdownOptions.ts';
+import { BLOCKED_IMAGE_CLASS, rehypePlugins, remarkPlugins, urlTransform } from '../lib/markdownOptions.ts';
 
 const components: Components = {
   // Links open in a new tab (in the desktop app: other sites in the system browser, the server's own pages in an app
   // window). One whose URL was dropped (lib/markdownOptions.ts urlTransform: the shell's reserved path, javascript:)
-  // is plain text.
+  // is plain text. A remote image that was not loaded (the link standing in for it) starts with an image icon.
   a: ({ node: _node, href, children, ...props }) =>
     href ? (
       <a {...props} href={href} target="_blank" rel="noreferrer noopener">
+        {props.className === BLOCKED_IMAGE_CLASS && (
+          <>
+            <ImageIcon />{' '}
+          </>
+        )}
         {children}
       </a>
     ) : (

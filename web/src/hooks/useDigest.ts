@@ -35,7 +35,7 @@ export function useDigest(docId: string | null) {
       if (info.status === 'ready') {
         const failed = info.slides.filter((s) => s.failed).length;
         toast(
-          failed > 0 ? `정리본을 만들었어요 (슬라이드 ${failed}장은 실패)` : '정리본이 완성됐어요 ✓',
+          failed > 0 ? `정리본을 만들었어요 (슬라이드 ${failed}장은 실패)` : '정리본이 완성됐어요',
           failed > 0 ? 'info' : 'success',
         );
       } else if (info.status === 'error') {

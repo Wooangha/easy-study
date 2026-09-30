@@ -25,9 +25,12 @@ export function providerWithModel(providers: ProviderInfo[] | undefined, id: Pro
   return parts.join(' · ');
 }
 
-/** "🔀 여기부터 Codex · gpt-5.5 · 추론 높음": the marker between the messages where the session's LLM changed. */
+/**
+ * "여기부터 Codex · gpt-5.5 · 추론 높음": the marker between the messages where the session's LLM changed (the
+ * message list draws a shuffle icon before it).
+ */
 export function switchMarkerText(providers: ProviderInfo[] | undefined, change: LlmSwitch): string {
-  return `🔀 여기부터 ${providerWithModel(providers, change.to.provider, change.to.model, change.to.effort)}`;
+  return `여기부터 ${providerWithModel(providers, change.to.provider, change.to.model, change.to.effort)}`;
 }
 
 /** The marker's tooltip: when, from what to what, and that the new LLM got the slides and a recap first. */
@@ -90,6 +93,7 @@ export type ContextChipKind =
   | 'attachments'
   | 'memos';
 
+/** One chip of the context line. Its text is plain (no emoji): the message list draws the icon of its `kind`. */
 export interface ContextChip {
   kind: ContextChipKind;
   text: string;
@@ -99,12 +103,12 @@ export interface ContextChip {
 
 const RECOVERED_CHIPS: Record<NonNullable<ContextInfo['recoveredFrom']>, { text: string; title: string }> = {
   resume_invalid: {
-    text: '🔄 이전 대화를 잃어 새 대화로 다시 전달',
+    text: '이전 대화를 잃어 새 대화로 다시 전달',
     title:
       'LLM 쪽 이전 대화를 이어갈 수 없어서(만료·삭제 등) 새 대화를 시작하고, 슬라이드와 최근 대화 요약을 다시 전달한 뒤 답했어요.',
   },
   context_overflow: {
-    text: '🔄 대화가 길어져 새 대화로 전달',
+    text: '대화가 길어져 새 대화로 전달',
     title: 'LLM 대화가 너무 길어져서 새 대화를 시작하고, 슬라이드와 최근 대화 요약을 다시 전달한 뒤 답했어요.',
   },
 };
@@ -119,21 +123,21 @@ export function describeContext(ctx: ContextInfo | undefined): ContextChip[] {
   else if (ctx.switched) {
     out.push({
       kind: 'switched',
-      text: '🔀 바꾼 LLM으로 새 대화 시작',
+      text: '바꾼 LLM으로 새 대화 시작',
       title: 'LLM을 바꿔서 새 대화를 시작하고, 슬라이드와 최근 대화 요약을 다시 전달한 뒤 답했어요.',
     });
-  } else if (ctx.rollover) out.push({ kind: 'rollover', text: '🔄 새 대화로 이어감' });
-  if (ctx.primed) out.push({ kind: 'primed', text: '📚 전체 슬라이드 전달' });
+  } else if (ctx.rollover) out.push({ kind: 'rollover', text: '새 대화로 이어감' });
+  if (ctx.primed) out.push({ kind: 'primed', text: '전체 슬라이드 전달' });
   if (ctx.overviewImages > 0) out.push({ kind: 'overview', text: `개요 이미지 ${ctx.overviewImages}장` });
   const attached = [...(ctx.attachedSlides ?? [])].sort((a, b) => a - b);
   const reused = [...(ctx.reusedSlides ?? [])].sort((a, b) => a - b);
-  if (attached.length > 0) out.push({ kind: 'attached', text: `🖼 ${pageList(attached)} 첨부` });
-  if (reused.length > 0) out.push({ kind: 'reused', text: `↺ ${pageList(reused)} 이미 전달됨` });
+  if (attached.length > 0) out.push({ kind: 'attached', text: `${pageList(attached)} 첨부` });
+  if (reused.length > 0) out.push({ kind: 'reused', text: `${pageList(reused)} 이미 전달됨` });
   const extra = ctx.attachments ?? 0;
   if (extra > 0) {
     out.push({
       kind: 'attachments',
-      text: `📎 첨부 ${extra}개`,
+      text: `첨부 ${extra}개`,
       title: '질문과 함께 보낸 선택 영역·이미지 (선택 영역은 그 안의 텍스트도 함께 전달돼요)',
     });
   }
@@ -141,33 +145,36 @@ export function describeContext(ctx: ContextInfo | undefined): ContextChip[] {
   if (memos > 0) {
     out.push({
       kind: 'memos',
-      text: `📝 메모 ${memos}개`,
+      text: `메모 ${memos}개`,
       title: '이 슬라이드와 앞뒤 슬라이드에 쓴 메모를 튜터에게 함께 전달했어요',
     });
   }
   return out;
 }
 
+/** The icon before a priming card's title (the message list draws it): the deck, a warning, a stop. */
+export type PrimeCardIcon = 'deck' | 'failed' | 'stopped';
+
 /** Title and style of a priming card, from the status of its answer (the deck only counts as delivered once the model answered). */
 export function primeCardState(
   pageCount: number,
   pending: boolean,
   answerStatus: MessageStatus | undefined,
-): { title: string; tone: 'normal' | 'failed' | 'aborted'; delivered: boolean } {
+): { title: string; icon: PrimeCardIcon; tone: 'normal' | 'failed' | 'aborted'; delivered: boolean } {
   const deck = `전체 슬라이드 ${pageCount}장`;
   if (pending || answerStatus === 'streaming') {
-    return { title: `📚 ${deck}을 LLM에게 전달하는 중…`, tone: 'normal', delivered: false };
+    return { title: `${deck}을 LLM에게 전달하는 중…`, icon: 'deck', tone: 'normal', delivered: false };
   }
   switch (answerStatus) {
     case 'complete':
-      return { title: `📚 ${deck}을 LLM에게 전달했어요`, tone: 'normal', delivered: true };
+      return { title: `${deck}을 LLM에게 전달했어요`, icon: 'deck', tone: 'normal', delivered: true };
     case 'error':
-      return { title: `⚠️ ${deck}을 LLM에게 전달하지 못했어요`, tone: 'failed', delivered: false };
+      return { title: `${deck}을 LLM에게 전달하지 못했어요`, icon: 'failed', tone: 'failed', delivered: false };
     case 'aborted':
-      return { title: `⏹ ${deck} 전달이 중단됐어요`, tone: 'aborted', delivered: false };
+      return { title: `${deck} 전달이 중단됐어요`, icon: 'stopped', tone: 'aborted', delivered: false };
     default:
       // No answer saved (e.g. an interrupted server): nothing says the deck arrived.
-      return { title: `📚 ${deck} 전달 (결과를 알 수 없어요)`, tone: 'aborted', delivered: false };
+      return { title: `${deck} 전달 (결과를 알 수 없어요)`, icon: 'deck', tone: 'aborted', delivered: false };
   }
 }
 

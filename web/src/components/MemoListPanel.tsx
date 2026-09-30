@@ -1,6 +1,7 @@
 // The 메모 tab (DESIGN §25): every memo of the lecture from the annotation summary (no per-slide loads), searched
 // over text and tags, filtered by tag or to the focused slide. A row opens the memo on its slide; its ⋯ deletes it.
 import { useMemo, useState } from 'react';
+import { Mic, RefreshCw, StickyNote, TriangleAlert } from 'lucide-react';
 import type { MemoSummary } from '../../../shared/types.ts';
 import { useAnnotations } from '../hooks/useAnnotations.ts';
 import { EMPTY_MEMO_FILTER, filterMemos, memoLines, memoTagCounts } from '../lib/annotations/memoList.ts';
@@ -17,7 +18,7 @@ interface MemoListPanelProps {
   /** A row was clicked: show the memo on its slide (selected and expanded). */
   onOpenMemo: (slide: number, id: string) => void;
   onGoToSlide: (slide: number) => void;
-  /** A memo's 🎙 chip: play that moment in the 녹음 tab. */
+  /** A memo's recording chip (mic icon): play that moment in the 녹음 tab. */
   onPlayRecording: (rid: string, t: number) => void;
 }
 
@@ -65,8 +66,14 @@ export function MemoListPanel({ docId, focusedSlide, onOpenMemo, onGoToSlide, on
           현재 슬라이드만
         </label>
         <span className="spacer" />
-        <button type="button" className="ghost-btn small" onClick={() => void store?.ensureSummary(true)} title="새로고침">
-          ↻
+        <button
+          type="button"
+          className="ghost-btn small"
+          onClick={() => void store?.ensureSummary(true)}
+          title="새로고침"
+          aria-label="새로고침"
+        >
+          <RefreshCw />
         </button>
       </div>
       {tags.length > 0 && (
@@ -86,12 +93,16 @@ export function MemoListPanel({ docId, focusedSlide, onOpenMemo, onGoToSlide, on
         </div>
       )}
       <div className="notes-scroll">
-        {snapshot.summaryError && !summary && <div className="inline-error">⚠️ 메모를 불러오지 못했어요: {snapshot.summaryError}</div>}
+        {snapshot.summaryError && !summary && (
+          <div className="inline-error">
+            <TriangleAlert /> 메모를 불러오지 못했어요: {snapshot.summaryError}
+          </div>
+        )}
         {!summary && !snapshot.summaryError && <div className="notes-empty muted">불러오는 중…</div>}
         {summary && memos.length === 0 && (
           <div className="notes-empty">
             <div className="chat-empty-icon" aria-hidden>
-              🗒
+              <StickyNote strokeWidth={1.5} />
             </div>
             <p>아직 메모가 없어요.</p>
             <p className="muted small">슬라이드 위 도구 줄의 메모 도구로 스티커 메모를 붙일 수 있어요. 태그와 다른 슬라이드·녹음으로의 연결도 돼요.</p>
@@ -158,7 +169,7 @@ export function MemoListPanel({ docId, focusedSlide, onOpenMemo, onGoToSlide, on
                         }}
                         title="녹음의 이 순간 듣기 (녹음 탭)"
                       >
-                        🎙 {formatClock(recording.t)}
+                        <Mic /> {formatClock(recording.t)}
                       </button>
                     )}
                   </div>

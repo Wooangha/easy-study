@@ -1,12 +1,13 @@
 // Small building blocks of the library view.
 import type { DraggableAttributes, DraggableSyntheticListeners } from '@dnd-kit/core';
 import { useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
+import { Check, ChevronRight, GripVertical, Hourglass, RefreshCw, TriangleAlert, type LucideIcon } from 'lucide-react';
 import type { Course, DigestStatus, DocMeta, LibraryLayout } from '../../../../shared/types.ts';
 import type { UploadItem } from '../../hooks/useDocs.ts';
 import { formatBytes } from '../../lib/format.ts';
 import { layoutRows } from '../../lib/libraryLayout.ts';
 
-/** "≡" drag handle (mouse: drag; touch: press and hold, then drag; keyboard: Space/Enter, arrows, Space/Enter). */
+/** Drag handle, a grip icon (mouse: drag; touch: press and hold, then drag; keyboard: Space/Enter, arrows, Space/Enter). */
 export function DragHandle({
   label,
   setRef,
@@ -31,27 +32,32 @@ export function DragHandle({
       aria-label={label}
       title={`${label} — 끌어서 옮기기 (터치: 길게 누른 채 끌기, 키보드: 스페이스 후 화살표)`}
     >
-      <span aria-hidden>≡</span>
+      <GripVertical />
     </button>
   );
 }
 
 /** Collapse chevron (points right; the toggle rotates it down when expanded). */
 export function Chevron({ className = 'collapse-chevron' }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 16 16" width="14" height="14" aria-hidden focusable="false">
-      <path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
+  // 14 px with the old hand-drawn chevron's 1.75 px line (3 of Lucide's 24 units).
+  return <ChevronRight className={className} size={14} strokeWidth={3} focusable="false" />;
 }
 
-/** "✓ 정리본" / "⏳ 정리 중" / "정리본 일부" badge (nothing when there is no digest). */
+/** "정리본" (a check) / "정리 중" (an hourglass) / "정리본 일부" badge (nothing when there is no digest). */
 export function DigestBadge({ status }: { status: DigestStatus | undefined }) {
   switch (status) {
     case 'ready':
-      return <span className="digest-badge is-ready">✓ 정리본</span>;
+      return (
+        <span className="digest-badge is-ready">
+          <Check strokeWidth={2.5} /> 정리본
+        </span>
+      );
     case 'running':
-      return <span className="digest-badge is-running">⏳ 정리 중</span>;
+      return (
+        <span className="digest-badge is-running">
+          <Hourglass strokeWidth={2.5} /> 정리 중
+        </span>
+      );
     case 'aborted':
     case 'error':
       return (
@@ -78,12 +84,25 @@ export function CourseSummaryBadges({ lectures, uploads }: { lectures: DocMeta[]
           className={ready === lectures.length ? 'digest-badge is-ready' : 'digest-badge is-muted'}
           title={`정리본이 있는 강의 ${ready}개 / 전체 ${lectures.length}개`}
         >
-          {ready === lectures.length ? '✓ ' : ''}정리본 {ready}/{lectures.length}
+          {ready === lectures.length && (
+            <>
+              <Check strokeWidth={2.5} />{' '}
+            </>
+          )}
+          정리본 {ready}/{lectures.length}
         </span>
       )}
-      {running > 0 && <span className="digest-badge is-running">⏳ 정리 중 {running}</span>}
+      {running > 0 && (
+        <span className="digest-badge is-running">
+          <Hourglass strokeWidth={2.5} /> 정리 중 {running}
+        </span>
+      )}
       {processing > 0 && <span className="digest-badge is-running">변환 중 {processing}</span>}
-      {failed > 0 && <span className="digest-badge is-partial">⚠️ 실패 {failed}</span>}
+      {failed > 0 && (
+        <span className="digest-badge is-partial">
+          <TriangleAlert strokeWidth={2.5} /> 실패 {failed}
+        </span>
+      )}
       {uploads > 0 && <span className="digest-badge is-running">업로드 중 {uploads}</span>}
     </span>
   );
@@ -141,7 +160,7 @@ export function FailedDocActions({
         onClick={() => onRetry(doc.id)}
         title="업로드한 PDF로 변환을 다시 해요"
       >
-        ↻ 다시 변환
+        <RefreshCw /> 다시 변환
       </button>
       <button type="button" className="ghost-btn small danger" onClick={() => onDelete(doc)} title="이 문서를 삭제해요">
         삭제
@@ -193,13 +212,13 @@ export function RenameInput({
 
 /** "새 과목" / "새 그룹" form. */
 export function NewTitleForm({
-  icon,
+  icon: Icon,
   placeholder,
   label,
   onCreate,
   onCancel,
 }: {
-  icon: string;
+  icon: LucideIcon;
   placeholder: string;
   label: string;
   onCreate: (title: string) => Promise<void>;
@@ -220,9 +239,7 @@ export function NewTitleForm({
   };
   return (
     <form className="course-create" onSubmit={(e) => void submit(e)}>
-      <span className="course-icon" aria-hidden>
-        {icon}
-      </span>
+      <Icon className="course-icon" />
       <input
         className="course-title-input"
         autoFocus
@@ -263,17 +280,17 @@ export function CourseOptions({
       if (row.course.id === exclude) return null;
       return (
         <option key={row.course.id} value={row.course.id}>
-          📁 {row.course.title}
+          {row.course.title}
         </option>
       );
     }
     const inGroup = row.courses.filter((c) => c.id !== exclude);
     if (inGroup.length === 0) return null;
     return (
-      <optgroup key={row.group.id} label={`🗂 ${row.group.title}`}>
+      <optgroup key={row.group.id} label={row.group.title}>
         {inGroup.map((c) => (
           <option key={c.id} value={c.id}>
-            📁 {c.title}
+            {c.title}
           </option>
         ))}
       </optgroup>

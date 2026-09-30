@@ -1,4 +1,22 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, type MouseEvent } from 'react';
+import {
+  BookOpen,
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  FileText,
+  Folder,
+  Hourglass,
+  MessageCircle,
+  NotebookPen,
+  Pause,
+  Play,
+  RefreshCw,
+  Search,
+  Square,
+  TriangleAlert,
+  Zap,
+} from 'lucide-react';
 import type { DigestSlide, DocMeta, ProviderInfo } from '../../../shared/types.ts';
 import { totalTokens } from '../../../shared/usage.ts';
 import { digestMarkdownUrl } from '../api.ts';
@@ -7,7 +25,7 @@ import type { DigestState } from '../hooks/useDigest.ts';
 import type { ProviderChoice } from '../hooks/useProviderChoice.ts';
 import { copyText } from '../lib/clipboard.ts';
 import { confirmDialog } from '../lib/confirm.ts';
-import { digestContinueLabel, digestNote, digestStatusLabel, digestView } from '../lib/digestState.ts';
+import { digestContinueLabel, digestNote, digestStatusLabel, digestView, type DigestIcon, type DigestLabel } from '../lib/digestState.ts';
 import { formatTime, providerWithModel } from '../lib/format.ts';
 import { toast } from '../lib/toast.ts';
 import { formatTokens, usageTitle } from '../lib/usage.ts';
@@ -33,6 +51,36 @@ interface DigestPanelProps {
   mode: DigestMode;
   onModeChange: (mode: DigestMode) => void;
   onGoToSlide: (slide: number) => void;
+}
+
+/** The icon before a digest label (lib/digestState.ts gives the kind, the text is plain). */
+function DigestLabelIcon({ icon }: { icon: DigestIcon }) {
+  switch (icon) {
+    case 'continue':
+      return <Play fill="currentColor" />;
+    case 'retry':
+      return <RefreshCw />;
+    case 'summary':
+      return <BookOpen />;
+    case 'running':
+      return <Hourglass />;
+    case 'ready':
+      return <Check />;
+    case 'paused':
+      return <Pause fill="currentColor" />;
+    case 'error':
+      return <TriangleAlert />;
+  }
+}
+
+function DigestLabelText({ label }: { label: DigestLabel }) {
+  return label.icon ? (
+    <>
+      <DigestLabelIcon icon={label.icon} /> {label.text}
+    </>
+  ) : (
+    label.text
+  );
 }
 
 export function DigestPanel({
@@ -144,13 +192,15 @@ export function DigestPanel({
   const continueLabel = info && s ? digestContinueLabel(info, s) : null;
   const note = info && s ? digestNote(info, s) : null;
   const outdatedNote = s?.summaryOutdated ? (
-    <p className="muted small">⚠️ 슬라이드 정리가 바뀌기 전에 만든 요약이에요. 위의 ‘📘 강의 요약 다시 만들기’로 새로 만들 수 있어요.</p>
+    <p className="muted small">
+      <TriangleAlert /> 슬라이드 정리가 바뀌기 전에 만든 요약이에요. 위의 ‘강의 요약 다시 만들기’로 새로 만들 수 있어요.
+    </p>
   ) : null;
   let content;
   if (!info || !s) {
     content = error ? (
       <div className="inline-error">
-        ⚠️ 정리본 정보를 불러오지 못했어요: {error}{' '}
+        <TriangleAlert /> 정리본 정보를 불러오지 못했어요: {error}{' '}
         <button type="button" className="ghost-btn small" onClick={() => void digest.refresh()}>
           다시 시도
         </button>
@@ -162,7 +212,7 @@ export function DigestPanel({
     content = (
       <div className="digest-intro">
         <div className="chat-empty-icon" aria-hidden>
-          📝
+          <NotebookPen strokeWidth={1.5} />
         </div>
         <h3>아직 정리본이 없어요</h3>
         <p>
@@ -170,13 +220,21 @@ export function DigestPanel({
           핵심을 붙여 정리해요. 한 번 만들어 두면 계속 재사용돼요.
         </p>
         <ul className="tips">
-          <li>⚡ 새 세션을 시작할 때 이미지 대신 이 텍스트를 전달해서 더 빠르고 저렴해요</li>
-          <li>🔎 텍스트 추출로는 흐트러지는 수식·표·기호(α, ε, ∪, ∈ …)도 이미지에서 정확히 읽어 와요</li>
-          <li>📁 과목에 넣어 두면 다음 강의를 공부할 때 이 강의의 요약이 함께 전달돼요</li>
-          <li>💬 새 세션을 처음 만들면 자동으로 만들기 시작해요</li>
+          <li>
+            <Zap /> 새 세션을 시작할 때 이미지 대신 이 텍스트를 전달해서 더 빠르고 저렴해요
+          </li>
+          <li>
+            <Search /> 텍스트 추출로는 흐트러지는 수식·표·기호(α, ε, ∪, ∈ …)도 이미지에서 정확히 읽어 와요
+          </li>
+          <li>
+            <Folder /> 과목에 넣어 두면 다음 강의를 공부할 때 이 강의의 요약이 함께 전달돼요
+          </li>
+          <li>
+            <MessageCircle /> 새 세션을 처음 만들면 자동으로 만들기 시작해요
+          </li>
         </ul>
         <button type="button" className="primary-btn" onClick={() => void start(false)} disabled={startDisabled} title={startTitle}>
-          📝 정리본 만들기
+          <NotebookPen /> 정리본 만들기
         </button>
         <p className="muted small">{chosen ? `${chosen}(으)로 만들어요 · 몇 분 걸릴 수 있어요` : startTitle}</p>
       </div>
@@ -202,7 +260,7 @@ export function DigestPanel({
             onClick={() => onGoToSlide(focusedSlide - 1)}
             disabled={focusedSlide <= 1}
           >
-            ◀ p.{Math.max(1, focusedSlide - 1)}
+            <ChevronLeft /> p.{Math.max(1, focusedSlide - 1)}
           </button>
           <span className="muted small">
             p.{focusedSlide} / {s.total}
@@ -213,12 +271,14 @@ export function DigestPanel({
             onClick={() => onGoToSlide(focusedSlide + 1)}
             disabled={focusedSlide >= s.total}
           >
-            p.{Math.min(s.total, focusedSlide + 1)} ▶
+            p.{Math.min(s.total, focusedSlide + 1)} <ChevronRight />
           </button>
         </div>
         {info.summary && (
           <details className="digest-summary compact">
-            <summary>📘 강의 전체 요약{s.summaryOutdated ? ' (이전 요약)' : ''}</summary>
+            <summary>
+              <BookOpen /> 강의 전체 요약{s.summaryOutdated ? ' (이전 요약)' : ''}
+            </summary>
             {outdatedNote}
             <Markdown text={info.summary} />
           </details>
@@ -248,7 +308,9 @@ export function DigestPanel({
       <>
         {info.summary ? (
           <section className="digest-summary">
-            <h3>📘 강의 요약</h3>
+            <h3>
+              <BookOpen /> 강의 요약
+            </h3>
             {outdatedNote}
             <Markdown text={info.summary} />
           </section>
@@ -278,15 +340,18 @@ export function DigestPanel({
           onClick={() => void digest.refresh()}
           disabled={loading}
           title="새로고침"
+          aria-label="새로고침"
         >
-          ↻
+          <RefreshCw />
         </button>
       </div>
 
       {info && s && (s.hasAny || s.running) && (
         <div className={`digest-status status-${info.status}`}>
           <div className="digest-status-line">
-            <span className="digest-status-label">{digestStatusLabel(info, s)}</span>
+            <span className="digest-status-label">
+              <DigestLabelText label={digestStatusLabel(info, s)} />
+            </span>
             {info.provider && (
               <span className="muted small">
                 {providerWithModel(providers, info.provider, info.model, info.effort)}
@@ -306,7 +371,7 @@ export function DigestPanel({
                 onClick={() => void digest.abort()}
                 disabled={pending !== null}
               >
-                ■ 중지
+                <Square fill="currentColor" /> 중지
               </button>
             ) : (
               <>
@@ -318,7 +383,7 @@ export function DigestPanel({
                     disabled={startDisabled}
                     title={startTitle}
                   >
-                    {continueLabel}
+                    <DigestLabelText label={continueLabel} />
                   </button>
                 )}
                 <button
@@ -345,17 +410,19 @@ export function DigestPanel({
           )}
           {note && (
             <div className={info.status === 'error' ? 'msg-error' : 'msg-note'}>
-              {note.message}
+              <TriangleAlert /> {note.message}
               {note.hint && <div className="digest-note-hint">{note.hint}</div>}
             </div>
           )}
           <div className="digest-file">
             {s.hasAny ? (
               <a className="notes-file-link" href={digestMarkdownUrl(doc.id)} target="_blank" rel="noreferrer">
-                📄 DIGEST.md 열기
+                <FileText /> DIGEST.md 열기
               </a>
             ) : (
-              <span className="muted">📄 DIGEST.md</span>
+              <span className="muted">
+                <FileText /> DIGEST.md
+              </span>
             )}
             {info.markdownPath && (
               <button
@@ -369,13 +436,17 @@ export function DigestPanel({
             )}
           </div>
           <div className="digest-hint">
-            ⚡ 정리본은 새 세션을 시작할 때 슬라이드 이미지 대신 재사용돼서 더 빠르고 저렴해요.
+            <Zap /> 정리본은 새 세션을 시작할 때 슬라이드 이미지 대신 재사용돼서 더 빠르고 저렴해요.
           </div>
         </div>
       )}
 
       <div className="digest-scroll" ref={scrollRef}>
-        {info && error && <div className="inline-error">⚠️ 새로고침 실패: {error}</div>}
+        {info && error && (
+          <div className="inline-error">
+            <TriangleAlert /> 새로고침 실패: {error}
+          </div>
+        )}
         {content}
       </div>
     </div>
@@ -417,7 +488,9 @@ const DigestEntry = memo(function DigestEntry({ entry, focused, onGoToSlide, reg
         <span className="digest-entry-title">{entry.title || <span className="muted">(제목 없음)</span>}</span>
       </header>
       {entry.failed && (
-        <div className="msg-error">⚠️ 이 슬라이드는 정리하지 못했어요 — ‘이어서 만들기’로 다시 시도할 수 있어요</div>
+        <div className="msg-error">
+          <TriangleAlert /> 이 슬라이드는 정리하지 못했어요 — ‘이어서 만들기’로 다시 시도할 수 있어요
+        </div>
       )}
       {entry.markdown && (
         <div className="digest-body">

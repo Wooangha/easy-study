@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { HOST_LIBRARIES, elfHeader, elfSections, hostLibrariesIn, isHostLibrary } from './appimage.mjs';
-import { SMOKE_MODELS, asrSmoke, mp4Boxes, readWav, toneWav } from './asr-smoke.mjs';
+import { BACKEND_LINES, SMOKE_MODELS, asrSmoke, mp4Boxes, readWav, toneWav } from './asr-smoke.mjs';
 import { checkBinary, elfInfo, machoInfo, peInfo } from './binaries.mjs';
 import { FFMPEG, OPUS, ffmpegBuildPlan } from './ffmpeg.mjs';
 import { parsePublicKey, parseSignature, trustedFields, verify, verifyTrusted } from './minisign.mjs';
@@ -37,9 +37,38 @@ import {
   sha256sums,
   versionInfoString,
 } from './release-assets.mjs';
-import { DESKTOP_DIR, REPO_DIR, TARGETS, externalBinOverride, hostTarget, shippedNodeVersion, targetInfo, tauriEnv, textSha256 } from './targets.mjs';
+import {
+  DESKTOP_DIR,
+  LINUX_EXTERNAL_BINS,
+  REPO_DIR,
+  TARGETS,
+  externalBinOverride,
+  hostTarget,
+  linuxExternalBins,
+  shippedNodeVersion,
+  targetInfo,
+  tauriEnv,
+  textSha256,
+} from './targets.mjs';
 import { APP_TAR_ARGS, e2eConfig, packApp, serveDir, writeLatest } from './update-e2e.mjs';
-import { WHISPER, pickVcomp, whisperFlags } from './whisper.mjs';
+import {
+  VULKAN_FILES,
+  VULKAN_SDK,
+  WHISPER,
+  buildWhisper,
+  cachedWhisper,
+  findVulkanSdk,
+  installVulkanSdk,
+  pickVcomp,
+  stampOf,
+  vulkanFile,
+  vulkanRequired,
+  vulkanSdkProblem,
+  vulkanSdkRoot,
+  whisperDir,
+  whisperFlags,
+  whisperVulkanFlags,
+} from './whisper.mjs';
 
 const tauriDir = path.join(DESKTOP_DIR, 'src-tauri');
 const readJson = (file) => JSON.parse(fs.readFileSync(path.join(tauriDir, file), 'utf8'));
@@ -92,10 +121,21 @@ test('per-platform bundles use the resources prepare.mjs writes', () => {
   assert.equal(win.windows.nsis.installMode, 'currentUser');
   assert.equal(win.windows.webviewInstallMode.type, 'downloadBootstrapper');
   // Linux: Node is an externalBin named es-node (/usr/bin/node would clash with the distribution's nodejs); the
-  // recording tools the same way (/usr/bin/es-whisper, /usr/bin/es-ffmpeg: never a distribution's ffmpeg).
+  // recording tools the same way (/usr/bin/es-whisper, /usr/bin/es-ffmpeg: never a distribution's ffmpeg). Only what
+  // every Linux build has: x86_64's es-whisper-vulkan comes from build.mjs when prepared (externalBinOverride), so
+  // `cd desktop && npm run dev` (prepare.mjs + tauri dev) and a plain cargo build work on aarch64 and without the SDK.
   assert.deepEqual(linux.externalBin, ['../resources/bin/es-node', '../resources/bin/es-whisper', '../resources/bin/es-ffmpeg']);
+  assert.deepEqual(linux.externalBin, LINUX_EXTERNAL_BINS.map((b) => `../resources/bin/${b}`));
+  for (const [triple, info] of Object.entries(TARGETS).filter(([, t]) => t.os === 'linux')) {
+    assert.deepEqual(linuxExternalBins(info, { whisper: true, ffmpeg: true }), LINUX_EXTERNAL_BINS, triple);
+  }
+  assert.equal(readJson('../package.json').scripts.dev, 'node scripts/prepare.mjs && tauri dev');
   assert.ok(linux.linux.deb.depends.includes('libatomic1'));
   assert.ok(linux.linux.deb.recommends.includes('fonts-noto-cjk'));
+  // The Vulkan loader for es-whisper-vulkan: recommended, never required (without it the CPU build transcribes).
+  assert.ok(linux.linux.deb.recommends.includes('libvulkan1'));
+  assert.ok(linux.linux.rpm.recommends.includes('vulkan-loader'));
+  for (const kind of ['deb', 'rpm']) assert.ok(!linux.linux[kind].depends.some((d) => /vulkan/.test(d)), kind);
   // xdg-open: external links, "브라우저에서 열기" and "라이브러리 폴더 열기" (tauri-plugin-opener).
   assert.ok(linux.linux.deb.recommends.includes('xdg-utils'));
   assert.ok(linux.linux.rpm.recommends.includes('xdg-utils'));
@@ -112,6 +152,8 @@ test('build targets map to matching Node downloads and npm platforms', () => {
     assert.equal(info.nodeAs, info.os === 'linux' ? 'externalBin' : 'resource', triple);
     assert.equal(info.libc, info.os === 'linux' ? 'glibc' : undefined, triple);
     assert.ok(triple.startsWith(info.cpu === 'x64' ? 'x86_64-' : 'aarch64-'), triple);
+    // Vulkan (whisper-cli on the GPU): Windows x64 and Linux x64 only (no Linux arm64 SDK; macOS has Metal).
+    assert.equal(info.vulkan === true, ['x86_64-pc-windows-msvc', 'x86_64-unknown-linux-gnu'].includes(triple), triple);
   }
   assert.equal(targetInfo(hostTarget()).os, process.platform);
   assert.throws(() => targetInfo('mips-unknown-linux-gnu'), /unknown target/);
@@ -187,19 +229,23 @@ test('Linux icons: plain NxN files only (an "@2x" file lands in hicolor/<N>x<N>@
 });
 
 test("AppImage: the libraries the user's system must provide are found, and only those", () => {
-  assert.deepEqual(HOST_LIBRARIES, ['libwayland-client.so.0']);
+  // The Vulkan loader too (es-whisper-vulkan): the user's finds the user's GPU drivers.
+  assert.deepEqual(HOST_LIBRARIES, ['libwayland-client.so.0', 'libvulkan.so.1']);
   assert.ok(isHostLibrary('libwayland-client.so.0'));
   assert.ok(isHostLibrary('libwayland-client.so.0.20.0'));
-  for (const name of ['libwayland-cursor.so.0', 'libwayland-egl.so.1', 'libwayland-server.so.0', 'libwayland-client.so.00']) {
+  assert.ok(isHostLibrary('libvulkan.so.1'));
+  assert.ok(isHostLibrary('libvulkan.so.1.3.204'));
+  for (const name of ['libwayland-cursor.so.0', 'libwayland-egl.so.1', 'libwayland-server.so.0', 'libwayland-client.so.00', 'libvulkan.so.10', 'libvulkan_lvp.so']) {
     assert.ok(!isHostLibrary(name), name);
   }
   const paths = [
     'usr/lib/libwayland-client.so.0',
     'usr/lib/libwayland-cursor.so.0',
+    'usr/lib/libvulkan.so.1',
     'usr/lib/easy-study/server/libwayland-client.so.0',
     'usr/share/doc/libwayland-client0/copyright',
   ];
-  assert.deepEqual(hostLibrariesIn(paths), ['usr/lib/libwayland-client.so.0']);
+  assert.deepEqual(hostLibrariesIn(paths), ['usr/lib/libwayland-client.so.0', 'usr/lib/libvulkan.so.1']);
 });
 
 test('AppImage: the squashfs image starts where the runtime ELF section header table ends', () => {
@@ -264,6 +310,12 @@ test('packaging/arch/PKGBUILD installs the .deb of the version CI sets', () => {
   assert.match(pkgbuild, /^sha256sums_x86_64=\('[0-9a-f]{64}'\)$/m);
   assert.match(pkgbuild, /^sha256sums_aarch64=\('[0-9a-f]{64}'\)$/m);
   assert.match(pkgbuild, /^_pkgname=easy-study$/m);
+  // x86_64: es-whisper-vulkan links libvulkan.so.1 (namcap: a dependency); a GPU driver stays optional.
+  assert.match(pkgbuild, /^depends_x86_64=\('vulkan-icd-loader'\)$/m);
+  assert.match(pkgbuild, /^optdepends_x86_64=\('vulkan-driver: [^']+'\)$/m);
+  assert.doesNotMatch(pkgbuild, /^depends=[^)]*vulkan/m);
+  const srcinfo = fs.readFileSync(path.join(REPO_DIR, 'packaging', 'arch', '.SRCINFO'), 'utf8');
+  assert.match(srcinfo, /\tsource_x86_64 = [^\n]+\n\tdepends_x86_64 = vulkan-icd-loader\n\toptdepends_x86_64 = vulkan-driver: [^\n]+\n\tsha256sums_x86_64 = /);
 });
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -412,6 +464,170 @@ test('whisper.cpp: the pinned release, portable flags per target, OpenMP only on
       assert.ok(flags.includes('-DBUILD_SHARED_LIBS=OFF'), triple);
       assert.equal(flags.includes('-DGGML_AVX2=ON'), info.cpu === 'x64', triple);
     }
+    // Vulkan: in the Windows x64 build (one more backend module); on Linux x64 a second build (a static file that
+    // links the system's Vulkan loader, so the CPU build stays loader-free); nowhere else.
+    assert.equal(flags.includes('-DGGML_VULKAN=ON'), triple === 'x86_64-pc-windows-msvc', triple);
+    // Without the Vulkan SDK (a local build): the CPU build alone, the same flags otherwise.
+    assert.deepEqual(whisperFlags(triple, { vulkan: false }), flags.filter((f) => f !== '-DGGML_VULKAN=ON'), triple);
+    assert.equal(whisperVulkanFlags(triple, { vulkan: false }), null, triple);
+    // /bigobj (MSVC) comes through CXXFLAGS (buildWhisper): -DCMAKE_CXX_FLAGS would drop CMake's defaults (/EHsc).
+    assert.ok(!flags.some((f) => /CMAKE_CXX_FLAGS/.test(f)), triple);
+    const vulkan = whisperVulkanFlags(triple);
+    if (triple === 'x86_64-unknown-linux-gnu') {
+      assert.deepEqual(vulkan, [...flags, '-DGGML_VULKAN=ON', '-DCMAKE_SKIP_BUILD_RPATH=ON']);
+      for (const f of ['-DBUILD_SHARED_LIBS=OFF', '-DGGML_AVX2=ON', '-DGGML_OPENMP=OFF']) assert.ok(vulkan.includes(f), f);
+    } else {
+      assert.equal(vulkan, null, triple);
+    }
+    assert.ok(!flags.some((f) => /GGML_(CUDA|HIP|SYCL)=ON|GGML_BACKEND_DIR/.test(f)), triple);
+  }
+});
+
+test('whisper.cpp with Vulkan: the SDK pin, the shipped file names, the cache stamp', () => {
+  assert.match(VULKAN_SDK.version, /^1\.\d+\.\d+\.\d+$/);
+  // One SDK per OS of the Vulkan targets, from LunarG, for exactly this version, SHA-256 checked.
+  const vulkanOs = [...new Set(Object.values(TARGETS).filter((t) => t.vulkan).map((t) => t.os))].sort();
+  assert.deepEqual(Object.keys(VULKAN_SDK.downloads).sort(), vulkanOs);
+  assert.deepEqual(vulkanOs, ['linux', 'win32']);
+  for (const [os_, d] of Object.entries(VULKAN_SDK.downloads)) {
+    assert.ok(d.url.startsWith(`https://sdk.lunarg.com/sdk/download/${VULKAN_SDK.version}/${os_ === 'win32' ? 'windows' : 'linux'}/`), d.url);
+    assert.ok(d.url.endsWith(os_ === 'win32' ? `-X64-${VULKAN_SDK.version}.exe` : `-x86_64-${VULKAN_SDK.version}.tar.xz`), d.url);
+    assert.match(d.sha256, /^[0-9a-f]{64}$/);
+    assert.ok(Number.isInteger(d.bytes) && d.bytes > 100e6, os_);
+  }
+  // Windows: never ggml's own names, which it loads from the exe's folder on every run (ggml-vulkan.dll,
+  // ggml-vulkan-*.dll); the server asks for this one with GGML_BACKEND_PATH. Linux: <whisper-cli>-vulkan, which the
+  // server looks for beside the CPU build (es-whisper → es-whisper-vulkan).
+  assert.deepEqual(VULKAN_FILES, { win32: 'es-ggml-vulkan.dll', linux: 'whisper-cli-vulkan' });
+  assert.doesNotMatch(VULKAN_FILES.win32, /^ggml-vulkan(-.*)?\.dll$/i);
+  for (const triple of Object.keys(TARGETS)) {
+    const info = targetInfo(triple);
+    assert.equal(vulkanFile(triple), info.vulkan ? VULKAN_FILES[info.os] : null, triple);
+    // The stamp names the SDK version where it is used (a new SDK rebuilds), and the second build's flags.
+    const stamp = stampOf(triple);
+    assert.equal(stamp.vulkanSdk, info.vulkan ? VULKAN_SDK.version : undefined, triple);
+    assert.equal(stamp.vulkan, info.vulkan ? true : undefined, triple);
+    assert.deepEqual(stamp.vulkanFlags, whisperVulkanFlags(triple) ?? undefined, triple);
+    assert.deepEqual(stamp.flags, whisperFlags(triple));
+    assert.match(stamp.script, /^[0-9a-f]{64}$/);
+    // A build without the Vulkan SDK says so (a later build with it rebuilds); targets without Vulkan are unaffected.
+    const cpu = stampOf(triple, { vulkan: false });
+    assert.equal(vulkanFile(triple, { vulkan: false }), null, triple);
+    if (info.vulkan) {
+      assert.deepEqual(cpu, { version: stamp.version, commit: stamp.commit, flags: whisperFlags(triple, { vulkan: false }), vulkan: false, script: stamp.script }, triple);
+    } else {
+      assert.deepEqual(cpu, stamp, triple);
+    }
+  }
+  const src = fs.readFileSync(path.join(DESKTOP_DIR, 'scripts', 'whisper.mjs'), 'utf8');
+  // The rename and the checks of what ships.
+  assert.match(src, /fs\.renameSync\(path\.join\(bin, libs\[i\]\), path\.join\(bin, VULKAN_FILES\.win32\)\)/);
+  assert.match(src, /if \(libs\.some\(\(f\) => \/\^vulkan-1\\\.dll\$\/i\.test\(f\)\)\) throw/);
+  assert.match(src, /allow: vulkan \? \['libvulkan\.so\.1'\] : \[\]/);
+  assert.match(src, /GGML_BACKEND_PATH: path\.join\(bin, VULKAN_FILES\.win32\)/);
+  // Linux: Vulkan is built in and set up only when asked (a model, or GGML_BACKEND_PATH): --version alone lists nothing.
+  assert.match(src, /GGML_BACKEND_PATH: '\/dev\/null'/);
+  assert.match(src, /runCheck\(gpu\.file, \['--version'\], gpu\.env\)/);
+  assert.match(src, /arg\('install-vulkan-sdk'\) === true/);
+  // Without the SDK: CPU only with a warning, or the old failure where Vulkan is required.
+  assert.match(src, /if \(sdkProblem && requireVulkan\) throw new Error\(`whisper-cli를 빌드할 수 없어요: \$\{sdkProblem\}`\);/);
+  // MSVC's /bigobj through the environment of the Windows configure, after any CXXFLAGS already set.
+  assert.match(src, /const configureEnv = info\.os === 'win32' \? appendEnv\(env, 'CXXFLAGS', '\/bigobj', ' '\) : env;/);
+  assert.doesNotMatch(src, /'-DCMAKE_CXX_FLAGS/);
+  // prepare.mjs --require-tools requires the Vulkan part too, and records whether it is there.
+  const prep = fs.readFileSync(path.join(DESKTOP_DIR, 'scripts', 'prepare.mjs'), 'utf8');
+  assert.match(prep, /buildWhisper\(\{ target, requireVulkan: required \|\| vulkanRequired\(\) \}\)/);
+  assert.match(prep, /if \(tool\.name === 'whisper' && info\.vulkan\) found\['whisper-vulkan'\] = Boolean\(built\?\.vulkan\);/);
+});
+
+test('whisper.cpp with Vulkan: required in CI and on request, else a build without the SDK is kept CPU only', async () => {
+  // Required: CI (GitHub sets CI=true), --require-vulkan, EASY_STUDY_REQUIRE_VULKAN=1 (and prepare.mjs --require-tools).
+  assert.equal(vulkanRequired({ env: {}, argv: ['node', 'whisper.mjs'] }), false);
+  assert.equal(vulkanRequired({ env: { CI: 'true' }, argv: [] }), true);
+  assert.equal(vulkanRequired({ env: { CI: '1' }, argv: [] }), true);
+  assert.equal(vulkanRequired({ env: { CI: 'false' }, argv: [] }), false);
+  assert.equal(vulkanRequired({ env: { EASY_STUDY_REQUIRE_VULKAN: '1' }, argv: [] }), true);
+  assert.equal(vulkanRequired({ env: {}, argv: ['node', 'whisper.mjs', '--target', 'x86_64-unknown-linux-gnu', '--require-vulkan'] }), true);
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'es-whcache-'));
+  try {
+    // A cached build (fake files) for each Vulkan target, as buildWhisper leaves it.
+    const cache = (triple, vulkan, files) => {
+      const dir = whisperDir(triple, tmp);
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.mkdirSync(path.join(dir, 'bin'), { recursive: true });
+      for (const f of files) fs.writeFileSync(path.join(dir, 'bin', f), f);
+      fs.writeFileSync(path.join(dir, 'stamp.json'), `${JSON.stringify(stampOf(triple, { vulkan }), null, 2)}\n`);
+      return path.join(dir, 'bin');
+    };
+    for (const triple of Object.keys(TARGETS).filter((t) => TARGETS[t].vulkan)) {
+      const exe = triple.includes('windows') ? 'whisper-cli.exe' : 'whisper-cli';
+      // Without the SDK: no Vulkan file, and prepare.mjs / --web get none.
+      let bin = cache(triple, false, [exe, 'LICENSE']);
+      const cpu = cachedWhisper(triple, tmp);
+      assert.deepEqual({ ...cpu, files: cpu.files.sort() }, { dir: bin, exe: path.join(bin, exe), vulkan: null, files: ['LICENSE', exe].sort().map((f) => path.join(bin, f)) }, triple);
+      // With it: the Vulkan file must be there.
+      bin = cache(triple, true, [exe, 'LICENSE']);
+      assert.equal(cachedWhisper(triple, tmp), null, triple);
+      bin = cache(triple, true, [exe, vulkanFile(triple), 'LICENSE']);
+      assert.equal(cachedWhisper(triple, tmp).vulkan, path.join(bin, vulkanFile(triple)), triple);
+      // Vulkan required: a build with it is reused without the SDK (CI's cache hit skips the SDK step)…
+      assert.equal((await buildWhisper({ target: triple, cacheDir: tmp, requireVulkan: true })).vulkan, path.join(bin, vulkanFile(triple)), triple);
+      // …one without it never: another machine's target fails before downloading anything (this machine's would be
+      // rebuilt, so it is left out here).
+      if (triple !== hostTarget()) {
+        cache(triple, false, [exe, 'LICENSE']);
+        await assert.rejects(buildWhisper({ target: triple, cacheDir: tmp, requireVulkan: true }), /whisper-cli를 빌드할 수 없어요/, triple);
+      }
+      // A stamp of other flags is no build of these.
+      cache(triple, false, [exe, 'LICENSE']);
+      const stampFile = path.join(whisperDir(triple, tmp), 'stamp.json');
+      const stamp = JSON.parse(fs.readFileSync(stampFile, 'utf8'));
+      fs.writeFileSync(stampFile, JSON.stringify({ ...stamp, flags: [...stamp.flags, '-DGGML_CUDA=ON'] }));
+      assert.equal(cachedWhisper(triple, tmp), null, triple);
+    }
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('whisper.cpp with Vulkan: the SDK is found (VULKAN_SDK, --install-vulkan-sdk, Linux packages) or its absence explained', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'es-vksdk-'));
+  try {
+    const none = { env: {}, cacheDir: tmp, glslcOnPath: () => false };
+    for (const triple of ['x86_64-unknown-linux-gnu', 'x86_64-pc-windows-msvc']) {
+      assert.match(vulkanSdkProblem(triple, none), /^Vulkan SDK가 없어요 .*node desktop\/scripts\/whisper\.mjs --install-vulkan-sdk/, triple);
+    }
+    for (const triple of ['aarch64-apple-darwin', 'x86_64-apple-darwin', 'aarch64-pc-windows-msvc', 'aarch64-unknown-linux-gnu']) {
+      assert.equal(vulkanSdkProblem(triple, none), null, triple);
+    }
+    // Linux: the distribution's glslc (and headers) will do; Windows needs the SDK.
+    assert.equal(vulkanSdkProblem('x86_64-unknown-linux-gnu', { ...none, glslcOnPath: () => true }), null);
+    assert.match(vulkanSdkProblem('x86_64-pc-windows-msvc', { ...none, glslcOnPath: () => true }), /Vulkan SDK가 없어요/);
+    // VULKAN_SDK without glslc in it: said so.
+    const sdk = path.join(tmp, 'sdk');
+    assert.match(vulkanSdkProblem('x86_64-unknown-linux-gnu', { ...none, env: { VULKAN_SDK: sdk } }), /glslc가 없어요/);
+    fs.mkdirSync(path.join(sdk, 'bin'), { recursive: true });
+    fs.writeFileSync(path.join(sdk, 'bin', 'glslc'), '');
+    assert.equal(vulkanSdkProblem('x86_64-unknown-linux-gnu', { ...none, env: { VULKAN_SDK: sdk } }), null);
+    assert.deepEqual(findVulkanSdk('win32', { env: { VULKAN_SDK: sdk }, cacheDir: tmp }), { dir: sdk, bin: path.join(sdk, 'Bin'), glslc: path.join(sdk, 'Bin', 'glslc.exe') });
+    // --install-vulkan-sdk's folder, used once the install finished (its marker).
+    const root = vulkanSdkRoot(tmp);
+    assert.equal(root, path.join(tmp, 'vulkan-sdk', VULKAN_SDK.version));
+    assert.equal(findVulkanSdk('linux', { env: {}, cacheDir: tmp }), null);
+    fs.mkdirSync(path.join(root, 'x86_64', 'bin'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'x86_64', 'bin', 'glslc'), '');
+    assert.equal(findVulkanSdk('linux', { env: {}, cacheDir: tmp }), null, 'not before the install finished');
+    fs.writeFileSync(`${root}.installed`, `${VULKAN_SDK.version}\n`);
+    assert.equal(findVulkanSdk('linux', { env: {}, cacheDir: tmp }).dir, path.join(root, 'x86_64'));
+    assert.equal(findVulkanSdk('win32', { env: {}, cacheDir: tmp }).glslc, path.join(root, 'Bin', 'glslc.exe'));
+    assert.equal(vulkanSdkProblem('x86_64-unknown-linux-gnu', { ...none }), null);
+    // The installer refuses targets without Vulkan and other machines' targets before downloading anything.
+    await assert.rejects(installVulkanSdk({ target: 'aarch64-unknown-linux-gnu', cacheDir: tmp, env: {} }), /Vulkan 빌드가 없어요/);
+    const other = hostTarget() === 'x86_64-unknown-linux-gnu' ? 'x86_64-pc-windows-msvc' : 'x86_64-unknown-linux-gnu';
+    await assert.rejects(installVulkanSdk({ target: other, cacheDir: tmp, env: {} }), /그 컴퓨터에 설치해야/);
+    assert.deepEqual(fs.readdirSync(path.join(tmp, 'vulkan-sdk')).sort(), [VULKAN_SDK.version, `${VULKAN_SDK.version}.installed`]);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
 
@@ -493,12 +709,24 @@ test('recording tools land where the shell looks for them', () => {
     assert.deepEqual(place(whisper, [file('whisper-cli'), file('LICENSE')], 'aarch64-apple-darwin'), ['whisper/whisper-cli', 'whisper/LICENSE']);
     assert.equal(fs.statSync(path.join(tmp, 'aarch64-apple-darwin', 'whisper', 'whisper-cli')).mode & 0o777, 0o755);
     assert.equal(fs.statSync(path.join(tmp, 'aarch64-apple-darwin', 'whisper', 'LICENSE')).mode & 0o777, 0o644);
-    assert.deepEqual(place(whisper, [file('whisper-cli.exe'), file('whisper.dll'), file('ggml-cpu-haswell.dll'), file('LICENSE')], 'x86_64-pc-windows-msvc'), [
+    assert.deepEqual(place(whisper, [file('whisper-cli.exe'), file('whisper.dll'), file('ggml-cpu-haswell.dll'), file('es-ggml-vulkan.dll'), file('LICENSE')], 'x86_64-pc-windows-msvc'), [
       'whisper/whisper-cli.exe',
       'whisper/whisper.dll',
       'whisper/ggml-cpu-haswell.dll',
+      'whisper/es-ggml-vulkan.dll',
       'whisper/LICENSE',
     ]);
+    assert.equal(fs.statSync(path.join(tmp, 'x86_64-pc-windows-msvc', 'whisper', 'es-ggml-vulkan.dll')).mode & 0o777, 0o755);
+    // Linux x64: whisper-cli's Vulkan build is the externalBin es-whisper-vulkan (→ /usr/bin, beside es-whisper).
+    assert.deepEqual(place(whisper, [file('whisper-cli'), file('whisper-cli-vulkan'), file('LICENSE')], 'x86_64-unknown-linux-gnu'), [
+      'bin/es-whisper-x86_64-unknown-linux-gnu',
+      'bin/es-whisper-vulkan-x86_64-unknown-linux-gnu',
+      'whisper/LICENSE',
+    ]);
+    for (const f of ['es-whisper-x86_64-unknown-linux-gnu', 'es-whisper-vulkan-x86_64-unknown-linux-gnu']) {
+      assert.equal(fs.statSync(path.join(tmp, 'x86_64-unknown-linux-gnu', 'bin', f)).mode & 0o777, 0o755, f);
+    }
+    assert.deepEqual(place(whisper, [file('whisper-cli'), file('LICENSE')], 'aarch64-unknown-linux-gnu'), ['bin/es-whisper-aarch64-unknown-linux-gnu', 'whisper/LICENSE']);
     // Linux: the externalBin es-<tool>-<triple> (→ /usr/bin/es-<tool>), licenses in resources/<tool>/.
     assert.deepEqual(place(ffmpeg, [file('ffmpeg'), file('COPYING.LGPLv2.1'), file('BUILD.txt')], 'x86_64-unknown-linux-gnu'), [
       'bin/es-ffmpeg-x86_64-unknown-linux-gnu',
@@ -509,13 +737,31 @@ test('recording tools land where the shell looks for them', () => {
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
-  // A local Linux build without a tool drops it from the externalBin list (a complete build keeps the config's).
+  // The config lists what every Linux build has; x86_64 adds es-whisper-vulkan only when prepare.mjs placed it
+  // (target.json's tools), and a local build without a tool drops it from the externalBin list.
   const linux = targetInfo('x86_64-unknown-linux-gnu');
-  assert.deepEqual(externalBinOverride(linux, { whisper: true, ffmpeg: true }), []);
-  assert.deepEqual(externalBinOverride(targetInfo('aarch64-apple-darwin'), { whisper: false, ffmpeg: false }), []);
-  const [flag, json] = externalBinOverride(linux, { whisper: true, ffmpeg: false });
-  assert.equal(flag, '--config');
-  assert.deepEqual(JSON.parse(json), { bundle: { externalBin: ['../resources/bin/es-node', '../resources/bin/es-whisper'] } });
+  const arm = targetInfo('aarch64-unknown-linux-gnu');
+  const override = (info, tools) => {
+    const args = externalBinOverride(info, tools);
+    if (args.length === 0) return null;
+    assert.equal(args[0], '--config');
+    return JSON.parse(args[1]).bundle.externalBin.map((b) => b.replace('../resources/bin/', ''));
+  };
+  assert.deepEqual(LINUX_EXTERNAL_BINS, ['es-node', 'es-whisper', 'es-ffmpeg']);
+  const full = { whisper: true, 'whisper-vulkan': true, ffmpeg: true };
+  assert.deepEqual(override(linux, full), ['es-node', 'es-whisper', 'es-whisper-vulkan', 'es-ffmpeg']);
+  // x86_64 without the Vulkan SDK (tools['whisper-vulkan'] false), or a target.json that does not say: none.
+  assert.equal(override(linux, { ...full, 'whisper-vulkan': false }), null);
+  assert.equal(override(linux, { whisper: true, ffmpeg: true }), null);
+  assert.equal(override(arm, { whisper: true, ffmpeg: true }), null);
+  assert.equal(override(arm, full), null, 'never on aarch64');
+  assert.equal(override(targetInfo('aarch64-apple-darwin'), { whisper: false, ffmpeg: false }), null);
+  assert.equal(override(targetInfo('x86_64-pc-windows-msvc'), full), null);
+  assert.deepEqual(override(linux, { ...full, ffmpeg: false }), ['es-node', 'es-whisper', 'es-whisper-vulkan']);
+  assert.deepEqual(override(linux, { whisper: false, 'whisper-vulkan': false, ffmpeg: true }), ['es-node', 'es-ffmpeg']);
+  assert.deepEqual(override(arm, { whisper: false, ffmpeg: false }), ['es-node']);
+  // build.mjs passes it on (with --skip-prepare too: target.json's tools).
+  assert.match(fs.readFileSync(path.join(DESKTOP_DIR, 'scripts', 'build.mjs'), 'utf8'), /tauriArgs\.push\(\.\.\.externalBinOverride\(info, stamp\.tools\)\);/);
 });
 
 /** A minimal thin Mach-O 64 with LC_LOAD_DYLIB commands. */
@@ -539,13 +785,14 @@ function machO(cputype, dylibs) {
   return Buffer.concat([header, ...cmds]);
 }
 
-/** A minimal ELF64 with .dynstr, .dynamic (DT_NEEDED entries) and .shstrtab. */
-function elf(machine, needed) {
-  const dynstr = Buffer.from(`\0${needed.join('\0')}\0`, 'latin1');
-  const dynamic = Buffer.alloc((needed.length + 1) * 16);
+/** A minimal ELF64 with .dynstr, .dynamic (DT_NEEDED entries, then DT_RUNPATH ones) and .shstrtab. */
+function elf(machine, needed, runpath = []) {
+  const entries = [...needed.map((name) => [1n, name]), ...runpath.map((dir) => [29n, dir])];
+  const dynstr = Buffer.from(`\0${entries.map((e) => e[1]).join('\0')}\0`, 'latin1');
+  const dynamic = Buffer.alloc((entries.length + 1) * 16);
   let at = 1;
-  needed.forEach((name, i) => {
-    dynamic.writeBigInt64LE(1n, i * 16);
+  entries.forEach(([tag, name], i) => {
+    dynamic.writeBigInt64LE(tag, i * 16);
     dynamic.writeBigUInt64LE(BigInt(at), i * 16 + 8);
     at += name.length + 1;
   });
@@ -611,8 +858,10 @@ test('shipped programs: right CPU, only the OS libraries', () => {
   });
   assert.equal(machoInfo(machO(0x01000007, [])).cpu, 'x64');
   assert.throws(() => machoInfo(Buffer.from('cafebabe00000002'.padEnd(64, '0'), 'hex')), /universal/);
-  assert.deepEqual(elfInfo(elf(62, ['libstdc++.so.6', 'libgomp.so.1', 'libc.so.6'])), { cpu: 'x64', needed: ['libstdc++.so.6', 'libgomp.so.1', 'libc.so.6'] });
-  assert.deepEqual(elfInfo(elf(183, [])), { cpu: 'arm64', needed: [] });
+  assert.deepEqual(elfInfo(elf(62, ['libstdc++.so.6', 'libgomp.so.1', 'libc.so.6'])), { cpu: 'x64', needed: ['libstdc++.so.6', 'libgomp.so.1', 'libc.so.6'], runpath: [] });
+  assert.deepEqual(elfInfo(elf(183, [])), { cpu: 'arm64', needed: [], runpath: [] });
+  // A run path (whisper.mjs refuses one: it would be the build machine's).
+  assert.deepEqual(elfInfo(elf(62, ['libvulkan.so.1'], ['/home/runner/sdk/lib'])), { cpu: 'x64', needed: ['libvulkan.so.1'], runpath: ['/home/runner/sdk/lib'] });
   assert.deepEqual(peInfo(pe(0x8664, ['whisper.dll', 'KERNEL32.dll', 'VCRUNTIME140.dll'])), { cpu: 'x64', imports: ['whisper.dll', 'KERNEL32.dll', 'VCRUNTIME140.dll'] });
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'es-bin-'));
@@ -630,6 +879,14 @@ test('shipped programs: right CPU, only the OS libraries', () => {
     check(elf(62, ['libstdc++.so.6', 'libm.so.6', 'libgcc_s.so.1', 'libc.so.6', 'ld-linux-x86-64.so.2']), { os: 'linux', cpu: 'x64' });
     // OpenMP's runtime is not on every Linux (the official whisper.cpp build fails on a clean Ubuntu).
     assert.throws(() => check(elf(62, ['libgomp.so.1', 'libc.so.6']), { os: 'linux', cpu: 'x64' }), /libgomp/);
+    // The Vulkan loader only where the call allows it (whisper-cli-vulkan; the packages recommend or depend on it).
+    const vulkan = elf(62, ['libvulkan.so.1', 'libstdc++.so.6', 'libc.so.6']);
+    assert.throws(() => check(vulkan, { os: 'linux', cpu: 'x64' }), /libvulkan\.so\.1/);
+    assert.deepEqual(check(vulkan, { os: 'linux', cpu: 'x64', allow: ['libvulkan.so.1'] }), ['libvulkan.so.1', 'libstdc++.so.6', 'libc.so.6']);
+    assert.throws(() => check(vulkan, { os: 'linux', cpu: 'x64' }), /libvulkan\.so\.1/, 'not remembered between calls');
+    assert.throws(() => check(elf(62, ['libvulkan.so.1', 'libgomp.so.1']), { os: 'linux', cpu: 'x64', allow: ['libvulkan.so.1'] }), /libgomp/);
+    // Windows: ggml's Vulkan module imports the GPU driver's vulkan-1.dll (never shipped): an OS library.
+    check(pe(0x8664, ['vulkan-1.dll', 'ggml-base.dll', 'KERNEL32.dll']), { os: 'win32', cpu: 'x64', own: ['ggml-base.dll'] });
     check(pe(0x8664, ['whisper.dll', 'ggml.dll', 'KERNEL32.dll', 'ADVAPI32.dll', 'msvcrt.dll']), { os: 'win32', cpu: 'x64', own: ['whisper.dll', 'ggml.dll'] });
     // Not the Visual C++ runtime (a user need not have it), and no DLL that is neither Windows' nor shipped.
     assert.throws(() => check(pe(0x8664, ['VCRUNTIME140.dll', 'KERNEL32.dll']), { os: 'win32', cpu: 'x64' }), /VCRUNTIME140/);
@@ -701,6 +958,22 @@ test('ASR smoke: WAV and MP4 readers, and the whole check with fake tools (no ne
     await assert.rejects(asrSmoke({ whisper: path.join(tmp, 'nope'), ffmpeg, model, vad: model, speechMode: 'none' }), /--whisper: no such file/);
     const broken = script('whisper-broken', 'process.exit(1);');
     await assert.rejects(asrSmoke({ whisper: broken, ffmpeg, model, vad: model, speechMode: 'none' }), /exited with 1/);
+    // --expect-backend vulkan: whisper-cli's own line, from a run that gets this process's environment (CI:
+    // GGML_VK_VISIBLE_DEVICES=0 puts it on Mesa's software device).
+    const gpu = script('whisper-gpu', `
+      if (process.env.GGML_VK_VISIBLE_DEVICES === '0') console.error('whisper_backend_init_gpu: using Vulkan0 backend');
+      ${fs.readFileSync(whisper, 'utf8').split('\n').slice(1).join('\n')}
+    `);
+    assert.equal(BACKEND_LINES.vulkan, 'using Vulkan0 backend');
+    await assert.rejects(asrSmoke({ whisper: gpu, ffmpeg, model, vad: model, speechMode: 'none', expectBackend: 'vulkan' }), /did not run on vulkan: no "using Vulkan0 backend"/);
+    process.env.GGML_VK_VISIBLE_DEVICES = '0';
+    try {
+      assert.deepEqual(await asrSmoke({ whisper: gpu, ffmpeg, model, vad: model, speechMode: 'none', expectBackend: 'vulkan' }), { spoken: false, text: '(tone)', segments: 1 });
+    } finally {
+      delete process.env.GGML_VK_VISIBLE_DEVICES;
+    }
+    await assert.rejects(asrSmoke({ whisper: gpu, ffmpeg, model, vad: model, speechMode: 'none', expectBackend: 'cuda' }), /--expect-backend: one of vulkan/);
+    await assert.rejects(asrSmoke({ whisper: gpu, ffmpeg, model, vad: model, speechMode: 'none', expectBackend: '' }), /--expect-backend/);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
@@ -726,8 +999,10 @@ test('CI builds the recording tools for every target, ships them and checks them
   assert.ok(build, 'job build');
   assert.match(build, /needs: \[ffmpeg\]/);
   assert.match(build, /name: ffmpeg-\$\{\{ matrix\.target \}\}\n\s+path: \.cache\/ffmpeg\/\$\{\{ matrix\.target \}\}/);
-  assert.match(build, /hashFiles\('desktop\/scripts\/whisper\.mjs', 'desktop\/scripts\/binaries\.mjs'\)/);
-  assert.match(build, /node desktop\/scripts\/whisper\.mjs --target \$\{\{ matrix\.target \}\}/);
+  // targets.mjs too: the stamp follows its `vulkan` (a changed target must not hit the old cache and skip the SDK).
+  assert.match(build, /hashFiles\('desktop\/scripts\/whisper\.mjs', 'desktop\/scripts\/binaries\.mjs', 'desktop\/scripts\/targets\.mjs'\)/);
+  // The Vulkan part is required there (no CPU-only build for lack of the SDK).
+  assert.match(build, /run: node desktop\/scripts\/whisper\.mjs --target \$\{\{ matrix\.target \}\} --require-vulkan\n/);
   // A release never goes out without them.
   assert.match(build, /node desktop\/scripts\/prepare\.mjs --target \$\{\{ matrix\.target \}\} --require-tools/);
   // macOS: the microphone key and entitlement in the built app; the tools signed with the app's identity.
@@ -739,11 +1014,65 @@ test('CI builds the recording tools for every target, ships them and checks them
     assert.ok(build.includes(where), where);
   }
   assert.match(build, /espeak-ng/);
-  assert.equal((build.match(/desktop\/scripts\/asr-smoke\.mjs"? --whisper/g) ?? []).length, 4);
+  // 4 CPU runs, the Linux x64 Vulkan build on lavapipe and Windows with the Vulkan backend requested.
+  assert.equal((build.match(/desktop\/scripts\/asr-smoke\.mjs"? --whisper/g) ?? []).length, 6);
   // Arch: the package carries them too (from the .deb) and removes them again.
   const arch = /\n {2}arch:\n([\s\S]*?)\n {2}release:/.exec(wf)?.[1];
   assert.match(arch, /node desktop\/scripts\/asr-smoke\.mjs --whisper \/usr\/bin\/es-whisper --ffmpeg \/usr\/bin\/es-ffmpeg/);
-  assert.match(arch, /test ! -e \/usr\/bin\/es-whisper && test ! -e \/usr\/bin\/es-ffmpeg/);
+  // The loader (the AppImage's check runs before the package is installed; namcap then requires the dependency) and
+  // lavapipe. es-whisper-vulkan has Vulkan built in: --version lists devices only with GGML_BACKEND_PATH set.
+  assert.match(arch, /pacman -Syu [^\n]*\\\n[^\n]*\bvulkan-icd-loader vulkan-swrast\b/);
+  assert.match(arch, /GGML_VK_VISIBLE_DEVICES=0 GGML_BACKEND_PATH=\/dev\/null \/usr\/bin\/es-whisper-vulkan --version 2> \/tmp\/vulkan\.txt\n\s+cat \/tmp\/vulkan\.txt\n\s+grep -q '\^ggml_vulkan: 0 = ' \/tmp\/vulkan\.txt\n/);
+  assert.match(arch, /GGML_VK_VISIBLE_DEVICES=0 GGML_BACKEND_PATH=\/dev\/null squashfs-root\/usr\/bin\/es-whisper-vulkan --version/);
+  // Every such check in the workflow (build job, AppImage and package here) sets it.
+  assert.equal((wf.match(/es-whisper-vulkan"? --version/g) ?? []).length, 3);
+  assert.equal((wf.match(/GGML_BACKEND_PATH=\/dev\/null/g) ?? []).length, 3);
+  assert.match(arch, /test ! -e \/usr\/bin\/es-whisper && test ! -e \/usr\/bin\/es-whisper-vulkan && test ! -e \/usr\/bin\/es-ffmpeg/);
+});
+
+test('CI builds whisper-cli with Vulkan on Windows x64 and Linux x64 and runs it', () => {
+  const wf = workflow();
+  const build = /\n {2}build:\n([\s\S]*?)\n {2}arch:/.exec(wf)?.[1];
+  const vulkanTargets = Object.keys(TARGETS).filter((t) => TARGETS[t].vulkan);
+  // The SDK only when whisper-cli is built (its cache missed), for exactly the Vulkan targets, before the build.
+  const sdkStep = /- name: Vulkan SDK \(whisper-cli's GPU build\)\n\s+if: ([^\n]+)\n\s+run: ([^\n]+)\n/.exec(build);
+  assert.ok(sdkStep, 'step "Vulkan SDK"');
+  assert.match(sdkStep[1], /^steps\.whisper-cache\.outputs\.cache-hit != 'true' && \(/);
+  assert.deepEqual([...sdkStep[1].matchAll(/matrix\.target == '([^']+)'/g)].map((m) => m[1]).sort(), vulkanTargets.sort());
+  assert.equal(sdkStep[2], 'node desktop/scripts/whisper.mjs --install-vulkan-sdk');
+  assert.match(build, /actions\/cache@[0-9a-f]{40} # v[\d.]+\n\s+id: whisper-cache\n\s+with:\n\s+path: \|\n\s+\.cache\/whisper\//);
+  assert.ok(build.indexOf('id: whisper-cache') < build.indexOf("Vulkan SDK (whisper-cli's GPU build)"));
+  assert.ok(build.indexOf("Vulkan SDK (whisper-cli's GPU build)") < build.indexOf('- name: whisper.cpp (whisper-cli)'));
+  // Linux x64: the loader (the AppImage bundler resolves es-whisper-vulkan's libraries) and lavapipe.
+  assert.match(build, /if: matrix\.target == 'x86_64-unknown-linux-gnu'\n\s+run: sudo apt-get install -y libvulkan1 mesa-vulkan-drivers\n/);
+  // The Vulkan code path on lavapipe (forced: ggml skips CPU-type devices), the AppImage's copy on the system's loader.
+  const lavapipe = /- name: Smoke test \(Linux x64, Vulkan on lavapipe\)\n\s+if: ([^\n]+)\n\s+run: \|\n([\s\S]*?)\n\n/.exec(build);
+  assert.ok(lavapipe, 'step "Smoke test (Linux x64, Vulkan on lavapipe)"');
+  assert.equal(lavapipe[1], "matrix.smoke && matrix.target == 'x86_64-unknown-linux-gnu'");
+  assert.match(lavapipe[2], /GGML_VK_VISIBLE_DEVICES=0 node desktop\/scripts\/asr-smoke\.mjs --whisper \/usr\/bin\/es-whisper-vulkan \\\n\s+--ffmpeg \/usr\/bin\/es-ffmpeg --expect-backend vulkan/);
+  assert.match(lavapipe[2], /GGML_VK_VISIBLE_DEVICES=0 GGML_BACKEND_PATH=\/dev\/null \\\n\s+"\$RUNNER_TEMP\/\.mount_easy-study\/squashfs-root\/usr\/bin\/es-whisper-vulkan" --version/);
+  assert.match(lavapipe[2], /grep -q '\^ggml_vulkan: 0 = '/);
+  // The server's own probe (server/recordings/asr.ts) as it runs on Linux: an empty model, no GGML_BACKEND_PATH;
+  // exit 3 after the device list, at the model's "bad magic".
+  assert.match(lavapipe[2], /empty=\$\(mktemp\)\n/);
+  assert.match(
+    lavapipe[2],
+    /\n\s+GGML_VK_VISIBLE_DEVICES=0 timeout \d+ \/usr\/bin\/es-whisper-vulkan -m "\$empty" -f "\$empty" > "\$RUNNER_TEMP\/probe\.txt" 2>&1 \|\| code=\$\?\n/,
+  );
+  assert.match(lavapipe[2], /if \[ "\$code" != 3 \]; then [^\n]*exit 1; fi\n\s+grep -q '\^ggml_vulkan: 0 = ' "\$RUNNER_TEMP\/probe\.txt"\n\s+grep -q 'bad magic' "\$RUNNER_TEMP\/probe\.txt"/);
+  assert.ok(build.indexOf('Smoke test (Linux, AppImage from a dot folder)') < build.indexOf('Smoke test (Linux x64, Vulkan on lavapipe)'));
+  // Windows: the same transcription with the Vulkan backend requested (no GPU on the runner: the CPU goes on), and
+  // never a ggml-vulkan.dll that would load on every run.
+  const win = /- name: Smoke test \(Windows\)\n[\s\S]*?\n\n/.exec(build)?.[0] ?? '';
+  assert.match(win, /Test-Path "\$release\\whisper\\ggml-vulkan\.dll"\) \{ throw/);
+  assert.match(win, /\$env:GGML_BACKEND_PATH = \(Resolve-Path "\$release\\whisper\\es-ggml-vulkan\.dll"\)\.Path\n\s+node desktop\/scripts\/asr-smoke\.mjs --whisper "\$release\\whisper\\whisper-cli\.exe"/);
+  assert.equal((win.match(/asr-smoke\.mjs --whisper/g) ?? []).length, 2);
+  assert.equal((win.match(/if \(\$LASTEXITCODE -ne 0\)/g) ?? []).length, 2);
+  // The server's probe with GGML_BACKEND_PATH still set: no GPU on the runner, so it only has to end (0 or 3) in time.
+  const probe = win.slice(win.indexOf('$env:GGML_BACKEND_PATH ='));
+  assert.match(probe, /Start-Process -FilePath "\$release\\whisper\\whisper-cli\.exe" -ArgumentList @\('-m', "`"\$empty`"", '-f', "`"\$empty`""\)/);
+  assert.match(probe, /if \(-not \$probe\.WaitForExit\(\d+\)\) \{ \$probe\.Kill\(\); throw/);
+  assert.match(probe, /if \(\$probe\.ExitCode -notin 0, 3\) \{ throw/);
 });
 
 test('build stamps hash script text with LF line endings (a CRLF Windows checkout reuses a Linux-built artifact)', () => {

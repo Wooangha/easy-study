@@ -34,7 +34,19 @@ import { buildIndex, simMatrix } from './align/sim.ts';
 import type { LexIndex } from './align/sim.ts';
 import { stripMarkdown } from './align/text.ts';
 import { alignInWorker } from './align/worker.ts';
-import { acceleration, contextPrompt, detectLanguage, findFfmpeg, findWhisper, probeVersion, runWhisper } from './asr.ts';
+import {
+  configureWhisperGpu,
+  contextPrompt,
+  detectLanguage,
+  findFfmpeg,
+  findWhisper,
+  gpuState,
+  probeGpu,
+  probeVersion,
+  runWhisper,
+  usesMetal,
+} from './asr.ts';
+import type { GpuOptions, ToolLocation } from './asr.ts';
 import { EventHub, RECORDING_PING_MS, sseFrame } from './events.ts';
 import type { SseTarget } from './events.ts';
 import { conversionError, convertUpload } from './ffmpeg.ts';
@@ -105,6 +117,8 @@ export interface RecordingsConfig {
   questionSpeechWaitMs: number;
   /** A live recording's speech is "recent" for the tutor only with audio (or a pause/resume) this recently (ms). */
   liveSpeechIdleMs: number;
+  /** Test hooks of the engine's GPU choice (another platform, the probe's timeout). */
+  gpu?: GpuOptions;
 }
 
 function defaultConfig(): RecordingsConfig {
@@ -126,15 +140,25 @@ function defaultConfig(): RecordingsConfig {
 
 let config: RecordingsConfig = defaultConfig();
 
-/** The default configuration with `partial` on top (startServer, tests). */
-export function configureRecordings(partial: Partial<RecordingsConfig> = {}): void {
+function applyConfig(partial: Partial<RecordingsConfig>): void {
   config = { ...defaultConfig(), ...partial };
   config.models.onInstalled = (modelId) => {
     warmUp(modelId);
     pumpQueue();
   };
 }
-configureRecordings({});
+applyConfig({});
+
+/**
+ * The default configuration with `partial` on top (startServer, tests). The service starts here: the engine's GPU
+ * probe (Vulkan) begins at once, so the recommended model knows about the GPU before the first recording.
+ */
+export function configureRecordings(partial: Partial<RecordingsConfig> = {}): void {
+  applyConfig(partial);
+  configureWhisperGpu(config.gpu);
+  const engine = findWhisper();
+  if (engine && existsSync(engine.path)) void probeGpu(engine.path);
+}
 
 export function recordingsConfig(): Readonly<RecordingsConfig> {
   return config;
@@ -1133,7 +1157,7 @@ let warming: Promise<void> | null = null;
  * would skip the silent input before the encoder runs).
  */
 function warmUp(modelId: string): void {
-  if (acceleration() !== 'metal' || runningJob || warming || queue.length > 0 || stopping) return;
+  if (!usesMetal() || runningJob || warming || queue.length > 0 || stopping) return;
   const engine = findWhisper();
   const model = config.models.paths(modelId);
   if (!engine || !existsSync(engine.path) || !model) return;
@@ -1233,13 +1257,14 @@ function conversionSlot(signal: AbortSignal): Promise<() => void> {
 
 /** GET /api/asr */
 export async function asrStatus(): Promise<AsrStatus> {
-  const accel = acceleration();
   const engine = findWhisper();
+  // The GPU probe (once per engine and server) runs beside the version probe: acceleration and the recommended model wait for it.
+  const gpu = engine && existsSync(engine.path) ? probeGpu(engine.path) : Promise.resolve(null);
   const status: AsrStatus = {
     engineAvailable: false,
-    acceleration: accel,
+    acceleration: 'cpu',
     ffmpegAvailable: false,
-    models: config.models.list(recommendedModel()),
+    models: [],
   };
   if (engine?.source === 'env' && !existsSync(engine.path)) {
     status.reason = `EASY_STUDY_WHISPER에 지정한 받아쓰기 엔진(whisper-cli)이 없습니다: ${engine.path}`;
@@ -1258,13 +1283,31 @@ export async function asrStatus(): Promise<AsrStatus> {
   }
   const ffmpeg = findFfmpeg();
   if (ffmpeg) status.ffmpegAvailable = (await probeVersion(ffmpeg.path, '-version', /ffmpeg version\s+(\S+)/)).ok;
+  await gpu;
+  Object.assign(status, acceleration(engine));
+  status.models = config.models.list(recommendedModel(engine));
   if (status.engineAvailable) pumpQueue();
   return status;
 }
 
-/** turbo with Metal (Apple Silicon), small on CPU-only machines (about 4× faster there). */
-export function recommendedModel(): string {
-  return acceleration() === 'metal' ? TURBO_MODEL_ID : SMALL_MODEL_ID;
+/**
+ * What transcription runs on now: Metal on Apple Silicon; Vulkan when the engine's probe found a GPU that has not
+ * failed; else the CPU (with why the GPU was turned off, when it was). Before the probe has ended: the CPU.
+ */
+export function acceleration(engine: ToolLocation | null = findWhisper()): Pick<AsrStatus, 'acceleration' | 'gpu' | 'gpuError'> {
+  if (usesMetal()) return { acceleration: 'metal' };
+  const state = engine ? gpuState(engine.path) : null;
+  if (state?.device) return { acceleration: 'vulkan', gpu: { name: state.device.name, integrated: state.device.integrated } };
+  return state?.error ? { acceleration: 'cpu', gpuError: state.error } : { acceleration: 'cpu' };
+}
+
+/**
+ * turbo with Metal (Apple Silicon) or a discrete GPU (Vulkan); small on built-in graphics and CPU-only machines
+ * (about 4× faster there).
+ */
+export function recommendedModel(engine: ToolLocation | null = findWhisper()): string {
+  const now = acceleration(engine);
+  return now.acceleration === 'metal' || (now.acceleration === 'vulkan' && !now.gpu?.integrated) ? TURBO_MODEL_ID : SMALL_MODEL_ID;
 }
 
 /** The recommended model if installed, else any installed model, else the recommended one (downloaded later). */

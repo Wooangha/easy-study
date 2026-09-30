@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useRef, useState, type CSSProperties } from 'react';
+import { FileText, ImageIcon, Scissors, X } from 'lucide-react';
 import type { Attachment } from '../../../shared/types.ts';
 import { attachmentUrl, checkSessionSoon } from '../api.ts';
 import { useLoginEpoch } from '../hooks/useAuth.ts';
@@ -29,7 +30,7 @@ export function AttachmentImage({
   if (failedAt === epoch) {
     return (
       <span className="att-img-missing" role="img" aria-label="이미지를 불러오지 못했어요">
-        🖼
+        <ImageIcon />
       </span>
     );
   }
@@ -111,7 +112,7 @@ export function AttachmentChips({
                 ) : c.localUrl ? (
                   <img src={c.localUrl} alt="" draggable={false} />
                 ) : (
-                  <span className="att-chip-icon">{c.kind === 'region' ? '✂' : '🖼'}</span>
+                  <span className="att-chip-icon">{c.kind === 'region' ? <Scissors /> : <ImageIcon />}</span>
                 )}
                 {!ready && (
                   <span
@@ -130,7 +131,7 @@ export function AttachmentChips({
               aria-label={`${c.label} 첨부 빼기`}
               title="첨부 빼기"
             >
-              ×
+              <X size="1em" />
             </button>
           </li>
         );
@@ -141,7 +142,7 @@ export function AttachmentChips({
 
 /**
  * A larger view of an attachment over the right pane (the slides stay visible, so a region's flash on its slide
- * can be seen at the same time). Esc, ✕ or a click beside the card closes it.
+ * can be seen at the same time). Esc, the close button or a click beside the card closes it.
  */
 export function AttachmentPreview({
   docId,
@@ -194,11 +195,11 @@ export function AttachmentPreview({
           <span className="spacer" />
           {region && attachment.slide !== undefined && (
             <button type="button" className="ghost-btn small" onClick={() => onShowOnSlide(attachment)}>
-              📄 p.{attachment.slide}에서 보기
+              <FileText /> p.{attachment.slide}에서 보기
             </button>
           )}
           <button ref={closeRef} type="button" className="icon-btn small" onClick={onClose} aria-label="닫기" title="닫기 (Esc)">
-            ✕
+            <X />
           </button>
         </div>
         <div className="att-preview-body">

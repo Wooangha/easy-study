@@ -1,4 +1,4 @@
-// "🔗 연결" of a memo (DESIGN §25): a small panel to link a slide of this lecture (a number, the focused slide by
+// "연결" of a memo (DESIGN §25): a small panel to link a slide of this lecture (a number, the focused slide by
 // default) or another lecture of the library (a select, with an optional slide). Emits a MemoLink; never a URL.
 // Floated next to its button (a memo card near an edge would clip it).
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';

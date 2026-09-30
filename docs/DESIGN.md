@@ -317,7 +317,9 @@ assistant messages carry it (`ChatMessage.effort`) and the notes name it ("Claud
 model and effort of a session can be changed later (PATCH /sessions/:sid, §5 "LLM switch"). A digest
 started by a session (DESIGN §11) or by POST /digest keeps its `effort` in digest.json for every batch and the lecture
 summary. The recordings' AI alignment (§22) takes no effort: it runs with the CLI's default (Claude Code on Haiku).
-Web: the top bar "새 세션" picker shows a compact "추론" select after the model select for providers with levels
+Web: the top bar's "새 세션" LLM is one button since 0.6.4 (NewSessionLlm.tsx: a robot icon, "Claude Code · CLI 기본값", a
+chevron; the three selects made the bar wrap) that opens a panel with the full picker stacked; the picker shows a "추론" select
+after the model select for providers with levels
 ("추론 기본값" first, the model's levels, catalog descriptions as tooltips; disabled for a model without levels). The
 choice `{provider, model, effort}` is stored in localStorage; a choice stored before efforts existed reads as 기본값,
 and a level the (new) model does not support falls back to 기본값.
@@ -388,6 +390,20 @@ session's when there is no answer; a session whose LLM changed (§5 "LLM switch"
   (everything bundled).
 
 ### Settings, theme and the desktop bridge (the web half of §24)
+- **Icons (0.6.4).** Every emoji of the UI became a Lucide icon (lucide-react, ISC; the user: "이모티콘들 … 그린 거로 바꿔줘 svg").
+  They are drawn in currentColor, 1.15em next to their text with a 1.8 stroke (the `:where(svg.lucide)` rules in styles.css;
+  a spot's own class or an explicit `size` / `strokeWidth` wins), decorative (`aria-hidden`; an icon-only button keeps an
+  `aria-label` and a title). One meaning, one icon: BookOpen (a lecture), Library, Folder / Folders (courses, groups), FileText,
+  NotebookPen (notes, the notes file), StickyNote (memo), MessageCircle (Q&A), Mic, Trash, Settings, Paperclip (첨부), Link,
+  Pin, MapPin (a pinned recording spot), Save, TriangleAlert, Hourglass, Check / CircleCheck, X (close / remove), Play /
+  Pause / Square (media, filled), ChevronDown / ChevronRight / ChevronUp (disclosures), RefreshCw, ExternalLink, Upload /
+  Download, ImageIcon, GraduationCap (the tutor), Bot (an LLM), Lock, Search, Lightbulb, Zap, Shuffle (an LLM switch),
+  Ellipsis (a menu), GripVertical (a drag handle), Info; the annotation tools MousePointer2, SquareDashedMousePointer,
+  Highlighter, Baseline, Square, Circle, Type, StickyNote and Eye / EyeOff. Where no SVG can go — `<option>` labels,
+  titles, aria-labels, confirm texts, text sent to the tutor or written to Markdown — the emoji was dropped and the words
+  kept. `<details>` disclosures draw Lucide's chevron as a CSS mask on `summary::before` (turned down when open) instead of
+  the browser's triangle. Plain signs stay text: ＋ / − on add and zoom buttons, the text-size − / +, × in "1.25×", keyboard
+  keys, ›, →.
 - **⚙ 설정** (web/src/components/SettingsDialog.tsx): the last button of the top bar, at the right end of whichever line
   it lands on (`margin-left: auto`: the bar wraps at the app's default 1280 px; on phones in the top right corner of
   the first line), with a dot while the desktop app has an update waiting. A modal `<dialog>` like ConfirmHost (Esc, the
@@ -1149,11 +1165,31 @@ the player's position is lifted to `web/src/lib/recording/playhead.ts` for "그�
 ### Engines (all local, no API key)
 - ASR: whisper.cpp **v1.9.4** `whisper-cli` as a short-lived sidecar (like the image/PDF workers). Default model
   `large-v3-turbo-q5_0` (574 MB, sha256 394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2) + Silero VAD v6.2.0; fast model
-  `small-q5_1` (190 MB) recommended on CPU-only machines. Flags: beam default (5), `-l ko|en` forced when known (auto otherwise), VAD on,
+  `small-q5_1` (190 MB) recommended on machines without GPU acceleration (and with a built-in GPU). Flags: beam default (5), `-l ko|en` forced when known (auto otherwise), VAD on,
   no prompt by default, output `-ojf`. Models are downloaded on first use into `<data>/models/` (desktop: app data dir; web: `<repo>/.cache/models`,
   env EASY_STUDY_MODELS_DIR), resumable, sha256-verified, never bundled; one fetch per file at a time (every model shares the VAD file), a
   corrupt part left by an earlier run is fetched again once from the start, and the reason of a failed download is `AsrModelInfo.error`. Binary lookup: env EASY_STUDY_WHISPER, then a bundled sidecar (desktop),
   then `<repo>/.cache/whisper/bin/whisper-cli` built by `npm run setup:whisper`, then PATH.
+- GPU (0.6.4): Metal on Apple silicon; **Vulkan on Windows x64 and Linux x64** (the user: "윈도우에 gpu 달려있는데 왜 그거
+  안씀"). The builds keep the CPU engine exactly as before and ship the Vulkan part beside it: Windows the ggml module renamed
+  `es-ggml-vulkan.dll` (a name ggml never loads by itself; a GPU run is the same `whisper-cli.exe` with
+  `GGML_BACKEND_PATH=<that file>`), Linux a second static `whisper-cli` built with Vulkan (`es-whisper-vulkan`, linking the
+  system's `libvulkan.so.1`; web mode `.cache/whisper/bin/whisper-cli-vulkan`). The server finds it beside the CPU engine
+  (asr.ts `gpuCommandFor`: the `.dll` on Windows, the `<name>-vulkan` sibling on Linux; nothing elsewhere;
+  `EASY_STUDY_WHISPER_GPU=0` turns it off) and probes it once per server run: a run with an **empty model file** — whisper-cli
+  lists ggml-vulkan's devices (`ggml_vulkan: N = <name> (<driver>) | uma: 0|1 | …`) while it sets up its backends, then stops
+  at the model ("bad magic", exit 3). `--version` is not enough: the static Linux build sets up its backends only for a model
+  (checked in a container with Mesa's lavapipe). The devices count only when the probe ended that way (an exit and the model
+  error; a probe that hung for 20 s, crashed or never started means no GPU, whatever it printed). ggml-vulkan skips CPU-type
+  devices (lavapipe, llvmpipe) by itself; the first discrete device (`uma: 0`) wins, else the first, passed as `-dev i` when
+  i ≠ 0. Every whisper-cli run (transcription and language detection) then goes to the GPU; a GPU run that fails (an exit
+  code, a signal, a start error, or 5 minutes without any output — ggml-vulkan waits on its fences without a limit) is done
+  again at once on the CPU, and when that works the GPU is off until the server restarts (a run that fails on the CPU too was
+  not the GPU's fault: the GPU stays on and the error goes to the window's own retries). A stop by the app never counts.
+  `AsrStatus.acceleration` is `'metal' | 'vulkan' | 'cpu'` with `gpu: {name, integrated}` or `gpuError` (the GPU turned off
+  after a failure); the recommended model is turbo on Metal and on a discrete Vulkan GPU, small otherwise; 설정 › 녹음's engine
+  line says "GPU(Vulkan) 가속 · <name>" / "CPU · GPU 오류로 CPU로 받아써요". Each window is a new process: the model is uploaded
+  to the GPU and the pipelines are created per run (the drivers cache the compiled shaders on disk).
 - Audio decode (uploads only): minimal LGPL ffmpeg; env EASY_STUDY_FFMPEG, bundled sidecar (desktop), else `ffmpeg` on PATH. One pass →
   `asr.wav` (16 kHz mono s16) + `playback.m4a` (AAC 64k mono, +faststart). Live recordings need no ffmpeg (PCM in, WAV playback).
 - Memory: at most one whisper process at a time (queue); live transcription processes ~20–30 s windows cut at silences as audio arrives.
@@ -1226,7 +1262,8 @@ for it, so the speech right before the question is included. Priming: one line s
 about using lecture speech.
 
 ### Web
-- Record button (🎙) in the chat header / top bar: first use shows a one-time notice to check the professor's/school's recording rules; mic
+- Record button in the top bar (0.6.4: a round microphone icon, no text; the running recording — timer, level meter, pause,
+  stop — takes its place, so it shows on every page, the library included): first use shows a one-time notice to check the professor's/school's recording rules; mic
   permission; level meter, timer, pause/stop; live transcript strip; recording continues while switching slides/tabs; if the page reloads the
   recorder offers to continue the same recording (resend from the acknowledged offset; IndexedDB keeps unacknowledged audio).
   Capture: getUserMedia → AudioContext({sampleRate: 16000}) → AudioWorklet → s16le chunks (~1–5 s) → offset POSTs, one in flight.
@@ -1256,7 +1293,10 @@ about using lecture speech.
   means the loopback origin the shell itself runs: its own server or its loopback proxy for a plain-http remote (§16, §19) — only
   the page the main window may show, and only while it is the shell's own child. A plain-http remote's page is never trusted
   directly (it is not a secure context anyway).
-- CI builds whisper-cli v1.9.4 per target (Metal on macOS; CPU elsewhere; on Windows with OpenMP and MSVC's vcomp140.dll next to it,
+- CI builds whisper-cli v1.9.4 per target (Metal on macOS; Vulkan beside the CPU engine on Windows x64 and Linux x64, built with
+  LunarG's Vulkan SDK 1.4.363.0 pinned with its SHA-256 in whisper.mjs and installed by `whisper.mjs --install-vulkan-sdk` only
+  when the whisper cache misses; a machine without the SDK builds the CPU engine alone unless Vulkan is required (CI,
+  `--require-tools`); CPU elsewhere; on Windows with OpenMP and MSVC's vcomp140.dll next to it,
   since ggml's own busy-waiting thread pool hangs there when threads outnumber free CPUs) and the minimal LGPL ffmpeg, caches them, ships them like es-node
   (resources on macOS/Windows, externalBin on Linux), and passes EASY_STUDY_WHISPER / EASY_STUDY_FFMPEG to the server. Licenses in
   THIRD_PARTY_NOTICES.md (whisper.cpp MIT, ffmpeg LGPL build config + source offer, Silero VAD MIT, models MIT/OpenAI).
@@ -1540,7 +1580,7 @@ MESSAGE_ID_RE, ANNOTATION_CLIENT_HEADER, ANNOTATION_CLIENT_ID_RE, PutSlideAnnota
 PatchSlideAnnotationsRequest, SlideAnnotationsConflict, MemoSummary, MAX_MEMO_SUMMARY_CHARS (400), AnnotationSummary,
 AnnotationTagsResponse, LayoutBox, SlideTextLayout, TextLayoutMissingResponse, AnnotationEvent, AnnotationDeviceSettings, plus
 `CreateRegionRequest.annotationId`, `Attachment.annotation` (AttachmentAnnotation), `SendMessageRequest.memos`, `ContextInfo.memos`;
-0.6.2: TextFont, TEXT_FONTS, SLIDE_PT_HEIGHT (540), MIN_TEXT_SIZE_PT (8), MAX_TEXT_SIZE_PT (72), DEFAULT_TEXT_SIZE_PT (16),
+0.6.2: TextFont, TEXT_FONTS, SLIDE_PT_HEIGHT (540), MIN_TEXT_SIZE_PT (8; 4 since 0.6.4), MAX_TEXT_SIZE_PT (72), DEFAULT_TEXT_SIZE_PT (16),
 DEFAULT_MEMO_TEXT_SIZE_PT (12), `TextItem.size / font / bold`, `MemoItem.size`.
 server/internal-types.ts: StudentMemo, `BuildTurnInput.studentMemos`, `BuildTurnInput.attachments[].annotation`, SessionChange.
 
@@ -1754,8 +1794,8 @@ write is in flight for that slide, else (a gap, or an event skipped during a fli
 `null` for a field the item did not have, so setting a text box's first `size` is undone by removing it —; of remove = add of the
 removed item, a run of re-adds in the items' original z-order; of hideMarker = unhideMarker), ≤ 50 entries; a **group action is one
 mutation of several ops and so one entry** (⌘Z moves / recolors / restores the whole group in one step); consecutive `update`s of
-the same item's `text` — or its `size` (the slider / number field; `COALESCED_FIELDS`) — within 2 s coalesced into one entry (a
-debounced text flush or a slider step is not an undo step each). ⌘Z undoes the most recent entry wherever it is
+the same item's `text` — or its `size` (the number field and its − / + buttons; `COALESCED_FIELDS`) — within 2 s coalesced into
+one entry (a debounced text flush or a − / + click is not an undo step each). ⌘Z undoes the most recent entry wherever it is
 (the focus is "the slide crossing the centre line" while the last edit is often on a neighbour) and scrolls/flashes that slide if it is
 off-screen (`showRegion`); a 409 replace prunes the entries of that slide only; entries whose ids vanished are pruned when applied.
 SlideViewer's window keydown handler (which today returns early on modifier keys) handles ⌘Z / Ctrl+Z → undo and ⌘⇧Z / Ctrl+Y → redo,
@@ -1888,11 +1928,11 @@ viewer alone (a zoomed-out slide: the menu hangs over the slide's edge as the re
 side with more room (never over the card) or, for a shape taller than the view, inside its bottom edge as before; sideways from
 the items' left edge, kept inside the visible part of the slide. Positioned in px (`left/top`; the region menu's `translateY(-100%)` is off for it), hidden until placed;
 never derived from the pointer or from `itemBounds`. Contents: a `N개` count for a group · four color dots (the active one = the
-common color; a click applies to every selected item) · for a single text box the **text look** (0.6.2): a number field 8–72 (`type=
-"number"`, the browser's ▲▼; a typed number applies as soon as it is valid, blur / Enter clamps) with a small `range` slider, in
-"pt on the slide" (text.ts `ptToSize` / `sizeToPt`), a `<select>` 기본 / 명조 / 고정폭 and a **B** toggle — inline on a wide pane, on a
+common color; a click applies to every selected item) · for a single text box the **text look** (0.6.2): a number field 4–72 between − and + buttons (0.6.4
+replaced the browser's ▲▼ and the small `range` slider, which the user found fiddly, and lowered the minimum from 8; a typed number
+applies as soon as it is valid, blur / Enter clamps, ↑ / ↓ step by one), in "pt on the slide" (text.ts `ptToSize` / `sizeToPt`), a `<select>` 기본 / 명조 / 고정폭 and a **B** toggle — inline on a wide pane, on a
 compact one (`compact`) behind a `가 16` button that opens them in a `Floating` popover (`.annot-style-pop`, closes on a press outside,
-Esc or a scroll) · for a single memo the same number field + slider (its text size; for a memo without one — its text renders
+Esc or a scroll) · for a single memo the same size field (its text size; for a memo without one — its text renders
 UI-sized, 13 px — the field starts at the points that 13 px amount to where the text is shown, `memoSizePt(item, shown)`: against
 the slide's rendered height inline (the menu measures the layer; 13 px of a 400-px slide = 18 pt), 10 pt in the bottom sheet, which
 renders CSS points — so the first ▲ step grows the text a little rather than shrinking it, and the value follows the zoom until a
@@ -1946,9 +1986,8 @@ state-specific `title` explains it — the same accessible name / pressed / titl
 never hears '튜터에게 숨김, not pressed'). While hidden the header (`.memo-head-hidden`) and the 메모 tab row (`.memo-row-hidden`)
 show the crossed eye, muted, as `role="img"` with `aria-label` / title '튜터에게 숨김'; the collapsed pill shows it decoratively
 (`.memo-pill-hidden`, `aria-hidden`) and appends ' · 튜터에게 숨김' to the pill button's own `aria-label`; the card's ⋯ menu says
-'튜터에게 숨기기' / '튜터에게 보이기'. 0.6.1 replaced the 👁 / 🙈 emoji everywhere (the user: "too ugly"); the annotation UI keeps only
-📎 첨부, 🗑 삭제, 🔗 연결 and 🎙 as emoji; 0.6.4 replaced 💬 on the slide (the Q&A badge, '이 부분 설명해줘', the item menu's
-question count) with `ChatIcon`, and the markers with the bar, "Q" label and dots.
+'튜터에게 숨기기' / '튜터에게 보이기'. 0.6.1 replaced the 👁 / 🙈 emoji (the user: "too ugly"); 0.6.4 replaced every emoji of the
+app with Lucide icons (see "Icons" in §24's web half) and the question markers with the bar, "Q" label and dots.
 
 **Composer.** A context chip next to `LectureSpeechChip`: `📝 메모 N개 포함` (N = memos with `tutor` true on the focus window from
 `summary.memos`; hidden when 0 or the global switch is off; title '이 슬라이드와 앞뒤 슬라이드의 메모를 튜터에게 함께 보내요 (설정 ›
@@ -2033,8 +2072,8 @@ the items' elements as drawn and places itself (menu.ts above; a memo card is ne
 empty area selects what it crosses, Shift+click / Shift+drag add and remove, one menu for the group (color / 📎 첨부 / 🗑 삭제 act on
 all), a drag on any selected item moves the group, Delete removes it, ⌘Z undoes each group action as one step — one PATCH of N
 ops each. The default state keeps the region drag; drawing tools keep drawing; an item is still picked with any tool. (3) Text
-boxes: a numeric size (8–72 "pt on the slide", stored as a fraction of the slide height — `SLIDE_PT_HEIGHT` 540 — so the zoom
-scales it; a number field with the browser's ▲▼ and a small slider), a font (기본 / 명조 / 고정폭) and bold; memos the numeric text
+boxes: a numeric size (4–72 "pt on the slide" since 0.6.4, 8–72 before; stored as a fraction of the slide height —
+`SLIDE_PT_HEIGHT` 540 — so the zoom scales it; a number field between − and + buttons), a font (기본 / 명조 / 고정폭) and bold; memos the numeric text
 size in the same units; the fields are optional (old files load unchanged, the server caps and validates them, `null` removes
 one), the box's height is re-laid out when its look changes, and the controls sit in the item menu (a `가 16` popover on a
 narrow pane). (4) An unselected rect / ellipse is hit on its ring only in every state (`outlineOnly` no longer looks at the tool;
