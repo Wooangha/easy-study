@@ -1114,7 +1114,7 @@ Web:
   ~350 ms then drag; Esc cancels) — the default state of the viewer, i.e. while no annotation tool is active and the press is not on
   an annotation item (§25 "Tools and gestures"; the `✂ 영역` toolbar toggle of 0.6.0 was removed in 0.6.1: no tool = the region state).
   On release a small floating menu: `📎 첨부` (POST regions → chip in
-  the composer), `💬 이 부분 설명해줘` (attach + send with that text), `✕`. Works at every zoom level; the rect is stored normalised.
+  the composer), `이 부분 설명해줘` with the speech-bubble icon (attach + send with that text), `✕`. Works at every zoom level; the rect is stored normalised.
 - Composer: chips row (thumbnail, "p.12 영역" / file name, ×, click → preview; region chip also scrolls the viewer to the slide and
   flashes the rect). `📎` button → file picker (images, multiple). Paste (Cmd/Ctrl+V) of images into the composer and dropping image files
   onto the chat panel upload them (progress, errors as toasts). Dropping a PDF anywhere keeps uploading it as a new document.
@@ -1947,7 +1947,8 @@ never hears '튜터에게 숨김, not pressed'). While hidden the header (`.memo
 show the crossed eye, muted, as `role="img"` with `aria-label` / title '튜터에게 숨김'; the collapsed pill shows it decoratively
 (`.memo-pill-hidden`, `aria-hidden`) and appends ' · 튜터에게 숨김' to the pill button's own `aria-label`; the card's ⋯ menu says
 '튜터에게 숨기기' / '튜터에게 보이기'. 0.6.1 replaced the 👁 / 🙈 emoji everywhere (the user: "too ugly"); the annotation UI keeps only
-📎 첨부, 🗑 삭제, 🔗 연결, 🎙 and the 💬 markers as emoji.
+📎 첨부, 🗑 삭제, 🔗 연결 and 🎙 as emoji; 0.6.4 replaced 💬 on the slide (the Q&A badge, '이 부분 설명해줘', the item menu's
+question count) with `ChatIcon`, and the markers with the bar, "Q" label and dots.
 
 **Composer.** A context chip next to `LectureSpeechChip`: `📝 메모 N개 포함` (N = memos with `tutor` true on the focus window from
 `summary.memos`; hidden when 0 or the global switch is off; title '이 슬라이드와 앞뒤 슬라이드의 메모를 튜터에게 함께 보내요 (설정 ›
@@ -1973,7 +1974,8 @@ dark `@media`/`data-theme` blocks, identical, each dark token overriding a light
 track in both themes (`--surface` is darker than the track in dark mode), kept under `:hover` too; an active drawing tool keeps
 the accent under the pointer (`--accent-strong`; the plain `:hover:not(:disabled)` rule outranks `.is-active`). Classes: `.annot-layer`,
 `.annot-svg`, `.annot-text`, `.annot-handle`, `.annot-draft`, `.annot-item-menu` (z-index 5 like `.region-menu`),
-`.memo-card[.is-collapsed]`, `.memo-sheet`, `.memo-tags`, `.tag-input`, `.link-picker`, `.qa-marker`, `.qa-marker-tip`, `.annot-tools`
+`.memo-card[.is-collapsed]`, `.memo-sheet`, `.memo-tags`, `.tag-input`, `.link-picker`, `.qa-region`, `.qa-region-bar`, `.qa-q`,
+`.qa-dot` / `.qa-dot-mark` / `.memo-pill-q`, `.qa-marker-tip`, `.annot-tools`
 (segmented, `.is-active`, `.is-default` for 선택·첨부), `.annot-tools-compact` (the collapsed picker, `.is-drawing`), `.tool-icon` /
 `.eye-icon` (16 px inline SVG; `.is-off` = crossed), `.memo-eye.is-on/.is-off`, `.memo-head-hidden` / `.memo-pill-hidden` /
 `.memo-row-hidden`, `.region-menu-btn.is-icon/.is-off`, `.annot-unsaved`, `.viewer.is-annot-tool .slide-box { touch-action: none;
@@ -2167,10 +2169,25 @@ sessionId, messageId, createdAt, itemId? }`, with several questions on the same 
 Deleting a session removes its markers; asking again adds one; the only persisted state is `hiddenMarkers` per slide on the server, so
 every device agrees. Cost: a linear pass over the notes once per notes refresh, memoised per document.
 
-**Rendering (QuestionMarkers.tsx inside the layer).** A small pill `💬` (or `💬 3`) at the anchor's top-right corner, kept inside the
-image, `pointer-events: auto`; a marker anchored to a region (not to a drawn item) also draws that region faintly (`.qa-marker-region`,
-dashed accent border and a 7 % tint, `pointer-events: none`; solid and 14 % while the pill is hovered or the tip open), so the
-asked-about part is visible without hovering. Hover/focus → tooltip (`.qa-marker-tip`, floated in `<body>` through `Floating` like the link picker —
+**Rendering (QuestionMarkers.tsx inside the layer).** The slide is white in both themes, so the marker colors are fixed
+(`--qa-ink` #4b6bf5 / `--qa-ink-strong` / `--qa-soft` on `.annot-layer`). A marker anchored to a region (0.6.4, after the user
+rejected the 💬 pill, outlines, corner brackets, pins, hand-drawn loops and ink recoloring; they chose "a bar on the left and a Q
+label" with "the bar must not cover the slide"): `QuestionRegions`, rendered first in the layer (under the items), draws the
+region as a 7 % tint (`.qa-region`) and a 3 px bar 2 px outside its left edge (`.qa-region-bar`, clamped to the image), both
+`mix-blend-mode: multiply` and `pointer-events: none`, so text under them stays as dark as it was; 15 % tint and a full bar while
+the marker is lit. Its label (`.qa-q`, "Q" or "Q" + count, 16 px pill) is a button placed by `regionLabelPlace` (markers.ts,
+pure): left of the bar at the region's top when the image has room there (`left`), else above the region's top-left corner
+(`above`), else inside it right of the bar (`inside`: a region in the image's top-left corner); the image's px size comes from
+the track width, the box aspect and the frame. A marker anchored to a drawn item: a small dot (`.qa-dot`, 8 px, or a 15 px number
+when several questions) in a 20 px button at the item's bounds' top-right corner, left out while the item is selected (its
+handles sit there; the item menu shows the count with the speech-bubble icon). A memo shows the dot in its own header, on the
+slide and in the bottom sheet (`MarkerButton` inside `MemoCard`, `.qa-dot.is-inline`); the collapsed pill, itself a button,
+shows a static dot and ' · 질문 N개' in its label (expanding it — inline, or as the sheet on narrow / touch screens — gives the
+dot that opens the questions). Labels and dots are `z-index: 2`, under the memo cards (3) and the slide's number and Q&A badge
+(4), so a marker never covers a memo; lit markers are lifted to `AnnotationLayer` (a set of `markerId`s: a focused label keeps
+its region lit while another is hovered) so their regions light up. Keyboard: focus opens the tip, ↓ moves into it, Esc closes
+it (without reopening on the returned focus). Known limit: on a dark slide the multiply tint and bar barely show (lecture PDFs
+are white). Hover/focus → tooltip (`.qa-marker-tip`, floated in `<body>` through `Floating` like the link picker —
 the slide box clips its overflow, so a 240 px tip on a marker near the image's left or top edge would be cut; it stays while the
 pointer is on it, closes on Esc, a click elsewhere or a scroll) with the question's first line and time; on touch a first tap
 shows it and a second jumps. Click → `onOpenQa(sessionId, messageId)`. The tooltip's × ('이 표시 지우기'; also right-click/long-press)
@@ -2197,7 +2214,7 @@ loading the effect retries whenever `messages` changes and gives up after 10 s; 
 
 **Tests.** web/tests/annotation-markers.test.ts (a plain region; an item-linked attachment; the item moved → the marker follows; the
 item deleted → the attachment rect; hidden keys; several questions on one rect → count; an attachment on a slide other than
-`question.slide`; the setting off → empty), web/tests/qa-jump.test.ts (`windowStartFor`).
+`question.slide`; the setting off → empty; `regionLabelPlace` left / above / inside and a wider label with a count), web/tests/qa-jump.test.ts (`windowStartFor`).
 
 ### Recording timeline
 

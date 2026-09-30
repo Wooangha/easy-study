@@ -1,7 +1,7 @@
 // 질문 표시 (DESIGN §25): where a question with a slide-region attachment was asked. Derived on the client from the
 // notes the app already loads per document (every Q&A grouped by slide) and the loaded slide documents (items and
 // hidden markers) — nothing is stored for a marker but its hidden key. Pure: one linear pass over the notes.
-import type { MarkerKey, NotesResponse, RegionRect, SlideAnnotations } from '../../../../shared/types.ts';
+import type { AnnotationItem, MarkerKey, NotesResponse, RegionRect, SlideAnnotations } from '../../../../shared/types.ts';
 import { firstLine } from '../format.ts';
 import { itemBounds, sameMarkerKey } from './geometry.ts';
 
@@ -25,6 +25,8 @@ export interface QuestionMarker {
   createdAt: string;
   /** The item the attachment was made from, when it is still on the slide (the marker then follows it). */
   itemId?: string;
+  /** That item's type: a memo shows its dot on the card itself, other items at their bounds' top-right corner. */
+  itemType?: AnnotationItem['type'];
   count: number;
   questions: MarkerQuestion[];
 }
@@ -84,7 +86,7 @@ export function deriveMarkers(
             sessionId: q.sessionId,
             messageId: q.messageId,
             createdAt: q.createdAt,
-            ...(item ? { itemId: item.id } : {}),
+            ...(item ? { itemId: item.id, itemType: item.type } : {}),
             count: 0,
             questions: [q],
           });
@@ -119,4 +121,28 @@ export function questionsOnItem(markers: readonly QuestionMarker[] | undefined, 
   let n = 0;
   for (const m of markers) if (m.itemId === itemId) n += m.count;
   return n;
+}
+
+/** A marker's stable id on its slide (React key, and which marker is lit): its newest question's key. */
+export const markerId = (m: QuestionMarker): string => `${m.key.sessionId}:${m.key.messageId}:${m.key.attachmentId}`;
+
+export type RegionLabelPlace = 'left' | 'above' | 'inside';
+
+/** The label's rough width in px: "Q" plus the count when there are several questions. */
+export const regionLabelWidth = (count: number): number => (count > 1 ? 20 + 7 * String(count).length : 17);
+
+/** Bar (3 px) + its gap to the region (2 px) + the gap between the label and the bar (3 px). */
+const LABEL_OFFSET = 8;
+const LABEL_HEIGHT = 16;
+
+/**
+ * Where a region marker's "Q" label goes. The color bar runs just outside the region's left edge; the label sits
+ * left of the bar at the region's top when there is room (`left`), else above the region's top-left corner
+ * (`above`), else inside it, right of the bar (`inside`: a region at the image's top-left corner). `layerWidth` /
+ * `layerHeight` are the image's rendered size in px; the slide box clips whatever sticks out of the image.
+ */
+export function regionLabelPlace(rect: RegionRect, count: number, layerWidth: number, layerHeight: number): RegionLabelPlace {
+  if (rect.x * layerWidth >= LABEL_OFFSET + regionLabelWidth(count) + 2) return 'left';
+  if (rect.y * layerHeight >= LABEL_HEIGHT + 4) return 'above';
+  return 'inside';
 }

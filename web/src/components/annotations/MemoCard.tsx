@@ -4,9 +4,12 @@
 // narrow pane or a touch screen the memo stays a pill and expands in the bottom sheet (`mode: 'sheet'`). Its text
 // is rendered as plain text only, in the memo's own text size when one is set (a fraction of the slide height, like
 // a text box; UI-sized 13 px otherwise). As part of a group selection (`group`) the card does not drag itself: the
-// press goes through to the viewer, which moves every selected item together.
+// press goes through to the viewer, which moves every selected item together. A memo attached to questions shows the
+// question marker's dot in its header, on the slide and in the bottom sheet (the pill, itself a button, shows a
+// static dot: expanding it — inline, or as the sheet on narrow / touch screens — gives the dot that opens them).
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import type { MemoItem, MemoLink } from '../../../../shared/types.ts';
+import type { QuestionMarker } from '../../lib/annotations/markers.ts';
 import { capText, memoPreview, movePoint, withLink } from '../../lib/annotations/geometry.ts';
 import { memoFontSize, memoSheetFontSize } from '../../lib/annotations/text.ts';
 import { movedBeyond, type Point } from '../../lib/attachments.ts';
@@ -17,6 +20,7 @@ import { PopoverMenu, type MenuSection } from '../organize/PopoverMenu.tsx';
 import { useLayerEnv } from './context.ts';
 import { EyeIcon } from './icons.tsx';
 import { LinkPicker } from './LinkPicker.tsx';
+import { MarkerButton, QuestionDot } from './QuestionMarkers.tsx';
 import { TagInput } from './TagInput.tsx';
 
 /** Typing pauses this long before the text is saved (blur / ⌘Enter save at once). */
@@ -35,9 +39,11 @@ interface MemoCardProps {
   mode: 'inline' | 'sheet';
   /** Part of a multi-selection: presses on the card go to the viewer (a drag moves the whole group). */
   group?: boolean;
+  /** The question marker of questions asked with this memo. */
+  marker?: QuestionMarker;
 }
 
-export function MemoCard({ slide, item, selected, editing, mode, group = false }: MemoCardProps) {
+export function MemoCard({ slide, item, selected, editing, mode, group = false, marker }: MemoCardProps) {
   const { actions, compact, docs, docId, tags: lectureTags, trackWidth } = useLayerEnv();
   const inline = mode === 'inline';
   // Narrow panes / touch: the inline card is always the pill; the sheet is the editor.
@@ -243,7 +249,7 @@ export function MemoCard({ slide, item, selected, editing, mode, group = false }
         onPointerUp={onHeaderPointerUp}
         onPointerCancel={() => endDrag(false)}
         title={item.text.trim() ? `${item.text.trim().slice(0, 200)}${item.text.length > 200 ? '…' : ''}` : '메모 (클릭해서 펴기)'}
-        aria-label={item.tutor ? `메모: ${preview}` : `메모: ${preview} · 튜터에게 숨김`}
+        aria-label={`메모: ${preview}${item.tutor ? '' : ' · 튜터에게 숨김'}${marker ? ` · 질문 ${marker.count}개` : ''}`}
       >
         <span className="memo-dot" aria-hidden />
         <span className="memo-pill-text">{preview}</span>
@@ -251,6 +257,11 @@ export function MemoCard({ slide, item, selected, editing, mode, group = false }
         {!item.tutor && (
           <span className="memo-pill-hidden" title="튜터에게 숨김" aria-hidden>
             <EyeIcon off />
+          </span>
+        )}
+        {marker && (
+          <span className="memo-pill-q" title={`이 메모로 물어본 질문 ${marker.count}개 (메모를 펴면 볼 수 있어요)`} aria-hidden>
+            <QuestionDot count={marker.count} />
           </span>
         )}
       </button>
@@ -285,6 +296,11 @@ export function MemoCard({ slide, item, selected, editing, mode, group = false }
           <span className="memo-head-hidden" role="img" title="튜터에게 숨김" aria-label="튜터에게 숨김">
             <EyeIcon off />
           </span>
+        )}
+        {marker && (
+          <MarkerButton slide={slide} marker={marker} className="qa-dot is-inline">
+            <QuestionDot count={marker.count} />
+          </MarkerButton>
         )}
         <PopoverMenu label="메모 메뉴" sections={menu} />
       </div>

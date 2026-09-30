@@ -22,11 +22,13 @@ interface FloatingProps {
   /** Handlers on the panel itself (a hover-opened panel stays while the pointer is on it; Esc / focus leaving it). */
   onPointerEnter?: (e: PointerEvent<HTMLDivElement>) => void;
   onPointerLeave?: (e: PointerEvent<HTMLDivElement>) => void;
+  /** React delivers a portal's events along the React tree: a panel opened inside a memo card stops its presses here. */
+  onPointerDown?: (e: PointerEvent<HTMLDivElement>) => void;
   onBlur?: (e: FocusEvent<HTMLDivElement>) => void;
   onKeyDown?: (e: KeyboardEvent<HTMLDivElement>) => void;
 }
 
-export function Floating({ anchor, width, height = 240, className, children, role, label, ref, onScrollAway, onPointerEnter, onPointerLeave, onBlur, onKeyDown }: FloatingProps) {
+export function Floating({ anchor, width, height = 240, className, children, role, label, ref, onScrollAway, onPointerEnter, onPointerLeave, onPointerDown, onBlur, onKeyDown }: FloatingProps) {
   const [style, setStyle] = useState<CSSProperties | null>(null);
   useLayoutEffect(() => {
     if (!anchor) return;
@@ -65,6 +67,7 @@ export function Floating({ anchor, width, height = 240, className, children, rol
       aria-label={label}
       onPointerEnter={onPointerEnter}
       onPointerLeave={onPointerLeave}
+      onPointerDown={onPointerDown}
       onBlur={onBlur}
       onKeyDown={onKeyDown}
     >

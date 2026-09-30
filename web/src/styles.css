@@ -861,6 +861,7 @@ kbd {
 
 .slide-label {
   position: absolute;
+  z-index: 4;
   top: 8px;
   left: 8px;
   padding: 1px 9px;
@@ -881,8 +882,12 @@ kbd {
 
 .qa-badge {
   position: absolute;
+  z-index: 4;
   top: 8px;
   right: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   padding: 1px 9px;
   border-radius: 999px;
   border: 0;
@@ -896,6 +901,13 @@ kbd {
 .qa-badge:hover {
   background: var(--accent);
   color: var(--accent-contrast);
+}
+
+.qa-badge-icon {
+  display: block;
+  width: 13px;
+  height: 13px;
+  flex: none;
 }
 
 /* ---------------------------------------------------------------- chat panel */
@@ -4209,6 +4221,21 @@ kbd {
   font-weight: 600;
 }
 
+.region-menu-icon {
+  display: inline-block;
+  width: 15px;
+  height: 15px;
+  margin-right: 5px;
+  vertical-align: -3px;
+}
+
+.annot-menu-note-icon {
+  display: block;
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
 .region-menu-btn:hover:not(:disabled),
 .region-menu-btn:focus-visible {
   background: var(--surface-2);
@@ -6891,53 +6918,161 @@ kbd {
   gap: 6px;
 }
 
-/* Question markers: the asked-about region, faint (stronger while its pill is hovered or its tip open), and a 💬
-   pill at the region's top-right corner; a tip on hover. A marker that follows a drawn item shows no region. */
-.qa-marker-region {
+/* Question markers. The slide is white in both themes, so the marker colors are fixed (the light theme's accent).
+   A region: a faint tint and a 3 px bar just outside its left edge, both multiplied into the slide (the text under
+   them stays as dark as it was), drawn first in the layer (under the items); stronger while its label is hovered or
+   its tip open. Its "Q" label (with the count when several questions share it) sits left of the bar, or above the
+   region, or inside it at the image's top-left corner. A drawn item: a small dot at its top-right corner (a number
+   when several). Labels and dots are over the items but under the memo cards (z-index 3) and the slide's number
+   and Q&A badge (4); a memo's dot is in its header. */
+.annot-layer {
+  --qa-ink: #4b6bf5;
+  --qa-ink-strong: #3656e0;
+  --qa-soft: #eef1ff;
+}
+
+.qa-region {
   position: absolute;
-  z-index: 3;
-  box-sizing: border-box;
-  border: 1px dashed color-mix(in srgb, var(--accent) 45%, transparent);
-  border-radius: 3px;
-  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  border-radius: 2px;
+  background: rgb(75 107 245 / 0.07);
+  mix-blend-mode: multiply;
   pointer-events: none;
+  transition: background 0.12s;
+}
+
+.qa-region.is-lit {
+  background: rgb(75 107 245 / 0.15);
+}
+
+.qa-region-bar {
+  position: absolute;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--qa-ink);
+  mix-blend-mode: multiply;
+  opacity: 0.8;
+  pointer-events: none;
+  transition: opacity 0.12s;
+}
+
+.qa-region-bar.is-lit {
+  opacity: 1;
+}
+
+.qa-q {
+  position: absolute;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  box-sizing: border-box;
+  height: 16px;
+  min-width: 17px;
+  margin: 0;
+  padding: 0 5px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--qa-soft);
+  box-shadow: 0 0 0 1px rgb(75 107 245 / 0.25);
+  color: var(--qa-ink-strong);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 16px;
+  white-space: nowrap;
+  cursor: pointer;
+  pointer-events: auto;
   transition:
     background 0.12s,
-    border-color 0.12s;
+    color 0.12s;
 }
 
-.qa-marker-region.is-lit {
-  border-style: solid;
-  border-color: color-mix(in srgb, var(--accent) 80%, transparent);
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
-}
-
-.qa-marker-wrap {
+/* A few px more to press than to see. */
+.qa-q::before {
   position: absolute;
-  z-index: 4;
-  transform: translate(-100%, -100%);
+  inset: -4px -3px;
+  content: '';
+}
+
+.qa-q.is-left {
+  transform: translateX(-100%);
+}
+
+.qa-q.is-above {
+  transform: translateY(calc(-100% - 2px));
+}
+
+.qa-q-n {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.qa-q:hover,
+.qa-q.is-lit {
+  background: var(--qa-ink-strong);
+  color: #fff;
+}
+
+/* The dot: a 20 px transparent button (an easy target) around the visible mark. */
+.qa-dot {
+  position: absolute;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  transform: translate(-50%, -50%);
+  cursor: pointer;
   pointer-events: auto;
 }
 
-.qa-marker {
-  padding: 1px 7px;
-  border: 0;
+.qa-dot.is-inline {
+  position: static;
+  flex: none;
+  transform: none;
+}
+
+.qa-dot-mark {
+  display: block;
+  box-sizing: border-box;
+  width: 8px;
+  height: 8px;
   border-radius: 999px;
-  background: var(--accent);
-  color: var(--accent-contrast);
-  font-size: 11px;
+  background: var(--qa-ink, #4b6bf5);
+  box-shadow:
+    0 0 0 2px #fff,
+    0 1px 3px rgb(0 0 0 / 0.25);
+  color: #fff;
+  font-size: 10px;
   font-weight: 700;
-  white-space: nowrap;
-  box-shadow: var(--shadow-sm);
-  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+  line-height: 15px;
+  text-align: center;
+  transition:
+    transform 0.12s,
+    background 0.12s;
 }
 
-.qa-marker:hover {
-  background: var(--accent-strong);
+.qa-dot-mark.has-count {
+  width: auto;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
 }
 
-.qa-marker-wrap.is-open .qa-marker {
-  background: var(--accent-strong);
+.qa-dot:hover .qa-dot-mark,
+.qa-dot.is-lit .qa-dot-mark {
+  background: var(--qa-ink-strong, #3656e0);
+  transform: scale(1.25);
+}
+
+.memo-pill-q {
+  display: inline-flex;
+  flex: none;
+  padding: 0 2px;
 }
 
 /* The tip is floated in <body> (Floating sets its position and width): the slide box would clip it. */

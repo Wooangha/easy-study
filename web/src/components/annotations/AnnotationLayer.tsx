@@ -2,9 +2,10 @@
 // shapes (a 0..1000 viewBox stretched over the image, so the stored 0..1 geometry maps directly), HTML for the
 // text boxes (their font scales with the slide: a size stored as a fraction of the slide height × the layer's
 // rendered height, `--slide-h`), the memo cards (UI-sized), the selection handles, the draft being drawn (or the
-// marquee of 범위 선택), and the question markers. The layer itself takes no pointer events; its interactive children
+// marquee of 범위 선택), and the question markers (the asked-about regions under the items, their labels and the items'
+// dots over them, a memo's dot on its card). The layer itself takes no pointer events; its interactive children
 // do and carry `data-annot`, so the viewer's scroller knows what was pressed.
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react';
 import type { AnnotationItem, RegionRect, SlideAnnotations, TextItem } from '../../../../shared/types.ts';
 import {
   ALL_HANDLES,
@@ -20,7 +21,7 @@ import { percentStyle, type Frame, type Point } from '../../lib/attachments.ts';
 import { useLatest } from '../../hooks/useLatest.ts';
 import { useLayerEnv } from './context.ts';
 import { MemoCard } from './MemoCard.tsx';
-import { QuestionMarkers } from './QuestionMarkers.tsx';
+import { QuestionMarkers, QuestionRegions, type LightMarker } from './QuestionMarkers.tsx';
 
 /** A shape being drawn on this slide (a dashed preview of what the release will make), or the marquee of 범위 선택. */
 export interface Draft {
@@ -36,6 +37,8 @@ export type DragPreview = Readonly<Record<string, { rect?: RegionRect; at?: Poin
 interface AnnotationLayerProps {
   slide: number;
   frame: Frame;
+  /** The slide box's aspect ratio (width / height): with the track's width, the image's size in px. */
+  aspect: number;
   /** The slide's document (null while not loaded: only a draft can show). */
   doc: SlideAnnotations | null;
   markers: readonly QuestionMarker[] | null;
@@ -51,10 +54,25 @@ interface AnnotationLayerProps {
 }
 
 const K = 1000;
+const NO_LIT: ReadonlySet<string> = new Set();
 const n = (v: number) => (v * K).toFixed(1);
 
-export function AnnotationLayer({ slide, frame, doc, markers, selectedIds, editingId, draft, drag, tool, replay }: AnnotationLayerProps) {
+export function AnnotationLayer({ slide, frame, aspect, doc, markers, selectedIds, editingId, draft, drag, tool, replay }: AnnotationLayerProps) {
   const items = doc?.items ?? [];
+  // A question marker hovered / focused / opened lights its region (drawn under the items, far from its label).
+  const [litMarkers, setLitMarkers] = useState<ReadonlySet<string>>(NO_LIT);
+  const lightMarker = useCallback<LightMarker>(
+    (id, on) =>
+      setLitMarkers((cur) => {
+        if (cur.has(id) === on) return cur;
+        const next = new Set(cur);
+        if (on) next.add(id);
+        else next.delete(id);
+        return next;
+      }),
+    [],
+  );
+  const shownMarkers = markers && markers.length > 0 ? markers : null;
   const rectOf = (item: AnnotationItem & { rect: RegionRect }) => drag?.[item.id]?.rect ?? item.rect;
   const isSelected = (id: string) => selectedIds?.includes(id) ?? false;
   const shapes: AnnotationItem[] = [];
@@ -73,6 +91,7 @@ export function AnnotationLayer({ slide, frame, doc, markers, selectedIds, editi
 
   return (
     <div className={`annot-layer tool-${tool}`} style={{ ...percentStyle(frame), '--frame-h': frame.h } as CSSProperties} data-annot-slide={slide}>
+      {shownMarkers && <QuestionRegions markers={shownMarkers} lit={litMarkers} />}
       <svg className="annot-svg" viewBox={`0 0 ${K} ${K}`} preserveAspectRatio="none" aria-hidden>
         {shapes.map((item) => {
           const cls = `annot-shape is-${item.color}${isSelected(item.id) ? ' is-selected' : ''}`;
@@ -122,13 +141,23 @@ export function AnnotationLayer({ slide, frame, doc, markers, selectedIds, editi
             group={group && isSelected(item.id)}
             editing={item.id === editingId}
             mode="inline"
+            marker={shownMarkers?.find((m) => m.itemId === item.id)}
           />
         );
       })}
       {handles && !drag && handles.map(({ handle, style }) => (
         <div key={handle} className={`annot-handle is-${handle}`} style={style} data-annot="handle" data-handle={handle} data-id={single!.id} />
       ))}
-      {markers && markers.length > 0 && <QuestionMarkers slide={slide} markers={markers} />}
+      {shownMarkers && (
+        <QuestionMarkers
+          slide={slide}
+          markers={shownMarkers}
+          frame={frame}
+          aspect={aspect}
+          skipItems={selectedIds}
+          onLit={lightMarker}
+        />
+      )}
     </div>
   );
 }

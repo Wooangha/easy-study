@@ -26,7 +26,7 @@ import { menuMaxWidth, placeItemMenu, unionPx, type MenuSide, type PxRect } from
 import { FONT_LABELS, clampPt, memoSizePt, ptToSize, sizeToPt, textSizeOf, type MemoShown } from '../../lib/annotations/text.ts';
 import { useLayerEnv } from './context.ts';
 import { Floating } from './Floating.tsx';
-import { EyeIcon } from './icons.tsx';
+import { ChatIcon, EyeIcon } from './icons.tsx';
 
 export const COLOR_NAMES: Record<(typeof ANNOTATION_COLORS)[number], string> = {
   yellow: '노랑',
@@ -206,8 +206,9 @@ export function ItemMenu({ slide, items, questions }: ItemMenuProps) {
         🗑 삭제
       </button>
       {!many && questions > 0 && (
-        <span className="annot-menu-note" title="이 필기를 첨부해서 물어본 질문 (슬라이드의 💬 표시)">
-          💬 {questions}
+        <span className="annot-menu-note" role="img" aria-label={`질문 ${questions}개`} title={`이 필기를 첨부해서 물어본 질문 ${questions}개 (선택을 풀면 모서리의 파란 점)`}>
+          <ChatIcon className="annot-menu-note-icon" />
+          {questions}
         </span>
       )}
       <button type="button" className="region-menu-btn is-close" onClick={() => actions.select(slide, null)} aria-label="선택 해제" title="선택 해제 (Esc)">

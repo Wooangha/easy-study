@@ -71,6 +71,7 @@ import { toast } from '../lib/toast.ts';
 import { AnnotationLayer, type Draft, type DragPreview } from './annotations/AnnotationLayer.tsx';
 import { AnnotationTools, NO_FILTER, toolHint, useMediaQuery, type SlideFilter } from './annotations/AnnotationTools.tsx';
 import { LayerContext, type LayerActions, type LayerEnv } from './annotations/context.ts';
+import { ChatIcon } from './annotations/icons.tsx';
 import { ItemMenu } from './annotations/ItemMenu.tsx';
 import { MemoCard } from './annotations/MemoCard.tsx';
 import { SlideImage } from './SlideImage.tsx';
@@ -217,9 +218,9 @@ interface SlideViewerProps {
   onOpenNotes: (slide: number) => void;
   /** "📎 첨부" on a selected region: attach it to the next question. */
   onAttachRegion: (slide: number, rect: RegionRect) => void;
-  /** "💬 이 부분 설명해줘": attach the region and ask about it right away. */
+  /** "이 부분 설명해줘": attach the region and ask about it right away. */
   onAskRegion: (slide: number, rect: RegionRect) => void;
-  /** Why a question cannot be sent right now (the 💬 action is then disabled), or null. */
+  /** Why a question cannot be sent right now (이 부분 설명해줘 is then disabled), or null. */
   askDisabledReason: string | null;
   /** 📎 첨부 of an annotation item (DESIGN §25): a chip for the next question. */
   onAttachItem?: (slide: number, item: AnnotationItem) => void;
@@ -1494,7 +1495,14 @@ export function SlideViewer({
                     ✕
                   </button>
                 </div>
-                <MemoCard slide={sheet.slide} item={sheetItem} selected editing={editing?.id === sheetItem.id} mode="sheet" />
+                <MemoCard
+                  slide={sheet.slide}
+                  item={sheetItem}
+                  selected
+                  editing={editing?.id === sheetItem.id}
+                  mode="sheet"
+                  marker={markers.get(sheet.slide)?.find((m) => m.itemId === sheetItem.id)}
+                />
               </div>
             </div>,
             document.body,
@@ -1610,6 +1618,7 @@ const SlideItem = memo(function SlideItem({
           <AnnotationLayer
             slide={slide}
             frame={frame}
+            aspect={aspect}
             doc={annotations}
             markers={markers}
             selectedIds={selectedIds}
@@ -1630,8 +1639,10 @@ const SlideItem = memo(function SlideItem({
             className="qa-badge"
             onClick={() => onOpenNotes(slide)}
             title={`이 슬라이드의 Q&A ${qaCount}개 보기`}
+            aria-label={`이 슬라이드의 Q&A ${qaCount}개 보기`}
           >
-            💬 {qaCount}
+            <ChatIcon className="qa-badge-icon" />
+            {qaCount}
           </button>
         )}
         {unsaved && (
@@ -1699,7 +1710,8 @@ function RegionMenu({
         disabled={askDisabledReason !== null}
         title={askDisabledReason ?? '이 영역을 첨부해서 “이 부분 설명해줘”라고 바로 질문해요'}
       >
-        💬 이 부분 설명해줘
+        <ChatIcon className="region-menu-icon" />
+        이 부분 설명해줘
       </button>
       <button type="button" className="region-menu-btn is-close" onClick={menu.cancel} aria-label="선택 취소" title="선택 취소 (Esc)">
         ✕

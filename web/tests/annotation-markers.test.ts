@@ -1,11 +1,12 @@
 // 질문 표시 (DESIGN §25): markers derived from the notes and the loaded slide documents — a plain region, an
 // item-linked attachment that follows its item, the fallback to the attachment's rect, hidden keys, stacking,
-// an attachment on another slide than the question's, the setting off. Run: node --test web/tests/*.test.ts
+// an attachment on another slide than the question's, the setting off; where a region's "Q" label goes.
+// Run: node --test web/tests/*.test.ts
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { Attachment, ChatMessage, MemoItem, NotesResponse, SlideAnnotations } from '../../shared/types.ts';
 import { emptySlideAnnotations } from '../src/lib/annotations/geometry.ts';
-import { NO_TEXT_LABEL, deriveMarkers, questionsOnItem } from '../src/lib/annotations/markers.ts';
+import { NO_TEXT_LABEL, deriveMarkers, markerId, questionsOnItem, regionLabelPlace, regionLabelWidth } from '../src/lib/annotations/markers.ts';
 
 const region = (id: string, slide: number, rect: Attachment['rect'], annotation?: Attachment['annotation']): Attachment => ({
   id,
@@ -87,9 +88,11 @@ describe('deriveMarkers', () => {
     const moved = deriveMarkers(n, docs({ 3: { items: [memo('an-000000000001', 0.6, 0.7)] } })).get(3)![0];
     assert.deepEqual(moved.rect, { x: 0.6, y: 0.7, w: 0.12, h: 0.08 });
     assert.equal(moved.itemId, 'an-000000000001');
+    assert.equal(moved.itemType, 'memo', 'a memo shows its dot on its card');
     const gone = deriveMarkers(n, docs({ 3: {} })).get(3)![0];
     assert.deepEqual(gone.rect, R);
     assert.equal(gone.itemId, undefined);
+    assert.equal(gone.itemType, undefined);
   });
 
   test('hidden keys are left out; the key names the session, the message and the attachment', () => {
@@ -117,6 +120,7 @@ describe('deriveMarkers', () => {
     assert.equal(m.label, '나중에');
     assert.equal(m.sessionId, 's2');
     assert.deepEqual(m.questions.map((q) => q.label), ['나중에', NO_TEXT_LABEL, '먼저']);
+    assert.equal(markerId(m), 's2:q2:a2', 'the id follows the newest question');
   });
 
   test('the marker goes on the attachment’s slide, not the question’s', () => {
@@ -144,5 +148,33 @@ describe('deriveMarkers', () => {
     assert.equal(questionsOnItem(markers, 'an-000000000001'), 2);
     assert.equal(questionsOnItem(markers, 'an-000000000002'), 0);
     assert.equal(questionsOnItem(undefined, 'an-000000000001'), 0);
+  });
+});
+
+describe('regionLabelPlace', () => {
+  // An image 800 × 450 px.
+  const W = 800;
+  const H = 450;
+
+  test('left of the bar when the region leaves room on its left', () => {
+    assert.equal(regionLabelPlace({ x: 0.3, y: 0.4, w: 0.2, h: 0.1 }, 1, W, H), 'left');
+    // 8 px (bar + gaps) + the label + 2 px: exactly enough.
+    const need = 8 + regionLabelWidth(1) + 2;
+    assert.equal(regionLabelPlace({ x: need / W, y: 0.4, w: 0.2, h: 0.1 }, 1, W, H), 'left');
+    assert.equal(regionLabelPlace({ x: (need - 1) / W, y: 0.4, w: 0.2, h: 0.1 }, 1, W, H), 'above');
+  });
+
+  test('a wider label (a count) needs more room on the left', () => {
+    const x = (8 + regionLabelWidth(1) + 2) / W;
+    assert.equal(regionLabelPlace({ x, y: 0.4, w: 0.2, h: 0.1 }, 1, W, H), 'left');
+    assert.equal(regionLabelPlace({ x, y: 0.4, w: 0.2, h: 0.1 }, 3, W, H), 'above');
+    assert.ok(regionLabelWidth(12) > regionLabelWidth(3));
+  });
+
+  test('above the region at the image’s left edge, inside it at the top-left corner', () => {
+    assert.equal(regionLabelPlace({ x: 0, y: 0.3, w: 0.5, h: 0.5 }, 1, W, H), 'above');
+    assert.equal(regionLabelPlace({ x: 0, y: 20 / H, w: 0.5, h: 0.5 }, 1, W, H), 'above');
+    assert.equal(regionLabelPlace({ x: 0, y: 19 / H, w: 0.5, h: 0.5 }, 1, W, H), 'inside');
+    assert.equal(regionLabelPlace({ x: 0.01, y: 0, w: 0.98, h: 1 }, 2, W, H), 'inside');
   });
 });

@@ -1,4 +1,5 @@
-// Inline SVG icons of the annotation UI (DESIGN §25): the tool glyphs of the toolbar and the eye of "튜터에게 보이기".
+// Inline SVG icons of the annotation UI (DESIGN §25): the tool glyphs of the toolbar, the eye of "튜터에게 보이기" and
+// the speech bubble of questions (the slide's Q&A badge, "이 부분 설명해줘", the item menu's question count).
 // 16 × 16, drawn in currentColor with the stroke of the app's other icons (organize/parts.tsx Chevron), so they take
 // the button's color — an emoji would not (the active tool's accent contrast, a muted "off" eye).
 import type { ReactNode } from 'react';
@@ -21,6 +22,15 @@ export function EyeIcon({ off = false, className = 'eye-icon' }: { off?: boolean
       <path d="M1.5 8c1.6-2.9 3.8-4.4 6.5-4.4S12.9 5.1 14.5 8c-1.6 2.9-3.8 4.4-6.5 4.4S3.1 10.9 1.5 8Z" {...STROKE} />
       <circle cx="8" cy="8" r="2.1" {...STROKE} />
       {off && <path d="M2.8 2.8l10.4 10.4" {...STROKE} />}
+    </Icon>
+  );
+}
+
+/** A speech bubble: questions and answers (the slide's Q&A badge, "이 부분 설명해줘"). */
+export function ChatIcon({ className = 'chat-icon' }: { className?: string }) {
+  return (
+    <Icon className={className}>
+      <path d="M3.2 2.8h9.6a1.7 1.7 0 0 1 1.7 1.7v5.6a1.7 1.7 0 0 1-1.7 1.7H7.6L4.6 14v-2.2H3.2a1.7 1.7 0 0 1-1.7-1.7V4.5a1.7 1.7 0 0 1 1.7-1.7Z" {...STROKE} />
     </Icon>
   );
 }

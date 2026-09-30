@@ -253,7 +253,7 @@ function StudySection() {
         <input type="checkbox" checked={markers} onChange={(e) => setMarkers(e.target.checked)} />
         <span>슬라이드에 질문 표시 보기</span>
       </label>
-      <p className="settings-hint">슬라이드의 한 부분을 첨부해서 질문한 자리에 💬 표시가 남아요. 표시를 클릭하면 그 질문과 답으로 가요.</p>
+      <p className="settings-hint">슬라이드의 한 부분을 첨부해서 질문하면 그 부분이 옅게 칠해지고 왼쪽에 파란 줄과 Q 표시가 남아요. 필기나 메모를 첨부했으면 그 모서리에 파란 점이 붙어요. 표시를 클릭하면 그 질문과 답으로 가요.</p>
     </>
   );
 }

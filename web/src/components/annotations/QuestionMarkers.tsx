@@ -1,55 +1,140 @@
-// 질문 표시 (DESIGN §25): a small 💬 pill at the top-right corner of where a question's region attachment was, kept
-// inside the image, and — for a marker anchored to a region rather than to an item that is still drawn — the region
-// itself, faint, so one sees which part was asked about (stronger while the tip is open or the pill hovered). Hover / focus shows the question's first line and time (several questions on one spot: the
-// list); a click jumps to that Q&A; on touch the first tap shows the tip and the second jumps. The tip is floated in
-// <body> (Floating, like a memo's link picker): the slide box clips its overflow, so a tip hung on a marker near the
-// image's left or top edge would be cut. The tip's × (also a right-click) hides the marker — the Q&A itself stays.
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
-import type { QuestionMarker } from '../../lib/annotations/markers.ts';
+// 질문 표시 (DESIGN §25). A question asked with a slide region leaves the region itself, faint (a light tint), with a
+// thin color bar just outside its left edge and a small "Q" label (with the count when several questions share the
+// region) left of the bar — the bar and the tint blend by multiply, so the slide's text under them stays readable.
+// A question asked with a drawn item (형광펜, a box, a text box) leaves a small dot at the item's top-right corner (a
+// number when several); a memo shows its dot in its own header (MemoCard; a static dot in the collapsed pill). The tint and the bar are drawn under the
+// items (QuestionRegions, first in the layer); the labels and dots over them (QuestionMarkers, last), but under the
+// memo cards, so a marker never covers a memo. Hover / focus on a label or dot shows the questions' first lines and
+// times and lights the region; a click jumps to that Q&A; on touch the first tap shows the tip and the second jumps.
+// Keyboard: focus shows the tip, ↓ moves into it, Esc closes it (and does not reopen it when focus returns).
+// The tip is floated in <body> (Floating, like a memo's link picker): the slide box clips its overflow, so a tip hung
+// on a marker near the image's left or top edge would be cut. The tip's × (also a right-click) hides the marker —
+// the Q&A itself stays.
+import { Fragment, useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { markerId, regionLabelPlace, type QuestionMarker } from '../../lib/annotations/markers.ts';
+import { percentStyle, type Frame } from '../../lib/attachments.ts';
 import { formatTime } from '../../lib/format.ts';
+import { useLatest } from '../../hooks/useLatest.ts';
 import { useLayerEnv } from './context.ts';
 import { Floating } from './Floating.tsx';
 
-interface QuestionMarkersProps {
-  slide: number;
-  markers: readonly QuestionMarker[];
-}
-
 const MAX_LISTED = 5;
 const TIP_WIDTH = 240;
-/** The pointer may cross the gap between the pill and the tip (or leave for a moment) this long. */
+/** The pointer may cross the gap between the label and the tip (or leave for a moment) this long. */
 const TIP_LEAVE_MS = 200;
 /** Rough height of the tip (Floating picks below / above with it): the padding and foot, one row per question. */
 const tipHeight = (questions: number): number => 44 + 46 * Math.min(questions, MAX_LISTED) + (questions > MAX_LISTED ? 16 : 0);
+const pct = (n: number) => `${(n * 100).toFixed(3)}%`;
 
-export function QuestionMarkers({ slide, markers }: QuestionMarkersProps) {
+/** A marker turns lit (hovered, focused or its tip open) or unlit, by `markerId`. Several can be lit at once. */
+export type LightMarker = (id: string, on: boolean) => void;
+
+/** The regions of the region markers: a faint tint and the bar left of it. Drawn first, under the items. */
+export function QuestionRegions({ markers, lit }: { markers: readonly QuestionMarker[]; lit: ReadonlySet<string> }) {
   return (
     <>
-      {markers.map((m) => (
-        <Marker key={`${m.key.sessionId}:${m.key.messageId}:${m.key.attachmentId}`} slide={slide} marker={m} />
-      ))}
+      {markers.map((m) => {
+        if (m.itemId) return null;
+        const id = markerId(m);
+        const on = lit.has(id) ? ' is-lit' : '';
+        const r = m.rect;
+        return (
+          <Fragment key={id}>
+            <div className={`qa-region${on}`} style={percentStyle(r)} aria-hidden />
+            <div className={`qa-region-bar${on}`} style={{ left: `max(0px, calc(${pct(r.x)} - 5px))`, top: pct(r.y), height: pct(r.h) }} aria-hidden />
+          </Fragment>
+        );
+      })}
     </>
   );
 }
 
-function Marker({ slide, marker }: { slide: number; marker: QuestionMarker }) {
+interface QuestionMarkersProps {
+  slide: number;
+  markers: readonly QuestionMarker[];
+  /** The image inside the slide box, and the box's aspect ratio: with the track's width, the image's size in px. */
+  frame: Frame;
+  aspect: number;
+  /** Items whose dot is left out: the selected ones (their handles sit on the corner; the item menu shows the count). */
+  skipItems: readonly string[] | null;
+  onLit: LightMarker;
+}
+
+/** The labels of the region markers and the dots of the item markers (a memo's dot is on its card). */
+export function QuestionMarkers({ slide, markers, frame, aspect, skipItems, onLit }: QuestionMarkersProps) {
+  // Read here, not in the layer: the context changes with the focused slide, and only the markers need the width.
+  const { trackWidth } = useLayerEnv();
+  const size = { width: trackWidth * frame.w, height: (trackWidth / aspect) * frame.h };
+  return (
+    <>
+      {markers.map((m) => {
+        const id = markerId(m);
+        const light = (on: boolean) => onLit(id, on);
+        if (m.itemId) {
+          if (m.itemType === 'memo' || skipItems?.includes(m.itemId)) return null;
+          const style: CSSProperties = { left: pct(Math.min(m.rect.x + m.rect.w, 0.99)), top: pct(Math.max(m.rect.y, 0.01)) };
+          return (
+            <MarkerButton key={id} slide={slide} marker={m} className="qa-dot" style={style} onLit={light}>
+              <QuestionDot count={m.count} />
+            </MarkerButton>
+          );
+        }
+        const r = m.rect;
+        const place = regionLabelPlace(r, m.count, size.width, size.height);
+        const style: CSSProperties =
+          place === 'left'
+            ? { left: `calc(${pct(r.x)} - 8px)`, top: pct(r.y) }
+            : place === 'above'
+              ? { left: `max(0px, calc(${pct(r.x)} - 5px))`, top: pct(r.y) }
+              : { left: `calc(${pct(r.x)} + 4px)`, top: `calc(${pct(r.y)} + 3px)` };
+        return (
+          <MarkerButton key={id} slide={slide} marker={m} className={`qa-q is-${place}`} style={style} onLit={light}>
+            Q{m.count > 1 && <span className="qa-q-n">{m.count}</span>}
+          </MarkerButton>
+        );
+      })}
+    </>
+  );
+}
+
+/** The visible dot of an item marker: a small circle, or a number when several questions were asked with the item. */
+export function QuestionDot({ count }: { count: number }) {
+  return <span className={count > 1 ? 'qa-dot-mark has-count' : 'qa-dot-mark'}>{count > 1 ? count : null}</span>;
+}
+
+interface MarkerButtonProps {
+  slide: number;
+  marker: QuestionMarker;
+  className: string;
+  style?: CSSProperties;
+  children: ReactNode;
+  /** Called with true while the marker is hovered, focused or its tip open, and false after. */
+  onLit?: (on: boolean) => void;
+}
+
+/** A marker's button and its tip (the questions, 노트에서 보기, 이 표시 지우기). */
+export function MarkerButton({ slide, marker, className, style, children, onLit }: MarkerButtonProps) {
   const { actions } = useLayerEnv();
   const [open, setOpen] = useState(false);
-  const [pill, setPill] = useState<HTMLButtonElement | null>(null);
+  const [hovered, setHovered] = useState(false);
+  const [button, setButton] = useState<HTMLButtonElement | null>(null);
   const tipRef = useRef<HTMLDivElement>(null);
   const leaveTimer = useRef(0);
-  const r = marker.rect;
-  // The pill sits at the top-right corner, hanging outside the rect when there is room above; near the image's
-  // edges it moves inside.
-  const style: CSSProperties = {
-    left: `${Math.min(r.x + r.w, 0.97) * 100}%`,
-    top: `${Math.max(r.y, 0.03) * 100}%`,
-  };
+  /** Esc in the tip gives the focus back to the button: that focus must not open the tip again. */
+  const refocusing = useRef(false);
+  const lit = open || hovered;
+  const onLitRef = useLatest(onLit);
+  useEffect(() => {
+    onLitRef.current?.(lit);
+    return () => {
+      if (lit) onLitRef.current?.(false);
+    };
+  }, [lit, onLitRef]);
 
-  /** Whether a node is the pill or inside the (portaled) tip. */
+  /** Whether a node is the button or inside the (portaled) tip. */
   const inside = useCallback(
-    (node: EventTarget | null): boolean => node instanceof Node && (pill?.contains(node) === true || tipRef.current?.contains(node) === true),
-    [pill],
+    (node: EventTarget | null): boolean => node instanceof Node && (button?.contains(node) === true || tipRef.current?.contains(node) === true),
+    [button],
   );
   const show = () => {
     window.clearTimeout(leaveTimer.current);
@@ -73,22 +158,14 @@ function Marker({ slide, marker }: { slide: number; marker: QuestionMarker }) {
 
   const hide = () => actions.hideMarkers(slide, marker.questions.map((q) => q.key));
 
-  const [hovered, setHovered] = useState(false);
-  const lit = open || hovered;
   return (
     <>
-      {!marker.itemId && (
-        <div
-          className={lit ? 'qa-marker-region is-lit' : 'qa-marker-region'}
-          style={{ left: `${r.x * 100}%`, top: `${r.y * 100}%`, width: `${r.w * 100}%`, height: `${r.h * 100}%` }}
-          aria-hidden
-        />
-      )}
-      <div className={open ? 'qa-marker-wrap is-open' : 'qa-marker-wrap'} style={style} data-annot="marker">
       <button
-        ref={setPill}
+        ref={setButton}
         type="button"
-        className="qa-marker"
+        className={lit ? `${className} is-lit` : className}
+        style={style}
+        data-annot="marker"
         onClick={(e) => {
           // A touch: the first tap shows the tip, the second jumps.
           if (e.nativeEvent instanceof PointerEvent && e.nativeEvent.pointerType === 'touch' && !open) {
@@ -110,19 +187,32 @@ function Marker({ slide, marker }: { slide: number; marker: QuestionMarker }) {
           setHovered(false);
           if (e.pointerType !== 'touch') hideSoon();
         }}
-        onFocus={show}
+        onFocus={() => {
+          if (refocusing.current) refocusing.current = false;
+          else show();
+        }}
         onBlur={(e) => {
+          refocusing.current = false;
           if (!inside(e.relatedTarget)) close();
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape' && open) {
+            e.stopPropagation();
+            close();
+          } else if (e.key === 'ArrowDown' && open) {
+            e.preventDefault();
+            tipRef.current?.querySelector<HTMLButtonElement>('button')?.focus();
+          }
         }}
         aria-label={`질문 ${marker.count}개: ${marker.label}`}
         title={marker.count > 1 ? `이 부분으로 물어본 질문 ${marker.count}개` : undefined}
       >
-        💬{marker.count > 1 ? ` ${marker.count}` : ''}
+        {children}
       </button>
       {open && (
         <Floating
           ref={tipRef}
-          anchor={pill}
+          anchor={button}
           width={TIP_WIDTH}
           height={tipHeight(marker.questions.length)}
           className="qa-marker-tip"
@@ -135,6 +225,7 @@ function Marker({ slide, marker }: { slide: number; marker: QuestionMarker }) {
           onPointerLeave={(e) => {
             if (e.pointerType !== 'touch') hideSoon();
           }}
+          onPointerDown={(e) => e.stopPropagation()}
           onBlur={(e) => {
             if (!inside(e.relatedTarget)) close();
           }}
@@ -142,7 +233,8 @@ function Marker({ slide, marker }: { slide: number; marker: QuestionMarker }) {
             if (e.key !== 'Escape') return;
             e.stopPropagation();
             close();
-            pill?.focus({ preventScroll: true });
+            refocusing.current = true;
+            button?.focus({ preventScroll: true });
           }}
         >
           {marker.questions.slice(0, MAX_LISTED).map((q) => (
@@ -170,7 +262,6 @@ function Marker({ slide, marker }: { slide: number; marker: QuestionMarker }) {
           </div>
         </Floating>
       )}
-    </div>
     </>
   );
 }
