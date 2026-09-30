@@ -1,6 +1,6 @@
 pkgbase = easy-study-bin
 	pkgdesc = Study lecture PDFs slide by slide with an LLM tutor (Claude Code, Codex, Claude API, OpenAI API): desktop app
-	pkgver = 0.6.4
+	pkgver = 0.6.5
 	pkgrel = 1
 	url = https://github.com/Wooangha/easy-study-releases
 	arch = x86_64
@@ -27,11 +27,11 @@ pkgbase = easy-study-bin
 	conflicts = easy-study
 	options = !strip
 	options = !debug
-	source_x86_64 = easy-study_0.6.4_amd64.deb::https://github.com/Wooangha/easy-study-releases/releases/download/v0.6.4/easy-study_0.6.4_amd64.deb
+	source_x86_64 = easy-study_0.6.5_amd64.deb::https://github.com/Wooangha/easy-study-releases/releases/download/v0.6.5/easy-study_0.6.5_amd64.deb
 	depends_x86_64 = vulkan-icd-loader
 	optdepends_x86_64 = vulkan-driver: GPU(Vulkan) speech recognition
-	sha256sums_x86_64 = 5a07bca33d947e98229a756b327bddd545e04469b38e99757331f1526efee854
-	source_aarch64 = easy-study_0.6.4_arm64.deb::https://github.com/Wooangha/easy-study-releases/releases/download/v0.6.4/easy-study_0.6.4_arm64.deb
-	sha256sums_aarch64 = 568ea5af824778e013ffdaa9498c1c3bf676f7618ce501ed52549677c8858beb
+	sha256sums_x86_64 = 85f9855217c0e432ee4f6425833fa9ec1d894d7f9efaf6fc2407f9f0ddf34de3
+	source_aarch64 = easy-study_0.6.5_arm64.deb::https://github.com/Wooangha/easy-study-releases/releases/download/v0.6.5/easy-study_0.6.5_arm64.deb
+	sha256sums_aarch64 = 651eaf0ef817259f2b2476ce9f407328e03e5475c0849f7b4cabe7b59143b1b9
 
 pkgname = easy-study-bin
