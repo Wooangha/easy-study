@@ -140,6 +140,22 @@ describe('slide matching', () => {
     );
   });
 
+  test('a footer whose date and "n / total" change on every slide is not a change', () => {
+    const withFooter = (specs: Spec[], date: string, total: number) =>
+      features(specs).map((f, i) => {
+        const footer = [date.split(' ')[0], `${date.split(' ')[1]},`, '2026', String(i + 1), '/', String(total)];
+        const words = footer.map((t, k) => ({ r: [0.6 + k * 0.06, 0.95, 0.05, 0.02] as [number, number, number, number], t, c: [k, k + 1] as [number, number] }));
+        return { ...f, layout: [...(f.layout ?? []), { r: [0.6, 0.95, 0.38, 0.02] as [number, number, number, number], dir: 'h' as const, words }] };
+      });
+    const old = deck(8);
+    const next = [...old.slice(0, 3), deck(1, 9)[0], ...old.slice(3)];
+    const result = matchSlides(withFooter(old, 'Sep 11', 8), withFooter(next, 'Sep 23', 9));
+    assert.deepEqual(
+      result.slides.map((s) => s.change),
+      ['same', 'same', 'same', 'new', 'same', 'same', 'same', 'same', 'same'],
+    );
+  });
+
   test('step-by-step builds (near-duplicate slides) keep their order', () => {
     const base = deck(1)[0];
     const builds: Spec[] = Array.from({ length: 5 }, (_, k) => ({

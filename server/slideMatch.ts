@@ -2,8 +2,9 @@
 // which new slide each old slide became, so that everything the student made on a slide follows it.
 //
 // Pure: works on per-slide features (the extracted text, the word boxes and a small grayscale picture), no files.
-// - Comparable text: the slide's words without the slide number (a lone number in the top or bottom margin, found
-//   by its box), case folded, without whitespace (the text file and the word boxes space CJK differently).
+// - Comparable text: the slide's words without the margin's noise (numbers and dates in the top or bottom margin — the
+//   slide number, "Sep 11, 2026" — and the deck's header / footer words, found by their boxes), case folded, without
+//   whitespace (the text file and the word boxes space CJK differently).
 // - Text similarity: TF-IDF weighted character trigrams over both decks (the course name, footers and other
 //   boilerplate on every slide weigh almost nothing), cosine.
 // - Image similarity: the weighted Jaccard of the two slides' "ink" (32 x 24 cells, distance from the background).
@@ -69,20 +70,49 @@ const ASSIGNMENT_MAX_WORK = 2e8;
 
 const MARGIN_TOP = 0.12;
 const MARGIN_BOTTOM = 0.86;
-const SLIDE_NUMBER = /^(?:p\.?|#)?\d{1,4}(?:\/\d{1,4})?$/i;
+/** A word of the margin that is a number or a date piece: "12", "3/35", "p.4", "#7", "11,", "2026", "2026.09.11", "/". */
+const MARGIN_NUMBER = /^(?:p\.?|#)?[\d.,:/\-–]*\d[\d.,:/\-–]*$|^[/|·–-]$/i;
 const PAGE_NUMBER_LINE = /^\s*(?:p\.?\s*|page\s+|slide\s+)?\d{1,4}(?:\s*(?:\/|of)\s*\d{1,4})?\s*$/i;
+/** A margin word on at least this share of a deck's slides is its header / footer (course name, lecture date). */
+const BOILERPLATE_SHARE = 0.5;
 
 function inMargin(r: LayoutBox): boolean {
   return r[1] + r[3] <= MARGIN_TOP || r[1] >= MARGIN_BOTTOM;
 }
 
-/** Boxes of the slide-number words (a lone number in the top or bottom margin). */
-export function slideNumberBoxes(layout: SlideFeatures['layout']): LayoutBox[] {
+function foldWord(word: string): string {
+  return word.normalize('NFC').toLowerCase().trim();
+}
+
+/**
+ * The header / footer words of a deck: words in the top or bottom margin of at least half of its slides (e.g. the
+ * lecture's date "Sep 11, 2026" on every slide — it changes with every re-post). Empty for decks under 4 slides.
+ */
+export function marginBoilerplate(slides: Pick<SlideFeatures, 'layout'>[]): Set<string> {
+  const counts = new Map<string, number>();
+  for (const slide of slides) {
+    const seen = new Set<string>();
+    for (const line of slide.layout ?? []) for (const w of line.words) if (inMargin(w.r)) seen.add(foldWord(w.t));
+    for (const word of seen) counts.set(word, (counts.get(word) ?? 0) + 1);
+  }
+  const out = new Set<string>();
+  if (slides.length < 4) return out;
+  for (const [word, n] of counts) if (n >= slides.length * BOILERPLATE_SHARE) out.add(word);
+  return out;
+}
+
+/** A margin word that is no content: a number (the slide number, a date) or the deck's header / footer. */
+function isMarginNoise(word: { r: LayoutBox; t: string }, boilerplate: ReadonlySet<string>): boolean {
+  if (!inMargin(word.r)) return false;
+  const t = foldWord(word.t);
+  return MARGIN_NUMBER.test(t) || boilerplate.has(t);
+}
+
+/** Boxes of the margin words that are no content (slide numbers, dates, header / footer): ignored by the pixels too. */
+export function slideNumberBoxes(layout: SlideFeatures['layout'], boilerplate: ReadonlySet<string> = new Set()): LayoutBox[] {
   if (!layout) return [];
   const boxes: LayoutBox[] = [];
-  for (const line of layout) {
-    for (const word of line.words) if (SLIDE_NUMBER.test(word.t.trim()) && inMargin(word.r)) boxes.push(word.r);
-  }
+  for (const line of layout) for (const word of line.words) if (isMarginNoise(word, boilerplate)) boxes.push(word.r);
   return boxes;
 }
 
@@ -90,12 +120,15 @@ function fold(text: string): string {
   return text.normalize('NFC').toLowerCase().replace(/\s+/g, '');
 }
 
-/** The text a slide is compared by: without its slide number, case folded, without whitespace. */
-export function comparableText(slide: Pick<SlideFeatures, 'text' | 'layout'>): string {
+/**
+ * The text a slide is compared by: without the margin's numbers and the deck's header / footer (`boilerplate`, see
+ * marginBoilerplate), case folded, without whitespace.
+ */
+export function comparableText(slide: Pick<SlideFeatures, 'text' | 'layout'>, boilerplate: ReadonlySet<string> = new Set()): string {
   if (slide.layout && slide.layout.length) {
     return fold(
       slide.layout
-        .map((line) => line.words.filter((w) => !(SLIDE_NUMBER.test(w.t.trim()) && inMargin(w.r))).map((w) => w.t).join(' '))
+        .map((line) => line.words.filter((w) => !isMarginNoise(w, boilerplate)).map((w) => w.t).join(' '))
         .join('\n'),
     );
   }
@@ -216,11 +249,15 @@ interface Prepared {
   scores: PairScore[][];
   oldText: string[];
   newText: string[];
+  oldBoilerplate: Set<string>;
+  newBoilerplate: Set<string>;
 }
 
 function prepare(oldSlides: SlideFeatures[], newSlides: SlideFeatures[]): Prepared {
-  const oldText = oldSlides.map(comparableText);
-  const newText = newSlides.map(comparableText);
+  const oldBoilerplate = marginBoilerplate(oldSlides);
+  const newBoilerplate = marginBoilerplate(newSlides);
+  const oldText = oldSlides.map((slide) => comparableText(slide, oldBoilerplate));
+  const newText = newSlides.map((slide) => comparableText(slide, newBoilerplate));
   const vectors = textVectors([...oldText, ...newText]);
   const oldVec = vectors.slice(0, oldSlides.length);
   const newVec = vectors.slice(oldSlides.length);
@@ -245,7 +282,7 @@ function prepare(oldSlides: SlideFeatures[], newSlides: SlideFeatures[]): Prepar
       return { score, text, image };
     }),
   );
-  return { scores, oldText, newText };
+  return { scores, oldText, newText, oldBoilerplate, newBoilerplate };
 }
 
 /** Similarity matrix (old x new). */
@@ -371,7 +408,7 @@ function longestIncreasing(values: number[]): Set<number> {
 export function matchSlides(oldSlides: SlideFeatures[], newSlides: SlideFeatures[]): SlideMatch {
   const n = oldSlides.length;
   const m = newSlides.length;
-  const { scores, oldText, newText } = prepare(oldSlides, newSlides);
+  const { scores, oldText, newText, oldBoilerplate, newBoilerplate } = prepare(oldSlides, newSlides);
 
   // The skeleton, then for each old slide the gap of new slides it is expected in: (lo, hi) exclusive.
   const anchor = monotonic(scores, n, m, ANCHOR_MIN);
@@ -434,7 +471,7 @@ export function matchSlides(oldSlides: SlideFeatures[], newSlides: SlideFeatures
   const slides: SlideMatchEntry[] = newSlides.map((slide, j) => {
     const i = oldOf[j];
     if (i < 0) return { slide: j + 1, from: null, change: 'new', score: 0 };
-    const ignore = [...slideNumberBoxes(oldSlides[i].layout), ...slideNumberBoxes(slide.layout)];
+    const ignore = [...slideNumberBoxes(oldSlides[i].layout, oldBoilerplate), ...slideNumberBoxes(slide.layout, newBoilerplate)];
     const same = oldText[i] === newText[j] && changedPixels(oldSlides[i].thumb, slide.thumb, ignore) <= SAME_PIXELS_MAX;
     return { slide: j + 1, from: i + 1, change: same ? 'same' : 'changed', score: scores[i][j].score, ...(moved.has(j) ? { moved: true } : {}) };
   });
