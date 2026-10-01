@@ -124,6 +124,106 @@ export interface DocMeta {
   courseId: string | null;
   /** Digest status of this document (for badges in pickers). */
   digestStatus: DigestStatus;
+  /**
+   * How many times the deck was swapped (DESIGN §28: a new version applied, or undone); absent = 0. Part of every slide
+   * image URL (`?v=`), which the server caches for good, and of the viewer's key.
+   */
+  deckRev?: number;
+  /** The last swap of the deck (DESIGN §28), for the banner and the 수정 / 새로 badges; absent = never swapped. */
+  lastChange?: DeckChange;
+}
+
+// ---------------------------------------------------------------------------
+// New version of a lecture PDF (DESIGN §28): the professor re-posted the deck. The new PDF is converted next to the
+// lecture, its slides are matched to the old ones (server/slideMatch.ts), and on apply everything the student made
+// follows its slide.
+// ---------------------------------------------------------------------------
+
+/** A slide of the new deck: the same as its old slide, changed, or new (no old counterpart). */
+export type SlideChangeKind = 'same' | 'changed' | 'new';
+
+export interface VersionPlanSlide {
+  /** 1-based slide of the new deck. */
+  slide: number;
+  /** The 1-based old slide it continues; null for a new slide. */
+  from: number | null;
+  change: SlideChangeKind;
+  /** The old slide was elsewhere in the order. */
+  moved?: true;
+}
+
+/** How the new deck's slides continue the old ones (NextVersionInfo.plan). */
+export interface VersionPlan {
+  /** DocMeta.deckRev the plan was made against; apply refuses (409) when the deck changed since. */
+  fromRev: number;
+  oldPageCount: number;
+  newPageCount: number;
+  /** One entry per new slide, in order. */
+  slides: VersionPlanSlide[];
+  /** Old slides without a counterpart, ascending. */
+  removed: number[];
+  /** Fewer than half of the old slides found a counterpart: probably another lecture's PDF. */
+  unrelated: boolean;
+  /**
+   * What the student has on the removed slides: 필기 items and memos (kept in the 빠진 슬라이드 archive) and questions
+   * (they stay in their sessions, shown on the nearest kept slide).
+   */
+  onRemoved: { items: number; memos: number; questions: number };
+}
+
+/** GET /api/docs/:docId/versions/next: the uploaded new version, while it is converted and until applied or dropped. */
+export interface NextVersionInfo {
+  status: 'processing' | 'ready' | 'error';
+  /** The uploaded file's name. */
+  fileName: string;
+  /** Slides rendered so far while 'processing'. */
+  progress: number;
+  /** 0 until the PDF is open. */
+  pageCount: number;
+  createdAt: string;
+  /** status 'error': why the PDF could not be converted. */
+  error?: string;
+  /** status 'ready'. */
+  plan?: VersionPlan;
+}
+
+/** DocMeta.lastChange: the last swap of the deck. */
+export interface DeckChange {
+  /** DocMeta.deckRev after the swap. */
+  rev: number;
+  at: string;
+  /** 'apply' = a new version replaced the deck; 'undo' = the deck before it came back. */
+  kind: 'apply' | 'undo';
+  /** File name of the deck that was replaced. */
+  fromFileName: string;
+  /** Slides (current numbering) whose content differs from the slide they continue. */
+  changed: number[];
+  /** Slides (current numbering) without a counterpart in the replaced deck. */
+  added: number[];
+  /** Slides of the replaced deck without a counterpart (their numbers there). */
+  removed: number[];
+  /** POST …/versions/undo can bring the replaced deck back (only the last apply, until the next swap). */
+  undoable: boolean;
+}
+
+/** Where a message or attachment was, when a new version dropped its slide: `slide` (in deck `rev`). */
+export interface RemovedFrom {
+  /** DocMeta.deckRev of the deck the slide was in. */
+  rev: number;
+  /** Its 1-based number in that deck. */
+  slide: number;
+}
+
+/** GET /api/docs/:docId/annotations/removed: the 필기 of a slide a new version dropped (the 빠진 슬라이드 archive). */
+export interface RemovedSlide {
+  /** DocMeta.deckRev of the deck the slide was in. */
+  rev: number;
+  /** Its 1-based number in that deck. */
+  slide: number;
+  removedAt: string;
+  /** A thumbnail exists: GET /api/docs/:docId/annotations/removed/:rev/:slide.webp */
+  thumb: boolean;
+  items: AnnotationItem[];
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +335,11 @@ export interface ContextInfo {
    * (PATCH …/sessions/:sid): a forced rollover on the new LLM, the earlier Q&A recapped.
    */
   switched?: true;
+  /**
+   * Set when this turn started a new provider conversation because the lecture's deck was replaced by a new version
+   * (DESIGN §28): a forced rollover with the new deck, the earlier Q&A recapped with the slides' new numbers.
+   */
+  deckUpdated?: true;
   /** Number of attachments (selected slide regions / images) sent with this question. */
   attachments?: number;
   /** Number of the student's own memos (§25 "학생의 메모") given to the tutor with this question; absent when none. */
@@ -248,6 +353,11 @@ export interface ChatMessage {
   text: string;
   /** 1-based slide number the question was about (the focused slide when sent). */
   slide: number;
+  /**
+   * A new version of the deck dropped the slide this message was on (DESIGN §28): `slide` is then the nearest kept slide,
+   * and this is where the message really was.
+   */
+  removedFrom?: RemovedFrom;
   /** 'prime' messages are the automatic "feed the whole deck" turn, not a user question. */
   kind: 'question' | 'prime';
   createdAt: string; // ISO
@@ -558,6 +668,11 @@ export interface Attachment {
    * Stored on the user message with the attachment; question markers link the item to the Q&A through it.
    */
   annotation?: AttachmentAnnotation;
+  /**
+   * kind 'region': a new version of the deck dropped `slide` (DESIGN §28). `slide` is then the nearest kept slide (so the
+   * attachment stays valid) and question markers skip the attachment.
+   */
+  removedFrom?: RemovedFrom;
   createdAt: string;
 }
 
@@ -640,6 +755,8 @@ export interface TranscriptSegment {
 export interface RecordingTranscript {
   recordingId: string;
   segments: TranscriptSegment[];
+  /** The recording's manual markers (markers.json), so every device shows the stored list (DESIGN §28). */
+  markers?: AlignmentMarker[];
 }
 
 /** The student viewed `slide` from recording time `t` (seconds, recording clock) on. */
@@ -1025,6 +1142,12 @@ export type AnnotationEvent =
    * clients refresh their notes (question markers) unless they already hold that state.
    */
   | { type: 'qa'; sessionId: string; updatedAt: string | null }
+  /**
+   * The lecture's deck was swapped (DESIGN §28: a new version applied, or undone): `oldToNew[old - 1]` = the new number of
+   * an old slide (null = dropped). Clients drop everything they hold for the lecture (slide images, annotations, text
+   * layouts, notes, the open session, composer chips, recordings) and load it again; the stream ends after this event.
+   */
+  | { type: 'deck'; rev: number; kind: 'apply' | 'undo'; oldToNew: (number | null)[] }
   | { type: 'ping' };
 
 /**

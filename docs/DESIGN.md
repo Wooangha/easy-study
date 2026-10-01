@@ -2477,3 +2477,161 @@ reference: every text is written in Korean first and every test pins the Korean 
   does not change the shell's. The rest of the server's terminal output (CLI, banners, proxy.log lines) stays Korean.
   The Linux package description (tauri.conf.json `shortDescription`, the launcher's Comment=) is both languages in one
   line.
+
+## 28. New version of a lecture PDF — 「새 버전 올리기」 (0.6.8)
+
+The user: "가끔씩 슬라이드가 업데이트돼서 새로운 걸 업로드해야되는 상황이 있는데 이를 위한 기능으로 뭘 만들 수 있을까" → "앱에
+붙여줘". The professor re-posts the deck (typos fixed, a line added, a slide dropped, one added, renumbered). The student
+uploads the new PDF onto the existing lecture; its slides are matched to the old ones and everything the student made
+follows its slide: 필기 and memos, question markers, the chats and notes, the recordings' slide alignment, the 정리본.
+
+### Matching (`server/slideMatch.ts`, pure; tests/slideMatch.test.ts)
+
+Per slide: the text and word boxes (PDFium `text()` / `textLayout()`), and a 128 × 96 grayscale picture. Both decks are
+rendered by the same engine for this (the old one from its source.pdf, so a deck converted by poppler compares fine).
+- **Comparable text**: the words without the slide number (a lone number in the top 12 % / bottom 14 % of the slide, found
+  by its box; without boxes, lines that are only a page number), case folded, whitespace removed.
+- **Text similarity**: TF-IDF weighted character trigrams over both decks (the course name and footers on every slide
+  weigh almost nothing), cosine. **Picture similarity**: weighted Jaccard of the slides' "ink" (32 × 24 cells, distance
+  from the slide's median gray: dark themes work, blank slides have none). Score = 0.75 text + 0.25 picture (picture only
+  when neither has ≥ 10 characters; 0.6 × picture when only one has).
+- **Assignment**: a monotonic DP over pairs ≥ ANCHOR_MIN 0.7 gives the skeleton; an old slide is "near" the new slides in
+  the gap between its skeleton neighbours. One optimal assignment (Hungarian, O(n² (n + m)); decks over ~450 slides fall
+  back to the DP with NEAR_MIN plus a greedy pass) with gain = score − NEAR_MIN 0.4 near (plus a 0.01 diagonal tie-break)
+  and score − FAR_MIN 0.65 elsewhere (a moved slide). Moved = not on the longest increasing run of matched pairs.
+- **same / changed / new**: a matched pair is `same` when the comparable texts are equal and at most 0.2 % of the 128 × 96
+  pixels differ by more than 24 gray levels outside the slide-number boxes; else `changed`. Unmatched new slides are
+  `new`, unmatched old slides removed.
+- Measured (8 real lectures, each edited twice with PDFium: slides removed / inserted from another lecture / moved,
+  sentences edited, pictures replaced, elements moved, every slide number renumbered; 598 slides): 595 matched right (the
+  3 misses: slides with more than half of their text replaced → removed + new), same/changed right on all but changes the
+  answer key had called invisible; the same PDF again → all same; renumbering only → all same; another lecture → ≤ 6 of
+  ~40 matched. The real L7 old vs updated pair: 42 same, 6 changed (all real edits, one a font-size change), the merged
+  build slide removed, the new aside slide added — all right (a one-word underline counts as same). 300 slides: 0.6 s.
+
+### Flow and API
+
+1. Lecture menu (LectureRow, DocCard) › **새 버전 올리기** (FileUp icon) → file picker (PDF only). Not offered while the
+   lecture is not ready.
+2. `POST /api/docs/:docId/versions` (raw PDF like POST /docs, `X-Filename`) → 202 NextVersionInfo. 400 not a PDF / empty,
+   404, 409 the lecture is not ready (or being deleted). A pending new version (processing or ready) is replaced: its
+   conversion is stopped and its folder removed first.
+3. The server converts it into `library/.next-<docId>/` (same PDF worker and image worker as an ingest, derived images
+   included, the same ingest slots; never visible as a document, outside the doc dir so the tutor CLIs cannot read it),
+   then a worker job matches it against the live deck → the plan. `GET /api/docs/:docId/versions/next` → NextVersionInfo
+   (404 none); the client polls it every 800 ms while processing. `GET …/versions/next/thumbs/:file` → the new deck's
+   thumbnails (webp, `no-store`). `DELETE …/versions/next` → 204 (drops it; idempotent).
+4. Dialog **새 버전 확인**: chips 그대로 N · 수정 N · 새로 N · 빠짐 N, then the changed slides (old thumb → new thumb, 이동
+   tag when moved), the new slides, the removed ones (old thumbs), a line on what sits on removed slides ("빠지는 장의 필기
+   N개·메모 N개는 메모 탭 › 빠진 슬라이드에 보관돼요", "질문 N개는 가까운 장으로 옮겨져요"), a warning when
+   `plan.unrelated` ("이 강의와 많이 달라요. 다른 강의 PDF가 아닌지 확인해 주세요."), [취소] [새 버전으로 바꾸기]. An identical
+   PDF says so ("바뀐 장이 없어요") and still allows applying (the file name changes).
+5. `POST …/versions/next/apply` → DocMeta (the swapped lecture). 409 with a message when busy (below), when the plan is
+   stale (`plan.fromRev !== deckRev`) or the next version is not ready; the client keeps the dialog and shows it.
+6. Afterwards DocMeta.deckRev + 1 and DocMeta.lastChange. The viewer shows a banner until dismissed (per browser,
+   localStorage `deckSeen:<docId>` = rev): "새 버전으로 바꿨어요 · 수정 6 · 새로 1 · 빠짐 1" with ‹ › to step through the
+   changed and added slides, [되돌리기] while `undoable`, [×]. The slide label of a changed / added slide shows a small
+   수정 / 새로 badge while the banner is not dismissed.
+7. `POST …/versions/undo` → DocMeta: the deck before the last apply comes back (rev + 1 again, kind 'undo'), with
+   everything the student did since mapped back. 409 when nothing to undo or busy.
+
+Every route is under remote-mode auth like the others; JSON errors.
+
+### Storage
+
+- `library/.next-<docId>/`: the staging render set (source.pdf, slides/, sheets/, text/, view/, thumbs/, inline/) +
+  `next.json` (NextVersionInfo without derived fields, plus the plan). Removed with the lecture (deleteDoc), on drop, and
+  at startup when it is still 'processing' (the client then shows the error "변환이 중단됐어요. 다시 올려 주세요").
+- `library/.prev-<docId>/`: the replaced deck's render set + `prev.json` {fromRev, toRev, oldMeta {pageCount, aspectRatio,
+  fileName}, newFileName, plan, appliedAt, steps, complete} — the apply's journal and the undo's source. One level: a new
+  apply replaces it, an undo consumes it, deleteDoc removes it.
+- `annotations/removed/r<rev>/NNN.json` (SlideAnnotations of slide NNN of deck `rev`, NNN padded with that deck's page
+  count) and `NNN.webp` (its thumbnail, copied from the old render set): the 빠진 슬라이드 archive, kept for good (subfolders
+  are ignored by the index rebuild). GET /api/docs/:docId/annotations/removed → RemovedSlide[] (newest rev first, then
+  slide); GET …/annotations/removed/:rev/:file → the thumbnail.
+- Per-subsystem idempotency marks (a remap does nothing when it finds `toRev`): `annotations/deck.json` {rev},
+  `attachments/deck.json` {rev}, SessionRecord.deckRev, recordings meta.json `deckRev`, DigestRecord.deckRev.
+
+### Apply (server/versions.ts, the orchestrator)
+
+1. Checks, then — synchronously, no await in between, like deleteDoc's busyReason — the gates: refuse (409, message per
+   reason) when the lecture is not ready / converting / being deleted / swapping, the next version not ready or its plan
+   stale, a digest is running (`lockDigest` throws), a turn is answering (`reserveDocTurns` throws), recordings are busy
+   (`recordingsBusy`: a live recording of the lecture, a transcription queued or running, a conversion, an alignment or
+   AI alignment running — checked just before). Then `swappingDocs.add(docId)`: every non-GET request for the lecture
+   except the versions routes answers 409 "새 버전으로 바꾸는 중이에요" (api.param('docId')); backfill and derived-image
+   requests are refused (imageWorkBlocked); attachment crop jobs are stopped.
+2. Drain: annotation writes and the debounced index (`drainAnnotations`), stop image runs of the live deck.
+3. Write `.prev-<docId>/prev.json` (complete: false), then per render entry: move live → .prev, staging → live (each step
+   idempotent: skipped when already done). Copy the removed slides' thumbnails into the annotation archive. Then doc.json
+   (updateMeta): pageCount, aspectRatio, fileName, progress, deckRev = toRev, lastChange (kind 'apply', undoable true).
+4. Remaps, each recorded in prev.json `steps` when done: `remapDocAnnotations`, `remapRegionAttachments`,
+   `remapSessionSlides`, `remapDocRecordings`, `remapDigest`, `remapAnnotationLinks` (memos of other lectures linking into
+   this one), then `writeNotes`, COURSE.md, the annotation index rebuild. prev.json complete: true; remove .next-<docId>.
+5. Release the gates (finally); send the `deck` annotation event (then the hub closes: every viewer, old bundles too,
+   reconnects and resyncs).
+- A crash: at startup a `.prev-*` with complete: false resumes from its steps (the remaps are idempotent), before
+  requests are accepted. An error mid-way keeps the gates until the steps that remain have been retried once; if it
+  still fails the lecture stays swapped with what succeeded and the error is logged (the student can undo).
+
+### Undo
+
+Allowed while `.prev-<docId>` is complete and `toRev === deckRev`. Same checks and gates. The inverse map: from the plan,
+`newToOld` (null for added slides); `changed` = the plan's changed old counterparts; `added` = the removed old slides;
+`restoreRev` = the plan's fromRev; fromRev = deckRev, toRev = deckRev + 1. Render sets swap back (the undone deck's set is
+deleted), doc.json gets the old meta and lastChange (kind 'undo', undoable false), the remaps run with the inverse map
+(their restore half puts back what the apply archived), `.prev-<docId>` is removed.
+
+### Remaps (per subsystem; `DeckMap` in server/internal-types.ts)
+
+- **Annotations** (annotations.ts): slide file of old k → new oldToNew[k−1] (file renamed with the new padding, `slide`
+  set, rev = max old rev + 1 for every rewritten file so no stale baseRev matches); removed → archive
+  `annotations/removed/r<fromRev>/`. MemoLink {kind 'slide'} remapped, dropped when removed; {kind 'doc', docId: self}
+  remapped, `slide` dropped when removed. TextHighlightItem on a changed slide (or any slide whose text layout changed):
+  `engine` set to 'moved' so the client re-anchors by its text against the new layout. Restore (undo): the archive of
+  `restoreRev` goes back to its slides, the folder removed. Writes are gated (409) for the duration; index.json rebuilt.
+  `remapAnnotationLinks`: other lectures' memos {kind 'doc', docId: this, slide} remapped (slide dropped when removed),
+  through the per-slide queue with a rev bump and the normal events.
+- **Attachments** (attachments.ts, `attachments/<id>.json` kind 'region'): slide remapped; removed → `slide` = the nearest
+  kept slide (the closest preceding old slide that survived, else the closest following, else 1) and `removedFrom` {rev:
+  fromRev, slide: old}. Restore: `removedFrom.rev === restoreRev` → slide = removedFrom.slide, flag removed.
+- **Sessions** (sessions.ts, inside the session queue, read-modify-write): ChatMessage.slide and its attachments' slides
+  like attachments (removedFrom on the message too); ContextInfo.attachedSlides / reusedSlides mapped, nulls dropped;
+  providerState → `{ ...initialProviderState(), generation, deckUpdated: true }` when it had a conversation (primed,
+  resume or history; `switched` kept), else a fresh state. updatedAt kept. **context.ts**: `deckUpdated` forces a
+  rollover with reason 'deck_update' (prompts.ts note: the professor posted a new version, the deck above is it, the recap
+  uses the new numbers, earlier answers may mention old numbers or content that changed); ContextInfo.deckUpdated. The
+  web context line says "새 버전 슬라이드로 다시 시작". **chat.ts**: `reserveDocTurns(docId)` (409 when a turn runs; blocks
+  new turns, prime turns and LLM switches until released).
+- **Recordings** (recordings/service.ts, through loadRec + Rec.serial, never the files directly): segments' slide mapped,
+  removed → null; timeline events mapped, removed → dropped; markers mapped, removed → dropped (written through
+  setMarkers); align-llm labels mapped, removed → key deleted. What was cleared or dropped is archived in
+  `recordings/<rid>/deck-r<fromRev>.json` and put back on restore. In-memory caches (material, lexIndex, recentPrior)
+  cleared; `realigned` + status sent. No realign. `recordingsBusy(docId)` → reason or null. RecordingTranscript carries
+  `markers`, and the web keeps the server's list (no stale localStorage list after a swap).
+- **Digest** (digest.ts): `lockDigest(docId)` (409 while running; blocks starts and DIGEST.md rewrites until released).
+  `remapDigest`: the record before is kept as `digest/digest-r<fromRev>.json`; entries of `same` slides renumbered,
+  changed / removed dropped (이어서 만들기 redoes the changed and new slides in the record's language); summaryStale =
+  true when anything changed; `error` = a note in the record's language ("새 버전으로 바뀐 장 N개를 다시 정리해야 해요"),
+  never the old slide numbers. Restore: entries for the restored deck's slides that were not `same` come from the
+  snapshot, its summary too; the snapshot removed. DIGEST.md and COURSE.md rewritten.
+- **Not remapped**: free text in answers and the digest summary that mentions "slide N" (the recap note tells the tutor);
+  memo links to removed slides (dropped); recording `RecordedAt` (no slide).
+
+### Web
+
+- `api.ts`: the versions API (upload with progress like POST /docs), `slideUrl` / `viewUrl` / `viewSrcSet` / `thumbUrl`
+  append `v=<deckRev>` (from a docId → rev map filled by normalizeDoc; no `v` at rev 0, so URLs of untouched lectures
+  stay as they were). App keys the viewer by `${id}:${deckRev}`. useDocs refreshes on window focus / visibility.
+- The 'deck' event (annotation stream of the open lecture): refresh the doc, drop the annotation store and text layouts,
+  notes, the session list and the open session, composer chips, recording feeds; remap localStorage `slide:<docId>` and
+  the pinned slide through oldToNew (nearest kept slide when dropped). The client that applied does the same itself.
+- 메모 tab: a **빠진 슬라이드** section (collapsed, with a count) listing the archive's memos and other 필기 with the old
+  thumbnail and "예전 p.N", read-only.
+- Messages / attachments with `removedFrom`: the p.N chip reads "p.N (빠진 장 p.M)"; markers skip such attachments.
+
+### Tests
+
+tests/slideMatch.test.ts (matching), tests/versions.test.ts (HTTP: upload → plan → apply → every subsystem remapped →
+undo → back; busy 409s; stale plan; drop; startup recovery of a half-applied swap; image URLs), per-subsystem remap
+unit tests next to their suites, web tests for the dialog's plan view model, URL versioning and the deck event handling.

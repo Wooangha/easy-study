@@ -40,6 +40,13 @@ export interface ProviderState {
    * came from another model (prompts.RestartReason 'provider_switch'). Gone once a conversation starts.
    */
   switched?: true;
+  /**
+   * The lecture's deck was replaced by a new version (or the replacement undone, DESIGN §28) and the conversation was
+   * dropped: the next turn starts a new provider conversation with the new deck as a forced rollover, whose recap
+   * gives the earlier questions' slides in the new numbering (prompts.RestartReason 'deck_update'). Gone once a
+   * conversation starts.
+   */
+  deckUpdated?: true;
 }
 
 /** Persisted as library/<docId>/sessions/<sessionId>.json */
@@ -270,4 +277,30 @@ export interface LayoutRecord {
   version: 1;
   groups: CourseGroup[];
   order: LayoutItem[];
+}
+
+/**
+ * One swap of a lecture's deck (DESIGN §28), as every subsystem remaps its slide numbers: a new version applied
+ * (fromRev r → toRev r + 1) or the last one undone (the inverse map, with `restoreRev` = the deck coming back).
+ * Every remap is idempotent: it records `toRev` with its data and does nothing when it finds it there.
+ */
+export interface DeckMap {
+  /** DocMeta.deckRev of the deck the data is numbered in before the remap. */
+  fromRev: number;
+  /** DocMeta.deckRev after it (fromRev + 1). */
+  toRev: number;
+  oldPageCount: number;
+  newPageCount: number;
+  /** oldToNew[old - 1] = the slide's number in the new deck (1-based), or null when the new deck dropped it. */
+  oldToNew: (number | null)[];
+  /** New-deck slides (new numbering) whose content differs from the old slide they continue. */
+  changed: ReadonlySet<number>;
+  /** New-deck slides (new numbering) without an old counterpart. */
+  added: ReadonlySet<number>;
+  /**
+   * Undo only: the deckRev of the deck coming back. What the apply from it archived — the removed slides' 필기,
+   * recording labels it cleared, the digest as it was, messages' RemovedFrom with this rev — is restored and the
+   * archive removed.
+   */
+  restoreRev?: number;
 }
