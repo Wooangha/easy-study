@@ -770,9 +770,25 @@ export function lockDigest(docId: string): () => void {
   };
 }
 
-/** digest/deck.json {rev}: the deckRev the digest was last renumbered to (absent = never). */
+/** digest/deck.json {rev}: the deckRev the digest's slides are numbered in (absent = 0). */
 function deckMarkPath(docId: string): string {
   return path.join(docPaths(docId).digestDir, 'deck.json');
+}
+
+/** The digest's deck mark, 0 when there is none. */
+async function readDeckMark(docId: string): Promise<number> {
+  const mark = await readJsonFile<{ rev?: unknown }>(deckMarkPath(docId));
+  return typeof mark?.rev === 'number' && Number.isInteger(mark.rev) && mark.rev >= 0 ? mark.rev : 0;
+}
+
+/** Writes the deck mark, making digest/ when the lecture has none yet (never the lecture's folder). */
+async function writeDeckMark(docId: string, rev: number): Promise<void> {
+  try {
+    await fs.mkdir(docPaths(docId).digestDir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+  }
+  await writeJsonAtomic(deckMarkPath(docId), { rev });
 }
 
 /** digest/digest-r<rev>.json: the record as it was in deck `rev`, before the swap from it (an undo's source). */
@@ -856,18 +872,33 @@ function remapRecord(before: DigestRecord, map: DeckMap, restored: DigestRecord 
 /**
  * Renumbers the digest for a new version of the deck, or back for an undo (DESIGN §28 "Remaps › Digest"). The record
  * before is kept as digest/digest-r<fromRev>.json; an undo (map.restoreRev) takes back what the apply dropped from
- * digest-r<restoreRev>.json, and no snapshot is left. Then DIGEST.md (with `title`) and COURSE.md. Nothing without a
- * digest. Idempotent through digest/deck.json: a swap resumed after a crash remaps the snapshot it kept, never its own
- * result. Runs while lockDigest holds the lecture, so no job is writing the record.
+ * digest-r<restoreRev>.json, and no snapshot is left. Then DIGEST.md (with `title`) and COURSE.md. Runs while
+ * lockDigest holds the lecture, so no job is writing the record.
+ *
+ * Only a digest numbered in map.fromRev (digest/deck.json {rev}, absent = 0) is renumbered (and snapshot), then marked
+ * map.toRev: a swap resumed after a crash remaps the snapshot it kept, never its own result, and a second run does
+ * nothing. An undo that finds it still in the deck coming back (map.restoreRev: the apply gave it up) only marks it;
+ * any other numbering is left alone. Without a digest only the mark is written, so one made later counts as numbered
+ * in the new deck.
  */
 export async function remapDigest(docId: string, map: DeckMap, title: string): Promise<void> {
   if (jobs.has(docId)) throw new HttpError(409, smsg().library.versions.busyDigest);
   const paths = docPaths(docId);
   const remapped = await persistQueue(docId, async () => {
     const current = await readDigestRecord(docId);
-    if (!current) return false;
-    const mark = await readJsonFile<{ rev?: unknown }>(deckMarkPath(docId));
-    if (mark?.rev !== map.toRev) {
+    const mark = await readDeckMark(docId);
+    if (!current) {
+      if (mark !== map.toRev) await writeDeckMark(docId, map.toRev);
+      return false;
+    }
+    if (mark !== map.fromRev && mark !== map.toRev) {
+      if (map.restoreRev === undefined || mark !== map.restoreRev) return false;
+      // The apply never renumbered it: nothing to bring back, its snapshot goes.
+      await writeDeckMark(docId, map.toRev);
+      await removeSnapshots(docId, null);
+      return false;
+    }
+    if (mark === map.fromRev) {
       let before = await readSnapshot(docId, map.fromRev);
       if (!before) {
         before = current;
@@ -877,7 +908,7 @@ export async function remapDigest(docId: string, map: DeckMap, title: string): P
       const record = remapRecord(before, map, restored);
       await writeJsonAtomic(paths.digestJson, record);
       await writeFileAtomic(paths.digestMd, digestMarkdown(title, map.newPageCount, record));
-      await writeJsonAtomic(deckMarkPath(docId), { rev: map.toRev });
+      await writeDeckMark(docId, map.toRev);
     }
     // An apply keeps its snapshot for the undo (older ones can no longer be undone); an undo consumes them.
     await removeSnapshots(docId, map.restoreRev === undefined ? map.fromRev : null);

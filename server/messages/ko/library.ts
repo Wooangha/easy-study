@@ -28,6 +28,8 @@ export const library = {
     noNext: '올린 새 버전이 없어요.',
     /** 409 of apply: the deck was swapped (or undone) since the new version was matched. */
     stalePlan: '그사이 강의 슬라이드가 바뀌었어요. 새 버전을 다시 올려 주세요.',
+    /** 409 of a slide-numbered write (or an undo) made for another deck than the lecture's (DECK_REV_HEADER). */
+    deckChanged: '그사이 이 강의가 새 버전으로 바뀌었어요. 화면을 다시 불러올게요.',
     nothingToUndo: '되돌릴 변경이 없어요.',
     busyAnswering: '답변하는 중에는 바꿀 수 없어요. 답변이 끝난 뒤에 다시 해 주세요.',
     busyDigest: '정리본을 만드는 중에는 바꿀 수 없어요. 끝나거나 멈춘 뒤에 다시 해 주세요.',

@@ -55,6 +55,7 @@ import { smsg } from './i18n.ts';
 import { MAX_MEMO_CHARS, MAX_TUTOR_MEMOS, truncateText } from './context.ts';
 import type { DeckMap, StudentMemo } from './internal-types.ts';
 import {
+  checkDeckRev,
   createKeyedQueue,
   docPaths,
   isDocSwapping,
@@ -707,12 +708,16 @@ async function buildPatch(docId: string, current: SlideAnnotations, body: Record
   return { doc, events: [{ type: 'slide', slide: doc.slide, rev: doc.rev, updatedAt: now, ops: applied }] };
 }
 
-/** The write itself (under the slide's queue): read, check the rev, build, cap, write, index, notify. */
+/**
+ * The write itself (under the slide's queue): read, check the rev, build, cap, write, index, notify. `deckRev` (the
+ * request's DECK_REV_HEADER): the deck its slide number belongs to, 409 deckChanged when it is not the lecture's.
+ */
 async function writeSlide(
   docId: string,
   slide: number,
   body: unknown,
   client: string | undefined,
+  deckRev: number | undefined,
   build: (docId: string, current: SlideAnnotations, body: Record<string, unknown>, pageCount: number, now: string) => Promise<WriteOutcome>,
 ): Promise<SlideAnnotations> {
   const request = jsonBody(body);
@@ -720,6 +725,8 @@ async function writeSlide(
     // A write queued before a swap began is refused here; drainAnnotations waited for the ones already running.
     if (isDocSwapping(docId)) throw swappingError();
     const meta = await requireDoc(docId);
+    // Before the slide is read: slide N of another deck is not this deck's slide N.
+    checkDeckRev(meta, deckRev);
     checkSlide(slide, meta.pageCount);
     const now = new Date().toISOString();
     const current = (await readSlideFile(docId, slide, meta.pageCount)) ?? emptyDoc(slide, now);
@@ -740,20 +747,21 @@ async function writeSlide(
 
 /**
  * PUT …/annotations/:slide (PutSlideAnnotationsRequest): replaces the slide's items and hidden markers. 409 with the
- * current document when `baseRev` is stale; 400 per bad item or over a cap. `client` (the writer's
- * X-Annotation-Client id) is not sent the resulting `slide-reset` event.
+ * current document when `baseRev` is stale; 409 deckChanged (no document) when `deckRev` is given and is not the
+ * lecture's; 400 per bad item or over a cap. `client` (the writer's X-Annotation-Client id) is not sent the resulting
+ * `slide-reset` event.
  */
-export function putSlideAnnotations(docId: string, slide: number, body: unknown, client?: string): Promise<SlideAnnotations> {
-  return writeSlide(docId, slide, body, client, buildPut);
+export function putSlideAnnotations(docId: string, slide: number, body: unknown, client?: string, deckRev?: number): Promise<SlideAnnotations> {
+  return writeSlide(docId, slide, body, client, deckRev, buildPut);
 }
 
 /**
  * PATCH …/annotations/:slide (PatchSlideAnnotationsRequest): applies the ops in order on the current document
  * (`add` refuses a duplicate id and `update` a missing one with 409 + current; `remove` is idempotent; hide / unhide
- * de-duplicate keys), then the same checks as a PUT. The `slide` event carries the ops as applied.
+ * de-duplicate keys), then the same checks as a PUT (the deck too). The `slide` event carries the ops as applied.
  */
-export function patchSlideAnnotations(docId: string, slide: number, body: unknown, client?: string): Promise<SlideAnnotations> {
-  return writeSlide(docId, slide, body, client, buildPatch);
+export function patchSlideAnnotations(docId: string, slide: number, body: unknown, client?: string, deckRev?: number): Promise<SlideAnnotations> {
+  return writeSlide(docId, slide, body, client, deckRev, buildPatch);
 }
 
 // ---------------------------------------------------------------------------
@@ -1264,14 +1272,17 @@ function remapItem(item: AnnotationItem, map: DeckMap, docId: string, changed: b
   return item;
 }
 
-/** Writes a dropped slide's document (and its old thumbnail) into annotations/removed/r<fromRev>/, padded like the old deck. */
+/**
+ * Writes a dropped slide's document into annotations/removed/r<fromRev>/, padded like the old deck, with its old
+ * thumbnail when it has 필기 (a document of hidden markers only is kept for the undo, never listed).
+ */
 async function archiveSlide(docId: string, map: DeckMap, doc: SlideAnnotations, removedAt: string, oldThumb: DeckRemapOptions['oldThumb']): Promise<void> {
   await mkdirOne(path.join(docPaths(docId).annotationsDir, REMOVED_DIR));
   const dir = removedDir(docId, map.fromRev);
   await mkdirOne(dir);
   const base = pageBaseName(doc.slide, map.oldPageCount);
   await writeJsonAtomic(path.join(dir, `${base}.json`), { ...doc, removedAt });
-  const thumb = oldThumb?.(doc.slide);
+  const thumb = doc.items.length > 0 ? oldThumb?.(doc.slide) : null;
   if (!thumb) return;
   try {
     await withFsRetry(() => fs.copyFile(thumb, path.join(dir, `${base}.webp`)));
@@ -1281,13 +1292,12 @@ async function archiveSlide(docId: string, map: DeckMap, doc: SlideAnnotations, 
 }
 
 /**
- * Reads the slide files in the old numbering, archives the dropped slides' 필기 and computes the files of the new
- * numbering (the journal). Nothing of the live slide files changes yet. null when the lecture has no annotations.
+ * Reads the slide files in the old numbering, archives the dropped slides' 필기 and hidden markers and computes the
+ * files of the new numbering (the journal). Nothing of the live slide files changes yet.
  */
-async function planDeckRemap(docId: string, map: DeckMap, oldThumb: DeckRemapOptions['oldThumb']): Promise<DeckJournal | null> {
+async function planDeckRemap(docId: string, map: DeckMap, oldThumb: DeckRemapOptions['oldThumb']): Promise<DeckJournal> {
   const dir = docPaths(docId).annotationsDir;
-  const files = await listSlideFiles(dir);
-  if (files === null) return null;
+  const files = (await listSlideFiles(dir)) ?? [];
   const now = new Date().toISOString();
   const old = new Map<number, SlideAnnotations>();
   const remove: string[] = [];
@@ -1325,7 +1335,8 @@ async function planDeckRemap(docId: string, map: DeckMap, oldThumb: DeckRemapOpt
   for (const doc of old.values()) {
     const next = newSlideOf(map, doc.slide);
     if (next === null) {
-      if (doc.items.length > 0) await archiveSlide(docId, map, doc, now, oldThumb);
+      // Hidden markers too: the undo puts them back with the slide.
+      if (doc.items.length > 0 || doc.hiddenMarkers.length > 0) await archiveSlide(docId, map, doc, now, oldThumb);
       continue;
     }
     const changed = map.changed.has(next);
@@ -1380,27 +1391,52 @@ export async function drainAnnotations(docId: string): Promise<void> {
   await flushAnnotationIndex(docId);
 }
 
+/** Writes the deck mark (annotations/deck.json), making annotations/ when the lecture has none yet. */
+async function writeDeckMark(docId: string, rev: number): Promise<void> {
+  const dir = docPaths(docId).annotationsDir;
+  await mkdirOne(dir);
+  await writeJsonAtomic(path.join(dir, DECK_FILE), { rev });
+}
+
 /**
  * The slide files follow their slides (DESIGN §28 Remaps › Annotations): old slide k's file becomes the file of
  * map.oldToNew[k − 1] (new padding, `slide` set, rev = the highest old rev + 1), memo links follow (dropped with a
  * dropped slide; a link into this lecture loses only its slide), 텍스트 형광 on changed slides get engine 'moved'. A
  * dropped slide's 필기 goes to annotations/removed/r<fromRev>/ with its old thumbnail (options.oldThumb). On an undo
  * (map.restoreRev) that archive comes back to its slides and is removed. The old numbering is read with
- * map.oldPageCount (doc.json has the new deck by now); the index is rebuilt at the end. Idempotent
- * (annotations/deck.json {rev}) and resumable (the journal). Writes directly: the swapping gate does not apply.
+ * map.oldPageCount (doc.json has the new deck by now); the index is rebuilt at the end. Writes directly: the swapping
+ * gate does not apply.
+ *
+ * Only files numbered in map.fromRev are renumbered (annotations/deck.json {rev}, absent = 0); once done the mark is
+ * map.toRev and a second run does nothing (a remap that stopped half-way resumes from its journal). An undo that finds
+ * the files still in the deck coming back (map.restoreRev: the apply gave the remap up) only marks them map.toRev.
+ * Files in any other numbering are left alone. A lecture without annotations/ gets the mark (and the folder), so what
+ * is written later counts as numbered in the new deck.
  */
 export function remapDocAnnotations(docId: string, map: DeckMap, options: DeckRemapOptions = {}): Promise<void> {
   return queue(`${docId}/deck`, async () => {
     const dir = docPaths(docId).annotationsDir;
+    if ((await listSlideFiles(dir)) === null) {
+      await writeDeckMark(docId, map.toRev);
+      return;
+    }
+    const mark = await readDeckMark(path.join(dir, DECK_FILE));
     const pending = await readJsonFile<unknown>(journalFile(docId, map.toRev));
-    if ((await readDeckMark(path.join(dir, DECK_FILE))) >= map.toRev) {
+    if (mark === map.toRev) {
       if (isJournal(pending, map.toRev)) await finishDeckJournal(docId, map, pending);
+      return;
+    }
+    if (mark !== map.fromRev) {
+      if (map.restoreRev !== undefined && mark === map.restoreRev) {
+        // The apply never renumbered them: its journal is of no use any more, nothing to bring back.
+        await rmWithRetry(journalFile(docId, map.fromRev), { force: true });
+        await writeDeckMark(docId, map.toRev);
+      }
       return;
     }
     // Index updates of writes from before (or of another lecture's link remap) land before the files move.
     await flushAnnotationIndex(docId);
     const journal = isJournal(pending, map.toRev) ? pending : await planDeckRemap(docId, map, options.oldThumb);
-    if (!journal) return; // no annotations at all
     if (journal !== pending) await writeJsonAtomic(journalFile(docId, map.toRev), journal);
     await applyDeckJournal(docId, map, journal);
   });

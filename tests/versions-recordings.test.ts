@@ -262,7 +262,7 @@ describe('recordings follow a new version of the lecture (remapDocRecordings)', 
   test('an undo drops what sits on a slide the new version added (kept in its own archive)', async () => {
     const rid = 'rec-20261001-140000-eeee';
     // Made after an apply (rev 1): numbered in the new deck, where slide 2 is the added one.
-    await writeRecording(rid, { source: 'upload', slides: [1, 2, 3], markers: [{ t: 2, slide: 2 }] }, {}, UNDO_DOC);
+    await writeRecording(rid, { source: 'upload', slides: [1, 2, 3], markers: [{ t: 2, slide: 2 }] }, { deckRev: 1 }, UNDO_DOC);
     await remapDocRecordings(UNDO_DOC, UNDO);
     assert.deepEqual(await slidesOf(rid, UNDO_DOC), [1, null, 2]);
     assert.deepEqual((await getTranscript(UNDO_DOC, rid)).markers, []);
@@ -272,7 +272,7 @@ describe('recordings follow a new version of the lecture (remapDocRecordings)', 
   });
 
   test('a crash between the writes: the archive’s pending state is written as it is, nothing is mapped twice', async () => {
-    await writeRecording(CRASHED, { source: 'upload', slides: [1, 2, 3], markers: [{ t: 3, slide: 2 }] }, { deckRev: 2 }, CRASH_DOC);
+    await writeRecording(CRASHED, { source: 'upload', slides: [1, 2, 3], markers: [{ t: 3, slide: 2 }] }, { deckRev: 3 }, CRASH_DOC);
     // The remap 3 → 4 had written its archive and the transcript, not the markers nor meta.json.
     const map: DeckMap = { ...APPLY, fromRev: 3, toRev: 4 };
     const transcriptFile = path.join(recDir(CRASHED, CRASH_DOC), 'transcript.json');
@@ -297,6 +297,48 @@ describe('recordings follow a new version of the lecture (remapDocRecordings)', 
       toRev: 4,
       cleared: { segments: { '3': 3 }, timeline: [], markers: [], llm: {} },
     });
+  });
+});
+
+describe('the deck a recording is numbered in (meta.deckRev)', () => {
+  test('an undo of an apply that gave the recording up only marks it; a recording in another deck is left alone', async () => {
+    const docId = 'gaveup-mno345';
+    await makeDoc(docId);
+    const kept = 'rec-20261001-150000-ffff';
+    const stray = 'rec-20261001-160000-abab';
+    // Still numbered in deck 0 (the apply's remap of it was given up), with what that remap had begun to write.
+    await writeRecording(kept, { source: 'upload', slides: [1, 2, 3], markers: [{ t: 2, slide: 3 }] }, {}, docId);
+    const leftover = path.join(recDir(kept, docId), 'deck-r0.json');
+    await fs.writeFile(leftover, JSON.stringify({ fromRev: 0, toRev: 1, cleared: { segments: { '3': 3 }, timeline: [], markers: [], llm: {} } }));
+
+    await remapDocRecordings(docId, UNDO);
+    assert.deepEqual(await slidesOf(kept, docId), [1, 2, 3], 'already in the deck that came back');
+    assert.deepEqual((await getTranscript(docId, kept)).markers, [{ t: 2, slide: 3 }]);
+    assert.equal((await readJson<RecordingMeta>(path.join(recDir(kept, docId), 'meta.json'))).deckRev, 2);
+    assert.equal(existsSync(leftover), false, 'nothing to bring back');
+
+    // Numbered in deck 1 while the lecture is swapped from deck 3: not this swap's numbering.
+    await writeRecording(stray, { source: 'upload', slides: [1, 2, 3], markers: [{ t: 2, slide: 2 }] }, { deckRev: 1 }, docId);
+    await remapDocRecordings(docId, { ...APPLY, fromRev: 3, toRev: 4 });
+    assert.deepEqual(await slidesOf(stray, docId), [1, 2, 3]);
+    assert.deepEqual((await getTranscript(docId, stray)).markers, [{ t: 2, slide: 2 }]);
+    assert.equal((await readJson<RecordingMeta>(path.join(recDir(stray, docId), 'meta.json'))).deckRev, 1);
+    assert.equal((await readJson<RecordingMeta>(path.join(recDir(kept, docId), 'meta.json'))).deckRev, 2);
+  });
+
+  test('a recording made on a swapped deck carries its deck', async () => {
+    const docId = 'swapped-pqr678';
+    await makeDoc(docId);
+    const docJson = path.join(library, docId, 'doc.json');
+    await fs.writeFile(docJson, JSON.stringify({ ...(await readJson<Record<string, unknown>>(docJson)), deckRev: 2 }));
+    const live = await createLiveRecording(docId, { language: 'ko' });
+    try {
+      assert.equal((await readJson<RecordingMeta>(path.join(recDir(live.id, docId), 'meta.json'))).deckRev, 2);
+    } finally {
+      await appendLiveAudio(docId, live.id, 0, tonesPcm(1, [{ start: 0.2, end: 0.8, hz: 440 }]));
+      await stopRecording(docId, live.id, undefined);
+      await deleteRecording(docId, live.id);
+    }
   });
 });
 

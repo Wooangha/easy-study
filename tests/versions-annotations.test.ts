@@ -301,13 +301,25 @@ describe('remapDocAnnotations: apply, then undo', () => {
     assert.deepEqual((await readSummary(DOC)).slides.map((entry) => entry.slide), [1, 2, 3, 4, 5]);
   });
 
-  test('a lecture without annotations: nothing is made', async () => {
+  test('a lecture without annotations gets only the deck mark: 필기 written later is of the new deck and its undo maps it', async () => {
     const EMPTY = 'empty-deck-ccc333';
     await makeDoc(EMPTY);
+    await writeMeta(EMPTY, 5, 1);
     await remapDocAnnotations(EMPTY, APPLY);
-    await assert.rejects(fs.access(docPaths(EMPTY).annotationsDir));
+    const dir = docPaths(EMPTY).annotationsDir;
+    assert.deepEqual(await fs.readdir(dir), ['deck.json']);
+    assert.deepEqual(await readJson(path.join(dir, 'deck.json')), { rev: 1 });
     assert.deepEqual(await listRemovedSlides(EMPTY), []);
     await assert.rejects(listRemovedSlides('nope-deck-000000'), (err: unknown) => err instanceof HttpError && err.status === 404);
+
+    // Written on the new deck's slide 2 (old slide 3), then the swap is undone: back to slide 3.
+    const onNew2 = [rectItem()];
+    await put(EMPTY, 2, onNew2);
+    await flushAnnotationIndex(EMPTY);
+    await writeMeta(EMPTY, 5, 2);
+    await remapDocAnnotations(EMPTY, UNDO);
+    assert.deepEqual(idsOf(await readSlideAnnotations(EMPTY, 3)), onNew2.map((item) => item.id));
+    assert.deepEqual(idsOf(await readSlideAnnotations(EMPTY, 2)), []);
   });
 });
 
@@ -354,6 +366,68 @@ describe('remapDocAnnotations: padding, resume', () => {
   });
 });
 
+describe('remapDocAnnotations: the deck mark decides', () => {
+  // Old deck (3 slides) → new deck: 1 → 2, 2 dropped, 3 → 1; new slide 3 added. Its undo restores deck 0 as deck 2.
+  const APPLY = deckMap(0, [2, null, 1], 3);
+  const UNDO = deckMap(1, [3, 1, null], 3, [], 0);
+
+  test('an undo of an apply that gave the remap up only marks the files (they are in the deck coming back)', async () => {
+    const DOC = 'gaveup-deck-aaa123';
+    await makeDoc(DOC, 3);
+    const ids = [];
+    for (const slide of [1, 2, 3]) ids.push((await put(DOC, slide, [rectItem()], slide === 2 ? [key(2)] : [])).items[0].id);
+    await flushAnnotationIndex(DOC);
+    const dir = docPaths(DOC).annotationsDir;
+    // The apply wrote its journal, then gave up (its mark is still absent: deck 0).
+    await fs.writeFile(path.join(dir, 'deck-r1.json'), JSON.stringify({ version: 1, toRev: 1, files: {}, remove: ['001.json'], keepRestore: false }));
+    await writeMeta(DOC, 3, 2);
+    await remapDocAnnotations(DOC, UNDO);
+    for (const slide of [1, 2, 3]) assert.deepEqual(idsOf(await readSlideAnnotations(DOC, slide)), [ids[slide - 1]], `slide ${slide}`);
+    assert.deepEqual((await readSlideAnnotations(DOC, 2)).hiddenMarkers, [key(2)]);
+    assert.deepEqual(await readJson(path.join(dir, 'deck.json')), { rev: 2 });
+    assert.deepEqual((await fs.readdir(dir)).filter((name) => name.startsWith('deck-r')), [], 'no journal is left to act on');
+    // Resumed: nothing more happens.
+    const before = await snapshot(dir);
+    await remapDocAnnotations(DOC, UNDO);
+    assert.deepEqual(await snapshot(dir), before);
+  });
+
+  test('files numbered in another deck than the swap is from are left alone', async () => {
+    const DOC = 'stray-deck-bbb123';
+    await makeDoc(DOC, 3);
+    for (const slide of [1, 2, 3]) await put(DOC, slide, [rectItem()]);
+    await flushAnnotationIndex(DOC);
+    const dir = docPaths(DOC).annotationsDir;
+    await fs.writeFile(path.join(dir, 'deck.json'), JSON.stringify({ rev: 1 }));
+    const before = await snapshot(dir);
+    // A swap from deck 3 (the remap from deck 1 was given up, then the deck changed again).
+    await remapDocAnnotations(DOC, deckMap(3, [2, null, 1], 3));
+    assert.deepEqual(await snapshot(dir), before);
+    // An undo restoring deck 0 does not apply either.
+    await remapDocAnnotations(DOC, deckMap(3, [3, 1, null], 3, [], 0));
+    assert.deepEqual(await snapshot(dir), before);
+  });
+
+  test('a dropped slide with only hidden markers is archived (not listed) and its undo puts them back', async () => {
+    const DOC = 'hidden-deck-ccc123';
+    await makeDoc(DOC, 3);
+    await put(DOC, 1, [rectItem()]);
+    await put(DOC, 2, [], [key(3), key(4)]);
+    await flushAnnotationIndex(DOC);
+    await writeMeta(DOC, 3, 1);
+    await remapDocAnnotations(DOC, APPLY, { oldThumb: () => path.join(tmpRoot, 'old-thumb-002.webp') });
+    const archive = path.join(docPaths(DOC).annotationsDir, 'removed', 'r0');
+    assert.deepEqual(await fs.readdir(archive), ['002.json'], 'no thumbnail: nothing to show');
+    assert.deepEqual(await listRemovedSlides(DOC), []);
+    assert.deepEqual((await readSlideAnnotations(DOC, 3)).hiddenMarkers, []);
+
+    await writeMeta(DOC, 3, 2);
+    await remapDocAnnotations(DOC, UNDO);
+    assert.deepEqual((await readSlideAnnotations(DOC, 2)).hiddenMarkers, [key(3), key(4)]);
+    await assert.rejects(fs.access(archive));
+  });
+});
+
 describe('the swapping gate, the drain and the deck event', () => {
   const DOC = 'gate-deck-fff666';
   before(() => makeDoc(DOC, 3));
@@ -372,6 +446,31 @@ describe('the swapping gate, the drain and the deck event', () => {
       endDocSwap(DOC);
     }
     assert.equal((await put(DOC, 2, [rectItem()])).rev, 1);
+  });
+
+  test("a write for another deck than the lecture's is refused with 409 deckChanged (deckRev, no document)", async () => {
+    const { rev } = await readSlideAnnotations(DOC, 2);
+    await writeMeta(DOC, 3, 2);
+    try {
+      for (const write of [
+        putSlideAnnotations(DOC, 2, { baseRev: rev, items: [rectItem()], hiddenMarkers: [] }, undefined, 1),
+        patchSlideAnnotations(DOC, 2, { baseRev: rev, ops: [{ op: 'add', item: rectItem() }] }, undefined, Number.NaN),
+      ]) {
+        await assert.rejects(write, (err: unknown) => {
+          assert.ok(err instanceof HttpError);
+          assert.equal(err.status, 409);
+          assert.equal(err.message, smsg('ko').library.versions.deckChanged);
+          assert.deepEqual(err.fields, { deckRev: 2 });
+          return true;
+        });
+      }
+      assert.equal((await readSlideAnnotations(DOC, 2)).rev, rev, 'nothing written');
+      // The lecture's deck, or no deck named (an older client): written.
+      assert.equal((await putSlideAnnotations(DOC, 2, { baseRev: rev, items: [], hiddenMarkers: [] }, undefined, 2)).rev, rev + 1);
+      assert.equal((await putSlideAnnotations(DOC, 2, { baseRev: rev + 1, items: [], hiddenMarkers: [] })).rev, rev + 2);
+    } finally {
+      await writeMeta(DOC, 3);
+    }
   });
 
   test('drainAnnotations waits for running writes and flushes the debounced index', async () => {
@@ -536,6 +635,52 @@ describe('remapRegionAttachments', () => {
     assert.deepEqual((await readAttachment(EDGE, att(2)))?.slide, 1);
     await remapRegionAttachments(EDGE, deckMap(1, [null, null], 1));
     assert.deepEqual(await readAttachment(EDGE, att(1)).then((a) => [a?.slide, a?.removedFrom]), [1, { rev: 1, slide: 2 }]);
+  });
+
+  test('only regions in the swap\'s deck move; an undo of an apply that gave them up only marks them', async () => {
+    const MARKED = 'marked-deck-aaa000';
+    await makeDoc(MARKED, 5);
+    await writeAttachment(MARKED, region(1, 2));
+    await writeAttachment(MARKED, region(2, 3));
+    const dir = attachmentsDir(MARKED);
+    // The apply's remap wrote its journal, then was given up: the regions are still numbered in deck 0.
+    await fs.writeFile(path.join(dir, 'deck-r1.json'), JSON.stringify({ version: 1, toRev: 1, attachments: [{ ...region(1, 1), removedFrom: { rev: 0, slide: 2 } }] }));
+    await remapRegionAttachments(MARKED, deckMap(1, [1, 3, 5, 4, null], 5, [], 0));
+    assert.deepEqual((await readAttachment(MARKED, att(1)))?.slide, 2);
+    assert.deepEqual((await readAttachment(MARKED, att(2)))?.slide, 3);
+    assert.deepEqual(await readJson(path.join(dir, 'deck.json')), { rev: 2 });
+    assert.deepEqual((await fs.readdir(dir)).filter((name) => name.startsWith('deck-r')), []);
+
+    // A swap from another deck than theirs (3) leaves them alone too.
+    const before = await snapshot(dir);
+    await remapRegionAttachments(MARKED, deckMap(3, [1, null, 2, 4, 3], 5));
+    assert.deepEqual(await snapshot(dir), before);
+  });
+
+  test('a lecture without regions gets the folder with the mark: a region made later moves with the next swap', async () => {
+    const FRESH = 'fresh-deck-bbb000';
+    await makeDoc(FRESH, 5);
+    await remapRegionAttachments(FRESH, deckMap(0, [1, null, 2, 4, 3], 5));
+    assert.deepEqual(await fs.readdir(attachmentsDir(FRESH)), ['deck.json']);
+    assert.deepEqual(await readJson(path.join(attachmentsDir(FRESH), 'deck.json')), { rev: 1 });
+    // Made on the new deck's slide 2, then the swap is undone: back to old slide 3.
+    await writeAttachment(FRESH, region(1, 2));
+    await remapRegionAttachments(FRESH, deckMap(1, [1, 3, 5, 4, null], 5, [], 0));
+    assert.deepEqual((await readAttachment(FRESH, att(1)))?.slide, 3);
+  });
+
+  test('a region for another deck than the lecture\'s is refused with 409 deckChanged before anything is made', async () => {
+    const STALE = 'stale-deck-ccc000';
+    await makeDoc(STALE, 2);
+    await writeMeta(STALE, 2, 3);
+    await assert.rejects(createRegionAttachment(STALE, { slide: 1, rect: RECT }, new Date(), 2), (err: unknown) => {
+      assert.ok(err instanceof HttpError);
+      assert.equal(err.status, 409);
+      assert.equal(err.message, smsg('ko').library.versions.deckChanged);
+      assert.deepEqual(err.fields, { deckRev: 3 });
+      return true;
+    });
+    await assert.rejects(fs.access(attachmentsDir(STALE)), 'no crop was started');
   });
 
   test('the 24 h sweep leaves the deck mark alone', async () => {

@@ -1,4 +1,5 @@
-// 새 버전 올리기 (DESIGN §28) rendered: the 새 버전 확인 dialog's plan and the viewer's banner, in Korean and English.
+// 새 버전 올리기 (DESIGN §28) rendered: the 새 버전 확인 dialog's plan and the viewer's banner, in Korean and English;
+// the dialog's backdrop (a click cancels only when the press started there) and its modal under the login screen.
 // Run: node --test web/tests/*.test.ts
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -23,7 +24,7 @@ registerHooks({
     return { format: 'module', source: code, shortCircuit: true };
   },
 });
-const { PlanSections } = await import('../src/components/NewVersionDialog.tsx');
+const { PlanSections, backdropGuard, syncModal } = await import('../src/components/NewVersionDialog.tsx');
 const { DeckBanner } = await import('../src/components/DeckBanner.tsx');
 
 const NOW = '2026-10-02T10:00:00.000Z';
@@ -89,5 +90,48 @@ describe('the 새 버전 확인 dialog and the banner, rendered', () => {
     assert.ok(t.includes('되돌리기'));
     const undone = plain(createElement(DeckBanner, { ...props, change: { ...change, kind: 'undo', undoable: false } }));
     assert.ok(undone.includes('이전 버전으로 되돌렸어요') && !undone.includes('되돌리기 '), undone);
+  });
+});
+
+describe('the 새 버전 확인 dialog: backdrop and login screen', () => {
+  test('a click on the backdrop cancels only when the press started there too (not a drag out of the card)', () => {
+    const guard = backdropGuard();
+    guard.press(false); // pressed in the card (selecting the file name)…
+    assert.equal(guard.click(true), false, '…released over the backdrop: the click targets the <dialog>, no cancel');
+    guard.press(true);
+    assert.equal(guard.click(true), true, 'pressed and released on the backdrop');
+    assert.equal(guard.click(true), false, 'a click without a press of its own');
+    guard.press(true);
+    assert.equal(guard.click(false), false, 'a click inside the card');
+  });
+
+  test('under the login screen the modal is closed (no `cancel`: the new version is kept) and shown again after it', () => {
+    const calls: string[] = [];
+    const dialog = {
+      open: false,
+      showModal() {
+        calls.push('showModal');
+        this.open = true;
+      },
+      close() {
+        calls.push('close');
+        this.open = false;
+      },
+      setAttribute(name: string) {
+        calls.push(`setAttribute ${name}`);
+      },
+    };
+    syncModal(dialog, false);
+    syncModal(dialog, false);
+    syncModal(dialog, true);
+    syncModal(dialog, true);
+    syncModal(dialog, false);
+    assert.deepEqual(calls, ['showModal', 'close', 'showModal']);
+    const opened: string[] = [];
+    syncModal({ open: false, close: () => {}, setAttribute: (name) => void opened.push(name) }, false);
+    assert.deepEqual(opened, ['open'], 'without showModal: the open attribute');
+    let closed = 0;
+    syncModal({ open: false, close: () => void closed++, setAttribute: () => {} }, true);
+    assert.equal(closed, 0, 'mounted under the login screen: not shown, nothing to close');
   });
 });

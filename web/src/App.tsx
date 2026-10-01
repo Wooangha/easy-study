@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { FileText, Folder, ImageIcon, TriangleAlert } from 'lucide-react';
 import type { AnnotationItem, Attachment, DocMeta, RegionRect } from '../../shared/types.ts';
-import { ApiError, errorMessage, startDigest, undoLastVersion, versionErrorMessage } from './api.ts';
+import { ApiError, errorMessage, onDeckChanged, startDigest, undoLastVersion, versionErrorMessage } from './api.ts';
 import { AttachmentContext, AttachmentPreview, type AttachmentActions } from './components/Attachments.tsx';
 import { ChatPanel, type PanelTab, type ScrollRequest } from './components/ChatPanel.tsx';
 import { ConfirmHost } from './components/ConfirmDialog.tsx';
@@ -38,10 +38,11 @@ import {
   explainRegionPrompt,
   planDrop,
   readyAttachments,
+  regionOnSlide,
   withoutAttachments,
   type DragKinds,
 } from './lib/attachments.ts';
-import { onDeckEvent } from './lib/annotations/store.ts';
+import { onDeckEvent, peekAnnotationStore, resetAnnotationStore } from './lib/annotations/store.ts';
 import { confirmDialog } from './lib/confirm.ts';
 import {
   SHELL_LEAVE_MS,
@@ -63,9 +64,9 @@ import { recorder } from './lib/recording/recorder.ts';
 import { getRecordingUploads, subscribeRecordingUploads, uploadRecordingFiles } from './lib/recording/uploads.ts';
 import { earlierLectures } from './lib/courseContext.ts';
 import { providerWithModel } from './lib/format.ts';
-import { isNumber, isString, readStorage, storageKeys, writeStorage } from './lib/storage.ts';
+import { isString, readRememberedSlide, readStorage, rememberSlide, storageKeys, writeStorage } from './lib/storage.ts';
 import { toast } from './lib/toast.ts';
-import { DeckRevs, remapSlide } from './lib/versionPlan.ts';
+import { DeckSwaps, remapRemembered, remapSlide, type DeckSwapDeps } from './lib/versionPlan.ts';
 
 const isDigestMode = (v: unknown): v is DigestMode => v === 'current' || v === 'all';
 
@@ -234,14 +235,15 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
     (attachment: Attachment) => {
       if (!readyDocId) return;
       setPreview({ docId: readyDocId, attachment });
-      if (attachment.kind === 'region' && attachment.slide && attachment.rect) {
-        viewerRef.current?.showRegion(attachment.slide, attachment.rect);
-      }
+      // Not a region whose slide a new version dropped: its rect is not on the slide it now names (DESIGN §28).
+      const place = regionOnSlide(attachment);
+      if (place) viewerRef.current?.showRegion(place.slide, place.rect);
     },
     [readyDocId],
   );
   const showOnSlide = useCallback((attachment: Attachment) => {
-    if (attachment.slide && attachment.rect) viewerRef.current?.showRegion(attachment.slide, attachment.rect);
+    const place = regionOnSlide(attachment);
+    if (place) viewerRef.current?.showRegion(place.slide, place.rect);
   }, []);
   const attachmentActions = useMemo<AttachmentActions | null>(
     () => (readyDocId ? { docId: readyDocId, open: openAttachment } : null),
@@ -357,7 +359,8 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
         toast(msg().shell.app.lectureDeleted, 'info');
         return;
       }
-      if (slide) writeStorage(storageKeys.slide(target), slide);
+      const targetDoc = docs?.find((d) => d.id === target);
+      if (slide) rememberSlide(target, slide, targetDoc?.deckRev ?? 0);
       setDocId(target);
     },
     [readyDocId, docs, goToSlide, setDocId],
@@ -369,21 +372,28 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
   }, [readyDocId]);
 
   // ---- A new version of a lecture's PDF (DESIGN §28) ----------------------------------------------------------
-  // A swap of the deck arrives as the annotation stream's `deck` event, as the answer of an apply / undo made here, or
-  // (when the event was missed) as a DocMeta with a newer deckRev; each swap is handled once (DeckRevs). The slide
-  // positions follow their slides; what the app holds of the lecture is loaded again (the viewer is keyed by the
-  // deck's rev, and useDocs replaces the annotation store together with the DocMeta).
-  const [deckRevs] = useState(() => new DeckRevs());
+  // A swap of the deck arrives as the annotation stream's `deck` event, as a slide-numbered write refused for another
+  // deck (409 { deckRev }: the event was missed), as the answer of an apply / undo made here, or as a DocMeta with a
+  // newer deckRev; each swap is handled once (DeckSwaps). The slide positions follow their slides; what the app holds
+  // of the lecture is loaded again (the viewer is keyed by the deck's rev, and useDocs replaces the annotation store
+  // together with the DocMeta; a store a swap stopped after that is replaced too).
   const focusedRef = useLatest(focusedSlide);
   const readyDocIdRef = useLatest(readyDocId);
   const dropRegionChips = attachments.dropRegions;
-  /** The remembered slide, the pinned slide and the notes filter follow their slides (no map: kept, or cleared). */
+  /**
+   * The remembered slide, the pinned slide and the notes filter follow their slides (no map: kept, or cleared). The
+   * remembered slide is remapped once per swap, whichever tab gets there first (its deck rev is stored with it).
+   */
   const remapPositions = useCallback(
-    (target: string, oldToNew: readonly (number | null)[] | null) => {
+    (target: string, rev: number, oldToNew: readonly (number | null)[] | null) => {
       const open = target === readyDocIdRef.current;
       if (oldToNew) {
-        const from = open ? focusedRef.current : readStorage<number | null>(storageKeys.slide(target), null, isNumber);
-        if (from !== null) writeStorage(storageKeys.slide(target), remapSlide(from, oldToNew));
+        if (open) {
+          rememberSlide(target, remapSlide(focusedRef.current, oldToNew), rev); // this tab's own place, in the old deck
+        } else {
+          const next = remapRemembered(readRememberedSlide(target), rev, oldToNew);
+          if (next) rememberSlide(target, next.slide, next.rev);
+        }
       }
       if (!open) return;
       setPinnedSlide((p) => (p === null || !oldToNew ? null : remapSlide(p, oldToNew)));
@@ -405,29 +415,42 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
     },
     [readyDocIdRef, dropRegionChips, refreshNotes, refreshDigest, refreshRecordings, studyRef],
   );
-  const handleDeckSwap = useCallback(
-    async (target: string, rev: number, oldToNew: readonly (number | null)[] | null, meta?: DocMeta) => {
-      const first = deckRevs.take(target, rev);
-      // The positions first: the viewer mounted for the new deck reads the remembered slide.
-      if (first) remapPositions(target, oldToNew);
-      if (meta) replaceDoc(meta);
-      else if (first) await refreshDoc(target);
-      if (first) reloadSwapped(target);
+  // The order of a swap's steps, each swap once (DeckSwaps); the steps read the latest state.
+  const swapDeps = useLatest<DeckSwapDeps>({
+    remapPositions,
+    listedRev: (target) => {
+      const listed = docs?.find((d) => d.id === target);
+      return listed ? (listed.deckRev ?? 0) : null;
     },
-    [deckRevs, remapPositions, replaceDoc, refreshDoc, reloadSwapped],
-  );
-  const handleDeckSwapRef = useLatest(handleDeckSwap);
-  useEffect(
-    () => onDeckEvent((target, event) => void handleDeckSwapRef.current(target, event.rev, event.oldToNew)),
-    [handleDeckSwapRef],
-  );
+    fetchRev: async (target) => {
+      const fetched = await refreshDoc(target);
+      return fetched ? (fetched.deckRev ?? 0) : null;
+    },
+    gone: (target) => docs !== null && !docs.some((d) => d.id === target),
+    replaceDoc,
+    replaceStoppedStore: (target) => {
+      if (!peekAnnotationStore(target)?.isSwapped) return false;
+      resetAnnotationStore(target);
+      return true;
+    },
+    reload: reloadSwapped,
+    wait: (ms) => new Promise((resolve) => window.setTimeout(resolve, ms)),
+  });
+  const [deckSwaps] = useState(() => new DeckSwaps(() => swapDeps.current));
+  useEffect(() => {
+    const offEvents = onDeckEvent((target, swap) => void deckSwaps.fromServer(target, swap.rev, swap.oldToNew));
+    // A question, a region or an undo refused for another deck: the caller showed the server's message.
+    const offRefusals = onDeckChanged((target, rev) => void deckSwaps.fromServer(target, rev, null));
+    return () => {
+      offEvents();
+      offRefusals();
+    };
+  }, [deckSwaps]);
   // A swap seen only in the open lecture's DocMeta (the event was missed: asleep, offline): reloaded, positions kept.
   const openDeckRev = doc?.status === 'ready' ? (doc.deckRev ?? 0) : null;
   useEffect(() => {
-    if (!readyDocId || openDeckRev === null || !deckRevs.see(readyDocId, openDeckRev)) return;
-    remapPositions(readyDocId, null);
-    reloadSwapped(readyDocId);
-  }, [readyDocId, openDeckRev, deckRevs, remapPositions, reloadSwapped]);
+    if (readyDocId && openDeckRev !== null) deckSwaps.shown(readyDocId, openDeckRev);
+  }, [readyDocId, openDeckRev, deckSwaps]);
 
   // 새 버전 올리기 from a lecture menu: pick a PDF, then the dialog uploads it and shows the plan.
   const newVersionInputRef = useRef<HTMLInputElement>(null);
@@ -440,28 +463,29 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
   }, []);
   const onVersionApplied = useCallback(
     (meta: DocMeta, oldToNew: (number | null)[]) => {
-      void handleDeckSwap(meta.id, meta.deckRev ?? 0, oldToNew, meta);
+      deckSwaps.fromAnswer(meta, oldToNew);
       toast(msg().versions.dialog.applied(meta.title), 'success');
     },
-    [handleDeckSwap],
+    [deckSwaps],
   );
   /** 되돌리기 of the viewer's banner: the deck before the last new version comes back. */
   const undoVersion = useCallback(async () => {
     const target = readyDocId;
     if (!target) return;
+    const fromRev = doc?.deckRev ?? 0; // the deck the banner was shown for (409 when it changed since)
     const m = msg().versions.banner;
     if (!(await confirmDialog({ title: m.undoConfirmTitle, message: m.undoConfirmMessage, confirmLabel: m.undo }))) return;
     let meta: DocMeta;
     try {
-      meta = await undoLastVersion(target);
+      meta = await undoLastVersion(target, fromRev);
     } catch (e) {
       toast(m.undoFailed(versionErrorMessage(e)), 'error');
       return;
     }
     toast(m.undoneToast, 'success');
     // The `deck` event normally came first with the map of the slides; without it the positions are kept.
-    await handleDeckSwap(target, meta.deckRev ?? 0, null, meta);
-  }, [readyDocId, handleDeckSwap]);
+    deckSwaps.fromAnswer(meta, null);
+  }, [readyDocId, doc?.deckRev, deckSwaps]);
 
   // ---- Upload target: the course new PDFs go into ------------------------------------------------
   // Chosen in the library, and following the course of the lecture that is open ("you are in Compiler").
@@ -1054,6 +1078,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
         <NewVersionDialog
           doc={newVersionDoc}
           file={newVersion.file}
+          suspended={suspended}
           onClose={() => setNewVersion(null)}
           onApplied={onVersionApplied}
         />

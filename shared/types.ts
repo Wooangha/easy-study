@@ -139,6 +139,18 @@ export interface DocMeta {
 // follows its slide.
 // ---------------------------------------------------------------------------
 
+/**
+ * Sent by the web client with every slide-numbered write (annotations PUT / PATCH, POST …/regions, questions and prime
+ * turns): the DocMeta.deckRev its slide numbers belong to. When it differs from the lecture's, the server answers 409
+ * `{ error, deckRev }` (no `current`) so a stale client reloads instead of writing onto whatever slide now has that number.
+ */
+export const DECK_REV_HEADER = 'X-Easy-Study-Deck-Rev';
+
+/** The body of POST /api/docs/:docId/versions/undo: the deckRev the client saw (409 when the deck changed since). */
+export interface UndoVersionRequest {
+  fromRev?: number;
+}
+
 /** A slide of the new deck: the same as its old slide, changed, or new (no old counterpart). */
 export type SlideChangeKind = 'same' | 'changed' | 'new';
 

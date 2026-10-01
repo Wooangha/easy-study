@@ -22,6 +22,7 @@ export const library = {
     nextNotReady: "The new version isn't ready yet. Try again when it is.",
     noNext: 'No new version was uploaded.',
     stalePlan: "The lecture's slides changed in the meantime. Upload the new version again.",
+    deckChanged: 'This lecture was switched to another version in the meantime. Reloading it.',
     nothingToUndo: 'There is nothing to undo.',
     busyAnswering: "It can't be switched while an answer is being written. Try again when the answer is done.",
     busyDigest: "It can't be switched while the digest is being made. Try again when it's done or stopped.",

@@ -247,6 +247,24 @@ describe('remapSessionSlides', () => {
     assert.equal(await fs.readFile(broken, 'utf8'), '{ not json');
   });
 
+  test('an undo of an apply that gave a session up only marks it (a new conversation); one of another deck is left alone', async () => {
+    const doc = 'compiler-l11-eee555';
+    await makeDoc(doc, 6, 2);
+    // Still numbered in deck 0: the apply's remap of it was given up.
+    const kept = await sessionWith(doc, [message({ role: 'user', slide: 3, text: 'q' })], { ...initialProviderState(), primed: true, generation: 1 });
+    await fs.writeFile(fileOf(doc, kept.id), JSON.stringify({ ...JSON.parse(await rawOf(doc, kept.id)), deckRev: undefined }));
+    await remapSessionSlides(doc, UNDO);
+    const undone = await getSession(doc, kept.id);
+    assert.deepEqual(undone?.messages.map((m) => [m.slide, m.removedFrom ?? null]), [[3, null]], 'already in the deck that came back');
+    assert.deepEqual(undone?.providerState, { ...initialProviderState(), generation: 1, deckUpdated: true });
+    assert.equal(await deckRevOf(doc, kept.id), 2);
+
+    // Numbered in deck 2 while the lecture is swapped from deck 4: not this swap's numbering.
+    const raw = await rawOf(doc, kept.id);
+    await remapSessionSlides(doc, { ...APPLY, fromRev: 4, toRev: 5 });
+    assert.equal(await rawOf(doc, kept.id), raw);
+  });
+
   test('a session made after a swap carries the deck it is numbered in, so a rerun of that swap skips it', async () => {
     const doc = 'compiler-l10-ddd444';
     await makeDoc(doc, 6, 1);

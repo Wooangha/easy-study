@@ -2489,12 +2489,18 @@ follows its slide: 필기 and memos, question markers, the chats and notes, the 
 
 Per slide: the text and word boxes (PDFium `text()` / `textLayout()`), and a 128 × 96 grayscale picture. Both decks are
 rendered by the same engine for this (the old one from its source.pdf, so a deck converted by poppler compares fine).
-- **Comparable text**: the words without the slide number (a lone number in the top 12 % / bottom 14 % of the slide, found
-  by its box; without boxes, lines that are only a page number), case folded, whitespace removed.
+- **Comparable text**: the words without the margin's noise, found by their boxes in the top 12 % / bottom 14 % of the
+  slide: the header / footer words (on at least half of the slides of either deck, one set for both versions), a margin
+  line made only of those and number pieces ("Database Lab · Sep 23, 2026 · 5 / 39": the re-post date changes on every
+  slide), and the slide's own printed number ("12", "p.4", "3쪽", "(3/12)", "[3]", within 3 of its position, with a
+  following "/ N"). Any other number stays ("Average waiting time = 17 ms" near the edge is content). Without boxes,
+  lines that are only a page number are dropped. Case folded, whitespace removed.
 - **Text similarity**: TF-IDF weighted character trigrams over both decks (the course name and footers on every slide
   weigh almost nothing), cosine. **Picture similarity**: weighted Jaccard of the slides' "ink" (32 × 24 cells, distance
-  from the slide's median gray: dark themes work, blank slides have none). Score = 0.75 text + 0.25 picture (picture only
-  when neither has ≥ 10 characters; 0.6 × picture when only one has).
+  from the slide's median gray: dark themes work, blank slides have none); for slides without text the decks' common
+  template (each cell's median ink over all slides) is taken out first, so two figure slides of one template share almost
+  nothing. Score = 0.75 text + 0.25 picture (picture only when neither has ≥ 10 characters; 0.6 × picture when only one
+  has).
 - **Assignment**: a monotonic DP over pairs ≥ ANCHOR_MIN 0.7 gives the skeleton; an old slide is "near" the new slides in
   the gap between its skeleton neighbours. One optimal assignment (Hungarian, O(n² (n + m)); decks over ~450 slides fall
   back to the DP with NEAR_MIN plus a greedy pass) with gain = score − NEAR_MIN 0.4 near (plus a 0.01 diagonal tie-break)
@@ -2507,7 +2513,9 @@ rendered by the same engine for this (the old one from its source.pdf, so a deck
   3 misses: slides with more than half of their text replaced → removed + new), same/changed right on all but changes the
   answer key had called invisible; the same PDF again → all same; renumbering only → all same; another lecture → ≤ 6 of
   ~40 matched. The real L7 old vs updated pair: 42 same, 6 changed (all real edits, one a font-size change), the merged
-  build slide removed, the new aside slide added — all right (a one-word underline counts as same). 300 slides: 0.6 s.
+  build slide removed, the new aside slide added — all right (a one-word underline counts as same). A DB lecture old vs
+  re-posted (35 → 39 slides, the footer's date changed on every slide): 25 same, 10 changed, 4 added — all right. 300
+  slides: 0.6 s.
 
 ### Flow and API
 
@@ -2629,6 +2637,27 @@ deleted), doc.json gets the old meta and lastChange (kind 'undo', undoable false
 - 메모 tab: a **빠진 슬라이드** section (collapsed, with a count) listing the archive's memos and other 필기 with the old
   thumbnail and "예전 p.N", read-only.
 - Messages / attachments with `removedFrom`: the p.N chip reads "p.N (빠진 장 p.M)"; markers skip such attachments.
+
+### Review fixes (before release)
+
+- **A swap that stops half-way stays gated**: when a render or meta step fails twice, the lecture is "stalled"
+  (isDocSwapping stays true: writes 409) until its journal completes; upload, drop, apply, undo and the startup resume
+  finish it first. A drop never deletes the staging a half-done apply still needs. Render-entry renames retry for ~10 s
+  on Windows (files still being read).
+- **Marks act on one deck only**: a remap runs only when its mark equals `fromRev`; on an undo, data whose mark equals
+  `restoreRev` (a remap the apply gave up) is only stamped `toRev`. A remap that finds no data still writes its mark, and
+  new recordings / sessions get the lecture's deckRev, so later data is never taken for deck 0. Hidden markers of a
+  dropped slide are archived with it (restored by undo; not listed).
+- **Stale clients**: every slide-numbered write (annotations PUT / PATCH, POST …/regions, questions and prime turns)
+  carries `X-Easy-Study-Deck-Rev`; a mismatch answers 409 `{ error, deckRev }` without `current`, so the web store never
+  rebases onto a renumbered slide — it drops its queued writes and reloads like on a `deck` event. Undo carries
+  `{ fromRev }`. The web orders a swap in DeckSwaps (lib/versionPlan.ts): the event, the apply / undo answer or a newer
+  DocMeta, whichever comes first, refreshes the doc (retrying 1 s → 15 s), replaces any stopped annotation store and
+  reloads once. The remembered slide carries its deck rev (`slideRev:<docId>`), so two tabs do not shift it twice.
+- **Cleanup**: at startup a staged version that is 'ready' or 'error' is removed (no dialog survives a restart); the
+  dialog drops its staged version on pagehide (keepalive DELETE), closes while the app waits for a login, and cancels on a
+  backdrop click only when the press started there. Regions with `removedFrom` are not shown on the substitute slide.
+- **Matcher**: the margin rules and picture-only template removal above; the header / footer set is shared by both decks.
 
 ### Tests
 

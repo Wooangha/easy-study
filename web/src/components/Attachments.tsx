@@ -5,7 +5,7 @@ import { attachmentUrl, checkSessionSoon } from '../api.ts';
 import { useLoginEpoch } from '../hooks/useAuth.ts';
 import { useLatest } from '../hooks/useLatest.ts';
 import { msg } from '../i18n/index.ts';
-import { attachmentLabel, attachmentTitle, type Chip } from '../lib/attachments.ts';
+import { attachmentLabel, attachmentTitle, regionOnSlide, type Chip } from '../lib/attachments.ts';
 import { inDialog } from './SlideViewer.tsx';
 
 /** What attachment thumbnails need: the document they belong to and what a click does (preview / jump). */
@@ -178,6 +178,8 @@ export function AttachmentPreview({
 
   const m = msg().chat.attachments;
   const region = attachment.kind === 'region';
+  /** Not for a region whose slide a new version dropped (its rect is not on the slide it now names). */
+  const onSlide = regionOnSlide(attachment);
   const text = region ? (attachment.text ?? '').trim() : '';
   return (
     <div
@@ -197,9 +199,9 @@ export function AttachmentPreview({
             </span>
           )}
           <span className="spacer" />
-          {region && attachment.slide !== undefined && (
+          {onSlide && (
             <button type="button" className="ghost-btn small" onClick={() => onShowOnSlide(attachment)}>
-              <FileText /> {m.showOnSlide(attachment.slide)}
+              <FileText /> {m.showOnSlide(onSlide.slide)}
             </button>
           )}
           <button ref={closeRef} type="button" className="icon-btn small" onClick={onClose} aria-label={msg().common.close} title={m.closeTitle}>

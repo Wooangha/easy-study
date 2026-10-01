@@ -12,7 +12,9 @@
 //
 // A `deck` event (DESIGN §28: a new version of the PDF applied, or undone) makes everything held numbered in the old
 // deck: the store stops (no more writes, loads or stream) and tells the app (onDeckEvent), which replaces it
-// (resetAnnotationStore) once it shows the new deck; the subscribers of useAnnotations move to the new store.
+// (resetAnnotationStore) once it shows the new deck; the subscribers of useAnnotations move to the new store. Every
+// write carries the deck the store was made for (DECK_REV_HEADER); a 409 saying the lecture is at another deck (the
+// event was missed) stops the store the same way, without a map of the slides.
 import {
   MAX_ANNOTATION_ITEMS,
   MAX_ANNOTATION_OPS,
@@ -26,6 +28,8 @@ import {
   annotationEventsUrl,
   checkSessionSoon,
   conflictCurrentOf,
+  deckChangedOf,
+  deckRevOf,
   getAnnotationSummary,
   getSlideAnnotations,
   listAnnotationTags,
@@ -58,7 +62,10 @@ export interface QaChange {
 export interface StoreDeps {
   getSummary: (docId: string) => Promise<AnnotationSummary>;
   getSlide: (docId: string, slide: number) => Promise<SlideAnnotations>;
-  patch: (docId: string, slide: number, body: { baseRev: number; ops: AnnotationOp[] }, client: string) => Promise<SlideAnnotations>;
+  /** `deckRev`: the deck the slide numbers belong to (DECK_REV_HEADER). */
+  patch: (docId: string, slide: number, body: { baseRev: number; ops: AnnotationOp[] }, client: string, deckRev: number) => Promise<SlideAnnotations>;
+  /** The deck rev the client holds for a lecture (the api's map); 0 when absent. */
+  deckRev?: (docId: string) => number;
   eventsUrl: (docId: string, client: string) => string;
   createEventSource: (url: string) => EventSourceLike;
   timers: Timers;
@@ -77,6 +84,7 @@ const defaultDeps: StoreDeps = {
   getSummary: getAnnotationSummary,
   getSlide: getSlideAnnotations,
   patch: patchSlideAnnotations,
+  deckRev: deckRevOf,
   eventsUrl: annotationEventsUrl,
   createEventSource: (url) => new EventSource(url),
   timers: realTimers,
@@ -159,6 +167,15 @@ export function parseAnnotationEvent(eventName: string, data: string): Annotatio
 /** The `deck` event (DESIGN §28). */
 export type DeckEvent = Extract<AnnotationEvent, { type: 'deck' }>;
 
+/**
+ * A swap of a lecture's deck as a store tells the app (onDeckEvent): the `deck` event itself, or a write refused
+ * because the lecture is at another deck (rev = the lecture's; no map of the slides).
+ */
+export interface DeckSwap {
+  rev: number;
+  oldToNew: readonly (number | null)[] | null;
+}
+
 interface WriteState {
   /** Ops applied locally, not sent yet. */
   pending: AnnotationOp[];
@@ -181,6 +198,8 @@ export class DocAnnotations {
   readonly docId: string;
   /** This tab's id: sent with writes and on the stream, so the server does not echo our own writes to us. */
   readonly clientId: string;
+  /** The deck rev the store was made for: every write says so (a store never outlives its deck). */
+  readonly deckRev: number;
   snapshot: AnnotationSnapshot;
   private readonly deps: StoreDeps;
   private listeners = new Set<Listener>();
@@ -202,6 +221,7 @@ export class DocAnnotations {
     this.docId = docId;
     this.deps = deps;
     this.clientId = newClientId();
+    this.deckRev = deps.deckRev?.(docId) ?? 0;
     this.snapshot = { summary: null, summaryError: null, slides: new Map(), unsaved: new Set(), history: emptyHistory(), connection: 'stopped' };
   }
 
@@ -401,7 +421,7 @@ export class DocAnnotations {
     const baseRev = this.snapshot.slides.get(slide)?.rev ?? 0;
     w.inflight = { ops, baseRev };
     this.deps
-      .patch(this.docId, slide, { baseRev, ops }, this.clientId)
+      .patch(this.docId, slide, { baseRev, ops }, this.clientId, this.deckRev)
       .then((result) => {
         w.inflight = null;
         w.rebased = false;
@@ -422,6 +442,14 @@ export class DocAnnotations {
     const w = this.write(slide);
     w.inflight = null;
     if (this.disposed || this.swapped) return;
+    const deckRev = deckChangedOf(e);
+    if (deckRev !== null) {
+      // The lecture is at another deck (a new version applied elsewhere, its `deck` event missed): nothing here can be
+      // rebased — every slide number may mean another slide. Stop like for the event; the app loads the lecture again.
+      this.deps.toast(annotationErrorMessage(e), 'info');
+      this.stopForDeck({ rev: deckRev, oldToNew: null });
+      return;
+    }
     const current = conflictCurrentOf(e);
     if (current) {
       if (!w.rebased) {
@@ -553,7 +581,7 @@ export class DocAnnotations {
         for (const l of this.qaListeners) l({ sessionId: event.sessionId, updatedAt: event.updatedAt });
         return;
       case 'deck':
-        this.onDeck(event);
+        this.stopForDeck(event);
         return;
       case 'slide': {
         const held = this.snapshot.slides.get(event.slide);
@@ -602,11 +630,11 @@ export class DocAnnotations {
   }
 
   /**
-   * The deck was swapped (DESIGN §28): stop — the stream (the server ends it anyway), the writes not sent yet (they are
-   * numbered in the old deck; the server refused them during the swap), any load — and tell the app. Without anyone
-   * listening, the store is replaced right away.
+   * The deck was swapped (DESIGN §28: its `deck` event, or a write refused for another deck): stop — the stream (the
+   * server ends it anyway), the writes not sent yet (they are numbered in the old deck; the server refuses them), any
+   * load — and tell the app. Without anyone listening, the store is replaced right away.
    */
-  private onDeck(event: DeckEvent): void {
+  private stopForDeck(swap: DeckSwap): void {
     if (this.swapped) return;
     this.swapped = true;
     this.client?.stop();
@@ -618,7 +646,7 @@ export class DocAnnotations {
       w.retryTimer = null;
       w.pending = [];
     }
-    for (const l of [...deckListeners]) l(this.docId, event);
+    for (const l of [...deckListeners]) l(this.docId, swap);
     if (deckListeners.size === 0 && stores.get(this.docId) === this) resetAnnotationStore(this.docId);
   }
 
@@ -658,10 +686,14 @@ export class DocAnnotations {
 const stores = new Map<string, DocAnnotations>();
 /** subscribeAnnotations: per document, what moves each subscription to the store that replaced the old one. */
 const followers = new Map<string, Set<() => void>>();
-const deckListeners = new Set<(docId: string, event: DeckEvent) => void>();
+const deckListeners = new Set<(docId: string, swap: DeckSwap) => void>();
 
-/** Every `deck` event of any open lecture (the app updates the lecture, its positions and what it holds of it). */
-export function onDeckEvent(listener: (docId: string, event: DeckEvent) => void): () => void {
+/**
+ * Every swap of an open lecture's deck a store learned of — its `deck` event, or a write refused for another deck —
+ * after the store stopped (the app updates the lecture, its positions and what it holds of it, then replaces the
+ * store: resetAnnotationStore).
+ */
+export function onDeckEvent(listener: (docId: string, swap: DeckSwap) => void): () => void {
   deckListeners.add(listener);
   return () => {
     deckListeners.delete(listener);

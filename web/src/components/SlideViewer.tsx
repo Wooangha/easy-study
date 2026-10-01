@@ -69,7 +69,7 @@ import { confirmDialog } from '../lib/confirm.ts';
 import { clamp, firstLine, slideSizes } from '../lib/format.ts';
 import { usePlayhead } from '../lib/recording/playhead.ts';
 import { recorder } from '../lib/recording/recorder.ts';
-import { isNumber, readStorage, storageKeys, writeStorage } from '../lib/storage.ts';
+import { isNumber, readStorage, rememberSlide, storageKeys, writeStorage } from '../lib/storage.ts';
 import { toast } from '../lib/toast.ts';
 import { bannerShown, changeBadges } from '../lib/versionPlan.ts';
 import { AnnotationLayer, type Draft, type DragPreview } from './annotations/AnnotationLayer.tsx';
@@ -1216,10 +1216,11 @@ export function SlideViewer({
     return () => ro.disconnect();
   }, []);
 
-  // Remember the position per doc.
+  // Remember the position per doc, with the deck it is numbered in (a swap remaps it once, DESIGN §28).
+  const deckRev = doc.deckRev ?? 0;
   useEffect(() => {
-    writeStorage(storageKeys.slide(doc.id), focused);
-  }, [doc.id, focused]);
+    rememberSlide(doc.id, focused, deckRev);
+  }, [doc.id, deckRev, focused]);
 
   // The annotation store loads the slides around the focus (and drops those far away).
   useEffect(() => {

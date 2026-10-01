@@ -180,26 +180,26 @@ export function useDocs() {
   const retry = useCallback(async (docId: string): Promise<boolean> => {
     try {
       const doc = await retryDoc(docId);
-      setDocs((prev) => prev && prev.map((d) => (d.id === docId ? doc : d)));
+      replace(doc);
       return true;
     } catch (e) {
       toast(msg().chat.docs.retryFailed(errorMessage(e)), 'error');
       void refresh();
       return false;
     }
-  }, [refresh]);
+  }, [refresh, replace]);
 
   /** Rename a lecture. Resolves true when the server took the new title. */
   const rename = useCallback(async (docId: string, title: string): Promise<boolean> => {
     try {
       const doc = await renameDoc(docId, title);
-      setDocs((prev) => prev && prev.map((d) => (d.id === docId ? doc : d)));
+      replace(doc); // with a newer deck (swapped elsewhere), its annotation store goes too: writes say which deck
       return true;
     } catch (e) {
       toast(msg().chat.docs.renameFailed(errorMessage(e)), 'error');
       return false;
     }
-  }, []);
+  }, [replace]);
 
   /** Delete a document (after the caller confirmed). Resolves true when it is gone. */
   const remove = useCallback(async (docId: string): Promise<boolean> => {

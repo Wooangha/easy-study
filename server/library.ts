@@ -205,18 +205,28 @@ export function isNotFound(err: unknown): boolean {
 /** Errors Windows reports while another process (antivirus, indexer, OneDrive, an editor) briefly holds a file. */
 const WINDOWS_LOCK_CODES: ReadonlySet<string> = new Set(['EPERM', 'EBUSY', 'EACCES']);
 /** Waits between attempts: about 1.5 s in total, like graceful-fs. */
-const WINDOWS_LOCK_RETRY_MS = [20, 40, 80, 120, 160, 240, 320, 400];
+const WINDOWS_LOCK_RETRY_MS: readonly number[] = [20, 40, 80, 120, 160, 240, 320, 400];
+/**
+ * Waits between attempts of moving a render entry of a deck being swapped (moveRenderEntries): about 10 s in total,
+ * since a slide image being sent to a browser keeps its file open until the transfer ends.
+ */
+export const RENDER_MOVE_RETRY_MS: readonly number[] = [...WINDOWS_LOCK_RETRY_MS, 500, 750, 1000, 1500, 2000, 2500];
 
 /**
- * Runs a filesystem operation; on Windows it is retried for a moment when the file is locked by another
- * process (EPERM/EBUSY/EACCES). Elsewhere those codes are real permission errors and are thrown at once.
+ * Runs a filesystem operation; on Windows it is retried for a moment (`delays`, by default about 1.5 s) when the file
+ * is locked by another process (EPERM/EBUSY/EACCES). Elsewhere those codes are real permission errors and are thrown
+ * at once.
  */
-export async function withFsRetry<T>(operation: () => Promise<T>, platform: NodeJS.Platform = process.platform): Promise<T> {
+export async function withFsRetry<T>(
+  operation: () => Promise<T>,
+  platform: NodeJS.Platform = process.platform,
+  delays: readonly number[] = WINDOWS_LOCK_RETRY_MS,
+): Promise<T> {
   for (let attempt = 0; ; attempt++) {
     try {
       return await operation();
     } catch (err) {
-      const delay = WINDOWS_LOCK_RETRY_MS[attempt];
+      const delay = delays[attempt];
       if (platform !== 'win32' || delay === undefined || !isErrnoException(err) || !WINDOWS_LOCK_CODES.has(err.code ?? '')) throw err;
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
@@ -311,6 +321,12 @@ const deletingDocs = new Set<string>();
  * but the versions routes answers 409, and nothing renders into them (imageWorkBlocked).
  */
 const swappingDocs = new Set<string>();
+/**
+ * Lectures whose swap stopped half-way (its render sets or doc.json could not be switched: prev.json is incomplete):
+ * gated like a running swap (isDocSwapping) until server/versions.ts finishes it, so nothing is written in a numbering
+ * the finished swap would renumber again.
+ */
+const stalledSwaps = new Set<string>();
 
 function isPresent<T>(value: T | null | undefined): value is T {
   return value !== null && value !== undefined;
@@ -416,14 +432,20 @@ export async function setDocDeck(docId: string, patch: DeckMetaPatch): Promise<S
   return updateMeta(docId, patch);
 }
 
-/** True while the lecture's deck is being swapped (DESIGN §28). */
+/** True while the lecture's deck is being swapped, or its swap stopped half-way (DESIGN §28): it takes no writes. */
 export function isDocSwapping(docId: string): boolean {
+  return swappingDocs.has(docId) || stalledSwaps.has(docId);
+}
+
+/** True while a swap of the lecture's deck runs (not one that stopped half-way: server/versions.ts resumes that one). */
+export function isSwapRunning(docId: string): boolean {
   return swappingDocs.has(docId);
 }
 
 /**
  * Why the lecture's deck cannot be swapped right now, or null: it is being deleted (404), converted or already being
- * swapped (409). Synchronous: server/versions.ts checks it and its other gates in one tick, then calls beginDocSwap.
+ * swapped (409). A swap that stopped half-way is no reason: it is resumed. Synchronous: server/versions.ts checks it
+ * and its other gates in one tick, then calls beginDocSwap.
  */
 export function swapRefusal(docId: string): HttpError | null {
   if (deletingDocs.has(docId)) return new HttpError(404, smsg().common.notFound.doc);
@@ -438,9 +460,38 @@ export function beginDocSwap(docId: string): void {
   backfillQueue.delete(docId);
 }
 
-/** The swap of the lecture's deck has ended (or failed). */
-export function endDocSwap(docId: string): void {
+/**
+ * The swap of the lecture's deck has ended, or failed. `stalled`: it stopped half-way (its journal is incomplete), so
+ * the lecture stays gated until a later swap call finishes it.
+ */
+export function endDocSwap(docId: string, stalled = false): void {
   swappingDocs.delete(docId);
+  if (stalled) stalledSwaps.add(docId);
+  else stalledSwaps.delete(docId);
+}
+
+/**
+ * DECK_REV_HEADER of a slide-numbered write (DESIGN §28): the deckRev the request's slide numbers belong to, or
+ * undefined when it has none (an older client: not checked). Anything but a whole number never matches a deck.
+ */
+export function requestDeckRev(header: string | undefined): number | undefined {
+  const value = header?.trim();
+  if (!value) return undefined;
+  return /^\d{1,9}$/.test(value) ? Number(value) : Number.NaN;
+}
+
+/**
+ * 409 of a write whose slide numbers belong to another deck than the lecture's (`{ error, deckRev }`: the lecture's
+ * deckRev now; no `current`), so a stale client reloads instead of writing onto whatever slide now has that number.
+ */
+export function deckChangedError(deckRev: number): HttpError {
+  return new HttpError(409, smsg().library.versions.deckChanged, { deckRev });
+}
+
+/** Throws deckChangedError when the request named a deck (`expected`) that is not the lecture's. */
+export function checkDeckRev(doc: Pick<StoredDocMeta, 'deckRev'>, expected: number | undefined): void {
+  const deckRev = doc.deckRev ?? 0;
+  if (expected !== undefined && expected !== deckRev) throw deckChangedError(deckRev);
 }
 
 /**
@@ -1275,10 +1326,13 @@ export function isNextVersionConverting(docId: string): boolean {
 }
 
 /**
- * Startup: a new version left 'processing' (the server stopped while converting it) is marked failed, "변환이
- * 중단됐어요" in the language it was uploaded in, and its render files are removed (DESIGN §28). Returns how many.
+ * Startup (after the swaps were resumed, DESIGN §28): no dialog survives a restart, so a staged new version that is
+ * 'ready' or 'error' (or has no readable next.json) is removed; one left 'processing' (the server stopped while
+ * converting it) is marked failed, "변환이 중단됐어요" in the language it was uploaded in, for a client that still asks,
+ * and its render files are removed (the next start removes the rest). The staging folder of a swap that stopped
+ * half-way is kept: finishing it needs it. Returns how many were removed or marked.
  */
-export async function markInterruptedNextVersions(): Promise<number> {
+export async function settleNextVersions(): Promise<number> {
   let entries;
   try {
     entries = await fs.readdir(libraryDir(), { withFileTypes: true });
@@ -1286,16 +1340,20 @@ export async function markInterruptedNextVersions(): Promise<number> {
     if (isNotFound(err)) return 0;
     throw err;
   }
-  let marked = 0;
+  let settled = 0;
   for (const entry of entries) {
     const docId = entry.name.slice(NEXT_PREFIX.length);
-    if (!entry.isDirectory() || !entry.name.startsWith(NEXT_PREFIX) || !isDocId(docId) || activeIngests.has(nextKey(docId))) continue;
+    if (!entry.isDirectory() || !entry.name.startsWith(NEXT_PREFIX) || !isDocId(docId)) continue;
+    if (activeIngests.has(nextKey(docId)) || isDocSwapping(docId)) continue;
     const stored = await readNextVersion(docId);
-    if (stored?.status !== 'processing') continue;
-    await failNextVersion(docId, smsg(isLang(stored.lang) ? stored.lang : DEFAULT_LANG).library.versions.interrupted);
-    marked++;
+    if (stored?.status === 'processing') {
+      await failNextVersion(docId, smsg(isLang(stored.lang) ? stored.lang : DEFAULT_LANG).library.versions.interrupted);
+    } else {
+      await rmWithRetry(nextVersionPaths(docId).dir, { recursive: true, force: true });
+    }
+    settled++;
   }
-  return marked;
+  return settled;
 }
 
 /** Lectures that have a .prev-<docId> folder: a replaced deck, or a swap that may still be under way (startup). */
@@ -1409,16 +1467,17 @@ function versionPlan(match: SlideMatch, fromRev: number, oldPageCount: number, n
 
 /**
  * Moves the render entries (RENDER_ENTRIES) found in `fromDir` into `toDir` (made when missing), replacing what `toDir`
- * has under those names. Entries already moved are skipped, so a move a crash interrupted is simply done again.
+ * has under those names. Entries already moved are skipped, so a move a crash interrupted is simply done again. On
+ * Windows a rename is retried for about 10 s (RENDER_MOVE_RETRY_MS): a slide being sent keeps its folder busy.
  */
-export async function moveRenderEntries(fromDir: string, toDir: string): Promise<void> {
+export async function moveRenderEntries(fromDir: string, toDir: string, platform: NodeJS.Platform = process.platform): Promise<void> {
   await mkdirWithRetry(toDir);
   for (const entry of RENDER_ENTRIES) {
     const from = path.join(fromDir, entry);
     if (!(await pathExists(from))) continue;
     const to = path.join(toDir, entry);
     await rmWithRetry(to, { recursive: true, force: true });
-    await renameWithRetry(from, to);
+    await withFsRetry(() => fs.rename(from, to), platform, RENDER_MOVE_RETRY_MS);
   }
 }
 
@@ -1526,7 +1585,7 @@ async function needsTextExtraction(paths: DocPaths): Promise<boolean> {
 
 /** Busy with the document in another way: its ingest (which writes every file itself), a deletion or a swap of its deck. */
 function imageWorkBlocked(docId: string): boolean {
-  return activeIngests.has(docId) || imageRuns.has(docId) || deletingDocs.has(docId) || swappingDocs.has(docId);
+  return activeIngests.has(docId) || imageRuns.has(docId) || deletingDocs.has(docId) || isDocSwapping(docId);
 }
 
 /**

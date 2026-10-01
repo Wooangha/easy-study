@@ -15,6 +15,7 @@ import type { NextFunction, Request, Response } from 'express';
 import {
   ATTACHMENT_ID_RE,
   COURSE_ID_RE,
+  DECK_REV_HEADER,
   DOC_ID_RE,
   MAX_ATTACHMENTS,
   MAX_ATTACHMENT_BYTES,
@@ -44,6 +45,7 @@ import type {
   ProviderInfo,
   StartDigestRequest,
   StreamEvent,
+  UndoVersionRequest,
   UpdateSessionRequest,
 } from '../shared/types.ts';
 import {
@@ -132,6 +134,7 @@ import {
   readStoredDoc,
   removeDeletedLeftovers,
   renameDoc,
+  requestDeckRev,
   requestDerivedImages,
   resumePendingIngests,
   retryIngest,
@@ -768,16 +771,27 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
     res.json(await applyNextVersion(req.params.docId));
   });
 
-  /** The deck the last new version replaced comes back → the lecture's DocMeta. 409 when there is nothing to undo or busy. */
+  /**
+   * The deck the last new version replaced comes back → the lecture's DocMeta. UndoVersionRequest: `fromRev`, the deck
+   * the client saw (409 deckChanged with the lecture's deckRev when it changed since). 409 when there is nothing to undo
+   * or busy.
+   */
   api.post('/docs/:docId/versions/undo', async (req, res) => {
-    res.json(await undoLastVersion(req.params.docId));
+    const { fromRev } = jsonBody(req) as Partial<Record<keyof UndoVersionRequest, unknown>>;
+    if (fromRev !== undefined && fromRev !== null && !(Number.isInteger(fromRev) && (fromRev as number) >= 0)) {
+      throw new HttpError(400, smsg().common.http.bodyInvalid);
+    }
+    res.json(await undoLastVersion(req.params.docId, typeof fromRev === 'number' ? fromRev : undefined));
   });
 
   // --- attachments: selected slide regions and images of the student (DESIGN §21) -------------------
 
-  /** CreateRegionRequest → 201 Attachment (400 bad slide / rect, 409 document not converted). */
+  /**
+   * CreateRegionRequest → 201 Attachment (400 bad slide / rect, 409 document not converted, 409 deckChanged when the
+   * DECK_REV_HEADER names another deck than the lecture's).
+   */
   api.post('/docs/:docId/regions', async (req, res) => {
-    res.status(201).json(await createRegionAttachment(req.params.docId, jsonBody(req)));
+    res.status(201).json(await createRegionAttachment(req.params.docId, jsonBody(req), new Date(), requestDeckRev(req.get(DECK_REV_HEADER))));
   });
 
   /**
@@ -890,6 +904,8 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
     if (kind === 'question' && typeof body.text !== 'string') throw new HttpError(400, smsg().chat.turns.questionRequired);
     const text = kind === 'question' ? String(body.text) : '';
     const neighbors = parseNeighbors(body.neighbors);
+    // The deck the slide number belongs to (409 deckChanged before the turn starts when it is not the lecture's).
+    const deckRev = requestDeckRev(req.get(DECK_REV_HEADER));
     // Priming turns take no attachments (DESIGN §21) and no memos (DESIGN §25).
     const attachments = kind === 'question' ? parseAttachmentIds(body.attachments) : undefined;
     const memos = kind === 'question' ? parseMemos(body.memos) : undefined;
@@ -906,7 +922,7 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
     const sse = lazySse(res);
     try {
       await runTurn(
-        { docId, sessionId, kind, text, slide, neighbors, attachments, memos, signal: disconnect.signal, onEvent: (event) => sse.send(event) },
+        { docId, sessionId, kind, text, slide, deckRev, neighbors, attachments, memos, signal: disconnect.signal, onEvent: (event) => sse.send(event) },
         chatDeps,
       );
     } catch (err) {

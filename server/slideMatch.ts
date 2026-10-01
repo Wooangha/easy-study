@@ -2,12 +2,13 @@
 // which new slide each old slide became, so that everything the student made on a slide follows it.
 //
 // Pure: works on per-slide features (the extracted text, the word boxes and a small grayscale picture), no files.
-// - Comparable text: the slide's words without the margin's noise (numbers and dates in the top or bottom margin — the
-//   slide number, "Sep 11, 2026" — and the deck's header / footer words, found by their boxes), case folded, without
-//   whitespace (the text file and the word boxes space CJK differently).
+// - Comparable text: the slide's words without the margin's noise (found by their boxes in the top or bottom margin: the
+//   decks' header / footer words, a footer line of only those and numbers — "Sep 11, 2026 · 3 / 35" —, and the slide's
+//   own printed number), case folded, without whitespace (the text file and the word boxes space CJK differently).
 // - Text similarity: TF-IDF weighted character trigrams over both decks (the course name, footers and other
 //   boilerplate on every slide weigh almost nothing), cosine.
-// - Image similarity: the weighted Jaccard of the two slides' "ink" (32 x 24 cells, distance from the background).
+// - Image similarity: the weighted Jaccard of the two slides' "ink" (32 x 24 cells, distance from the background), after
+//   the decks' common template (each cell's median ink over every slide) is taken out.
 // - Assignment: a monotonic DP (like a diff) over confident pairs gives the deck's skeleton; every other old slide
 //   is expected in the gap of new slides between its skeleton neighbours. Then one optimal assignment (Hungarian)
 //   matches old to new slides: a pair inside its gap needs NEAR_MIN, a pair anywhere else (a moved slide) FAR_MIN.
@@ -70,11 +71,17 @@ const ASSIGNMENT_MAX_WORK = 2e8;
 
 const MARGIN_TOP = 0.12;
 const MARGIN_BOTTOM = 0.86;
-/** A word of the margin that is a number or a date piece: "12", "3/35", "p.4", "#7", "11,", "2026", "2026.09.11", "/". */
-const MARGIN_NUMBER = /^(?:p\.?|#)?[\d.,:/\-–]*\d[\d.,:/\-–]*$|^[/|·–-]$/i;
-const PAGE_NUMBER_LINE = /^\s*(?:p\.?\s*|page\s+|slide\s+)?\d{1,4}(?:\s*(?:\/|of)\s*\d{1,4})?\s*$/i;
+/** A word that can be a printed slide number: "12", "p.4", "#7", "3/12", "(3/12)", "[3]", "3쪽" (group 1 = the number). */
+const SLIDE_NUMBER_WORD = /^[([]?(?:p\.?|#)?(\d{1,4})(?:\/\d{1,4})?(?:쪽|페이지|p)?[)\]]?$/i;
+/** A number or date piece, or a separator: "11,", "2026", "2026.09.11", "9/11", "(3/12)", "/", "|", "·", "–", "of". */
+const NUMBER_PIECE = /^[([]?[\d.,:/\-–]*\d[\d.,:/\-–]*(?:쪽|페이지|p)?[)\]]?$|^[/|·–—-]$|^of$/i;
+/** A printed slide number is at most this far from the slide's position (a title slide not counted, and so on). */
+const SLIDE_NUMBER_SLACK = 3;
+const PAGE_NUMBER_LINE = /^\s*(?:p\.?\s*|page\s+|slide\s+|-\s*)?[([]?\d{1,4}(?:\s*(?:\/|of)\s*\d{1,4})?(?:쪽|페이지)?[)\]]?(?:\s*-)?\s*$/i;
 /** A margin word on at least this share of a deck's slides is its header / footer (course name, lecture date). */
 const BOILERPLATE_SHARE = 0.5;
+
+type LayoutLine = NonNullable<SlideFeatures['layout']>[number];
 
 function inMargin(r: LayoutBox): boolean {
   return r[1] + r[3] <= MARGIN_TOP || r[1] >= MARGIN_BOTTOM;
@@ -86,7 +93,7 @@ function foldWord(word: string): string {
 
 /**
  * The header / footer words of a deck: words in the top or bottom margin of at least half of its slides (e.g. the
- * lecture's date "Sep 11, 2026" on every slide — it changes with every re-post). Empty for decks under 4 slides.
+ * course name, the lecture's date "Sep 11, 2026" on every slide — it changes with every re-post). Empty under 4 slides.
  */
 export function marginBoilerplate(slides: Pick<SlideFeatures, 'layout'>[]): Set<string> {
   const counts = new Map<string, number>();
@@ -101,18 +108,37 @@ export function marginBoilerplate(slides: Pick<SlideFeatures, 'layout'>[]): Set<
   return out;
 }
 
-/** A margin word that is no content: a number (the slide number, a date) or the deck's header / footer. */
-function isMarginNoise(word: { r: LayoutBox; t: string }, boilerplate: ReadonlySet<string>): boolean {
-  if (!inMargin(word.r)) return false;
-  const t = foldWord(word.t);
-  return MARGIN_NUMBER.test(t) || boilerplate.has(t);
+/**
+ * Which words of a layout line are no content, only in the top / bottom margin: a line made only of number pieces and
+ * header / footer words (a footer "Database Lab · Sep 11, 2026 · 3 / 35"), else the header / footer words and the slide's
+ * own number (within SLIDE_NUMBER_SLACK of its 1-based `position`, with a following "/ N" or "of N"). Any other number
+ * stays: "Average waiting time = 17 ms" or "Midterm on 10/15" near the edge is content.
+ */
+function marginNoise(line: LayoutLine, boilerplate: ReadonlySet<string>, position?: number): boolean[] {
+  const words = line.words.map((w) => foldWord(w.t));
+  const margin = line.words.map((w) => inMargin(w.r));
+  if (words.length > 0 && words.every((t, k) => margin[k] && (NUMBER_PIECE.test(t) || boilerplate.has(t)))) return words.map(() => true);
+  const noise = words.map((t, k) => margin[k] && boilerplate.has(t));
+  if (position === undefined) return noise;
+  words.forEach((t, k) => {
+    const number = margin[k] ? SLIDE_NUMBER_WORD.exec(t) : null;
+    if (!number || Math.abs(Number(number[1]) - position) > SLIDE_NUMBER_SLACK) return;
+    noise[k] = true;
+    if ((words[k + 1] === '/' || words[k + 1] === 'of') && /^\d{1,4}\)?$/.test(words[k + 2] ?? '')) noise[k + 1] = noise[k + 2] = true;
+  });
+  return noise;
 }
 
-/** Boxes of the margin words that are no content (slide numbers, dates, header / footer): ignored by the pixels too. */
-export function slideNumberBoxes(layout: SlideFeatures['layout'], boilerplate: ReadonlySet<string> = new Set()): LayoutBox[] {
+/** Boxes of the margin words that are no content (see marginNoise): ignored by the pixel comparison too. */
+export function slideNumberBoxes(layout: SlideFeatures['layout'], boilerplate: ReadonlySet<string> = new Set(), position?: number): LayoutBox[] {
   if (!layout) return [];
   const boxes: LayoutBox[] = [];
-  for (const line of layout) for (const word of line.words) if (isMarginNoise(word, boilerplate)) boxes.push(word.r);
+  for (const line of layout) {
+    const noise = marginNoise(line, boilerplate, position);
+    line.words.forEach((word, k) => {
+      if (noise[k]) boxes.push(word.r);
+    });
+  }
   return boxes;
 }
 
@@ -121,14 +147,21 @@ function fold(text: string): string {
 }
 
 /**
- * The text a slide is compared by: without the margin's numbers and the deck's header / footer (`boilerplate`, see
- * marginBoilerplate), case folded, without whitespace.
+ * The text a slide is compared by: without the margin's noise (see marginNoise; `position` = the slide's 1-based place
+ * in its deck), case folded, without whitespace. Without word boxes, lines that are only a page number are dropped.
  */
-export function comparableText(slide: Pick<SlideFeatures, 'text' | 'layout'>, boilerplate: ReadonlySet<string> = new Set()): string {
+export function comparableText(
+  slide: Pick<SlideFeatures, 'text' | 'layout'>,
+  boilerplate: ReadonlySet<string> = new Set(),
+  position?: number,
+): string {
   if (slide.layout && slide.layout.length) {
     return fold(
       slide.layout
-        .map((line) => line.words.filter((w) => !isMarginNoise(w, boilerplate)).map((w) => w.t).join(' '))
+        .map((line) => {
+          const noise = marginNoise(line, boilerplate, position);
+          return line.words.filter((_, k) => !noise[k]).map((w) => w.t).join(' ');
+        })
         .join('\n'),
     );
   }
@@ -223,6 +256,24 @@ function inkSimilarity(a: Float32Array, b: Float32Array): number {
   return max < 1 ? 1 : min / max;
 }
 
+/**
+ * Takes the decks' common template out of every slide's ink (in place): each cell's median ink over all slides of both
+ * decks (the title band, logo and footer every slide has). Two different figure slides of one template then share
+ * almost nothing, so a picture-only slide does not pair with any other one. Needs 4 slides or more.
+ */
+function removeTemplate(pics: Float32Array[]): void {
+  if (pics.length < 4) return;
+  const cells = pics[0].length;
+  const column = new Float32Array(pics.length);
+  for (let c = 0; c < cells; c++) {
+    for (let k = 0; k < pics.length; k++) column[k] = pics[k][c];
+    column.sort();
+    const template = column[column.length >> 1];
+    if (template <= 0) continue;
+    for (const pic of pics) pic[c] = Math.max(0, pic[c] - template);
+  }
+}
+
 /** Share of the pixels that differ between two thumbnails, outside the given boxes (the slide numbers). */
 export function changedPixels(a: Uint8Array, b: Uint8Array, ignore: LayoutBox[] = []): number {
   if (a.length !== b.length || a.length !== THUMB_W * THUMB_H) return 1;
@@ -249,40 +300,48 @@ interface Prepared {
   scores: PairScore[][];
   oldText: string[];
   newText: string[];
-  oldBoilerplate: Set<string>;
-  newBoilerplate: Set<string>;
+  boilerplate: Set<string>;
 }
 
 function prepare(oldSlides: SlideFeatures[], newSlides: SlideFeatures[]): Prepared {
-  const oldBoilerplate = marginBoilerplate(oldSlides);
-  const newBoilerplate = marginBoilerplate(newSlides);
-  const oldText = oldSlides.map((slide) => comparableText(slide, oldBoilerplate));
-  const newText = newSlides.map((slide) => comparableText(slide, newBoilerplate));
+  // One header / footer for both versions: a word that is boilerplate in one deck only (a 4-slide deck losing a slide,
+  // a title word on exactly half of the slides) would otherwise be dropped from one side only.
+  const boilerplate = new Set([...marginBoilerplate(oldSlides), ...marginBoilerplate(newSlides)]);
+  const oldText = oldSlides.map((slide, i) => comparableText(slide, boilerplate, i + 1));
+  const newText = newSlides.map((slide, j) => comparableText(slide, boilerplate, j + 1));
   const vectors = textVectors([...oldText, ...newText]);
   const oldVec = vectors.slice(0, oldSlides.length);
   const newVec = vectors.slice(oldSlides.length);
   const oldPic = oldSlides.map((s) => ink(s.thumb));
   const newPic = newSlides.map((s) => ink(s.thumb));
+  // Picture-only slides compare without the decks' common template; text slides keep it (their text decides, and
+  // the template keeps an edited slide's picture close to its old one).
+  const oldBare = oldPic.map((p) => p.slice());
+  const newBare = newPic.map((p) => p.slice());
+  removeTemplate([...oldBare, ...newBare]);
   const scores = oldSlides.map((_, i) =>
     newSlides.map((_, j) => {
-      const image = inkSimilarity(oldPic[i], newPic[j]);
       const a = oldVec[i];
       const b = newVec[j];
       let text = 0;
+      let image: number;
       let score: number;
       if (a.hasText && b.hasText) {
+        image = inkSimilarity(oldPic[i], newPic[j]);
         text = a.text === b.text ? 1 : cosine(a, b);
         score = 0.75 * text + 0.25 * image;
       } else if (!a.hasText && !b.hasText) {
+        image = inkSimilarity(oldBare[i], newBare[j]);
         score = image;
       } else {
         // Text on one side only: text was added to (or taken off) a picture slide, or they are unrelated.
+        image = inkSimilarity(oldBare[i], newBare[j]);
         score = 0.6 * image;
       }
       return { score, text, image };
     }),
   );
-  return { scores, oldText, newText, oldBoilerplate, newBoilerplate };
+  return { scores, oldText, newText, boilerplate };
 }
 
 /** Similarity matrix (old x new). */
@@ -408,7 +467,7 @@ function longestIncreasing(values: number[]): Set<number> {
 export function matchSlides(oldSlides: SlideFeatures[], newSlides: SlideFeatures[]): SlideMatch {
   const n = oldSlides.length;
   const m = newSlides.length;
-  const { scores, oldText, newText, oldBoilerplate, newBoilerplate } = prepare(oldSlides, newSlides);
+  const { scores, oldText, newText, boilerplate } = prepare(oldSlides, newSlides);
 
   // The skeleton, then for each old slide the gap of new slides it is expected in: (lo, hi) exclusive.
   const anchor = monotonic(scores, n, m, ANCHOR_MIN);
@@ -471,7 +530,7 @@ export function matchSlides(oldSlides: SlideFeatures[], newSlides: SlideFeatures
   const slides: SlideMatchEntry[] = newSlides.map((slide, j) => {
     const i = oldOf[j];
     if (i < 0) return { slide: j + 1, from: null, change: 'new', score: 0 };
-    const ignore = [...slideNumberBoxes(oldSlides[i].layout, oldBoilerplate), ...slideNumberBoxes(slide.layout, newBoilerplate)];
+    const ignore = [...slideNumberBoxes(oldSlides[i].layout, boilerplate, i + 1), ...slideNumberBoxes(slide.layout, boilerplate, j + 1)];
     const same = oldText[i] === newText[j] && changedPixels(oldSlides[i].thumb, slide.thumb, ignore) <= SAME_PIXELS_MAX;
     return { slide: j + 1, from: i + 1, change: same ? 'same' : 'changed', score: scores[i][j].score, ...(moved.has(j) ? { moved: true } : {}) };
   });

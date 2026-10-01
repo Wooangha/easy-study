@@ -12,6 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { after, before, describe, test } from 'node:test';
+import { DECK_REV_HEADER } from '../shared/types.ts';
 import type {
   AnnotationEvent,
   Attachment,
@@ -41,6 +42,7 @@ import {
   endDocSwap,
   nextVersionPaths,
   prevVersionPaths,
+  settleNextVersions,
   textFileName,
   waitForIngest,
   waitForNextVersion,
@@ -712,8 +714,11 @@ describe('a new version of a lecture over HTTP', () => {
     await fs.mkdir(path.join(staged.dir, 'slides'), { recursive: true });
     await fs.writeFile(staged.sourcePdf, lecturePdf(['A']));
     await fs.writeFile(staged.meta, JSON.stringify({ status: 'processing', fileName: 'x.pdf', progress: 1, pageCount: 1, aspectRatio: 16 / 9, createdAt: new Date().toISOString(), lang: 'en' }));
+    // A new version that was ready (or failed) when the server stopped: no dialog is left to use it.
+    const settled = await fakeLectureWithNext('settle-ready-ccc333', 'ready');
 
     server = await startServer(serverOptions());
+    assert.equal(await exists(settled), false);
     const swapped = await storedDoc(docId);
     assert.equal(swapped.deckRev, 3);
     assert.equal(swapped.fileName, 'Compilers L2 (v3).pdf');
@@ -734,6 +739,212 @@ describe('a new version of a lecture over HTTP', () => {
     // Deleting the lecture removes the replaced deck with it.
     assert.equal((await send('DELETE', `/docs/${docId}`)).status, 204);
     assert.equal(await exists(prev.dir), false);
+  });
+});
+
+/** A lecture folder with only its doc.json, and a staged new version in `status`; resolves with the staging folder. */
+async function fakeLectureWithNext(docId: string, status: NextVersionInfo['status']): Promise<string> {
+  const doc: StoredDocMeta = { id: docId, title: docId, fileName: `${docId}.pdf`, pageCount: 1, aspectRatio: 16 / 9, status: 'ready', progress: 1, createdAt: '2026-10-01T10:00:00.000Z' };
+  await fs.mkdir(docPaths(docId).dir, { recursive: true });
+  await fs.writeFile(docPaths(docId).docJson, JSON.stringify(doc));
+  const staged = nextVersionPaths(docId);
+  await fs.mkdir(staged.slidesDir, { recursive: true });
+  await fs.writeFile(staged.meta, JSON.stringify({ status, fileName: 'v2.pdf', progress: 1, pageCount: 1, aspectRatio: 16 / 9, createdAt: '2026-10-01T10:00:00.000Z' }));
+  return staged.dir;
+}
+
+/** An fs failure the retries do not cover (outside Windows locks). */
+const ioError = () => Object.assign(new Error('EIO: i/o error (test)'), { code: 'EIO' });
+
+describe('a swap that stops half-way, remaps given up, writes for another deck', () => {
+  let docId = '';
+  let linking = '';
+  let attachmentId = '';
+  const onD = [rectItem()];
+  const linkMemo = { ...memoItem('L4의 4장 참고'), links: [] as Array<{ kind: 'doc'; docId: string; slide: number }> };
+  /** A request that names the deck its slide numbers belong to. */
+  const sendFor = (rev: string, method: string, p: string, body?: unknown) =>
+    api(p, { method, headers: { 'Content-Type': 'application/json', [DECK_REV_HEADER]: rev }, body: body === undefined ? undefined : JSON.stringify(body) });
+  const attachmentOf = () => readJson<Attachment>(path.join(docPaths(docId).dir, 'attachments', `${attachmentId}.json`));
+  const linksOf = async () => {
+    const doc = await json<SlideAnnotations>(await api(`/docs/${linking}/annotations/1`));
+    return (doc.items.find((item) => item.id === linkMemo.id) as { links: unknown[] }).links;
+  };
+
+  before(async () => {
+    server = await startServer(serverOptions());
+    docId = (await importLecture(OLD_DECK, 'Compilers L4.pdf')).id;
+    linking = (await importLecture(['A'], 'Compilers L5.pdf')).id;
+    await json<SlideAnnotations>(await send('PUT', `/docs/${docId}/annotations/4`, { baseRev: 0, items: onD, hiddenMarkers: [] }));
+    attachmentId = (await json<Attachment>(await send('POST', `/docs/${docId}/regions`, { slide: 4, rect: RECT }), 201)).id;
+    linkMemo.links = [{ kind: 'doc', docId, slide: 4 }];
+    await json<SlideAnnotations>(await send('PUT', `/docs/${linking}/annotations/1`, { baseRev: 0, items: [linkMemo], hiddenMarkers: [] }));
+  });
+
+  after(async () => {
+    await server?.close();
+    server = null;
+  });
+
+  test('an apply that gives remaps up; its undo leaves what they never renumbered where it is', async (t) => {
+    await json(await upload(docId, lecturePdf(NEW_DECK), 'Compilers L4 (v2).pdf'), 202);
+    assert.equal((await waitForPlan(docId)).status, 'ready');
+    // The region attachments and the other lecture's 필기 cannot be read while the deck is swapped.
+    const unreadable = new Set([path.join(docPaths(docId).dir, 'attachments'), docPaths(linking).annotationsDir]);
+    const readdir = fs.readdir;
+    t.mock.method(fs, 'readdir', function (this: unknown, ...args: unknown[]) {
+      if (unreadable.has(String(args[0]))) return Promise.reject(ioError());
+      return (readdir as (...a: unknown[]) => Promise<unknown>).apply(this, args);
+    });
+    const applied = await json<DocMeta>(await send('POST', `/docs/${docId}/versions/next/apply`));
+    t.mock.restoreAll();
+    assert.equal(applied.deckRev, 1);
+    assert.deepEqual((await readJson<SwapJournal>(prevVersionPaths(docId).journal)).failed, ['attachments', 'links']);
+    // Given up, not stopped: the lecture takes writes.
+    assert.deepEqual((await json<SlideAnnotations>(await api(`/docs/${docId}/annotations/3`))).items.map((item) => item.id), onD.map((item) => item.id));
+    assert.equal((await attachmentOf()).slide, 4, 'still numbered in deck 0');
+    assert.deepEqual(await linksOf(), [{ kind: 'doc', docId, slide: 4 }]);
+
+    const undone = await json<DocMeta>(await send('POST', `/docs/${docId}/versions/undo`, { fromRev: 1 }));
+    assert.equal(undone.deckRev, 2);
+    assert.deepEqual((await json<SlideAnnotations>(await api(`/docs/${docId}/annotations/4`))).items.map((item) => item.id), onD.map((item) => item.id));
+    const attachment = await attachmentOf();
+    assert.deepEqual([attachment.slide, attachment.removedFrom], [4, undefined], 'deck 0 is back: nothing to map');
+    assert.deepEqual(await readJson(path.join(docPaths(docId).dir, 'attachments', 'deck.json')), { rev: 2 });
+    assert.deepEqual(await linksOf(), [{ kind: 'doc', docId, slide: 4 }]);
+  });
+
+  test('an apply whose render sets cannot be switched keeps the lecture gated; a drop finishes it first', async (t) => {
+    await json(await upload(docId, lecturePdf(NEW_DECK), 'Compilers L4 (v3).pdf'), 202);
+    assert.equal((await waitForPlan(docId)).plan?.fromRev, 2);
+    const staged = nextVersionPaths(docId);
+    const blocked = path.join(staged.dir, 'slides');
+    let stuck = true;
+    const rename = fs.rename;
+    t.mock.method(fs, 'rename', function (this: unknown, ...args: Parameters<typeof fs.rename>) {
+      if (stuck && String(args[0]) === blocked) return Promise.reject(ioError());
+      return rename.apply(this, args);
+    });
+    const failed = await send('POST', `/docs/${docId}/versions/next/apply`);
+    assert.equal(failed.status, 500);
+    await failed.arrayBuffer();
+    const journal = await readJson<SwapJournal>(prevVersionPaths(docId).journal);
+    assert.deepEqual([journal.complete, journal.steps], [false, ['render-out']]);
+
+    // Half-moved: nothing is written until the swap is finished (its remaps would renumber it once more).
+    const { rev } = await json<SlideAnnotations>(await api(`/docs/${docId}/annotations/1`));
+    const write = () => send('PUT', `/docs/${docId}/annotations/1`, { baseRev: rev, items: [rectItem()], hiddenMarkers: [] });
+    await expectError(await write(), 409, M.swapping);
+    await expectError(await send('POST', `/docs/${docId}/regions`, { slide: 1, rect: RECT }), 409, M.swapping);
+    assert.equal((await api(`/docs/${docId}`)).status, 200, 'reads go on');
+
+    // The drop finishes the apply first (it needs the staging folder): failing again, the drop fails and keeps it.
+    const refused = await send('DELETE', `/docs/${docId}/versions/next`);
+    assert.equal(refused.status, 500);
+    await refused.arrayBuffer();
+    assert.ok(await exists(staged.meta));
+    await expectError(await write(), 409, M.swapping);
+
+    stuck = false;
+    assert.equal((await send('DELETE', `/docs/${docId}/versions/next`)).status, 204);
+    const doc = await json<DocMeta>(await api(`/docs/${docId}`));
+    assert.deepEqual([doc.deckRev, doc.fileName, doc.lastChange?.kind], [3, 'Compilers L4 (v3).pdf', 'apply']);
+    assert.equal((await readJson<SwapJournal>(prevVersionPaths(docId).journal)).complete, true);
+    assert.equal(await exists(staged.dir), false);
+    // The region the undo only marked moves with this apply (old 4 → new 3).
+    assert.equal((await attachmentOf()).slide, 3);
+    const current = await json<SlideAnnotations>(await api(`/docs/${docId}/annotations/1`));
+    assert.equal((await send('PUT', `/docs/${docId}/annotations/1`, { baseRev: current.rev, items: [], hiddenMarkers: [] })).status, 200);
+  });
+
+  test("writes for another deck than the lecture's answer 409 deckChanged with its deckRev, before anything happens", async () => {
+    const deckChanged = async (res: Response) => {
+      const body = (await res.json()) as Record<string, unknown>;
+      assert.equal(res.status, 409, String(body.error));
+      assert.deepEqual(body, { error: M.deckChanged, deckRev: 3 });
+    };
+    const { rev } = await json<SlideAnnotations>(await api(`/docs/${docId}/annotations/2`));
+    await deckChanged(await sendFor('2', 'PUT', `/docs/${docId}/annotations/2`, { baseRev: rev, items: [rectItem()], hiddenMarkers: [] }));
+    await deckChanged(await sendFor('2', 'PATCH', `/docs/${docId}/annotations/2`, { baseRev: rev, ops: [{ op: 'add', item: rectItem() }] }));
+    await deckChanged(await sendFor('x', 'PUT', `/docs/${docId}/annotations/2`, { baseRev: rev, items: [], hiddenMarkers: [] }));
+    assert.equal((await json<SlideAnnotations>(await api(`/docs/${docId}/annotations/2`))).rev, rev);
+    await deckChanged(await sendFor('2', 'POST', `/docs/${docId}/regions`, { slide: 2, rect: RECT }));
+
+    const session = await json<Session>(await send('POST', `/docs/${docId}/sessions`, { provider: 'claude-code' }), 201);
+    const calls = providerCalls;
+    await deckChanged(await sendFor('2', 'POST', `/docs/${docId}/sessions/${session.id}/messages`, { slide: 2, text: 'What is a token?' }));
+    await deckChanged(await sendFor('2', 'POST', `/docs/${docId}/sessions/${session.id}/prime`, { slide: 2 }));
+    assert.equal(providerCalls, calls);
+    assert.deepEqual((await json<Session>(await api(`/docs/${docId}/sessions/${session.id}`))).messages, []);
+
+    await deckChanged(await send('POST', `/docs/${docId}/versions/undo`, { fromRev: 2 }));
+    await expectError(await send('POST', `/docs/${docId}/versions/undo`, { fromRev: 'two' }), 400);
+    assert.equal((await storedDoc(docId)).deckRev, 3);
+
+    // The lecture's deck: accepted.
+    assert.equal((await json<SlideAnnotations>(await sendFor('3', 'PUT', `/docs/${docId}/annotations/2`, { baseRev: rev, items: [], hiddenMarkers: [] }))).rev, rev + 1);
+    assert.equal((await json<DocMeta>(await send('POST', `/docs/${docId}/versions/undo`, { fromRev: 3 }))).deckRev, 4);
+  });
+
+  test('a swap the next start cannot finish keeps the lecture gated (and its staging folder) until a drop finishes it', async (t) => {
+    await json(await upload(docId, lecturePdf(NEW_DECK), 'Compilers L4 (v4).pdf'), 202);
+    const info = await waitForPlan(docId);
+    assert.equal(info.plan?.fromRev, 4);
+    await waitForNextVersion(docId);
+    await server!.close();
+    server = null;
+    // The server stopped right after it wrote the journal of an apply.
+    const doc = await storedDoc(docId);
+    const staged = nextVersionPaths(docId);
+    const journal: SwapJournal = {
+      fromRev: 4,
+      toRev: 5,
+      oldMeta: { pageCount: doc.pageCount, aspectRatio: doc.aspectRatio, fileName: doc.fileName },
+      newFileName: 'Compilers L4 (v4).pdf',
+      newAspectRatio: (await readJson<{ aspectRatio: number }>(staged.meta)).aspectRatio,
+      plan: info.plan!,
+      appliedAt: '2026-10-02T09:00:00.000Z',
+      steps: [],
+      complete: false,
+    };
+    await fs.mkdir(prevVersionPaths(docId).dir, { recursive: true });
+    await fs.writeFile(prevVersionPaths(docId).journal, JSON.stringify(journal));
+
+    let stuck = true;
+    const blocked = path.join(staged.dir, 'slides');
+    const rename = fs.rename;
+    t.mock.method(fs, 'rename', function (this: unknown, ...args: Parameters<typeof fs.rename>) {
+      if (stuck && String(args[0]) === blocked) return Promise.reject(ioError());
+      return rename.apply(this, args);
+    });
+    server = await startServer(serverOptions());
+    assert.equal((await storedDoc(docId)).deckRev, 4);
+    assert.ok(await exists(staged.meta), 'kept: finishing the swap needs it');
+    const { rev } = await json<SlideAnnotations>(await api(`/docs/${docId}/annotations/1`));
+    await expectError(await send('PUT', `/docs/${docId}/annotations/1`, { baseRev: rev, items: [], hiddenMarkers: [] }), 409, M.swapping);
+
+    stuck = false;
+    assert.equal((await send('DELETE', `/docs/${docId}/versions/next`)).status, 204);
+    assert.equal((await storedDoc(docId)).deckRev, 5);
+    assert.equal(await exists(staged.dir), false);
+    const current = await json<SlideAnnotations>(await api(`/docs/${docId}/annotations/1`));
+    assert.equal((await send('PUT', `/docs/${docId}/annotations/1`, { baseRev: current.rev, items: [], hiddenMarkers: [] })).status, 200);
+  });
+
+  test('settling the staged versions: what no dialog can use goes, a stalled swap keeps its own', async () => {
+    const stalled = 'settle-stalled-aaa111';
+    const ready = await fakeLectureWithNext(stalled, 'ready');
+    const failed = await fakeLectureWithNext('settle-error-bbb222', 'error');
+    endDocSwap(stalled, true);
+    try {
+      await settleNextVersions();
+      assert.equal(await exists(ready), true, 'finishing the swap needs it');
+      assert.equal(await exists(failed), false);
+    } finally {
+      endDocSwap(stalled);
+    }
+    await settleNextVersions();
+    assert.equal(await exists(ready), false);
   });
 });
 

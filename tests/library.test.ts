@@ -30,6 +30,7 @@ import {
   isIngestRunning,
   listDocs,
   loadDocAssets,
+  moveRenderEntries,
   pngAspectRatio,
   progressThrottle,
   readDigestRecord,
@@ -1089,6 +1090,33 @@ describe('portability helpers', () => {
       { code: 'ENOENT' },
     );
     assert.equal(calls, 1);
+  });
+
+  test('moveRenderEntries waits longer on Windows: a slide being sent keeps its render folder busy for a while', async (t) => {
+    const from = await fs.mkdtemp(path.join(tmpRoot, 'move-from-'));
+    const to = path.join(from, 'swapped');
+    await fs.mkdir(path.join(from, 'slides'));
+    await fs.writeFile(path.join(from, 'slides', '001.png'), 'png');
+    const rename = fs.rename;
+    // 12 refusals ≈ 5 s of retries: past the ~1.5 s every other file operation waits.
+    let busy = 12;
+    t.mock.method(fs, 'rename', function (this: unknown, ...args: Parameters<typeof fs.rename>) {
+      if (busy-- > 0) return Promise.reject(locked('EBUSY'));
+      return rename.apply(this, args);
+    });
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    let settled: unknown = null;
+    void moveRenderEntries(from, to, 'win32').then(
+      () => (settled = 'moved'),
+      (err: unknown) => (settled = err),
+    );
+    for (let turn = 0; settled === null && turn < 10_000; turn++) {
+      await new Promise((resolve) => setImmediate(resolve));
+      t.mock.timers.tick(250);
+    }
+    assert.equal(settled, 'moved');
+    assert.equal(await fs.readFile(path.join(to, 'slides', '001.png'), 'utf8'), 'png');
+    await fs.rm(from, { recursive: true, force: true });
   });
 
   test('pngAspectRatio reads the PNG header; anything else gives the fallback', async () => {

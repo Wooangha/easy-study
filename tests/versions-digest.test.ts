@@ -380,11 +380,13 @@ describe('remapDigest', () => {
     assert.equal(record.error, smsg('ko').chat.digest.interrupted);
   });
 
-  test('nothing without a digest; an undo without a snapshot works like an apply; an apply drops older snapshots', async () => {
+  test('without a digest only the mark; an undo without a snapshot works like an apply; an apply drops older snapshots', async () => {
     const docId = 'none-000001';
     await writeDoc(docId, 6);
     await remapDigest(docId, APPLY, 'L7 Parsing');
-    assert.equal(await exists(docPaths(docId).digestDir), false);
+    // A digest made from now on is numbered in the new deck.
+    assert.deepEqual(await fs.readdir(docPaths(docId).digestDir), ['deck.json']);
+    assert.deepEqual(await readJson(digestFile(docId, 'deck.json')), { rev: 1 });
     assert.equal(await exists(docPaths(docId).digestMd), false);
 
     // A digest made on the new deck, then the swap undone: there is nothing to restore.
@@ -402,6 +404,25 @@ describe('remapDigest', () => {
     assert.equal(await exists(digestFile(docId, 'digest-r3.json')), true);
     record = await readRecord(docId);
     assert.deepEqual(record.slides.map((e) => e.slide), [4, 5, 6]);
+  });
+
+  test('an undo of an apply that gave the digest up only marks it; a digest of another deck is left alone', async () => {
+    const docId = 'gaveup-000001';
+    await writeDoc(docId, 6);
+    const original = oldRecord(6);
+    await writeRecord(docId, original);
+    // The apply kept its snapshot, then gave up before it renumbered anything (no mark: deck 0).
+    await fs.writeFile(digestFile(docId, 'digest-r0.json'), JSON.stringify(original));
+    await remapDigest(docId, UNDO, 'L7 Parsing');
+    assert.deepEqual(await readRecord(docId), original, 'already in the deck that came back');
+    assert.deepEqual(await readJson(digestFile(docId, 'deck.json')), { rev: 2 });
+    assert.equal(await exists(digestFile(docId, 'digest-r0.json')), false, 'nothing to bring back');
+
+    // A swap from deck 4 while the digest is numbered in deck 2: nothing renumbered, no snapshot.
+    await remapDigest(docId, deckMap(4, [1, 2, null, 4, 3, 6], 6, [2]), 'L7 Parsing');
+    assert.deepEqual(await readRecord(docId), original);
+    assert.deepEqual(await readJson(digestFile(docId, 'deck.json')), { rev: 2 });
+    assert.equal(await exists(digestFile(docId, 'digest-r4.json')), false);
   });
 
   test('a job after the swap redoes only the changed and added slides, then the summary', async () => {

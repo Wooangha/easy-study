@@ -30,6 +30,7 @@ import { isImageWorkerStopped, runAttachmentWorker } from './imageWorker.ts';
 import type { AttachmentJob, AttachmentWorkerResult, AttachmentWorkerRun, UploadImageType } from './imageWorker.ts';
 import type { DeckMap } from './internal-types.ts';
 import {
+  checkDeckRev,
   createKeyedQueue,
   createSlots,
   docPaths,
@@ -411,14 +412,15 @@ async function annotationSnapshot(docId: string, slide: number, annotationId: st
 /**
  * POST /api/docs/:docId/regions: crops the region (padded) from the full-resolution slide and reads the PDF's
  * text inside it, in the image worker. 404 unknown document, 409 not converted (yet) or its deck being swapped
- * (DESIGN §28), 400 bad slide / rect, or an `annotationId` that names no 필기 of the slide (its snapshot is taken
- * before the image is made).
+ * (DESIGN §28), 409 deckChanged when `deckRev` (the request's DECK_REV_HEADER) is not the lecture's deck, 400 bad
+ * slide / rect, or an `annotationId` that names no 필기 of the slide (its snapshot is taken before the image is made).
  */
-export async function createRegionAttachment(docId: string, body: unknown, now: Date = new Date()): Promise<Attachment> {
+export async function createRegionAttachment(docId: string, body: unknown, now: Date = new Date(), deckRev?: number): Promise<Attachment> {
   if (isDocSwapping(docId)) throw swappingError();
   const doc = await readStoredDoc(docId);
   if (!doc) throw new HttpError(404, smsg().common.notFound.doc);
   if (doc.status !== 'ready') throw notReadyError(doc);
+  checkDeckRev(doc, deckRev);
   const { slide, rect, annotationId } = parseRegionRequest(body, doc.pageCount);
   const annotation = annotationId ? await annotationSnapshot(docId, slide, annotationId) : null;
   await ensureAttachmentsDir(docId);
@@ -717,23 +719,40 @@ function isAttachmentsJournal(value: unknown, toRev: number): value is Attachmen
 /**
  * Region attachments follow their slide (DESIGN §28 Remaps › Attachments): `slide` remapped; a dropped slide → the
  * nearest kept slide and `removedFrom` {fromRev, old slide}; on an undo, `removedFrom.rev === restoreRev` → back to
- * removedFrom.slide, the flag removed. Under the attachments lock; idempotent (attachments/deck.json {rev}) and
- * resumable (the journal). The old numbering is map.oldPageCount (doc.json has the new deck by now).
+ * removedFrom.slide, the flag removed. Under the attachments lock; resumable (the journal). The old numbering is
+ * map.oldPageCount (doc.json has the new deck by now).
+ *
+ * Only regions numbered in map.fromRev are moved (attachments/deck.json {rev}, absent = 0); then the mark is map.toRev
+ * and a second run does nothing. An undo that finds them still in the deck coming back (map.restoreRev: the apply gave
+ * the remap up) only marks them map.toRev; any other numbering is left alone. A lecture without attachments/ gets the
+ * folder with the mark, so the regions made later count as numbered in the new deck.
  */
 export async function remapRegionAttachments(docId: string, map: DeckMap): Promise<void> {
   await lock(docId, async () => {
     const dir = attachmentsDir(docId);
+    const markFile = path.join(dir, DECK_FILE);
     let names: string[];
     try {
       names = await fs.readdir(dir);
     } catch (err) {
-      if (isNotFound(err)) return; // no attachments at all
-      throw err;
+      if (!isNotFound(err)) throw err;
+      await ensureAttachmentsDir(docId);
+      await writeJsonAtomic(markFile, { rev: map.toRev });
+      return;
     }
     const journalFile = path.join(dir, `deck-r${map.toRev}.json`);
-    const mark = await readJsonFile<{ rev?: unknown }>(path.join(dir, DECK_FILE));
-    if (typeof mark?.rev === 'number' && mark.rev >= map.toRev) {
+    const stored = await readJsonFile<{ rev?: unknown }>(markFile);
+    const mark = typeof stored?.rev === 'number' && Number.isInteger(stored.rev) ? stored.rev : 0;
+    if (mark === map.toRev) {
       await rmWithRetry(journalFile, { force: true });
+      return;
+    }
+    if (mark !== map.fromRev) {
+      if (map.restoreRev !== undefined && mark === map.restoreRev) {
+        // The apply never moved them: its journal is of no use any more.
+        await rmWithRetry(path.join(dir, `deck-r${map.fromRev}.json`), { force: true });
+        await writeJsonAtomic(markFile, { rev: map.toRev });
+      }
       return;
     }
     const pending = await readJsonFile<unknown>(journalFile);
@@ -758,7 +777,7 @@ export async function remapRegionAttachments(docId: string, map: DeckMap): Promi
       // Deleted meanwhile (a crash, then the sweep): its metadata is not made again.
       if ((await readJsonFile<unknown>(metaFile(docId, attachment.id))) !== null) await writeJsonAtomic(metaFile(docId, attachment.id), attachment);
     }
-    await writeJsonAtomic(path.join(dir, DECK_FILE), { rev: map.toRev });
+    await writeJsonAtomic(markFile, { rev: map.toRev });
     await rmWithRetry(journalFile, { force: true });
   });
 }

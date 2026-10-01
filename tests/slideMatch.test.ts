@@ -211,6 +211,104 @@ describe('slide matching', () => {
   });
 });
 
+describe('review fixes', () => {
+  /** A slide whose word boxes are given line by line: [y, words…]. */
+  const laid = (lines: [number, ...string[]][], picture: number): SlideFeatures => {
+    const layout: SlideTextLayout['lines'] = lines.map(([y, ...words]) => ({
+      r: [0.05, y, 0.9, 0.04],
+      dir: 'h',
+      words: words.map((t, k) => ({ r: [0.05 + k * 0.1, y, 0.09, 0.04] as [number, number, number, number], t, c: [k, k + 1] as [number, number] })),
+    }));
+    return { ...slide({ lines: [], picture }), text: lines.map(([, ...w]) => w.join(' ')).join('\n'), layout };
+  };
+
+  test('picture-only slides of one template do not pair up: a removed one stays removed', () => {
+    // Every slide has the same title band (the template); the figures differ.
+    const pic = (seed: number): SlideFeatures => {
+      const f = slide({ lines: [], picture: seed });
+      for (let y = 0; y < 14; y++) f.thumb.fill(60, y * THUMB_W, (y + 1) * THUMB_W);
+      return f;
+    };
+    const old = [1, 2, 3, 4, 5, 6, 7].map(pic);
+    const next = [1, 2, 4, 5, 6, 7, 8, 9].map(pic);
+    const result = matchSlides(old, next);
+    assert.deepEqual(result.removed, [3]);
+    assert.deepEqual(
+      result.slides.map((s) => s.from),
+      [1, 2, 4, 5, 6, 7, null, null],
+    );
+  });
+
+  test('a number near the edge that is content (not the slide number) is compared', () => {
+    const deckOf = (ms: number) =>
+      Array.from({ length: 6 }, (_, i) =>
+        laid(
+          [
+            [0.2, 'Scheduling', 'example', String.fromCharCode(65 + i)],
+            [0.5, 'round', 'robin', 'quantum', String(i)],
+            ...(i === 3 ? ([[0.9, 'Average', 'waiting', 'time', '=', String(ms), 'ms']] as [number, ...string[]][]) : []),
+            [0.95, 'OS', String(i + 1)],
+          ],
+          100 + i,
+        ),
+      );
+    const result = matchSlides(deckOf(17), deckOf(13));
+    assert.deepEqual(
+      result.slides.map((s) => s.change),
+      ['same', 'same', 'same', 'changed', 'same', 'same'],
+    );
+  });
+
+  test('a footer that is boilerplate in one version only does not make identical slides differ', () => {
+    const deckOf = (n: number) =>
+      Array.from({ length: n }, (_, i) =>
+        laid(
+          [
+            [0.2, 'Topic', String.fromCharCode(65 + i), 'details', 'here'],
+            [0.5, 'more', 'words', 'about', String.fromCharCode(75 + i)],
+            [0.95, '운영체제', '·', '2026년', '9월', '11일'],
+          ],
+          200 + i,
+        ),
+      );
+    const old = deckOf(4);
+    const next = [old[0], old[1], old[3]];
+    const result = matchSlides(old, next);
+    assert.deepEqual(
+      result.slides.map((s) => [s.from, s.change]),
+      [
+        [1, 'same'],
+        [2, 'same'],
+        [4, 'same'],
+      ],
+    );
+  });
+
+  test('slide numbers like "3쪽", "(3/12)", "[3]" and "- 3 -" are renumbered without a change', () => {
+    for (const form of [(n: number) => ['운영체제', `${n}쪽`], (n: number) => ['OS', `(${n}/12)`], (n: number) => [`[${n}]`], (n: number) => ['-', String(n), '-']]) {
+      const deckOf = (keep: (i: number) => boolean) =>
+        Array.from({ length: 12 }, (_, i) => i)
+          .filter(keep)
+          .map((i, pos) =>
+            laid(
+              [
+                [0.2, 'Section', String.fromCharCode(65 + i), 'title'],
+                [0.5, 'body', 'text', 'of', 'slide', String.fromCharCode(75 + i)],
+                [0.95, ...form(pos + 1)],
+              ],
+              300 + i,
+            ),
+          );
+      const result = matchSlides(deckOf(() => true), deckOf((i) => i !== 2));
+      assert.deepEqual(result.removed, [3], JSON.stringify(form(1)));
+      assert.ok(
+        result.slides.every((s) => s.change === 'same'),
+        `${JSON.stringify(form(1))}: ${result.slides.map((s) => s.change[0]).join('')}`,
+      );
+    }
+  });
+});
+
 describe('comparable text and slide numbers', () => {
   test('the slide number is found by its box in the margin, other numbers stay', () => {
     const s = slide({ lines: ['Rule 4 applies', 'x = 2 * y'], number: 13, picture: 1 });

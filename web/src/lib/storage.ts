@@ -43,6 +43,8 @@ export const storageKeys = {
   /** "여기부터 p.N" markers sent for a recording (the API has no GET for them). */
   recordingMarkers: (recordingId: string) => `recordingMarkers:${recordingId}`,
   slide: (docId: string) => `slide:${docId}`,
+  /** The deck rev (DocMeta.deckRev, DESIGN §28) the remembered `slide:<docId>` is numbered in; absent = 0. */
+  slideRev: (docId: string) => `slideRev:${docId}`,
   session: (docId: string) => `session:${docId}`,
   /** The deck swap (DocMeta.lastChange.rev, DESIGN §28) whose banner was dismissed in this browser. */
   deckSeen: (docId: string) => `deckSeen:${docId}`,
@@ -95,3 +97,24 @@ export function writeStorage(key: string, value: unknown): void {
 export const isNumber = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 export const isString = (v: unknown): v is string => typeof v === 'string';
 export const isBoolean = (v: unknown): v is boolean => typeof v === 'boolean';
+
+/**
+ * The remembered slide of a lecture and the deck rev it is numbered in (DESIGN §28), or null when none is remembered.
+ * A slide remembered before deck revs were stored counts as rev 0.
+ */
+export function readRememberedSlide(docId: string): { slide: number; rev: number } | null {
+  const slide = readStorage<number | null>(storageKeys.slide(docId), null, isNumber);
+  if (slide === null) return null;
+  return { slide, rev: readStorage(storageKeys.slideRev(docId), 0, isNumber) };
+}
+
+/**
+ * Remember the slide of a lecture, numbered in deck `rev`. Never over a slide of a later deck: a viewer of the old
+ * deck still shown (here, or in another tab) must not undo the remap of a swap.
+ */
+export function rememberSlide(docId: string, slide: number, rev: number): void {
+  const stored = readRememberedSlide(docId);
+  if (stored && stored.rev > rev) return;
+  writeStorage(storageKeys.slide(docId), slide);
+  writeStorage(storageKeys.slideRev(docId), rev > 0 ? rev : null); // absent = 0: nothing more for a lecture never swapped
+}

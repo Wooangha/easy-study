@@ -6,8 +6,9 @@
 // The swap is journaled in library/.prev-<docId>/prev.json, next to the replaced deck: each step is recorded once it is
 // done, so a swap the server stopped in the middle is finished at the next start (resumeSwaps, before requests are
 // accepted; every remap is idempotent). While a swap runs the lecture is marked swapping (library.ts): its writes answer
-// 409, its digest and turns are held (lockDigest, reserveDocTurns), nothing renders into it. Uploads, drops, applies
-// and undos of one lecture run one after another.
+// 409, its digest and turns are held (lockDigest, reserveDocTurns), nothing renders into it. A swap whose render sets
+// or doc.json could not be switched leaves the lecture gated ("stalled") until an upload, drop, apply or undo of it
+// (or the next start) finishes the swap. Uploads, drops, applies and undos of one lecture run one after another.
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import type { DeckChange, DocMeta, NextVersionInfo, VersionPlan } from '../shared/types.ts';
@@ -22,16 +23,16 @@ import { smsg } from './i18n.ts';
 import type { DeckMap } from './internal-types.ts';
 import {
   beginDocSwap,
+  checkDeckRev,
   createKeyedQueue,
   discardNextVersion,
   docPaths,
   endDocSwap,
   getDoc,
   interruptNextVersion,
-  isDocSwapping,
   isNextVersionConverting,
+  isSwapRunning,
   looksLikePdf,
-  markInterruptedNextVersions,
   mkdirWithRetry,
   moveRenderEntries,
   nextVersionPaths,
@@ -42,6 +43,7 @@ import {
   readStoredDoc,
   rmWithRetry,
   setDocDeck,
+  settleNextVersions,
   slideFileName,
   stageNextVersion,
   stopDocImageWork,
@@ -114,7 +116,7 @@ const versionsQueue = createKeyedQueue();
 export async function importNextVersion(docId: string, bytes: Buffer, fileName: string): Promise<NextVersionInfo> {
   if (!looksLikePdf(bytes)) throw new HttpError(400, texts().notPdf);
   await requireReadyDoc(docId);
-  if (isDocSwapping(docId)) throw new HttpError(409, texts().swapping);
+  refuseRunningSwap(docId);
   return versionsQueue(docId, async () => {
     // A swap that failed half-way is finished first: it may still need the staging folder this replaces.
     await finishInterruptedSwap(docId);
@@ -142,11 +144,18 @@ export async function nextVersionThumb(docId: string, file: string): Promise<{ t
   return { thumb: thumbPath(paths.dir, slideFile), png: path.join(paths.slidesDir, slideFile) };
 }
 
-/** DELETE …/versions/next: drops the uploaded new version (its conversion stopped, its folder removed). Idempotent. */
+/**
+ * DELETE …/versions/next: drops the uploaded new version (its conversion stopped, its folder removed). Idempotent. An
+ * apply that stopped half-way still needs the staging folder: it is finished first, and when it fails again the drop
+ * answers its error and the folder stays.
+ */
 export async function dropNextVersion(docId: string): Promise<void> {
   await requireDoc(docId);
-  if (isDocSwapping(docId)) throw new HttpError(409, texts().swapping);
-  await versionsQueue(docId, () => discardNextVersion(docId));
+  refuseRunningSwap(docId);
+  await versionsQueue(docId, async () => {
+    await finishInterruptedSwap(docId);
+    await discardNextVersion(docId);
+  });
 }
 
 async function toInfo(docId: string, stored: StoredNextVersion): Promise<NextVersionInfo> {
@@ -180,7 +189,7 @@ async function withOnRemoved(docId: string, plan: Omit<VersionPlan, 'onRemoved'>
  * interrupt (a digest, an answer, a recording).
  */
 export async function applyNextVersion(docId: string): Promise<DocMeta> {
-  if (isDocSwapping(docId)) throw new HttpError(409, texts().swapping);
+  refuseRunningSwap(docId);
   return versionsQueue(docId, async () => {
     await finishInterruptedSwap(docId);
     const doc = await requireReadyDoc(docId);
@@ -216,20 +225,25 @@ export async function applyNextVersion(docId: string): Promise<DocMeta> {
 }
 
 /**
- * POST …/versions/undo: the deck the last apply replaced comes back, with everything the student did since mapped back
- * (DESIGN §28 Undo). Resolves with the lecture. 409 when there is nothing to undo (no apply kept, or the deck changed
- * since) or something runs that a swap must not interrupt.
+ * POST …/versions/undo (UndoVersionRequest): the deck the last apply replaced comes back, with everything the student
+ * did since mapped back (DESIGN §28 Undo). Resolves with the lecture. 409 `deckChanged` (with the lecture's deckRev)
+ * when `fromRev`, the deck the client saw, is not the lecture's any more; 409 when there is nothing to undo (no apply
+ * kept, or the deck changed since) or something runs that a swap must not interrupt.
  */
-export async function undoLastVersion(docId: string): Promise<DocMeta> {
-  if (isDocSwapping(docId)) throw new HttpError(409, texts().swapping);
+export async function undoLastVersion(docId: string, fromRev?: number): Promise<DocMeta> {
+  refuseRunningSwap(docId);
   return versionsQueue(docId, async () => {
     await finishInterruptedSwap(docId);
     const doc = await requireReadyDoc(docId);
+    checkDeckRev(doc, fromRev);
     const journal = await readJournal(docId);
     if (!journal || !journal.complete || journal.undo || journal.toRev !== (doc.deckRev ?? 0)) {
       throw new HttpError(409, texts().nothingToUndo);
     }
-    const undo = { fromRev: journal.toRev, toRev: journal.toRev + 1, at: new Date().toISOString(), steps: [] };
+    // The memo links of other lectures carry no deck mark: links the apply gave up on are not mapped back either.
+    // (Every other remap knows from its own mark whether the apply renumbered its data.)
+    const steps: SwapStep[] = journal.failed?.includes('links') ? ['links'] : [];
+    const undo = { fromRev: journal.toRev, toRev: journal.toRev + 1, at: new Date().toISOString(), steps };
     await withSwapGates(docId, async () => {
       // A new version being converted is matched against the deck that goes away.
       await interruptNextVersion(docId, texts().interrupted);
@@ -244,13 +258,20 @@ export async function undoLastVersion(docId: string): Promise<DocMeta> {
 
 /**
  * Startup, before requests are accepted: a swap the server stopped in the middle (prev.json incomplete, or an undo
- * begun) is finished from its journal; then new versions left converting are marked interrupted. Returns how many
- * swaps were finished.
+ * begun) is finished from its journal (one that fails again leaves its lecture gated); then the staged new versions are
+ * settled (settleNextVersions: no dialog survives a restart). Returns how many swaps were finished.
  */
 export async function resumeSwaps(): Promise<number> {
   let resumed = 0;
   for (const docId of await prevVersionDocIds()) {
-    const journal = await readJournal(docId);
+    let journal: SwapJournal | null;
+    try {
+      journal = await readJournal(docId);
+    } catch (err) {
+      console.error(`[versions] ${docId}: the journal of the last swap could not be read:`, err);
+      endDocSwap(docId, true);
+      continue;
+    }
     if (!journal || (journal.complete && !journal.undo) || !(await readStoredDoc(docId))) continue;
     console.log(`[versions] ${docId}: finishing the interrupted ${journal.undo ? 'undo' : 'switch to the new version'}`);
     beginDocSwap(docId);
@@ -258,14 +279,15 @@ export async function resumeSwaps(): Promise<number> {
       await resumeJournal(docId, journal);
       resumed++;
     } catch (err) {
+      // The lecture stays gated: a later upload, drop, apply or undo of it tries again.
       console.error(`[versions] ${docId}: the interrupted swap could not be finished:`, err);
     } finally {
-      endDocSwap(docId);
+      endDocSwap(docId, await isSwapIncomplete(docId));
     }
   }
-  await markInterruptedNextVersions().catch((err: unknown) => {
-    // Shown as still converting until the next start; the server starts either way.
-    console.error('[versions] could not mark interrupted new versions:', err);
+  await settleNextVersions().catch((err: unknown) => {
+    // Shown as they are until the next start; the server starts either way.
+    console.error('[versions] could not settle the staged new versions:', err);
   });
   return resumed;
 }
@@ -297,16 +319,40 @@ async function withSwapGates<T>(docId: string, work: () => Promise<T>): Promise<
     await drainAnnotations(docId);
     return await work();
   } finally {
-    endDocSwap(docId);
+    // A swap that stopped half-way keeps the lecture gated (its writes would be renumbered wrongly when it is finished);
+    // its digest and turns are released, the swapping gate refuses their requests.
+    endDocSwap(docId, await isSwapIncomplete(docId));
     releaseTurns();
     releaseDigest();
   }
 }
 
-/** A swap of the lecture that failed half-way in this process (its render sets or doc.json): finished under the gates. */
+/** True when the lecture's journal says a swap is under way (an apply incomplete, or an undo begun); an unreadable one too. */
+async function isSwapIncomplete(docId: string): Promise<boolean> {
+  try {
+    const journal = await readJournal(docId);
+    return journal !== null && (!journal.complete || journal.undo !== undefined);
+  } catch {
+    return true;
+  }
+}
+
+/** A 409 while a swap of the lecture runs; one that stopped half-way is finished by the call instead. */
+function refuseRunningSwap(docId: string): void {
+  if (isSwapRunning(docId)) throw new HttpError(409, texts().swapping);
+}
+
+/**
+ * A swap of the lecture that stopped half-way (its render sets or doc.json, or a server stopped in the middle):
+ * finished under the gates; the lecture's stalled gate goes once its journal is complete.
+ */
 async function finishInterruptedSwap(docId: string): Promise<void> {
   const journal = await readJournal(docId);
-  if (!journal || (journal.complete && !journal.undo)) return;
+  if (!journal || (journal.complete && !journal.undo)) {
+    // Nothing to finish: a gate left by a journal that could not be read goes too.
+    if (!isSwapRunning(docId)) endDocSwap(docId);
+    return;
+  }
   const event = await withSwapGates(docId, () => resumeJournal(docId, journal));
   sendDeckEvent(docId, event);
 }

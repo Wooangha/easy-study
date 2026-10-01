@@ -40,7 +40,7 @@ import { appendHistory, buildTurn, defaultContextSettings } from './context.ts';
 import { slang, smsg } from './i18n.ts';
 import type { Lang } from './i18n.ts';
 import type { BuildTurnInput, BuildTurnOutput, ContextSettings, DocAssets, ProviderState, SessionRecord, StudentMemo } from './internal-types.ts';
-import { loadDocAssets } from './library.ts';
+import { checkDeckRev, loadDocAssets } from './library.ts';
 import { attachmentLabel } from './prompts.ts';
 import { getProvider, providerInfos } from './providers/index.ts';
 import { lectureSpeechFor } from './recordings/speech.ts';
@@ -132,6 +132,11 @@ export interface TurnRequest {
   text: string;
   /** 1-based focused slide. */
   slide: number;
+  /**
+   * The DocMeta.deckRev `slide` belongs to (the request's DECK_REV_HEADER, DESIGN §28): another deck than the lecture's
+   * → HttpError 409 deckChanged before anything is persisted. Omitted = not checked.
+   */
+  deckRev?: number;
   /**
    * Slides before and after the focused one to feed as well (clamped to 0..3).
    * Omitted = ContextSettings.neighborWindow.
@@ -332,6 +337,8 @@ async function executeTurn(request: TurnRequest, deps: ChatDeps, signal: AbortSi
   const m = smsg();
   if (!session) throw new HttpError(404, m.common.notFound.session);
   const doc = await loadDocAssets(docId);
+  // Read after the turn was registered: a swap cannot begin from here on (reserveDocTurns), so the number stays valid.
+  checkDeckRev(doc.meta, request.deckRev);
   const provider = deps.getProvider(session.provider);
   if (!provider) throw new HttpError(400, m.chat.providers.unknownProvider(session.provider));
   const check = await deps.checkProvider(session.provider);

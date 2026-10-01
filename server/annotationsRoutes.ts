@@ -7,7 +7,7 @@
 import path from 'node:path';
 import express from 'express';
 import type { Request, Response } from 'express';
-import { ANNOTATION_CLIENT_HEADER, ANNOTATION_CLIENT_ID_RE, DOC_ID_RE } from '../shared/types.ts';
+import { ANNOTATION_CLIENT_HEADER, ANNOTATION_CLIENT_ID_RE, DECK_REV_HEADER, DOC_ID_RE } from '../shared/types.ts';
 import type { TextLayoutMissingResponse } from '../shared/types.ts';
 import {
   listAnnotationTags,
@@ -21,7 +21,7 @@ import {
 } from './annotations.ts';
 import { HttpError } from './config.ts';
 import { smsg } from './i18n.ts';
-import { docPaths, notReadyError, readStoredDoc, requestTextBackfill, textExtractionPending } from './library.ts';
+import { docPaths, notReadyError, readStoredDoc, requestDeckRev, requestTextBackfill, textExtractionPending } from './library.ts';
 import { layoutFileName } from './pageNames.ts';
 
 /** The writer's client id of a PUT / PATCH (its own events are not echoed to it), when the header carries a valid one. */
@@ -117,14 +117,17 @@ export function createAnnotationsRouter(): express.Router {
     res.json(await readSlideAnnotations(req.params.docId as string, Number(req.params.slide)));
   });
 
+  // Writes name the deck their slide number belongs to (DECK_REV_HEADER, DESIGN §28): 409 deckChanged for another one.
   router.put(`${base}/:slide`, async (req, res) => {
     res.set('Cache-Control', 'no-cache');
-    res.json(await putSlideAnnotations(req.params.docId as string, Number(req.params.slide), req.body, clientOf(req)));
+    const deckRev = requestDeckRev(req.get(DECK_REV_HEADER));
+    res.json(await putSlideAnnotations(req.params.docId as string, Number(req.params.slide), req.body, clientOf(req), deckRev));
   });
 
   router.patch(`${base}/:slide`, async (req, res) => {
     res.set('Cache-Control', 'no-cache');
-    res.json(await patchSlideAnnotations(req.params.docId as string, Number(req.params.slide), req.body, clientOf(req)));
+    const deckRev = requestDeckRev(req.get(DECK_REV_HEADER));
+    res.json(await patchSlideAnnotations(req.params.docId as string, Number(req.params.slide), req.body, clientOf(req), deckRev));
   });
 
   /**

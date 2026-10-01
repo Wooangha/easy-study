@@ -338,6 +338,18 @@ export function attachmentTitle(a: Labelled): string {
   return a.name?.trim() ? m.imageTitleNamed(a.name.trim()) : m.imageTitle;
 }
 
+/**
+ * Where a region attachment can be shown on the slides (보기 › 슬라이드에서 보기, the flash when it is opened): its
+ * slide and rect — none for an image, and none for a region whose slide a new version dropped (removedFrom, DESIGN
+ * §28): it now names the nearest kept slide, where its rect means nothing.
+ */
+export function regionOnSlide(
+  a: Pick<Attachment, 'kind' | 'slide' | 'rect' | 'removedFrom'>,
+): { slide: number; rect: RegionRect } | null {
+  if (a.kind !== 'region' || !a.slide || !a.rect || a.removedFrom) return null;
+  return { slide: a.slide, rect: a.rect };
+}
+
 /** The question sent when only attachments were given (Enter on an empty composer). */
 export function defaultQuestion(attachments: ReadonlyArray<Pick<Attachment, 'kind'>>): string {
   const m = msg().chat.attachments;

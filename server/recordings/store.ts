@@ -66,8 +66,8 @@ export interface RecordingMeta {
    */
   lang?: Lang;
   /**
-   * DESIGN §28: the DocMeta.deckRev the slides are numbered in, set when a new version of the lecture remapped them
-   * (absent: never remapped). A remap to a rev not above it does nothing.
+   * DESIGN §28: the DocMeta.deckRev the slides are numbered in, set when the recording is made on a swapped deck and
+   * when a new version of the lecture remaps them (absent = deck 0). Only a swap from this rev renumbers them.
    */
   deckRev?: number;
 }

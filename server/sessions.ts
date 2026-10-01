@@ -55,7 +55,7 @@ const MAX_HEADING_QUESTION_CHARS = 120;
 
 /**
  * A session record with the deck mark of DESIGN §28: the DocMeta.deckRev its slide numbers are in (absent = 0, or a
- * session made before decks were swapped). remapSessionSlides does nothing to a record that already has its toRev.
+ * session made before decks were swapped). remapSessionSlides renumbers only a record in the swap's fromRev.
  */
 type DeckRecord = SessionRecord & { deckRev?: number };
 
@@ -461,14 +461,22 @@ export async function recoverInterruptedSessions(): Promise<number> {
  * Sessions"), each inside its session queue: the slide of every message and of its region attachments (a dropped slide
  * → the nearest kept one, with `removedFrom`; an undo puts back what the apply from `restoreRev` moved), the slides
  * of the turns' ContextInfo, and a provider conversation made with the old deck dropped (the next turn starts a new
- * one with the new deck: ProviderState.deckUpdated). `updatedAt` is kept. Idempotent: a record that already has
- * `map.toRev` is left alone. Called by the orchestrator while the lecture's turns are held off (chat.reserveDocTurns).
+ * one with the new deck: ProviderState.deckUpdated). `updatedAt` is kept. Called by the orchestrator while the
+ * lecture's turns are held off (chat.reserveDocTurns).
+ *
+ * Only records numbered in map.fromRev (`deckRev`, absent = 0) are renumbered, then marked map.toRev: a second run
+ * leaves them alone. An undo that finds a record still in the deck coming back (map.restoreRev: the apply gave it up)
+ * only marks it map.toRev (its conversation still restarts: the deck changed under it). Any other record is left alone.
  */
 export async function remapSessionSlides(docId: string, map: DeckMap): Promise<void> {
   for (const id of await sessionIds(docId)) {
     await updateRecord(docId, id, (record) => {
-      if ((record.deckRev ?? 0) >= map.toRev) return false;
-      for (const message of record.messages) remapMessage(message, map);
+      const mark = record.deckRev ?? 0;
+      if (mark === map.fromRev) {
+        for (const message of record.messages) remapMessage(message, map);
+      } else if (map.restoreRev === undefined || mark !== map.restoreRev) {
+        return false;
+      }
       record.providerState = deckUpdatedState(record.providerState);
       record.deckRev = map.toRev;
       return true;

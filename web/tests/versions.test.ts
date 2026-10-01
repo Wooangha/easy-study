@@ -1,18 +1,31 @@
-// 새 버전 올리기 on the client (DESIGN §28): the 새 버전 확인 dialog's view model, the slide remap of positions, the
-// banner's helpers, the deck revs handled once, the `v=` of slide image URLs, the versions API, the annotation
-// stream's `deck` event (parsed, the store stopped and replaced, its subscribers moved), and what a moved question or
-// attachment says. Run: node --test web/tests/*.test.ts
+// 새 버전 올리기 on the client (DESIGN §28): the 새 버전 확인 dialog's view model, the slide remap of positions (once per
+// swap, whichever tab), the banner's helpers, the deck revs handled once, the order of a swap's steps (DeckSwaps), the
+// `v=` of slide image URLs, the versions API, the deck rev every slide-numbered write carries and the 409 that refuses
+// it for another deck, the annotation stream's `deck` event (parsed, the store stopped and replaced, its subscribers
+// moved), and what a moved question or attachment says. Run: node --test web/tests/*.test.ts
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, test } from 'node:test';
 import type { AnnotationSummary, Attachment, ChatMessage, DeckChange, DocMeta, MemoItem, NotesResponse, RectItem, SlideAnnotations, VersionPlan } from '../../shared/types.ts';
 import { LANG_HEADER } from '../../shared/i18n.ts';
+import { DECK_REV_HEADER } from '../../shared/types.ts';
 import {
+  ApiError,
   applyNextVersion,
+  createRegion,
+  deckChangedOf,
+  deckRevOf,
   dropNextVersion,
+  dropNextVersionOnLeave,
+  errorMessage,
   getRemovedSlides,
   listDocs,
   nextThumbUrl,
+  onDeckChanged,
+  patchSlideAnnotations,
+  primeSession,
+  putSlideAnnotations,
   removedThumbUrl,
+  sendMessage,
   slideUrl,
   thumbUrl,
   undoLastVersion,
@@ -20,7 +33,7 @@ import {
   viewSrcSet,
   viewUrl,
 } from '../src/api.ts';
-import { setLang } from '../src/i18n/index.ts';
+import { msg, setLang } from '../src/i18n/index.ts';
 import { emptySlideAnnotations } from '../src/lib/annotations/geometry.ts';
 import { deriveMarkers } from '../src/lib/annotations/markers.ts';
 import {
@@ -31,23 +44,29 @@ import {
   peekAnnotationStore,
   resetAnnotationStore,
   subscribeAnnotations,
-  type DeckEvent,
+  type DeckSwap,
   type StoreDeps,
 } from '../src/lib/annotations/store.ts';
-import { attachmentLabel } from '../src/lib/attachments.ts';
+import { attachmentLabel, regionOnSlide } from '../src/lib/attachments.ts';
 import { applyAuthStatus, resetAuthForTests } from '../src/lib/auth.ts';
 import { describeContext } from '../src/lib/format.ts';
 import type { EventSourceLike, Timers } from '../src/lib/recording/events.ts';
+import { readRememberedSlide, rememberSlide } from '../src/lib/storage.ts';
 import {
+  DECK_REFRESH_MAX_MS,
   DeckRevs,
+  DeckSwaps,
   bannerShown,
   changeBadges,
   changeSlides,
+  deckRefreshDelay,
   oldToNewOf,
   planView,
+  remapRemembered,
   remapSlide,
   removedItemText,
   stepSlide,
+  type DeckSwapDeps,
 } from '../src/lib/versionPlan.ts';
 
 const NOW = '2026-10-02T10:00:00.000Z';
@@ -424,7 +443,7 @@ describe('the `deck` event', () => {
     store.subscribe(() => {});
     sources[0].open();
     await tick();
-    const got: Array<[string, DeckEvent]> = [];
+    const got: Array<[string, DeckSwap]> = [];
     const off = onDeckEvent((docId, event) => got.push([docId, event]));
     try {
       sources[0].emit('deck', DECK);
@@ -543,5 +562,421 @@ describe('a question or attachment on a dropped slide', () => {
       chips.map((c) => [c.kind, c.text]),
       [['deckUpdated', '새 버전 슬라이드로 다시 시작']],
     );
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Every slide-numbered write says which deck its numbers belong to; a 409 for another deck reloads the lecture
+// ---------------------------------------------------------------------------------------------------------------------
+
+describe('the deck rev of slide-numbered writes (DECK_REV_HEADER), and the 409 for another deck', () => {
+  const realFetch = globalThis.fetch;
+  let seen: Array<{ url: string; method: string; headers: Headers; body: string | null; keepalive: boolean }> = [];
+  /** The answer of the next requests: a JSON body and a status (an SSE stream for 200 on a turn). */
+  let respond: (url: string) => Response = () => new Response('[]', { status: 200 });
+
+  beforeEach(() => {
+    resetAuthForTests();
+    applyAuthStatus({ authRequired: false, authenticated: true });
+    seen = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      seen.push({
+        url: String(input),
+        method: init?.method ?? 'GET',
+        headers: new Headers(init?.headers),
+        body: typeof init?.body === 'string' ? init.body : null,
+        keepalive: init?.keepalive === true,
+      });
+      return respond(String(input));
+    }) as typeof fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    respond = () => new Response('[]', { status: 200 });
+    resetAuthForTests();
+  });
+
+  const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+  const sse = () =>
+    new Response('event: done\ndata: {"type":"ping"}\n\n', { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+  const deckChanged = (deckRev: number) => json({ error: '그사이 이 강의가 새 버전으로 바뀌었어요. 화면을 다시 불러올게요.', deckRev }, 409);
+
+  test('annotations PUT / PATCH, regions, questions and prime turns carry the deck rev held for the lecture (0 when none)', async () => {
+    respond = () => json([docMeta('lec-h1', 4), docMeta('lec-h0')]);
+    await listDocs();
+    assert.equal(deckRevOf('lec-h1'), 4);
+    assert.equal(deckRevOf('lec-h0'), 0);
+    assert.equal(deckRevOf('lec-never-seen'), 0);
+    respond = () => json(slideDoc(2, 1));
+    await patchSlideAnnotations('lec-h1', 2, { baseRev: 0, ops: [] }, 'client-1');
+    await putSlideAnnotations('lec-h0', 2, { baseRev: 0, items: [], hiddenMarkers: [] });
+    await patchSlideAnnotations('lec-h1', 2, { baseRev: 0, ops: [] }, 'client-1', 3); // a store made for deck 3
+    respond = () => json({ id: 'att-0123456789abcdef', kind: 'region', slide: 2, createdAt: NOW }, 201);
+    await createRegion('lec-h1', { slide: 2, rect: { x: 0, y: 0, w: 0.5, h: 0.5 } });
+    respond = sse;
+    await sendMessage('lec-h1', 's1', { text: 'x', slide: 2 }, () => {});
+    await primeSession('lec-h0', 's1', { slide: 1 }, () => {});
+    const writes = seen.slice(1);
+    assert.deepEqual(
+      writes.map((r) => [r.method, r.url, r.headers.get(DECK_REV_HEADER)]),
+      [
+        ['PATCH', '/api/docs/lec-h1/annotations/2', '4'],
+        ['PUT', '/api/docs/lec-h0/annotations/2', '0'],
+        ['PATCH', '/api/docs/lec-h1/annotations/2', '3'],
+        ['POST', '/api/docs/lec-h1/regions', '4'],
+        ['POST', '/api/docs/lec-h1/sessions/s1/messages', '4'],
+        ['POST', '/api/docs/lec-h0/sessions/s1/prime', '0'],
+      ],
+    );
+    assert.equal(writes[0].headers.get('X-Annotation-Client'), 'client-1', 'the client id still goes along');
+    assert.equal(writes[4].headers.get('Accept'), 'text/event-stream');
+  });
+
+  test('undo says which deck it undoes (`fromRev`: the one shown, else the one held)', async () => {
+    respond = () => json(docMeta('lec-u', 6));
+    await undoLastVersion('lec-u', 5);
+    await undoLastVersion('lec-u');
+    assert.deepEqual(
+      seen.map((r) => [r.method, r.url, r.body]),
+      [
+        ['POST', '/api/docs/lec-u/versions/undo', '{"fromRev":5}'],
+        ['POST', '/api/docs/lec-u/versions/undo', '{"fromRev":6}'],
+      ],
+    );
+  });
+
+  test('deckChangedOf: only a 409 with a deck rev and no `current` (an annotation conflict is not one)', () => {
+    const e = (status: number, data: Record<string, unknown> | null) => new ApiError('x', status, null, [], data);
+    assert.equal(deckChangedOf(e(409, { error: 'x', deckRev: 3 })), 3);
+    assert.equal(deckChangedOf(e(409, { error: 'x', deckRev: 0 })), 0);
+    assert.equal(deckChangedOf(e(409, { error: 'x', deckRev: 3, current: slideDoc(1, 2) })), null);
+    assert.equal(deckChangedOf(e(409, { error: 'x' })), null);
+    assert.equal(deckChangedOf(e(409, { error: 'x', deckRev: '3' })), null);
+    assert.equal(deckChangedOf(e(400, { error: 'x', deckRev: 3 })), null);
+    assert.equal(deckChangedOf(new Error('x')), null);
+  });
+
+  test('a question, a region or an undo refused for another deck: the server’s words, and the app is told to reload', async () => {
+    const told: Array<[string, number]> = [];
+    const off = onDeckChanged((docId, rev) => told.push([docId, rev]));
+    try {
+      respond = () => deckChanged(7);
+      await assert.rejects(sendMessage('lec-r', 's1', { text: 'x', slide: 2 }, () => {}), (e: unknown) => {
+        assert.equal(errorMessage(e), '그사이 이 강의가 새 버전으로 바뀌었어요. 화면을 다시 불러올게요.', 'not "이미 답변을 생성하고 있어요"');
+        return true;
+      });
+      await assert.rejects(primeSession('lec-r', 's1', { slide: 2 }, () => {}));
+      await assert.rejects(createRegion('lec-r', { slide: 2, rect: { x: 0, y: 0, w: 0.5, h: 0.5 } }));
+      await assert.rejects(undoLastVersion('lec-r', 6));
+      assert.deepEqual(told, [
+        ['lec-r', 7],
+        ['lec-r', 7],
+        ['lec-r', 7],
+        ['lec-r', 7],
+      ]);
+      // A busy turn (409 without a deck rev) is still a busy turn, and reloads nothing.
+      respond = () => json({ error: 'busy' }, 409);
+      await assert.rejects(sendMessage('lec-r', 's1', { text: 'x', slide: 2 }, () => {}), (e: unknown) => {
+        assert.equal(errorMessage(e), msg().common.api.busyAnswering);
+        return true;
+      });
+      assert.equal(told.length, 4);
+    } finally {
+      off();
+    }
+  });
+
+  test('the page goes away with a new version staged: DELETE …/versions/next with keepalive', () => {
+    dropNextVersionOnLeave('lec-leave');
+    assert.deepEqual(
+      seen.map((r) => [r.method, r.url, r.keepalive]),
+      [['DELETE', '/api/docs/lec-leave/versions/next', true]],
+    );
+  });
+});
+
+describe('the annotation store: a write refused for another deck', () => {
+  const rect = { id: 'an-0000000000d1', type: 'rect' as const, color: 'yellow' as const, createdAt: NOW, updatedAt: NOW, rect: { x: 0, y: 0, w: 0.1, h: 0.1 } };
+
+  test('every write carries the deck the store was made for', async () => {
+    const { deps } = fakeDeps();
+    const revs: unknown[] = [];
+    const store = new DocAnnotations('lec-store-rev', { ...deps, deckRev: () => 3, patch: (...args) => (revs.push(args[4]), new Promise(() => {})) });
+    assert.equal(store.deckRev, 3);
+    assert.equal(store.mutate(1, [{ op: 'add', item: rect }]), true);
+    assert.deepEqual(revs, [3]);
+    store.close();
+  });
+
+  test('409 { deckRev } is not rebased: the writes are dropped, the store stops and tells the app (no map)', async () => {
+    const { deps } = fakeDeps();
+    const toasts: Array<[string, string | undefined]> = [];
+    let patches = 0;
+    const store = new DocAnnotations('lec-store-409', {
+      ...deps,
+      toast: (message, kind) => toasts.push([message, kind]),
+      patch: () => {
+        patches++;
+        return Promise.reject(new ApiError('그사이 이 강의가 새 버전으로 바뀌었어요. 화면을 다시 불러올게요.', 409, null, [], { error: '…', deckRev: 5 }));
+      },
+    });
+    const got: Array<[string, DeckSwap]> = [];
+    const off = onDeckEvent((docId, swap) => got.push([docId, swap]));
+    try {
+      store.subscribe(() => {});
+      assert.equal(store.mutate(1, [{ op: 'add', item: rect }]), true);
+      assert.equal(store.mutate(1, [{ op: 'add', item: { ...rect, id: 'an-0000000000d2' } }]), true, 'queued behind the request in flight');
+      await tick();
+      assert.equal(patches, 1, 'not sent again (a rebase would)');
+      assert.deepEqual(got, [['lec-store-409', { rev: 5, oldToNew: null }]]);
+      assert.equal(store.isSwapped, true);
+      assert.deepEqual(toasts, [['그사이 이 강의가 새 버전으로 바뀌었어요. 화면을 다시 불러올게요.', 'info']]);
+      assert.equal(store.mutate(1, [{ op: 'remove', id: rect.id }]), false, 'nothing more is written');
+      await tick();
+      assert.equal(patches, 1, 'the queued ops were dropped');
+    } finally {
+      off();
+      store.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The order of a swap's steps (DeckSwaps): a stopped store never stays, a failed refetch is retried
+// ---------------------------------------------------------------------------------------------------------------------
+
+describe('DeckSwaps', () => {
+  /** App's steps, recorded; the DocMeta list and the store as plain state. */
+  function harness(
+    options: {
+      listed?: number;
+      fetches?: Array<number | null>;
+      fetch?: () => Promise<number | null>;
+      stopped?: () => boolean;
+      reset?: () => void;
+    } = {},
+  ) {
+    const log: string[] = [];
+    const waits: number[] = [];
+    let listed: number | null = options.listed ?? 0;
+    const fetches = [...(options.fetches ?? [])];
+    let gone = false;
+    const deps: DeckSwapDeps = {
+      remapPositions: (docId, rev, map) => void log.push(`remap ${docId} ${rev} ${map ? map.join(',') : 'none'}`),
+      listedRev: () => listed,
+      fetchRev: async () => {
+        const got = options.fetch ? await options.fetch() : fetches.length > 0 ? fetches.shift()! : null;
+        log.push(`fetch ${got}`);
+        if (got !== null) listed = got;
+        return got;
+      },
+      gone: () => gone,
+      replaceDoc: (meta) => {
+        listed = meta.deckRev ?? 0;
+        log.push(`replace ${listed}`);
+      },
+      replaceStoppedStore: () => {
+        const stopped = options.stopped?.() ?? false;
+        if (stopped) {
+          options.reset?.();
+          log.push('reset store');
+        }
+        return stopped;
+      },
+      reload: (docId) => void log.push(`reload ${docId}`),
+      wait: async (ms) => void waits.push(ms),
+    };
+    return {
+      swaps: new DeckSwaps(() => deps),
+      log,
+      waits,
+      setListed: (rev: number) => (listed = rev),
+      setGone: () => (gone = true),
+    };
+  }
+
+  test('the event: positions, the DocMeta, then the store and the rest — once', async () => {
+    const { swaps, log } = harness({ fetches: [2] });
+    swaps.shown('d', 1);
+    await swaps.fromServer('d', 2, [1, null, 2]);
+    await swaps.fromServer('d', 2, [1, null, 2]);
+    swaps.shown('d', 2);
+    assert.deepEqual(log, ['remap d 2 1,,2', 'fetch 2', 'reload d']);
+  });
+
+  test('a DocMeta showed the new deck before its event: the store the event stopped is replaced, the lecture loaded again', async () => {
+    let stopped = false;
+    const { swaps, log } = harness({ stopped: () => stopped, reset: () => (stopped = false) });
+    swaps.shown('d', 0);
+    swaps.shown('d', 1); // fetched mid-swap (useDocs replaced the store with it)
+    assert.deepEqual(log, ['remap d 1 none', 'reload d']);
+    stopped = true; // the replacement got the `deck` event
+    await swaps.fromServer('d', 1, [1, 2]);
+    assert.deepEqual(log, ['remap d 1 none', 'reload d', 'reset store', 'reload d']);
+    assert.equal(stopped, false);
+    await swaps.fromServer('d', 1, [1, 2]);
+    assert.equal(log.length, 4, 'nothing stopped: nothing to do');
+  });
+
+  test('a failed refetch is retried with backoff (1 s, 2 s, …) until the DocMeta shows the new deck', async () => {
+    let stopped = true;
+    const { swaps, log, waits } = harness({ fetches: [null, null, 1, 3], stopped: () => stopped, reset: () => (stopped = false) });
+    await swaps.fromServer('d', 3, null);
+    assert.deepEqual(waits, [1000, 2000, 4000], 'an older DocMeta (rev 1) is not the new deck either');
+    assert.deepEqual(log, ['remap d 3 none', 'fetch null', 'fetch null', 'fetch 1', 'fetch 3', 'reset store', 'reload d']);
+    assert.equal(deckRefreshDelay(0), 1000);
+    assert.equal(deckRefreshDelay(3), 8000);
+    assert.equal(deckRefreshDelay(4), DECK_REFRESH_MAX_MS);
+    assert.equal(deckRefreshDelay(60), DECK_REFRESH_MAX_MS);
+  });
+
+  test('another refresh brings the DocMeta meanwhile; a deleted lecture stops the retries', async () => {
+    const a = harness({ fetches: [null] });
+    const pending = a.swaps.fromServer('d', 2, null);
+    a.setListed(2);
+    await pending;
+    assert.deepEqual(a.log, ['remap d 2 none', 'fetch null', 'reload d']);
+
+    const b = harness({ fetches: [null] });
+    const gone = b.swaps.fromServer('d', 2, null);
+    b.setGone();
+    await gone;
+    assert.deepEqual(b.log, ['remap d 2 none', 'fetch null']);
+  });
+
+  test('while the DocMeta is being fetched, another notice of the same swap leaves the stopped store to it', async () => {
+    let stopped = true;
+    let release: (rev: number | null) => void = () => {};
+    const { swaps, log } = harness({
+      stopped: () => stopped,
+      reset: () => (stopped = false),
+      fetch: () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    });
+    const first = swaps.fromServer('d', 2, null);
+    await swaps.fromServer('d', 2, null); // the store's own notice of the same 409, say
+    assert.equal(stopped, true, 'not replaced before the viewer shows the new deck');
+    release(2);
+    await first;
+    assert.equal(stopped, false);
+    assert.deepEqual(log, ['remap d 2 none', 'fetch 2', 'reset store', 'reload d']);
+  });
+
+  test('the answer of an apply made here, then its event', async () => {
+    const { swaps, log } = harness();
+    swaps.shown('d', 0);
+    swaps.fromAnswer(docMeta('d', 1), [2, 1]);
+    await swaps.fromServer('d', 1, [2, 1]);
+    swaps.shown('d', 1);
+    assert.deepEqual(log, ['remap d 1 2,1', 'replace 1', 'reload d']);
+  });
+
+  test('with the real stores: the replacement made mid-swap gets the event — it is replaced, not left stopped', async () => {
+    const { deps, sources } = fakeDeps();
+    annotationStore('lec-c9', deps);
+    const unsubscribe = subscribeAnnotations('lec-c9', () => {});
+    let reloads = 0;
+    const swaps = new DeckSwaps(() => ({
+      remapPositions: () => {},
+      listedRev: () => 1,
+      fetchRev: async () => 1,
+      gone: () => false,
+      replaceDoc: () => {},
+      replaceStoppedStore: (docId) => {
+        if (!peekAnnotationStore(docId)?.isSwapped) return false;
+        resetAnnotationStore(docId);
+        return true;
+      },
+      reload: () => void reloads++,
+      wait: async () => {},
+    }));
+    const off = onDeckEvent((docId, swap) => void swaps.fromServer(docId, swap.rev, swap.oldToNew));
+    try {
+      swaps.shown('lec-c9', 0);
+      // A DocMeta fetched while the swap ran shows deck 1: useDocs replaces the store, App reloads.
+      resetAnnotationStore('lec-c9');
+      swaps.shown('lec-c9', 1);
+      assert.equal(reloads, 1);
+      const midSwap = peekAnnotationStore('lec-c9');
+      assert.equal(sources.length, 2);
+      sources[1].open();
+      await tick();
+      sources[1].emit('deck', { ...DECK, rev: 1 });
+      await tick();
+      const now = peekAnnotationStore('lec-c9');
+      assert.equal(midSwap?.isSwapped, true);
+      assert.ok(now && now !== midSwap && !now.isSwapped, 'a working store again');
+      assert.equal(sources.length, 3, 'which streams');
+      assert.equal(reloads, 2, 'what was loaded mid-swap is loaded again');
+    } finally {
+      off();
+      unsubscribe();
+      peekAnnotationStore('lec-c9')?.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The remembered slide follows a swap once, whichever tab gets there first
+// ---------------------------------------------------------------------------------------------------------------------
+
+describe('the remembered slide and its deck rev', () => {
+  const items = new Map<string, string>();
+  beforeEach(() => {
+    items.clear();
+    const localStorage = {
+      getItem: (key: string) => items.get(key) ?? null,
+      setItem: (key: string, value: string) => void items.set(key, value),
+      removeItem: (key: string) => void items.delete(key),
+    };
+    Object.assign(globalThis, { window: { localStorage } });
+  });
+  afterEach(() => {
+    Reflect.deleteProperty(globalThis, 'window');
+  });
+
+  test('remapRemembered: once per swap (a second tab finds it done), nothing when none is remembered', () => {
+    const map = [1, null, 2, 4];
+    const first = remapRemembered({ slide: 4, rev: 0 }, 1, map);
+    assert.deepEqual(first, { slide: 4, rev: 1 });
+    assert.equal(remapRemembered(first, 1, map), null, 'the other tab: already numbered in deck 1');
+    assert.equal(remapRemembered({ slide: 3, rev: 2 }, 1, map), null, 'a later deck');
+    assert.equal(remapRemembered(null, 1, map), null);
+    assert.deepEqual(remapRemembered({ slide: 2, rev: 0 }, 1, map), { slide: 1, rev: 1 }, 'a dropped slide: the nearest kept one');
+  });
+
+  test('two tabs: the slide is remapped by the first one only; a viewer of the old deck does not undo it', () => {
+    const map = [2, 3, 4];
+    rememberSlide('lec-tabs', 1, 0); // saved by a viewer of deck 0
+    assert.equal(items.has('easy-study:slideRev:lec-tabs'), false, 'rev 0 is not stored');
+    assert.deepEqual(readRememberedSlide('lec-tabs'), { slide: 1, rev: 0 });
+    for (const _tab of ['A', 'B']) {
+      const next = remapRemembered(readRememberedSlide('lec-tabs'), 1, map);
+      if (next) rememberSlide('lec-tabs', next.slide, next.rev);
+    }
+    assert.deepEqual(readRememberedSlide('lec-tabs'), { slide: 2, rev: 1 }, 'not 3: remapped once');
+    rememberSlide('lec-tabs', 1, 0); // the old deck's viewer, still shown, saves its focus
+    assert.deepEqual(readRememberedSlide('lec-tabs'), { slide: 2, rev: 1 });
+    rememberSlide('lec-tabs', 3, 1); // the new deck's viewer
+    assert.deepEqual(readRememberedSlide('lec-tabs'), { slide: 3, rev: 1 });
+    assert.equal(items.get('easy-study:slide:lec-tabs'), '3', 'the slide itself stays a number (older bundles read it)');
+  });
+
+  test('a slide remembered before deck revs were stored counts as deck 0', () => {
+    items.set('easy-study:slide:lec-old', '5');
+    assert.deepEqual(readRememberedSlide('lec-old'), { slide: 5, rev: 0 });
+    assert.equal(readRememberedSlide('lec-none'), null);
+  });
+});
+
+describe('a region whose slide a new version dropped is not shown on the slide it now names', () => {
+  test('regionOnSlide', () => {
+    const rect = { x: 0.1, y: 0.1, w: 0.2, h: 0.2 };
+    assert.deepEqual(regionOnSlide({ kind: 'region', slide: 4, rect }), { slide: 4, rect });
+    assert.equal(regionOnSlide({ kind: 'region', slide: 4, rect, removedFrom: { rev: 1, slide: 6 } }), null);
+    assert.equal(regionOnSlide({ kind: 'region', slide: 4 }), null);
+    assert.equal(regionOnSlide({ kind: 'image' }), null);
   });
 });

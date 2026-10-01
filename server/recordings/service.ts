@@ -894,11 +894,25 @@ class Rec {
    * The lecture's deck was swapped: the segments' slides, the timeline, the markers and the AI labels follow `map`.
    * A segment on a removed slide loses it (null), events / markers / labels on one are dropped; all of that is kept in
    * deck-r<fromRev>.json, and an undo (map.restoreRev) puts back what the swap from that rev kept, then removes its
-   * file. Done once per rev (meta.deckRev); what it writes is in the archive first, so a crash repeats the same
-   * writes. No realign. Runs in serial().
+   * file. Only a recording numbered in map.fromRev (meta.deckRev, absent = 0) is renumbered, then marked map.toRev;
+   * what it writes is in the archive first, so a crash repeats the same writes. An undo that finds it still in the deck
+   * coming back (map.restoreRev: the apply gave it up) only marks it; any other numbering is left alone. No realign.
+   * Runs in serial().
    */
   async remapDeck(map: DeckMap): Promise<void> {
-    if ((this.meta.deckRev ?? 0) >= map.toRev) return;
+    const mark = this.meta.deckRev ?? 0;
+    if (mark !== map.fromRev) {
+      if (map.restoreRev === undefined || mark !== map.restoreRev) return;
+      this.deckGen++;
+      await removeDeckArchive(this.docId, this.id, map.restoreRev);
+      this.meta.deckRev = map.toRev;
+      await this.saveMeta();
+      // The live deck changed all the same.
+      this.material = null;
+      this.lexIndex = null;
+      this.recentPrior.clear();
+      return;
+    }
     this.deckGen++;
     let archive = await readDeckArchive(this.docId, this.id, map.fromRev);
     if (archive?.toRev !== map.toRev || !archive.next) {
@@ -1258,6 +1272,15 @@ async function requireDocExists(docId: string): Promise<void> {
   if (!(await readStoredDoc(docId))) throw new HttpError(404, smsg().common.notFound.doc);
 }
 
+/**
+ * A new recording's slides will be numbered in the lecture's current deck (DESIGN §28): meta.deckRev, so a later undo
+ * of the swap to it maps them back (absent = deck 0).
+ */
+async function stampDeckRev(meta: RecordingMeta): Promise<void> {
+  const deckRev = (await readStoredDoc(meta.docId))?.deckRev;
+  if (deckRev) meta.deckRev = deckRev;
+}
+
 /** While the lecture is swapped to a new version (DESIGN §28) its recordings take no writes, like the rest of it. */
 function refuseWhileSwapping(docId: string): void {
   if (isDocSwapping(docId)) throw new HttpError(409, smsg().library.versions.swapping);
@@ -1584,6 +1607,7 @@ async function createLive(
   const paths = recordingPaths(docId, id);
   await fs.mkdir(paths.dir, { recursive: true });
   await LiveAudio.create(paths.audioPcm, paths.audioIdx);
+  await stampDeckRev(meta);
   await writeMeta(meta);
   liveKey = recKey(docId, id);
   const rec = await loadRec(docId, id);
@@ -1805,6 +1829,7 @@ export async function finishUpload(
       originalName: cleanTitle(originalName) ?? sourceFile,
       lang: slang(),
     };
+    await stampDeckRev(meta);
     await writeMeta(meta);
     const rec = await loadRec(docId, id);
     return rec.info();

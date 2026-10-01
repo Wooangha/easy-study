@@ -35,11 +35,12 @@ import type {
   SlideTextLayout,
   StartDigestRequest,
   StreamEvent,
+  UndoVersionRequest,
   UpdateCourseRequest,
   UpdateGroupRequest,
   UpdateSessionRequest,
 } from '../../shared/types.ts';
-import { ANNOTATION_CLIENT_HEADER, ATTACHMENT_ID_RE } from '../../shared/types.ts';
+import { ANNOTATION_CLIENT_HEADER, ATTACHMENT_ID_RE, DECK_REV_HEADER } from '../../shared/types.ts';
 import {
   getAuthSnapshot,
   loginPending,
@@ -308,6 +309,52 @@ function versioned(docId: string, url: string): string {
   return rev ? `${url}${url.includes('?') ? '&' : '?'}v=${rev}` : url;
 }
 
+/** The DocMeta.deckRev this client holds for a lecture (0 when it was never swapped, or is not known here). */
+export function deckRevOf(docId: string): number {
+  return deckRevs.get(docId) ?? 0;
+}
+
+/**
+ * The header of a slide-numbered write (DESIGN §28): the deck its slide numbers belong to. The server answers 409
+ * `{ error, deckRev }` when the lecture is at another deck (deckChangedOf).
+ */
+const deckRevHeaders = (docId: string, rev: number = deckRevOf(docId)): Record<string, string> => ({
+  [DECK_REV_HEADER]: String(rev),
+});
+
+/**
+ * The lecture's current deck rev of a 409 refusing a slide-numbered write sent for another deck (`{ error, deckRev }`,
+ * no `current`: not an annotation conflict), or null for any other failure.
+ */
+export function deckChangedOf(e: unknown): number | null {
+  if (!(e instanceof ApiError) || e.status !== 409 || !e.data || 'current' in e.data) return null;
+  const rev = e.data.deckRev;
+  return typeof rev === 'number' && Number.isInteger(rev) && rev >= 0 ? rev : null;
+}
+
+const deckChangedListeners = new Set<(docId: string, deckRev: number) => void>();
+
+/**
+ * A question, a prime turn, a region or an undo was refused because the lecture's deck changed meanwhile (a new
+ * version applied elsewhere, the `deck` event missed): the app loads the lecture again. The annotation store handles
+ * its own writes (onDeckEvent).
+ */
+export function onDeckChanged(listener: (docId: string, deckRev: number) => void): () => void {
+  deckChangedListeners.add(listener);
+  return () => {
+    deckChangedListeners.delete(listener);
+  };
+}
+
+/** `promise`, telling onDeckChanged's listeners when it fails because the deck of `docId` changed. */
+function watchDeck<T>(docId: string, promise: Promise<T>): Promise<T> {
+  return promise.catch((e: unknown) => {
+    const rev = deckChangedOf(e);
+    if (rev !== null) for (const l of [...deckChangedListeners]) l(docId, rev);
+    throw e;
+  });
+}
+
 export const listDocs = () => request<DocMeta[]>('/api/docs').then((list) => list.map(normalizeDoc));
 
 export const getDoc = (docId: string) => request<DocMeta>(docPath(docId)).then(normalizeDoc);
@@ -550,11 +597,27 @@ export const getNextVersion = (docId: string) =>
 /** Drop the pending new version (its conversion stops). Idempotent. */
 export const dropNextVersion = (docId: string) => request<void>(`${versionsPath(docId)}/next`, { method: 'DELETE' });
 
+/**
+ * dropNextVersion while the page goes away (pagehide): a `keepalive` request outlives the page. It does not wait for
+ * a login (there is no page left to show one); best effort.
+ */
+export function dropNextVersionOnLeave(docId: string): void {
+  try {
+    void fetch(`${versionsPath(docId)}/next`, withLang({ method: 'DELETE', keepalive: true, credentials: 'same-origin' })).catch(() => {});
+  } catch {
+    /* no fetch (an old browser): the server replaces the staged version with the next upload */
+  }
+}
+
 /** Swap the deck for the pending new version. Resolves with the swapped lecture; 409 with the reason when it cannot now. */
 export const applyNextVersion = (docId: string) => postJSON<DocMeta>(`${versionsPath(docId)}/next/apply`).then(normalizeDoc);
 
-/** Bring back the deck before the last new version (DocMeta.lastChange.undoable). 409 when there is nothing to undo or busy. */
-export const undoLastVersion = (docId: string) => postJSON<DocMeta>(`${versionsPath(docId)}/undo`).then(normalizeDoc);
+/**
+ * Bring back the deck before the last new version (DocMeta.lastChange.undoable). `fromRev` is the deck shown (409
+ * `{ deckRev }` when it changed since: onDeckChanged). 409 when there is nothing to undo or busy.
+ */
+export const undoLastVersion = (docId: string, fromRev: number = deckRevOf(docId)) =>
+  watchDeck(docId, postJSON<DocMeta>(`${versionsPath(docId)}/undo`, { fromRev } satisfies UndoVersionRequest)).then(normalizeDoc);
 
 /** A thumbnail of the pending new version's slide; `createdAt` (NextVersionInfo) tells two uploads apart. */
 export const nextThumbUrl = (docId: string, slide: number, createdAt?: string) =>
@@ -586,7 +649,7 @@ export const attachmentUrl = (docId: string, id: string) => `${docPath(docId)}/a
  * `annotation`.
  */
 export const createRegion = (docId: string, body: CreateRegionRequest) =>
-  postJSON<Attachment>(`${docPath(docId)}/regions`, body);
+  watchDeck(docId, sendJSON<Attachment>('POST', `${docPath(docId)}/regions`, body, deckRevHeaders(docId)));
 
 /**
  * Upload an image (pasted, dropped or picked) as an attachment of `docId`, with progress. The server checks and
@@ -816,10 +879,11 @@ export async function postStream(
   body: unknown,
   onEvent: (event: StreamEvent) => void,
   signal?: AbortSignal,
+  extraHeaders?: Record<string, string>,
 ): Promise<void> {
   const res = await fetchWithLogin(path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', ...extraHeaders },
     body: JSON.stringify(body),
     signal,
   });
@@ -864,7 +928,7 @@ export const primeSession = (
   body: PrimeRequest,
   onEvent: (event: StreamEvent) => void,
   signal?: AbortSignal,
-) => postStream(`${sessionPath(docId, sid)}/prime`, body, onEvent, signal);
+) => watchDeck(docId, postStream(`${sessionPath(docId, sid)}/prime`, body, onEvent, signal, deckRevHeaders(docId)));
 
 export const sendMessage = (
   docId: string,
@@ -872,7 +936,7 @@ export const sendMessage = (
   body: SendMessageRequest,
   onEvent: (event: StreamEvent) => void,
   signal?: AbortSignal,
-) => postStream(`${sessionPath(docId, sid)}/messages`, body, onEvent, signal);
+) => watchDeck(docId, postStream(`${sessionPath(docId, sid)}/messages`, body, onEvent, signal, deckRevHeaders(docId)));
 
 /** User-facing message for a failed recording request: the server's own words (a 409 is not a busy chat turn here). */
 export function recordingErrorMessage(e: unknown): string {
@@ -894,19 +958,34 @@ export const getAnnotationSummary = (docId: string) =>
 export const getSlideAnnotations = (docId: string, slide: number) =>
   request<SlideAnnotations>(`${annotationsPath(docId)}/${slide}`, { cache: 'no-store' });
 
-const clientHeaders = (client?: string): Record<string, string> | undefined =>
-  client ? { [ANNOTATION_CLIENT_HEADER]: client } : undefined;
+/** This tab's id (the server does not echo its writes to its own stream) and the deck the slide numbers belong to. */
+const writeHeaders = (docId: string, client: string | undefined, deckRev: number): Record<string, string> => ({
+  ...(client ? { [ANNOTATION_CLIENT_HEADER]: client } : {}),
+  ...deckRevHeaders(docId, deckRev),
+});
 
 /**
  * Replace a slide's items and hidden markers. 409 (`ApiError.data.current` = the stored document) when `baseRev` is
  * stale, 400 for a bad item. `client` is this tab's id: the server does not echo the write to its own stream.
+ * `deckRev`: the deck the slide number belongs to (the one held here by default); another deck than the lecture's is
+ * refused with 409 `{ deckRev }` (deckChangedOf).
  */
-export const putSlideAnnotations = (docId: string, slide: number, body: PutSlideAnnotationsRequest, client?: string) =>
-  sendJSON<SlideAnnotations>('PUT', `${annotationsPath(docId)}/${slide}`, body, clientHeaders(client));
+export const putSlideAnnotations = (
+  docId: string,
+  slide: number,
+  body: PutSlideAnnotationsRequest,
+  client?: string,
+  deckRev: number = deckRevOf(docId),
+) => sendJSON<SlideAnnotations>('PUT', `${annotationsPath(docId)}/${slide}`, body, writeHeaders(docId, client, deckRev));
 
 /** Apply ops (add / update / remove / hideMarker / unhideMarker) to a slide; the same answers as PUT. */
-export const patchSlideAnnotations = (docId: string, slide: number, body: PatchSlideAnnotationsRequest, client?: string) =>
-  sendJSON<SlideAnnotations>('PATCH', `${annotationsPath(docId)}/${slide}`, body, clientHeaders(client));
+export const patchSlideAnnotations = (
+  docId: string,
+  slide: number,
+  body: PatchSlideAnnotationsRequest,
+  client?: string,
+  deckRev: number = deckRevOf(docId),
+) => sendJSON<SlideAnnotations>('PATCH', `${annotationsPath(docId)}/${slide}`, body, writeHeaders(docId, client, deckRev));
 
 /** SSE of a lecture's annotations: `slide` (ops), `slide-reset`, `summary`, `qa`, `deck`, `ping`. With ?lang= (no header). */
 export function annotationEventsUrl(docId: string, client?: string): string {
@@ -951,7 +1030,8 @@ export function annotationErrorMessage(e: unknown): string {
 /** User-facing message for any thrown value. */
 export function errorMessage(e: unknown): string {
   if (e instanceof ApiError) {
-    if (e.status === 409) return msg().common.api.busyAnswering;
+    // A 409 is a busy chat turn — or the lecture's deck changed meanwhile, which the server says in its own words.
+    if (e.status === 409) return deckChangedOf(e) !== null ? e.message : msg().common.api.busyAnswering;
     if (e.status === 401) return msg().common.api.loginRequired;
     return e.message;
   }
