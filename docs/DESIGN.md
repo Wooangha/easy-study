@@ -2550,7 +2550,7 @@ Every route is under remote-mode auth like the others; JSON errors.
   are ignored by the index rebuild). GET /api/docs/:docId/annotations/removed → RemovedSlide[] (newest rev first, then
   slide); GET …/annotations/removed/:rev/:file → the thumbnail.
 - Per-subsystem idempotency marks (a remap does nothing when it finds `toRev`): `annotations/deck.json` {rev},
-  `attachments/deck.json` {rev}, SessionRecord.deckRev, recordings meta.json `deckRev`, DigestRecord.deckRev.
+  `attachments/deck.json` {rev}, SessionRecord.deckRev, recordings meta.json `deckRev`, `digest/deck.json` {rev}.
 
 ### Apply (server/versions.ts, the orchestrator)
 

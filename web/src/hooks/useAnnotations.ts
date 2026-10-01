@@ -1,9 +1,10 @@
 // The annotation store of the open document (lib/annotations/store.ts), for React: subscribing creates the store
 // (reference counted; it lingers a little after the last viewer leaves), and the snapshot changes whenever a slide
-// document, the summary, the undo history or the stream's state does.
+// document, the summary, the undo history or the stream's state does. A swapped deck (DESIGN §28) replaces the store:
+// the subscription follows it.
 import { useCallback, useSyncExternalStore } from 'react';
 import type { SlideAnnotations } from '../../../shared/types.ts';
-import { EMPTY_SNAPSHOT, annotationStore, peekAnnotationStore, type AnnotationSnapshot, type DocAnnotations } from '../lib/annotations/store.ts';
+import { EMPTY_SNAPSHOT, peekAnnotationStore, subscribeAnnotations, type AnnotationSnapshot, type DocAnnotations } from '../lib/annotations/store.ts';
 
 export interface AnnotationsState {
   store: DocAnnotations | null;
@@ -15,7 +16,7 @@ export function useAnnotations(docId: string | null): AnnotationsState {
   const subscribe = useCallback(
     (listener: () => void) => {
       if (!docId) return () => {};
-      const unsubscribe = annotationStore(docId).subscribe(listener);
+      const unsubscribe = subscribeAnnotations(docId, listener);
       listener(); // the store may have been created just now
       return unsubscribe;
     },

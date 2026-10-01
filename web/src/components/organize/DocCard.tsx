@@ -1,10 +1,11 @@
-import { Hourglass, Mic, Pencil, TriangleAlert } from 'lucide-react';
+import { FileUp, Hourglass, Mic, Pencil, TriangleAlert } from 'lucide-react';
 import { useState } from 'react';
 import type { Course, DocMeta, LibraryLayout } from '../../../../shared/types.ts';
 import { viewUrl } from '../../api.ts';
 import { msg } from '../../i18n/index.ts';
 import { formatDate } from '../../lib/format.ts';
 import { dndId, type DropData } from '../../lib/libraryDnd.ts';
+import { useNewVersionPicker } from '../NewVersionDialog.tsx';
 import { RecordingUploadBadge, useRecordingUploadPicker } from '../recording/RecordingUploads.tsx';
 import { SlideImage } from '../SlideImage.tsx';
 import { PopoverMenu } from './PopoverMenu.tsx';
@@ -32,6 +33,7 @@ export function DocCard({ doc, courses, layout, onOpen, onMove, onRetry, onRenam
   const hasCourses = courses.length > 0;
   const pickRecording = useRecordingUploadPicker();
   const canUploadRecording = ready && pickRecording !== null;
+  const pickNewVersion = useNewVersionPicker();
   const data: DropData = { role: 'lecture', docId: doc.id, courseId: null };
   const { setNodeRef, setActivatorNodeRef, listeners, attributes, isDragging } = useOrgItem({
     id: dndId.lecture(doc.id),
@@ -88,6 +90,17 @@ export function DocCard({ doc, courses, layout, onOpen, onMove, onRetry, onRenam
                         icon: Mic,
                         hint: m.uploadRecordingHint,
                         onSelect: () => pickRecording?.(doc),
+                      },
+                    ]
+                  : []),
+                ...(ready && pickNewVersion
+                  ? [
+                      {
+                        key: 'new-version',
+                        label: msg().versions.menu,
+                        icon: FileUp,
+                        hint: msg().versions.menuHint,
+                        onSelect: () => pickNewVersion(doc),
                       },
                     ]
                   : []),

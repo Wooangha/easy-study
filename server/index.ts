@@ -127,6 +127,7 @@ import {
   docPaths,
   getDoc,
   importPdf,
+  isDocSwapping,
   listDocs,
   readStoredDoc,
   removeDeletedLeftovers,
@@ -155,6 +156,15 @@ import {
   toSession,
   writeNotes,
 } from './sessions.ts';
+import {
+  applyNextVersion,
+  dropNextVersion,
+  getNextVersion,
+  importNextVersion,
+  nextVersionThumb,
+  resumeSwaps,
+  undoLastVersion,
+} from './versions.ts';
 
 const MAX_UPLOAD = '300mb';
 const SSE_PING_MS = 15_000;
@@ -587,6 +597,13 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
   api.param('attachmentId', (_req, _res, next, value: string) => {
     next(ATTACHMENT_ID_RE.test(value) ? undefined : new HttpError(404, smsg().common.notFound.attachment));
   });
+  // While a lecture's deck is swapped for a new version (DESIGN §28) it takes no writes, on every router (recordings
+  // and annotations included); the versions routes answer for themselves. Reads go on.
+  api.use('/docs/:docId', (req, _res, next) => {
+    const write = req.method !== 'GET' && req.method !== 'HEAD';
+    const refused = write && isDocSwapping(String(req.params.docId)) && !/^\/versions(\/|$)/.test(req.path);
+    next(refused ? new HttpError(409, smsg().library.versions.swapping) : undefined);
+  });
   // Only parses application/json bodies; the raw PDF upload passes through untouched.
   api.use(express.json({ limit: '2mb' }));
 
@@ -661,6 +678,7 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
     const docId = req.params.docId;
     // Checked synchronously right before the deletion starts, so nothing can start in between.
     await deleteDoc(docId, () => {
+      if (isDocSwapping(docId)) return smsg().library.versions.swapping;
       if (isDigestRunning(docId)) return smsg().library.docs.deleteWhileDigest;
       if (hasRunningTurns(docId)) return smsg().library.docs.deleteWhileAnswering;
       // From here on the document is gone for every request: attachment images still being made are not wanted,
@@ -702,6 +720,57 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
   api.get('/docs/:docId/thumbs/:file', async (req, res) => {
     const { doc, slideFile } = await requireSlide(req.params.docId, req.params.file, 'webp');
     await sendDerivedFile(req, res, doc, slideFile, thumbPath(docPaths(doc.id).dir, slideFile));
+  });
+
+  // --- a new version of the lecture's PDF (DESIGN §28) -------------------------------------------------
+
+  /**
+   * The new version (raw PDF like POST /docs, X-Filename URI-encoded) → 202 NextVersionInfo; it is converted and matched
+   * in the background, replacing a pending one. 400 not a PDF / empty, 404, 409 the lecture is not ready or swapping.
+   */
+  api.post('/docs/:docId/versions', express.raw({ type: () => true, limit: MAX_UPLOAD }), async (req, res) => {
+    const bytes: unknown = req.body;
+    if (!Buffer.isBuffer(bytes) || bytes.length === 0) throw new HttpError(400, smsg().library.docs.pdfEmpty);
+    res.status(202).json(await importNextVersion(req.params.docId, bytes, decodeFileName(req.get('X-Filename'))));
+  });
+
+  /** NextVersionInfo of the uploaded new version (the client polls it while it is converted); 404 when there is none. */
+  api.get('/docs/:docId/versions/next', async (req, res) => {
+    const info = await getNextVersion(req.params.docId);
+    if (!info) throw new HttpError(404, smsg().library.versions.noNext);
+    res.set('Cache-Control', 'no-store');
+    res.json(info);
+  });
+
+  /** A thumbnail of the new version (`<n>.webp`; the slide PNG until it is written), never cached: it may be replaced. */
+  api.get('/docs/:docId/versions/next/thumbs/:file', async (req, res) => {
+    const { thumb, png } = await nextVersionThumb(req.params.docId, req.params.file);
+    const options = { cacheControl: false, lastModified: false, etag: false, headers: { 'Cache-Control': 'no-store' } };
+    for (const file of [thumb, png]) {
+      try {
+        await sendFile(res, file, options);
+        return;
+      } catch (err) {
+        if (res.headersSent) return warnTransfer(req, err);
+      }
+    }
+    throw new HttpError(404, smsg().common.notFound.slide);
+  });
+
+  /** Drops the uploaded new version (idempotent). */
+  api.delete('/docs/:docId/versions/next', async (req, res) => {
+    await dropNextVersion(req.params.docId);
+    res.status(204).end();
+  });
+
+  /** The new version replaces the deck → the lecture's DocMeta. 409 (with the reason) when busy, stale or not ready. */
+  api.post('/docs/:docId/versions/next/apply', async (req, res) => {
+    res.json(await applyNextVersion(req.params.docId));
+  });
+
+  /** The deck the last new version replaced comes back → the lecture's DocMeta. 409 when there is nothing to undo or busy. */
+  api.post('/docs/:docId/versions/undo', async (req, res) => {
+    res.json(await undoLastVersion(req.params.docId));
   });
 
   // --- attachments: selected slide regions and images of the student (DESIGN §21) -------------------
@@ -1226,6 +1295,10 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
     const leftovers = await removeDeletedLeftovers();
     if (log && leftovers > 0) console.log(`[library] removed ${leftovers} leftover folder(s) of deleted documents`);
     configureRecordings(options.recordings);
+    // A swap of a lecture's deck the server stopped in the middle is finished before anything else touches the lecture
+    // (DESIGN §28); new versions left converting are marked interrupted.
+    const swaps = await resumeSwaps();
+    if (log && swaps > 0) console.log(`[versions] finished ${swaps} interrupted switch(es) to a new version`);
     if (options.resumeRecordings ?? options.resumeIngests ?? true) {
       const resumed = await resumeRecordings();
       if (log && resumed > 0) console.log(`[recordings] resumed ${resumed} unfinished recording(s)`);

@@ -16,6 +16,20 @@ export const library = {
     deleteWhileDigest: "The lecture can't be deleted while its digest is being made. Stop making the digest first",
     deleteWhileAnswering: "The lecture can't be deleted while an answer is being written. Try again when the answer is done",
   },
+  versions: {
+    swapping: 'Switching to the new version. Try again in a moment.',
+    notReady: 'A new version can be uploaded once the lecture is converted.',
+    nextNotReady: "The new version isn't ready yet. Try again when it is.",
+    noNext: 'No new version was uploaded.',
+    stalePlan: "The lecture's slides changed in the meantime. Upload the new version again.",
+    nothingToUndo: 'There is nothing to undo.',
+    busyAnswering: "It can't be switched while an answer is being written. Try again when the answer is done.",
+    busyDigest: "It can't be switched while the digest is being made. Try again when it's done or stopped.",
+    busyRecording: "It can't be switched while this lecture is being recorded.",
+    busyTranscribing: "It can't be switched while a recording is being transcribed or aligned. Try again when that's done.",
+    interrupted: 'The conversion was interrupted. Upload it again.',
+    notPdf: 'Only PDF files can be uploaded.',
+  },
   courses: {
     nameRequired: {
       course: 'Enter a course name',

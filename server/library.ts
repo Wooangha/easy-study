@@ -8,6 +8,8 @@
 //   digest/digest.json, DIGEST.md, annotations/NNN.json, annotations/index.json (server/annotations.ts),
 //   view/NNN-<w>.webp, thumbs/NNN.webp, inline/<dir>-<name>.jpg (derived images, server/assets.ts)
 //   library/courses/<courseId>/course.json, COURSE.md
+//   library/.next-<docId>/ (a new version of the lecture's PDF: its render set + next.json) and .prev-<docId>/ (the
+//   deck the last new version replaced + prev.json, server/versions.ts), DESIGN §28
 //
 // The PDF (PDFium-wasm, server/pdf.ts) and all image work (contact sheets, derived images) run in the worker
 // of server/imageWorker.ts, a short-lived child process: this module never loads PDFium or sharp. Documents
@@ -21,21 +23,27 @@
 //
 // Also: deleting a document / retrying a failed ingest (DESIGN §14), and the single-instance lock
 // library/.server.lock that keeps a second server away from a library another one is using.
+//
+// A new version of a lecture's PDF (DESIGN §28) is converted by the same pipeline into its staging folder (the live
+// deck is never touched), then a worker matches its slides to the lecture's; server/versions.ts swaps the render sets
+// (moveRenderEntries) while the lecture is marked swapping (isDocSwapping).
 import { randomBytes } from 'node:crypto';
 import { readFileSync, unlinkSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { COURSE_ID_RE, DOC_ID_RE, EFFORT_ID_RE } from '../shared/types.ts';
-import type { DigestSlide, DigestStatus, DocMeta } from '../shared/types.ts';
+import type { DigestSlide, DigestStatus, DocMeta, NextVersionInfo, VersionPlan, VersionPlanSlide } from '../shared/types.ts';
 import { readTokenUsage } from '../shared/usage.ts';
 import { VIEW_WIDTHS, inlinePathFor, thumbPath, viewPath } from './assets.ts';
 import { HttpError, libraryDir } from './config.ts';
-import { isLang, smsg } from './i18n.ts';
-import { isImageWorkerStopped, runImageWorker, runPdfWorker, runTextWorker } from './imageWorker.ts';
-import type { ImageJob, ImageWorkerOptions, ImageWorkerRun, PdfInfo, PdfWorkerHandlers, SheetEntry } from './imageWorker.ts';
+import { DEFAULT_LANG, isLang, slang, smsg } from './i18n.ts';
+import type { Lang } from './i18n.ts';
+import { isImageWorkerStopped, runImageWorker, runMatchWorker, runPdfWorker, runTextWorker, stoppedError } from './imageWorker.ts';
+import type { ImageJob, ImageWorkerOptions, ImageWorkerRun, MatchJob, PdfInfo, PdfWorkerHandlers, SheetEntry } from './imageWorker.ts';
 import { TEXT_ENGINE, TEXT_ENGINE_FILE, slideFileName, textFileName } from './pageNames.ts';
 import type { CourseContext, CourseLectureRef, CourseRecord, DigestRecord, DocAssets } from './internal-types.ts';
+import type { SlideMatch } from './slideMatch.ts';
 
 export type { SheetEntry } from './imageWorker.ts';
 export { slideFileName, textFileName } from './pageNames.ts';
@@ -56,15 +64,23 @@ export const SERVER_LOCK_FILE_NAME = '.server.lock';
  */
 const DELETED_PREFIX = '.deleted-';
 
+/**
+ * A new version of a lecture's PDF is converted into `.next-<docId>` and the deck it replaced is kept in
+ * `.prev-<docId>` (DESIGN §28): next to the lecture's folder, so neither is ever a document nor readable by the tutor
+ * CLIs (which see the lecture's folder only).
+ */
+const NEXT_PREFIX = '.next-';
+const PREV_PREFIX = '.prev-';
+
 const DIGEST_STATUSES: ReadonlySet<DigestStatus> = new Set<DigestStatus>(['none', 'running', 'ready', 'error', 'aborted']);
 
 // ---------------------------------------------------------------------------
 // Paths
 // ---------------------------------------------------------------------------
 
-export interface DocPaths {
+/** A deck's render set: its PDF and everything rendered from it (a lecture's, a staged new version's, a replaced deck's). */
+export interface RenderPaths {
   dir: string;
-  docJson: string;
   sourcePdf: string;
   slidesDir: string;
   sheetsDir: string;
@@ -74,6 +90,27 @@ export interface DocPaths {
   viewDir: string;
   thumbsDir: string;
   inlineDir: string;
+}
+
+/** The entries of a render set under its folder, swapped as a whole when a new version replaces the deck (DESIGN §28). */
+export const RENDER_ENTRIES = ['source.pdf', 'slides', 'sheets', 'text', 'view', 'thumbs', 'inline'] as const;
+
+function renderPaths(dir: string): RenderPaths {
+  return {
+    dir,
+    sourcePdf: path.join(dir, 'source.pdf'),
+    slidesDir: path.join(dir, 'slides'),
+    sheetsDir: path.join(dir, 'sheets'),
+    sheetsJson: path.join(dir, 'sheets', 'sheets.json'),
+    textDir: path.join(dir, 'text'),
+    viewDir: path.join(dir, 'view'),
+    thumbsDir: path.join(dir, 'thumbs'),
+    inlineDir: path.join(dir, 'inline'),
+  };
+}
+
+export interface DocPaths extends RenderPaths {
+  docJson: string;
   sessionsDir: string;
   notesDir: string;
   studyNotes: string;
@@ -103,16 +140,8 @@ export function docPaths(docId: string): DocPaths {
   if (!isDocId(docId)) throw new HttpError(404, smsg().common.notFound.doc);
   const dir = path.join(libraryDir(), docId);
   return {
-    dir,
+    ...renderPaths(dir),
     docJson: path.join(dir, 'doc.json'),
-    sourcePdf: path.join(dir, 'source.pdf'),
-    slidesDir: path.join(dir, 'slides'),
-    sheetsDir: path.join(dir, 'sheets'),
-    sheetsJson: path.join(dir, 'sheets', 'sheets.json'),
-    textDir: path.join(dir, 'text'),
-    viewDir: path.join(dir, 'view'),
-    thumbsDir: path.join(dir, 'thumbs'),
-    inlineDir: path.join(dir, 'inline'),
     sessionsDir: path.join(dir, 'sessions'),
     notesDir: path.join(dir, 'notes'),
     studyNotes: path.join(dir, 'STUDY_NOTES.md'),
@@ -121,6 +150,32 @@ export function docPaths(docId: string): DocPaths {
     digestMd: path.join(dir, 'DIGEST.md'),
     annotationsDir: path.join(dir, 'annotations'),
   };
+}
+
+/** library/.next-<docId>: a new version of the lecture's PDF being converted and matched (DESIGN §28). */
+export interface NextVersionPaths extends RenderPaths {
+  /** next.json (StoredNextVersion). */
+  meta: string;
+}
+
+/** library/.prev-<docId>: the deck the last new version replaced, and the swap's journal (DESIGN §28). */
+export interface PrevVersionPaths extends RenderPaths {
+  /** prev.json (server/versions.ts). */
+  journal: string;
+}
+
+/** Paths of a lecture's staged new version (404 for an invalid id, like docPaths). */
+export function nextVersionPaths(docId: string): NextVersionPaths {
+  if (!isDocId(docId)) throw new HttpError(404, smsg().common.notFound.doc);
+  const dir = path.join(libraryDir(), `${NEXT_PREFIX}${docId}`);
+  return { ...renderPaths(dir), meta: path.join(dir, 'next.json') };
+}
+
+/** Paths of the deck a lecture's last new version replaced (404 for an invalid id, like docPaths). */
+export function prevVersionPaths(docId: string): PrevVersionPaths {
+  if (!isDocId(docId)) throw new HttpError(404, smsg().common.notFound.doc);
+  const dir = path.join(libraryDir(), `${PREV_PREFIX}${docId}`);
+  return { ...renderPaths(dir), journal: path.join(dir, 'prev.json') };
 }
 
 /** Absolute path of library/courses. */
@@ -251,6 +306,11 @@ const activeIngests = new Map<string, Promise<void>>();
 const derivingDocs = new Set<string>();
 /** Documents being deleted: every read already treats them as missing. */
 const deletingDocs = new Set<string>();
+/**
+ * Lectures whose deck is being swapped for a new version or back (DESIGN §28, server/versions.ts): every write for them
+ * but the versions routes answers 409, and nothing renders into them (imageWorkBlocked).
+ */
+const swappingDocs = new Set<string>();
 
 function isPresent<T>(value: T | null | undefined): value is T {
   return value !== null && value !== undefined;
@@ -346,6 +406,41 @@ async function updateMeta(docId: string, patch: Partial<StoredDocMeta>): Promise
     await writeJsonAtomic(file, next);
     return next;
   });
+}
+
+/** doc.json fields a swap of the deck sets (DESIGN §28): the new deck's shape and file name, its rev and the change. */
+export type DeckMetaPatch = Pick<StoredDocMeta, 'pageCount' | 'aspectRatio' | 'fileName' | 'progress' | 'deckRev' | 'lastChange'>;
+
+/** Writes the deck fields of doc.json (server/versions.ts), through the same per-document queue as every other write. */
+export async function setDocDeck(docId: string, patch: DeckMetaPatch): Promise<StoredDocMeta> {
+  return updateMeta(docId, patch);
+}
+
+/** True while the lecture's deck is being swapped (DESIGN §28). */
+export function isDocSwapping(docId: string): boolean {
+  return swappingDocs.has(docId);
+}
+
+/**
+ * Why the lecture's deck cannot be swapped right now, or null: it is being deleted (404), converted or already being
+ * swapped (409). Synchronous: server/versions.ts checks it and its other gates in one tick, then calls beginDocSwap.
+ */
+export function swapRefusal(docId: string): HttpError | null {
+  if (deletingDocs.has(docId)) return new HttpError(404, smsg().common.notFound.doc);
+  if (swappingDocs.has(docId)) return new HttpError(409, smsg().library.versions.swapping);
+  if (isIngestRunning(docId)) return new HttpError(409, smsg().library.versions.notReady);
+  return null;
+}
+
+/** The swap of the lecture's deck begins (after swapRefusal said nothing): the backfill leaves it alone from now on. */
+export function beginDocSwap(docId: string): void {
+  swappingDocs.add(docId);
+  backfillQueue.delete(docId);
+}
+
+/** The swap of the lecture's deck has ended (or failed). */
+export function endDocSwap(docId: string): void {
+  swappingDocs.delete(docId);
 }
 
 /**
@@ -593,12 +688,12 @@ export function demoteHeadings(markdown: string, levels: number): string {
 // ---------------------------------------------------------------------------
 
 /** True when the buffer carries a PDF header (readers accept it anywhere in the first 1 KB). */
-function looksLikePdf(bytes: Buffer): boolean {
+export function looksLikePdf(bytes: Buffer): boolean {
   return bytes.length > 5 && bytes.subarray(0, 1024).includes('%PDF-');
 }
 
 /** Original file name without any directory part, NFC-normalized (macOS hands out NFD Hangul). */
-function cleanFileName(fileName: string): string {
+export function cleanFileName(fileName: string): string {
   const base = fileName.normalize('NFC').split(/[/\\]/).pop() ?? '';
   // eslint-disable-next-line no-control-regex
   const cleaned = base.replace(/[\u0000-\u001f\u007f]/g, '').trim();
@@ -747,15 +842,21 @@ export async function deleteDoc(docId: string, busyReason: () => string | null =
     // file would make the rename below fail).
     await stopImageRun(docId);
     await activeIngests.get(docId);
+    // A new version being converted goes with the lecture (its match worker reads the lecture's files).
+    await stopNextVersionIngest(docId);
     digestStatusCache.delete(docId);
     const dir = docPaths(docId).dir;
     const trash = path.join(libraryDir(), `${DELETED_PREFIX}${docId}-${randomBytes(3).toString('hex')}`);
     try {
       await renameWithRetry(dir, trash);
     } catch (err) {
-      if (isNotFound(err)) return; // removed by hand meanwhile
+      if (isNotFound(err)) {
+        await removeVersionFolders(docId); // removed by hand meanwhile
+        return;
+      }
       throw err;
     }
+    await removeVersionFolders(docId);
     await rmWithRetry(trash, { recursive: true, force: true }).catch((err: unknown) => {
       // Invisible already; the startup sweep (removeDeletedLeftovers) tries again.
       console.warn(`[library] could not remove ${trash}: ${(err as Error).message}`);
@@ -766,7 +867,19 @@ export async function deleteDoc(docId: string, busyReason: () => string | null =
   }
 }
 
-/** Removes folders of deleted documents that could not be removed at the time (startup sweep). */
+/** A deleted lecture's staged new version and replaced deck (DESIGN §28); the startup sweep retries what fails. */
+async function removeVersionFolders(docId: string): Promise<void> {
+  for (const dir of [nextVersionPaths(docId).dir, prevVersionPaths(docId).dir]) {
+    await rmWithRetry(dir, { recursive: true, force: true }).catch((err: unknown) => {
+      console.warn(`[library] could not remove ${dir}: ${(err as Error).message}`);
+    });
+  }
+}
+
+/**
+ * Removes folders of deleted documents that could not be removed at the time (startup sweep), and the staged new
+ * version or replaced deck (DESIGN §28) of a lecture that no longer exists.
+ */
 export async function removeDeletedLeftovers(): Promise<number> {
   let entries;
   try {
@@ -777,11 +890,28 @@ export async function removeDeletedLeftovers(): Promise<number> {
   }
   let removed = 0;
   for (const entry of entries) {
-    if (!entry.isDirectory() || !entry.name.startsWith(DELETED_PREFIX)) continue;
+    if (!entry.isDirectory()) continue;
+    const versionPrefix = [NEXT_PREFIX, PREV_PREFIX].find((prefix) => entry.name.startsWith(prefix));
+    if (versionPrefix) {
+      // Kept while its lecture exists.
+      const docId = entry.name.slice(versionPrefix.length);
+      if (isDocId(docId) && (await pathExists(docPaths(docId).docJson))) continue;
+    } else if (!entry.name.startsWith(DELETED_PREFIX)) {
+      continue;
+    }
     await rmWithRetry(path.join(libraryDir(), entry.name), { recursive: true, force: true });
     removed++;
   }
   return removed;
+}
+
+async function pathExists(file: string): Promise<boolean> {
+  try {
+    await fs.access(file);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** File names of a document's rendered slides, in slide order. */
@@ -795,9 +925,9 @@ export type SlotRelease = () => void;
 export interface Slots {
   /**
    * Resolves with the release function once one of the `limit` slots is free (first come, first served), or
-   * with null when cancelWaiting() turned the waiting caller away.
+   * with null when cancelWaiting() turned the waiting caller away or `signal` aborted while it waited.
    */
-  acquire(): Promise<SlotRelease | null>;
+  acquire(signal?: AbortSignal): Promise<SlotRelease | null>;
   /** Turns away every caller still waiting (shutdown); slots already held are not affected. */
   cancelWaiting(): void;
   /** Slots held, and callers waiting for one. */
@@ -820,12 +950,25 @@ export function createSlots(limit: number): Slots {
     };
   };
   return {
-    acquire() {
+    acquire(signal) {
+      if (signal?.aborted) return Promise.resolve(null);
       if (running < limit) {
         running++;
         return Promise.resolve(releaser());
       }
-      return new Promise((resolve) => waiting.push(resolve));
+      return new Promise((resolve) => {
+        const waiter = (release: SlotRelease | null) => {
+          signal?.removeEventListener('abort', onAbort);
+          resolve(release);
+        };
+        const onAbort = () => {
+          const index = waiting.indexOf(waiter);
+          if (index !== -1) waiting.splice(index, 1);
+          resolve(null);
+        };
+        signal?.addEventListener('abort', onAbort, { once: true });
+        waiting.push(waiter);
+      });
     },
     cancelWaiting() {
       for (const resolve of waiting.splice(0)) resolve(null);
@@ -876,13 +1019,35 @@ async function recordIngestFailure(docId: string, err: unknown): Promise<void> {
   });
 }
 
-/** The ingest's work once it holds a worker slot: the PDF worker, then the image worker. */
-async function convert(docId: string): Promise<void> {
-  const paths = docPaths(docId);
+/**
+ * What a conversion writes into (DESIGN §28): a lecture's own folder, or the staging folder of a new version of its PDF —
+ * so the live deck is never touched while a new version is converted.
+ */
+interface IngestTarget {
+  /** Key of the conversion in activeIngests and of its worker in imageRuns: the document id, or nextKey(docId). */
+  key: string;
+  paths: RenderPaths;
+  /** Writes the target's metadata (doc.json, next.json) through its queue. */
+  writeMeta(patch: { progress?: number; pageCount?: number; aspectRatio?: number }): Promise<unknown>;
+  /** Aborted when the conversion is not wanted any more: no worker is started after that. */
+  signal?: AbortSignal;
+}
+
+function docTarget(docId: string): IngestTarget {
+  return { key: docId, paths: docPaths(docId), writeMeta: (patch) => updateMeta(docId, patch) };
+}
+
+/**
+ * The start of every conversion: a clean slate, the PDF worker (slides, text, page count), then an image run that
+ * writes the contact sheets and goes on with the derived images. Resolves once the sheets are written; the caller
+ * owns the image run from then on (it is killed when this throws).
+ */
+async function renderTarget(target: IngestTarget): Promise<{ pageCount: number; aspectRatio: number; images: ImageWorkerRun }> {
+  const { key, paths } = target;
   let images: ImageWorkerRun | null = null;
   try {
     // A backfill of the previous rendering must not write into the new one.
-    await stopImageRun(docId);
+    await stopImageRun(key);
     // Start from a clean slate: a resumed ingest may have left partial output behind, and derived images
     // of an earlier rendering must go (the image worker writes only the missing ones).
     for (const dir of [paths.slidesDir, paths.sheetsDir, paths.textDir, paths.viewDir, paths.thumbsDir, paths.inlineDir]) {
@@ -891,21 +1056,41 @@ async function convert(docId: string): Promise<void> {
     for (const dir of [paths.slidesDir, paths.textDir]) await mkdirWithRetry(dir);
 
     // Page count, slides/NNN.png and text/NNN.txt in one PDF worker run (PDFium-wasm, server/pdf.ts).
-    const info = await renderPdf(docId, paths);
+    const info = await renderPdf(target);
     // The rendered image is authoritative (it accounts for rotation, crop boxes, ...).
     const aspectRatio = await pngAspectRatio(path.join(paths.slidesDir, slideFileName(1, info.pageCount)), info.aspectRatio);
 
     // Contact sheets (required for 'ready'), then the derived images, in one worker process.
-    images = startImageRun(docId, { docDir: paths.dir, slides: slideFileNames(info.pageCount), sheets: { aspectRatio }, derived: true });
+    throwIfStopped(target.signal);
+    images = startImageRun(key, { docDir: paths.dir, slides: slideFileNames(info.pageCount), sheets: { aspectRatio }, derived: true });
     await images.sheets;
+    return { pageCount: info.pageCount, aspectRatio, images };
+  } catch (err) {
+    images?.kill();
+    throw err;
+  }
+}
+
+/** A conversion stopped on purpose between its workers ends like one whose worker was killed. */
+function throwIfStopped(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw stoppedError();
+}
+
+/** The ingest's work once it holds a worker slot: the PDF worker, then the image worker. */
+async function convert(docId: string): Promise<void> {
+  let images: ImageWorkerRun | null = null;
+  try {
+    const rendered = await renderTarget(docTarget(docId));
+    images = rendered.images;
 
     // From here on only the derived images are still written: the document is deletable the moment doc.json says
     // 'ready' (a deletion stops the image worker and waits for this ingest; isIngestRunning must not be true in the
     // gap between the write and the next line, which a slow machine can hit).
     derivingDocs.add(docId);
     // `error: undefined` drops the message of a failed attempt that another process may have left.
-    await updateMeta(docId, { status: 'ready', progress: info.pageCount, pageCount: info.pageCount, aspectRatio, error: undefined });
-    console.log(`[library] ${docId}: ready (${info.pageCount} slides)`);
+    const { pageCount, aspectRatio } = rendered;
+    await updateMeta(docId, { status: 'ready', progress: pageCount, pageCount, aspectRatio, error: undefined });
+    console.log(`[library] ${docId}: ready (${pageCount} slides)`);
   } catch (err) {
     derivingDocs.delete(docId);
     images?.kill();
@@ -962,31 +1147,286 @@ export function progressThrottle(intervalMs: number, now: () => number = Date.no
 }
 
 /**
- * Runs the PDF worker for a document (slides/NNN.png, text/NNN.txt, text/.engine): doc.json gets the page
+ * Runs the PDF worker for a conversion (slides/NNN.png, text/NNN.txt, text/.engine): its metadata gets the page
  * count and aspect ratio as soon as the PDF is open, then `progress` (slides written) at most every
  * PROGRESS_POLL_MS. Registered like an image run, so a deletion or a new ingest stops it.
  */
-async function renderPdf(docId: string, paths: DocPaths): Promise<PdfInfo> {
+async function renderPdf(target: IngestTarget): Promise<PdfInfo> {
   let metaWrites: Promise<unknown> = Promise.resolve();
   let pageCount = 0;
   const shouldWrite = progressThrottle(PROGRESS_POLL_MS);
   const handlers: PdfWorkerHandlers = {
     onInfo: (info) => {
       pageCount = info.pageCount;
-      metaWrites = metaWrites.then(() => updateMeta(docId, { pageCount: info.pageCount, aspectRatio: info.aspectRatio }));
+      metaWrites = metaWrites.then(() => target.writeMeta({ pageCount: info.pageCount, aspectRatio: info.aspectRatio }));
     },
     onProgress: (rendered) => {
       if (!shouldWrite(rendered, pageCount)) return;
-      metaWrites = metaWrites.then(() => updateMeta(docId, { progress: rendered }));
+      metaWrites = metaWrites.then(() => target.writeMeta({ progress: rendered }));
     },
-    onWarning: (message) => console.warn(`[library] ${docId}: ${message}`),
+    onWarning: (message) => console.warn(`[library] ${target.key}: ${message}`),
   };
-  const run = startRun(docId, runPdfWorker({ kind: 'pdf', docDir: paths.dir, longEdge: RENDER_LONG_EDGE }, handlers));
+  throwIfStopped(target.signal);
+  const run = startRun(target.key, runPdfWorker({ kind: 'pdf', docDir: target.paths.dir, longEdge: RENDER_LONG_EDGE }, handlers));
   try {
     return await run.done;
   } finally {
     await metaWrites.catch(() => {});
   }
+}
+
+// ---------------------------------------------------------------------------
+// A new version of a lecture's PDF (DESIGN §28): converted into .next-<docId> like an upload, then matched
+// ---------------------------------------------------------------------------
+
+/** library/.next-<docId>/next.json: NextVersionInfo without what is counted when it is read (plan.onRemoved). */
+export interface StoredNextVersion extends Omit<NextVersionInfo, 'plan'> {
+  /** Width / height of the new deck's slides (doc.json's aspectRatio once it is applied). */
+  aspectRatio: number;
+  /** status 'ready': how the new slides continue the lecture's, without onRemoved. */
+  plan?: Omit<VersionPlan, 'onRemoved'>;
+  /** The language of the upload: a conversion the server stopped is marked failed in it at the next start. */
+  lang?: Lang;
+}
+
+const NEXT_STATUSES: ReadonlySet<string> = new Set<StoredNextVersion['status']>(['processing', 'ready', 'error']);
+
+/** Key of a new version's conversion in activeIngests and of its workers in imageRuns. */
+function nextKey(docId: string): string {
+  return `${docId}:next`;
+}
+
+/** Conversions of new versions by lecture, aborted when the new version is dropped or replaced. */
+const nextVersionStops = new Map<string, AbortController>();
+
+/** The lecture's staged new version (next.json), or null when there is none. */
+export async function readNextVersion(docId: string): Promise<StoredNextVersion | null> {
+  if (!isDocId(docId)) return null;
+  const value = await readJsonFile<StoredNextVersion>(nextVersionPaths(docId).meta);
+  return typeof value === 'object' && value !== null && NEXT_STATUSES.has(value.status) ? value : null;
+}
+
+/** Applies a patch to next.json (serialized like doc.json; `undefined` values remove the key). */
+async function updateNextMeta(docId: string, patch: Partial<StoredNextVersion>): Promise<StoredNextVersion> {
+  return metaQueue(nextKey(docId), async () => {
+    const file = nextVersionPaths(docId).meta;
+    const current = await readJsonFile<StoredNextVersion>(file);
+    if (!current) throw new Error(`next.json of ${docId} is missing`);
+    const next: StoredNextVersion = { ...current, ...patch };
+    await writeJsonAtomic(file, next);
+    return next;
+  });
+}
+
+/**
+ * Stores a new version of a lecture's PDF in .next-<docId> and starts its conversion and matching in the background
+ * (server/versions.ts has checked the lecture). A pending new version is dropped first. Resolves with next.json as
+ * written ('processing'); 400 when the bytes are not a PDF, 404 when the lecture was deleted meanwhile.
+ */
+export async function stageNextVersion(docId: string, bytes: Buffer, fileName: string): Promise<StoredNextVersion> {
+  if (!looksLikePdf(bytes)) throw new HttpError(400, smsg().library.versions.notPdf);
+  await discardNextVersion(docId);
+  const paths = nextVersionPaths(docId);
+  await mkdirWithRetry(paths.dir);
+  await fs.writeFile(paths.sourcePdf, bytes);
+  const meta: StoredNextVersion = {
+    status: 'processing',
+    fileName: cleanFileName(fileName),
+    progress: 0,
+    pageCount: 0,
+    aspectRatio: 16 / 9, // placeholder until the PDF worker has opened the PDF
+    createdAt: new Date().toISOString(),
+    lang: slang(),
+  };
+  await writeJsonAtomic(paths.meta, meta);
+  // Deleted while the files were written: the folder must not stay behind.
+  if (!(await readStoredDoc(docId))) {
+    await rmWithRetry(paths.dir, { recursive: true, force: true });
+    throw new HttpError(404, smsg().common.notFound.doc);
+  }
+  void startNextVersionIngest(docId);
+  return meta;
+}
+
+/** Drops the lecture's staged new version: its conversion is stopped and its folder removed (idempotent). */
+export async function discardNextVersion(docId: string): Promise<void> {
+  await stopNextVersionIngest(docId);
+  await rmWithRetry(nextVersionPaths(docId).dir, { recursive: true, force: true });
+}
+
+/**
+ * Stops a running conversion of the lecture's new version and marks it failed with `error` (the deck it is matched
+ * against is going away, DESIGN §28 Undo). Nothing happens when none runs.
+ */
+export async function interruptNextVersion(docId: string, error: string): Promise<void> {
+  if (!activeIngests.has(nextKey(docId))) return;
+  await stopNextVersionIngest(docId);
+  await failNextVersion(docId, error).catch(() => {}); // dropped meanwhile
+}
+
+/** Resolves when the conversion of the lecture's new version (if any) has ended (tests, versions.ts). */
+export function waitForNextVersion(docId: string): Promise<void> {
+  return activeIngests.get(nextKey(docId)) ?? Promise.resolve();
+}
+
+/** True while a new version of the lecture is being converted or matched. */
+export function isNextVersionConverting(docId: string): boolean {
+  return activeIngests.has(nextKey(docId));
+}
+
+/**
+ * Startup: a new version left 'processing' (the server stopped while converting it) is marked failed, "변환이
+ * 중단됐어요" in the language it was uploaded in, and its render files are removed (DESIGN §28). Returns how many.
+ */
+export async function markInterruptedNextVersions(): Promise<number> {
+  let entries;
+  try {
+    entries = await fs.readdir(libraryDir(), { withFileTypes: true });
+  } catch (err) {
+    if (isNotFound(err)) return 0;
+    throw err;
+  }
+  let marked = 0;
+  for (const entry of entries) {
+    const docId = entry.name.slice(NEXT_PREFIX.length);
+    if (!entry.isDirectory() || !entry.name.startsWith(NEXT_PREFIX) || !isDocId(docId) || activeIngests.has(nextKey(docId))) continue;
+    const stored = await readNextVersion(docId);
+    if (stored?.status !== 'processing') continue;
+    await failNextVersion(docId, smsg(isLang(stored.lang) ? stored.lang : DEFAULT_LANG).library.versions.interrupted);
+    marked++;
+  }
+  return marked;
+}
+
+/** Lectures that have a .prev-<docId> folder: a replaced deck, or a swap that may still be under way (startup). */
+export async function prevVersionDocIds(): Promise<string[]> {
+  let entries;
+  try {
+    entries = await fs.readdir(libraryDir(), { withFileTypes: true });
+  } catch (err) {
+    if (isNotFound(err)) return [];
+    throw err;
+  }
+  return entries
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith(PREV_PREFIX))
+    .map((entry) => entry.name.slice(PREV_PREFIX.length))
+    .filter(isDocId);
+}
+
+/** next.json says why the new version failed; its render files are of no use any more. */
+async function failNextVersion(docId: string, error: string): Promise<void> {
+  await updateNextMeta(docId, { status: 'error', error, plan: undefined });
+  const dir = nextVersionPaths(docId).dir;
+  for (const entry of RENDER_ENTRIES) await rmWithRetry(path.join(dir, entry), { recursive: true, force: true });
+}
+
+/** Stops the conversion of the lecture's new version (if any) and waits until it has ended; next.json stays as it is. */
+async function stopNextVersionIngest(docId: string): Promise<void> {
+  const key = nextKey(docId);
+  nextVersionStops.get(docId)?.abort();
+  await stopImageRun(key);
+  await activeIngests.get(key);
+}
+
+function startNextVersionIngest(docId: string): Promise<void> {
+  const key = nextKey(docId);
+  const running = activeIngests.get(key);
+  if (running) return running;
+  const controller = new AbortController();
+  const run = stagedIngest(docId, controller.signal).finally(() => {
+    activeIngests.delete(key);
+    if (nextVersionStops.get(docId) === controller) nextVersionStops.delete(docId);
+  });
+  activeIngests.set(key, run);
+  nextVersionStops.set(docId, controller);
+  return run;
+}
+
+/**
+ * The conversion of a new version: the ingest's workers in the same slots, writing into .next-<docId> and next.json,
+ * its derived images included (the dialog shows the new thumbnails; the deck is complete once applied), then a worker
+ * matches its slides to the lecture's (server/slideMatch.ts) and next.json gets the plan: 'ready'. Never rejects.
+ */
+async function stagedIngest(docId: string, signal: AbortSignal): Promise<void> {
+  const key = nextKey(docId);
+  const paths = nextVersionPaths(docId);
+  const release = await ingestSlots.acquire(signal);
+  // Dropped while waiting, or the server stops (the next start marks it interrupted).
+  if (!release) return;
+  let images: ImageWorkerRun | null = null;
+  try {
+    const rendered = await renderTarget({ key, paths, signal, writeMeta: (patch) => updateNextMeta(docId, patch) });
+    images = rendered.images;
+    try {
+      logDerivedResult(key, await images.done);
+    } catch (err) {
+      if (isImageWorkerStopped(err)) throw err;
+      // The routes fall back to the slide PNGs, and the backfill writes them once the version is applied.
+      console.warn(`[library] ${key}: derived images not written: ${(err as Error).message}`);
+    }
+
+    const live = await readStoredDoc(docId);
+    if (live?.status !== 'ready') throw new Error('the lecture is not ready');
+    throwIfStopped(signal);
+    const job: MatchJob = { kind: 'match', oldDir: docPaths(docId).dir, oldPageCount: live.pageCount, newDir: paths.dir };
+    const match = await startRun(key, runMatchWorker(job)).done;
+    const { pageCount, aspectRatio } = rendered;
+    const plan = versionPlan(match, live.deckRev ?? 0, live.pageCount, pageCount);
+    await updateNextMeta(docId, { status: 'ready', progress: pageCount, pageCount, aspectRatio, plan, error: undefined });
+    console.log(`[library] ${docId}: new version ready (${pageCount} slides, ${plan.removed.length} removed)`);
+  } catch (err) {
+    images?.kill();
+    // Dropped or replaced: whoever stopped it decides what becomes of next.json.
+    if (signal.aborted) return;
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[library] new version of ${docId} failed: ${message}`);
+    await failNextVersion(docId, message).catch((writeErr: unknown) => {
+      console.error(`[library] could not record the failure of the new version of ${docId}:`, writeErr);
+    });
+  } finally {
+    release();
+  }
+}
+
+/** A new version's plan from its match, without what is counted when it is read (onRemoved). */
+function versionPlan(match: SlideMatch, fromRev: number, oldPageCount: number, newPageCount: number): Omit<VersionPlan, 'onRemoved'> {
+  const slides: VersionPlanSlide[] = match.slides.map((entry) => ({
+    slide: entry.slide,
+    from: entry.from,
+    change: entry.change,
+    ...(entry.moved ? { moved: true as const } : {}),
+  }));
+  const matched = slides.filter((entry) => entry.from !== null).length;
+  return {
+    fromRev,
+    oldPageCount,
+    newPageCount,
+    slides,
+    removed: [...match.removed].sort((a, b) => a - b),
+    unrelated: matched < oldPageCount / 2,
+  };
+}
+
+/**
+ * Moves the render entries (RENDER_ENTRIES) found in `fromDir` into `toDir` (made when missing), replacing what `toDir`
+ * has under those names. Entries already moved are skipped, so a move a crash interrupted is simply done again.
+ */
+export async function moveRenderEntries(fromDir: string, toDir: string): Promise<void> {
+  await mkdirWithRetry(toDir);
+  for (const entry of RENDER_ENTRIES) {
+    const from = path.join(fromDir, entry);
+    if (!(await pathExists(from))) continue;
+    const to = path.join(toDir, entry);
+    await rmWithRetry(to, { recursive: true, force: true });
+    await renameWithRetry(from, to);
+  }
+}
+
+/** Stops the lecture's image work (a backfill run, an ingest's derived images) and waits for it: its deck is swapped. */
+export async function stopDocImageWork(docId: string): Promise<void> {
+  backfillQueue.delete(docId);
+  await stopImageRun(docId);
+  await activeIngests.get(docId);
 }
 
 // ---------------------------------------------------------------------------
@@ -1084,9 +1524,9 @@ async function needsTextExtraction(paths: DocPaths): Promise<boolean> {
   );
 }
 
-/** Busy with the document in another way: its ingest (which writes every file itself) or a deletion. */
+/** Busy with the document in another way: its ingest (which writes every file itself), a deletion or a swap of its deck. */
 function imageWorkBlocked(docId: string): boolean {
-  return activeIngests.has(docId) || imageRuns.has(docId) || deletingDocs.has(docId);
+  return activeIngests.has(docId) || imageRuns.has(docId) || deletingDocs.has(docId) || swappingDocs.has(docId);
 }
 
 /**

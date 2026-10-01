@@ -1,8 +1,10 @@
 // The 메모 tab (DESIGN §25): every memo of the lecture from the annotation summary (no per-slide loads), searched
 // over text and tags, filtered by tag or to the focused slide. A row opens the memo on its slide; its ⋯ deletes it.
-import { useMemo, useState } from 'react';
+// Below them, collapsed, 빠진 슬라이드 (DESIGN §28): the 필기 of slides a new version of the PDF dropped, read-only.
+import { useEffect, useMemo, useState } from 'react';
 import { Mic, RefreshCw, StickyNote, TriangleAlert } from 'lucide-react';
-import type { MemoSummary } from '../../../shared/types.ts';
+import type { MemoSummary, RemovedSlide } from '../../../shared/types.ts';
+import { ApiError, getRemovedSlides, removedThumbUrl, versionErrorMessage } from '../api.ts';
 import { useAnnotations } from '../hooks/useAnnotations.ts';
 import { msg } from '../i18n/index.ts';
 import { EMPTY_MEMO_FILTER, filterMemos, memoLines, memoTagCounts } from '../lib/annotations/memoList.ts';
@@ -10,6 +12,7 @@ import { confirmDialog } from '../lib/confirm.ts';
 import { formatTime } from '../lib/format.ts';
 import { formatClock } from '../lib/recording/timeline.ts';
 import { toast } from '../lib/toast.ts';
+import { removedItemText } from '../lib/versionPlan.ts';
 import { EyeIcon } from './annotations/icons.tsx';
 import { PopoverMenu } from './organize/PopoverMenu.tsx';
 
@@ -199,7 +202,67 @@ export function MemoListPanel({ docId, focusedSlide, onOpenMemo, onGoToSlide, on
             </div>
           );
         })}
+        <RemovedSlides docId={docId} />
       </div>
     </div>
+  );
+}
+
+/** 빠진 슬라이드: what sat on the slides new versions dropped, with the old thumbnail and "예전 p.N". Loaded once (the panel is keyed by the deck's rev). */
+function RemovedSlides({ docId }: { docId: string }) {
+  const [state, setState] = useState<{ slides: RemovedSlide[] } | { error: string } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    getRemovedSlides(docId)
+      .then((slides) => {
+        if (!cancelled) setState({ slides });
+      })
+      .catch((e: unknown) => {
+        // A server without the archive (404) has nothing to show.
+        if (!cancelled) setState(e instanceof ApiError && e.status === 404 ? { slides: [] } : { error: versionErrorMessage(e) });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [docId]);
+  if (!state) return null;
+  const m = msg().versions.removed;
+  if ('error' in state) {
+    return (
+      <div className="inline-error">
+        <TriangleAlert /> {m.loadFailed(state.error)}
+      </div>
+    );
+  }
+  const slides = state.slides.filter((s) => s.items.length > 0);
+  if (slides.length === 0) return null;
+  const count = slides.reduce((n, s) => n + s.items.length, 0);
+  const kinds = msg().chat.attachments.kinds;
+  return (
+    <details className="removed-slides">
+      <summary title={m.title}>
+        {m.heading} <span className="memo-tag-count">{count}</span>
+      </summary>
+      {slides.map((s) => (
+        <section key={`${s.rev}:${s.slide}`} className="removed-slide">
+          <div className="removed-slide-head">
+            {s.thumb && (
+              <span className="removed-thumb">
+                <img src={removedThumbUrl(docId, s.rev, s.slide)} alt={m.thumbAlt(s.slide)} loading="lazy" decoding="async" />
+              </span>
+            )}
+            <span className="slide-chip is-static">{m.oldPage(s.slide)}</span>
+          </div>
+          <ul className="removed-items">
+            {s.items.map((item) => (
+              <li key={item.id} className={`removed-item is-${item.color}`}>
+                <span className="memo-row-bar" aria-hidden />
+                <span className="removed-item-text">{removedItemText(item) ?? kinds[item.type]}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ))}
+    </details>
   );
 }

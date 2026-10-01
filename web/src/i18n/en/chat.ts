@@ -72,6 +72,9 @@ export const chat = {
     switchedTitle:
       'The LLM was changed, so a new conversation was started and the slides and a summary of the recent conversation were sent again before answering.',
     rollover: 'Continued in a new conversation',
+    deckUpdated: 'Restarted with the new slides',
+    deckUpdatedTitle:
+      'The lecture PDF was replaced by a new version, so a new conversation was started and the new slides and a summary of the recent conversation were sent again before answering.',
     primed: 'All slides sent',
     overviewImages: (n) => plural(n, 'overview image', 'overview images'),
     attached: (pages) => `${pages} attached`,
@@ -241,6 +244,7 @@ export const chat = {
     someSlide: 'the slide',
     regionTitle: (where) => `Region selected on ${where}`,
     onPage: (slide, what) => `p.${slide} ${what}`,
+    onRemovedPage: (slide, what, old) => `p.${slide} ${what} (removed p.${old})`,
     region: 'region',
     selectedRegion: 'Selected region',
     image: 'Image',

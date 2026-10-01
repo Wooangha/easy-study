@@ -44,6 +44,8 @@ export const storageKeys = {
   recordingMarkers: (recordingId: string) => `recordingMarkers:${recordingId}`,
   slide: (docId: string) => `slide:${docId}`,
   session: (docId: string) => `session:${docId}`,
+  /** The deck swap (DocMeta.lastChange.rev, DESIGN §28) whose banner was dismissed in this browser. */
+  deckSeen: (docId: string) => `deckSeen:${docId}`,
 } as const;
 
 export function readStorage<T>(key: string, fallback: T, validate?: (value: unknown) => value is T): T {

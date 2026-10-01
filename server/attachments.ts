@@ -9,6 +9,10 @@
 // snapshotted into Attachment.annotation when the attachment is made (nothing is written into the annotation store),
 // so the tutor gets the note's words and the question markers can link the item to the Q&A.
 //
+// A new version of the deck (DESIGN §28) moves region attachments to their slide's new number; one whose slide was
+// dropped goes to the nearest kept slide with `removedFrom` (remapRegionAttachments). attachments/deck.json {rev} marks
+// the deck the slides are numbered in.
+//
 // Lifetime: an attachment no message refers to is deleted after 24 h (sweepAttachments: at startup and hourly);
 // deleting a session deletes the attachments only its messages referred to; deleting a document deletes its
 // folder. Attachments of a running turn are pinned (in memory) so neither can take them away under it; the checks
@@ -17,17 +21,19 @@ import { randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { ANNOTATION_ID_RE, ATTACHMENT_ID_RE, MAX_ANNOTATION_TEXT_CHARS, MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES } from '../shared/types.ts';
-import type { AnnotationItem, Attachment, AttachmentAnnotation, RegionRect } from '../shared/types.ts';
+import type { AnnotationItem, Attachment, AttachmentAnnotation, RegionRect, RemovedFrom } from '../shared/types.ts';
 import { readSlideAnnotations } from './annotations.ts';
 import { ATTACHMENTS_DIR, ATTACHMENT_IMAGE_EXTS } from './assets.ts';
 import { HttpError } from './config.ts';
 import { smsg } from './i18n.ts';
 import { isImageWorkerStopped, runAttachmentWorker } from './imageWorker.ts';
 import type { AttachmentJob, AttachmentWorkerResult, AttachmentWorkerRun, UploadImageType } from './imageWorker.ts';
+import type { DeckMap } from './internal-types.ts';
 import {
   createKeyedQueue,
   createSlots,
   docPaths,
+  isDocSwapping,
   isNotFound,
   listStoredDocs,
   notReadyError,
@@ -56,6 +62,18 @@ const ANNOTATION_TYPES: ReadonlySet<string> = new Set<AnnotationItem['type']>(['
 const texts = () => smsg().library.attachments;
 /** Decimals a stored rect keeps (the client sends 4; clamping must not add floating-point noise). */
 const RECT_DECIMALS = 1e6;
+/** attachments/deck.json {rev}: the deckRev region slides are numbered in (absent = 0; DESIGN §28). */
+const DECK_FILE = 'deck.json';
+/**
+ * Stems of the deck mark and of a remap's journal (deck-r<toRev>.json), and of their temporary files: never
+ * attachments, though they fit ATTACHMENT_ID_RE (attachment ids are `att-…`).
+ */
+const DECK_STEM_RE = /^deck(-r\d+)?$/;
+
+/** 409 while the lecture's deck is being swapped (DESIGN §28). */
+function swappingError(): HttpError {
+  return new HttpError(409, smsg().library.versions.swapping);
+}
 
 /** An attachment with the absolute path of its stored image. */
 export interface StoredAttachment {
@@ -155,6 +173,14 @@ function normalizeAnnotation(value: unknown): AttachmentAnnotation | null {
   return annotation;
 }
 
+/** Attachment.removedFrom as stored, or null when it is not well formed. */
+function normalizeRemovedFrom(value: unknown): RemovedFrom | null {
+  const raw = value as Partial<RemovedFrom> | null;
+  if (typeof raw !== 'object' || raw === null) return null;
+  if (!Number.isInteger(raw.rev) || (raw.rev as number) < 0 || !Number.isInteger(raw.slide) || (raw.slide as number) < 1) return null;
+  return { rev: raw.rev as number, slide: raw.slide as number };
+}
+
 /** The stored Attachment, checked (the file name is authoritative for the id); null when missing or malformed. */
 function normalizeAttachment(value: unknown, id: string): Attachment | null {
   const raw = value as Partial<Attachment> | null;
@@ -169,6 +195,8 @@ function normalizeAttachment(value: unknown, id: string): Attachment | null {
     attachment.text = typeof raw.text === 'string' ? raw.text : '';
     const annotation = normalizeAnnotation(raw.annotation);
     if (annotation) attachment.annotation = annotation;
+    const removedFrom = normalizeRemovedFrom(raw.removedFrom);
+    if (removedFrom) attachment.removedFrom = removedFrom;
   } else if (typeof raw.name === 'string' && raw.name) {
     attachment.name = raw.name;
   }
@@ -293,6 +321,8 @@ async function runJob(docId: string, job: AttachmentJob, failure: string): Promi
       return await run.done;
     } catch (err) {
       if ((await readStoredDoc(docId)) === null) throw new HttpError(404, smsg().common.notFound.doc);
+      // A swap of the deck stops the lecture's jobs (DESIGN §28).
+      if (isDocSwapping(docId)) throw swappingError();
       if (isImageWorkerStopped(err)) throw new HttpError(503, smsg().common.http.shuttingDown);
       console.warn(`[attachments] ${docId}: ${job.kind} ${job.id} failed: ${(err as Error).message}`);
       throw new HttpError(500, failure);
@@ -321,10 +351,15 @@ export function hasAttachmentJobs(docId: string): boolean {
   return runningJobs.has(docId);
 }
 
-/** Writes <id>.json once the image exists; a document deleted meanwhile is not made again (404, image removed). */
-async function saveAttachment(docId: string, attachment: Attachment): Promise<Attachment> {
+/**
+ * Writes <id>.json once the image exists; a document deleted meanwhile is not made again (404, image removed). With
+ * `deckRev` (a region): 409 when the deck was swapped meanwhile (or is being swapped), since `slide` is of the old one.
+ */
+async function saveAttachment(docId: string, attachment: Attachment, deckRev?: number): Promise<Attachment> {
   try {
-    if ((await readStoredDoc(docId)) === null) throw new HttpError(404, smsg().common.notFound.doc);
+    const doc = await readStoredDoc(docId);
+    if (doc === null) throw new HttpError(404, smsg().common.notFound.doc);
+    if (deckRev !== undefined && (isDocSwapping(docId) || (doc.deckRev ?? 0) !== deckRev)) throw swappingError();
     // No mkdir: when the folder went away with its document, this fails instead of making it again.
     await writeJsonAtomic(metaFile(docId, attachment.id), attachment);
     return attachment;
@@ -375,10 +410,12 @@ async function annotationSnapshot(docId: string, slide: number, annotationId: st
 
 /**
  * POST /api/docs/:docId/regions: crops the region (padded) from the full-resolution slide and reads the PDF's
- * text inside it, in the image worker. 404 unknown document, 409 not converted (yet), 400 bad slide / rect, or an
- * `annotationId` that names no 필기 of the slide (its snapshot is taken before the image is made).
+ * text inside it, in the image worker. 404 unknown document, 409 not converted (yet) or its deck being swapped
+ * (DESIGN §28), 400 bad slide / rect, or an `annotationId` that names no 필기 of the slide (its snapshot is taken
+ * before the image is made).
  */
 export async function createRegionAttachment(docId: string, body: unknown, now: Date = new Date()): Promise<Attachment> {
+  if (isDocSwapping(docId)) throw swappingError();
   const doc = await readStoredDoc(docId);
   if (!doc) throw new HttpError(404, smsg().common.notFound.doc);
   if (doc.status !== 'ready') throw notReadyError(doc);
@@ -390,17 +427,21 @@ export async function createRegionAttachment(docId: string, body: unknown, now: 
   const failure = texts().cropFailed(slide);
   const result = await runJob(docId, job, failure);
   if (!result.ok) throw new HttpError(500, failure);
-  return saveAttachment(docId, {
-    id,
-    kind: 'region',
-    slide,
-    rect,
-    width: result.width,
-    height: result.height,
-    text: result.text ?? '',
-    ...(annotation ? { annotation } : {}),
-    createdAt: now.toISOString(),
-  });
+  return saveAttachment(
+    docId,
+    {
+      id,
+      kind: 'region',
+      slide,
+      rect,
+      width: result.width,
+      height: result.height,
+      text: result.text ?? '',
+      ...(annotation ? { annotation } : {}),
+      createdAt: now.toISOString(),
+    },
+    doc.deckRev ?? 0,
+  );
 }
 
 export type { UploadImageType } from './imageWorker.ts';
@@ -561,7 +602,7 @@ export async function sweepAttachments(referenced: ReferencedIds, options: Sweep
     const modified = new Map<string, number>();
     for (const name of names) {
       const id = name.split('.')[0];
-      if (!ATTACHMENT_ID_RE.test(id)) continue;
+      if (!ATTACHMENT_ID_RE.test(id) || DECK_STEM_RE.test(id)) continue;
       if (name === `${id}.json`) {
         const time = Date.parse((await readAttachment(doc.id, id))?.createdAt ?? '');
         if (Number.isFinite(time)) created.set(id, time);
@@ -622,4 +663,102 @@ export function startAttachmentSweeper(referenced: ReferencedIds, intervalMs: nu
       await current;
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// A new version of the deck (DESIGN §28)
+// ---------------------------------------------------------------------------
+
+/** The journal of a remap (attachments/deck-r<toRev>.json): the region attachments as they will be, written first. */
+interface AttachmentsJournal {
+  version: 1;
+  toRev: number;
+  attachments: Attachment[];
+}
+
+/** The old slide's number in the new deck, or null when the new deck dropped it. */
+function newSlideOf(map: DeckMap, old: number): number | null {
+  if (!Number.isInteger(old) || old < 1 || old > map.oldPageCount) return null;
+  const next = map.oldToNew[old - 1];
+  return typeof next === 'number' ? next : null;
+}
+
+/** Where a dropped slide's region goes: the closest preceding old slide that was kept, else the closest following, else 1. */
+function nearestKeptSlide(map: DeckMap, old: number): number {
+  for (let slide = Math.min(old, map.oldPageCount + 1) - 1; slide >= 1; slide--) {
+    const next = newSlideOf(map, slide);
+    if (next !== null) return next;
+  }
+  for (let slide = old + 1; slide <= map.oldPageCount; slide++) {
+    const next = newSlideOf(map, slide);
+    if (next !== null) return next;
+  }
+  return 1;
+}
+
+/** A region attachment in the new deck, or null when it does not change. */
+function remapRegion(attachment: Attachment, map: DeckMap): Attachment | null {
+  if (attachment.kind !== 'region' || attachment.slide === undefined) return null;
+  const { removedFrom, ...rest } = attachment;
+  // Undo: what the apply from restoreRev moved off its dropped slide goes back there.
+  if (map.restoreRev !== undefined && removedFrom?.rev === map.restoreRev && removedFrom.slide <= map.newPageCount) {
+    return { ...rest, slide: removedFrom.slide };
+  }
+  const next = newSlideOf(map, attachment.slide);
+  if (next !== null) return next === attachment.slide ? null : { ...attachment, slide: next };
+  return { ...attachment, slide: nearestKeptSlide(map, attachment.slide), removedFrom: { rev: map.fromRev, slide: attachment.slide } };
+}
+
+function isAttachmentsJournal(value: unknown, toRev: number): value is AttachmentsJournal {
+  const raw = value as Partial<AttachmentsJournal> | null;
+  return typeof raw === 'object' && raw !== null && raw.version === 1 && raw.toRev === toRev && Array.isArray(raw.attachments);
+}
+
+/**
+ * Region attachments follow their slide (DESIGN §28 Remaps › Attachments): `slide` remapped; a dropped slide → the
+ * nearest kept slide and `removedFrom` {fromRev, old slide}; on an undo, `removedFrom.rev === restoreRev` → back to
+ * removedFrom.slide, the flag removed. Under the attachments lock; idempotent (attachments/deck.json {rev}) and
+ * resumable (the journal). The old numbering is map.oldPageCount (doc.json has the new deck by now).
+ */
+export async function remapRegionAttachments(docId: string, map: DeckMap): Promise<void> {
+  await lock(docId, async () => {
+    const dir = attachmentsDir(docId);
+    let names: string[];
+    try {
+      names = await fs.readdir(dir);
+    } catch (err) {
+      if (isNotFound(err)) return; // no attachments at all
+      throw err;
+    }
+    const journalFile = path.join(dir, `deck-r${map.toRev}.json`);
+    const mark = await readJsonFile<{ rev?: unknown }>(path.join(dir, DECK_FILE));
+    if (typeof mark?.rev === 'number' && mark.rev >= map.toRev) {
+      await rmWithRetry(journalFile, { force: true });
+      return;
+    }
+    const pending = await readJsonFile<unknown>(journalFile);
+    let changed: Attachment[];
+    if (isAttachmentsJournal(pending, map.toRev)) {
+      changed = pending.attachments.flatMap((entry) => {
+        const attachment = typeof entry?.id === 'string' && ATTACHMENT_ID_RE.test(entry.id) ? normalizeAttachment(entry, entry.id) : null;
+        return attachment ? [attachment] : [];
+      });
+    } else {
+      changed = [];
+      for (const name of names) {
+        const id = name.slice(0, -'.json'.length);
+        if (!name.endsWith('.json') || !ATTACHMENT_ID_RE.test(id) || DECK_STEM_RE.test(id)) continue;
+        const attachment = normalizeAttachment(await readJsonFile<unknown>(path.join(dir, name)), id);
+        const next = attachment ? remapRegion(attachment, map) : null;
+        if (next) changed.push(next);
+      }
+      if (changed.length > 0) await writeJsonAtomic(journalFile, { version: 1, toRev: map.toRev, attachments: changed } satisfies AttachmentsJournal);
+    }
+    for (const attachment of changed) {
+      // Deleted meanwhile (a crash, then the sweep): its metadata is not made again.
+      if ((await readJsonFile<unknown>(metaFile(docId, attachment.id))) !== null) await writeJsonAtomic(metaFile(docId, attachment.id), attachment);
+    }
+    await writeJsonAtomic(path.join(dir, DECK_FILE), { rev: map.toRev });
+    await rmWithRetry(journalFile, { force: true });
+  });
 }

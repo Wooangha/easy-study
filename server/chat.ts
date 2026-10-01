@@ -21,6 +21,9 @@
 // session, unknown thread or previous_response_id) or it became too large ('context_overflow'), the
 // turn is rebuilt as a new conversation (re-prime + recap) and retried once within the same request.
 //
+// A new version of a lecture's deck (DESIGN §28): while the deck is swapped, reserveDocTurns keeps every turn (and LLM
+// switch) of the lecture off, so no turn's final save can undo the sessions' remap.
+//
 // Token usage (DESIGN §23): what the provider reports (ProviderRunInput.onUsage / onLimits) is streamed as `usage`
 // events — the turn's running total over all its attempts — stored on the assistant message and added to the
 // session's totals (a priming turn to its priming cost too), whether the turn succeeds, fails or is aborted.
@@ -164,6 +167,8 @@ interface RunningTurn {
 }
 
 const runningTurns = new Map<string, RunningTurn>();
+/** Lectures whose deck is being swapped (reserveDocTurns): their turns and LLM switches answer 409. */
+const reservedDocs = new Set<string>();
 
 function turnKey(docId: string, sessionId: string): string {
   return `${docId}/${sessionId}`;
@@ -199,6 +204,24 @@ export function runningTurnCount(): number {
   return runningTurns.size;
 }
 
+/**
+ * Keeps the lecture's turns off while its deck is swapped for a new version (DESIGN §28). Synchronous, so the caller
+ * can check its other gates in the same tick: throws HttpError 409 when a turn of the lecture is running (or one of its
+ * sessions' LLM is being changed) or the lecture is already reserved. Until the returned function is called (it may be
+ * called more than once), new turns, prime turns and LLM switches of the lecture answer 409.
+ */
+export function reserveDocTurns(docId: string): () => void {
+  if (reservedDocs.has(docId)) throw new HttpError(409, smsg().library.versions.swapping);
+  if (hasRunningTurns(docId)) throw new HttpError(409, smsg().library.versions.busyAnswering);
+  reservedDocs.add(docId);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    reservedDocs.delete(docId);
+  };
+}
+
 function withTimeout(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
   return new Promise((resolve) => {
     const timer = setTimeout(() => resolve(false), timeoutMs);
@@ -223,10 +246,11 @@ export function waitForIdle(timeoutMs: number): Promise<boolean> {
 /**
  * Runs `fn` with the session reserved like a running turn, for a change of the session that must not race with a
  * turn (whose final save would undo it): the LLM switch (DESIGN §5). A turn asked for meanwhile gets 409, and this
- * rejects with HttpError 409 while a turn of the session is running.
+ * rejects with HttpError 409 while a turn of the session is running or the lecture's deck is swapped (reserveDocTurns).
  */
 export async function withSessionReserved<T>(docId: string, sessionId: string, fn: () => Promise<T>): Promise<T> {
   const key = turnKey(docId, sessionId);
+  if (reservedDocs.has(docId)) throw new HttpError(409, smsg().library.versions.swapping);
   if (runningTurns.has(key)) throw new HttpError(409, smsg().chat.turns.busy);
   let markFinished = () => {};
   const finished = new Promise<void>((resolve) => {
@@ -242,12 +266,13 @@ export async function withSessionReserved<T>(docId: string, sessionId: string, f
 }
 
 /**
- * Runs one turn. Rejects with HttpError (404 / 400 / 409) when the turn cannot start; in that
- * case no event has been emitted and nothing was persisted.
+ * Runs one turn. Rejects with HttpError (404 / 400 / 409) when the turn cannot start (409 also while the lecture's deck
+ * is swapped, reserveDocTurns); in that case no event has been emitted and nothing was persisted.
  */
 export async function runTurn(request: TurnRequest, deps: ChatDeps = defaultChatDeps()): Promise<TurnResult> {
   const key = turnKey(request.docId, request.sessionId);
-  // Check-and-reserve without an await in between, so concurrent requests cannot both pass.
+  // Check-and-reserve without an await in between, so concurrent requests (and a deck swap) cannot both pass.
+  if (reservedDocs.has(request.docId)) throw new HttpError(409, smsg().library.versions.swapping);
   if (runningTurns.has(key)) throw new HttpError(409, smsg().chat.turns.alreadyAnswering);
   const controller = new AbortController();
   let markFinished = () => {};

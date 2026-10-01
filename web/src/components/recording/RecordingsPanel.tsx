@@ -329,7 +329,13 @@ function RecordingDetail({ doc, info: listInfo, focusedSlide, providers, choice,
   const live = isLive(info);
   const refreshList = recordings.refresh;
   const onMarkersSaved = useCallback(() => void refreshList(), [refreshList]);
-  const { markers, pending: markersPending, apply: applyMarker } = useMarkers(doc.id, info.id, doc.pageCount, onMarkersSaved);
+  const { markers, pending: markersPending, apply: applyMarker } = useMarkers(
+    doc.id,
+    info.id,
+    doc.pageCount,
+    onMarkersSaved,
+    feed?.markers ?? null,
+  );
   const aligning = feed?.aligning ?? false;
 
   const [mode, setModeState] = useState<TranscriptMode>(() => readStorage(storageKeys.transcriptMode, 'all', isMode));

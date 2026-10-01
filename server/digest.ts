@@ -19,7 +19,11 @@
 // a time (a process-wide limit), so opening several lectures does not multiply the load; with a CLI
 // provider each call also needs a slot of the CLI process budget (server/cliBudget.ts), where chat turns
 // go first.
+//
+// A new version of the lecture's PDF (DESIGN §28) renumbers the digest (remapDigest): entries of unchanged slides
+// follow their slide, the others are dropped for 이어서 만들기 to redo; an undo puts back what the swap dropped.
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import type { DigestInfo, DigestSlide, ProviderId, TokenUsage } from '../shared/types.ts';
 import { addUsage, totalTokens } from '../shared/usage.ts';
 import { defaultChatDeps } from './chat.ts';
@@ -38,15 +42,18 @@ import {
 } from './digestPrompt.ts';
 import { DEFAULT_LANG, runInLang, slang, smsg } from './i18n.ts';
 import type { Lang } from './i18n.ts';
-import type { DocAssets, DigestRecord } from './internal-types.ts';
+import type { DeckMap, DocAssets, DigestRecord } from './internal-types.ts';
 import {
   createKeyedQueue,
   demoteHeadings,
   docPaths,
+  isNotFound,
   listStoredDocs,
   loadDocAssets,
   readDigestRecord,
+  readJsonFile,
   readStoredDoc,
+  rmWithRetry,
   slideFileName,
   sortDigestSlides,
   writeFileAtomic,
@@ -135,6 +142,10 @@ interface DigestJob {
 const jobs = new Map<string, DigestJob>();
 /** Serializes writes of digest.json / DIGEST.md per document. */
 const persistQueue = createKeyedQueue();
+/** Holders of lockDigest per document: its deck is being swapped for a new version (DESIGN §28). */
+const swapLocks = new Map<string, number>();
+/** lockDigest calls so far per document, so a start that read the deck before a swap never runs after it. */
+const swapCounts = new Map<string, number>();
 
 // ---------------------------------------------------------------------------
 // Process-wide limit on digest provider calls
@@ -246,8 +257,8 @@ export function isDigestRunning(docId: string): boolean {
 
 /**
  * Starts (or resumes, or with `force` redoes) the digest of a ready document in the background and
- * returns its state (status 'running'). Throws 404 (unknown document), 409 (document not ready or a
- * digest job already running) or 400 (unknown / unavailable provider).
+ * returns its state (status 'running'). Throws 404 (unknown document), 409 (document not ready, a
+ * digest job already running or its deck being swapped) or 400 (unknown / unavailable provider).
  */
 export async function startDigest(
   docId: string,
@@ -255,6 +266,7 @@ export async function startDigest(
   deps: DigestDeps = defaultDigestDeps(),
 ): Promise<DigestInfo> {
   const m = smsg();
+  const swapsBefore = swapCounts.get(docId) ?? 0;
   const provider = deps.getProvider(options.provider);
   if (!provider) throw new HttpError(400, m.chat.providers.unknownProvider(String(options.provider)));
   const assets = await loadDocAssets(docId);
@@ -263,6 +275,8 @@ export async function startDigest(
 
   // Check-and-reserve without an await in between, so concurrent requests cannot both start a job.
   if (jobs.has(docId)) throw new HttpError(409, m.chat.digest.alreadyRunning);
+  // A new version of the deck is being put in, or was while the deck above was read (DESIGN §28).
+  if (swapLocks.has(docId) || (swapCounts.get(docId) ?? 0) !== swapsBefore) throw new HttpError(409, m.library.versions.swapping);
   let markFinished = () => {};
   const job: DigestJob = {
     controller: new AbortController(),
@@ -687,10 +701,10 @@ export function digestMarkdown(title: string, pageCount: number, record: DigestR
 
 /**
  * DIGEST.md again from digest.json, with the lecture's current title (after a rename). Nothing without a digest; a
- * digest being made writes it with the new title when it saves.
+ * digest being made writes it with the new title when it saves, a deck being swapped when it is renumbered.
  */
 export async function rewriteDigestMarkdown(docId: string): Promise<void> {
-  if (jobs.has(docId)) return;
+  if (jobs.has(docId) || swapLocks.has(docId)) return;
   const [doc, record] = await Promise.all([readStoredDoc(docId), readDigestRecord(docId)]);
   if (!doc || !record) return;
   await persistQueue(docId, () => writeFileAtomic(docPaths(docId).digestMd, digestMarkdown(doc.title, doc.pageCount, record)));
@@ -728,6 +742,152 @@ export async function readDigestMarkdown(docId: string): Promise<string | null> 
   const record = jobs.get(docId)?.record ?? (await readDigestRecord(docId));
   if (!record) return null;
   const markdown = digestMarkdown(doc.title, doc.pageCount, record);
-  await persistQueue(docId, () => writeFileAtomic(paths.digestMd, markdown));
+  // Not while the deck is swapped: the record read above may be about to be renumbered.
+  if (!swapLocks.has(docId)) await persistQueue(docId, () => writeFileAtomic(paths.digestMd, markdown));
   return markdown;
+}
+
+// ---------------------------------------------------------------------------
+// A new version of the deck (DESIGN §28)
+// ---------------------------------------------------------------------------
+
+/**
+ * Holds the digest of a lecture while its deck is swapped for a new version (or back): no job starts (409) and
+ * DIGEST.md is not rewritten until the returned function releases it (idempotent). Synchronous, so the swap can take it
+ * with its other gates; throws 409 while a job runs.
+ */
+export function lockDigest(docId: string): () => void {
+  if (jobs.has(docId)) throw new HttpError(409, smsg().library.versions.busyDigest);
+  swapLocks.set(docId, (swapLocks.get(docId) ?? 0) + 1);
+  swapCounts.set(docId, (swapCounts.get(docId) ?? 0) + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const held = (swapLocks.get(docId) ?? 1) - 1;
+    if (held > 0) swapLocks.set(docId, held);
+    else swapLocks.delete(docId);
+  };
+}
+
+/** digest/deck.json {rev}: the deckRev the digest was last renumbered to (absent = never). */
+function deckMarkPath(docId: string): string {
+  return path.join(docPaths(docId).digestDir, 'deck.json');
+}
+
+/** digest/digest-r<rev>.json: the record as it was in deck `rev`, before the swap from it (an undo's source). */
+function snapshotPath(docId: string, rev: number): string {
+  return path.join(docPaths(docId).digestDir, `digest-r${rev}.json`);
+}
+
+async function readSnapshot(docId: string, rev: number): Promise<DigestRecord | null> {
+  const value = await readJsonFile<DigestRecord>(snapshotPath(docId, rev));
+  return value && Array.isArray(value.slides) ? value : null;
+}
+
+/** Removes the snapshots except the one of deck `keep` (null = all of them). */
+async function removeSnapshots(docId: string, keep: number | null): Promise<void> {
+  const dir = docPaths(docId).digestDir;
+  let names: string[];
+  try {
+    names = await fs.readdir(dir);
+  } catch (err) {
+    if (isNotFound(err)) return;
+    throw err;
+  }
+  for (const name of names) {
+    const rev = /^digest-r(\d+)\.json$/.exec(name)?.[1];
+    if (rev !== undefined && Number(rev) !== keep) await rmWithRetry(path.join(dir, name), { force: true });
+  }
+}
+
+/** No job runs during a swap: 'running' on disk is a leftover of a crash, as at startup. */
+function settleInterrupted(record: DigestRecord): void {
+  if (record.status !== 'running') return;
+  record.status = 'aborted';
+  record.error = smsg(record.lang ?? 'ko').chat.digest.interrupted;
+}
+
+/**
+ * `before` (numbered in deck map.fromRev) in the numbering of map.toRev: entries of the slides that continue an old
+ * slide unchanged are renumbered, the others dropped. Unless every slide kept its number and content, the summary is
+ * stale and the note says how many slides to redo (never old numbers). An undo with `restored`, the record from before
+ * the apply, takes back its entries for the slides that are not unchanged, its summary and its state.
+ */
+function remapRecord(before: DigestRecord, map: DeckMap, restored: DigestRecord | null): DigestRecord {
+  const slides: DigestSlide[] = [];
+  for (const entry of before.slides) {
+    const slide = entry.slide <= map.oldPageCount ? (map.oldToNew[entry.slide - 1] ?? null) : null;
+    if (slide !== null && !map.changed.has(slide) && !map.added.has(slide)) slides.push({ ...entry, slide });
+  }
+  const record: DigestRecord = { ...before, slides: sortDigestSlides(slides) };
+  settleInterrupted(record);
+  const lang = record.lang ?? 'ko';
+  if (restored) {
+    // Restored in its own language when a redo changed it since, so one digest never mixes two.
+    const whole = (restored.lang ?? 'ko') !== lang;
+    const old = restored.slides.filter((entry) => entry.slide <= map.newPageCount);
+    record.slides = sortDigestSlides(whole ? old : [...old, ...record.slides]);
+    record.summary = restored.summary;
+    if (restored.summaryStale) record.summaryStale = true;
+    else delete record.summaryStale;
+    record.status = restored.status;
+    if (restored.error) record.error = restored.error;
+    else delete record.error;
+    if (whole) {
+      if (restored.lang) record.lang = restored.lang;
+      else delete record.lang;
+    }
+    settleInterrupted(record);
+    return record;
+  }
+  const unchanged =
+    map.oldPageCount === map.newPageCount &&
+    map.changed.size === 0 &&
+    map.added.size === 0 &&
+    map.oldToNew.every((slide, index) => slide === index + 1);
+  if (!unchanged) {
+    record.summaryStale = true;
+    record.error = smsg(lang).chat.digest.newVersion(map.changed.size + map.added.size);
+  }
+  return record;
+}
+
+/**
+ * Renumbers the digest for a new version of the deck, or back for an undo (DESIGN §28 "Remaps › Digest"). The record
+ * before is kept as digest/digest-r<fromRev>.json; an undo (map.restoreRev) takes back what the apply dropped from
+ * digest-r<restoreRev>.json, and no snapshot is left. Then DIGEST.md (with `title`) and COURSE.md. Nothing without a
+ * digest. Idempotent through digest/deck.json: a swap resumed after a crash remaps the snapshot it kept, never its own
+ * result. Runs while lockDigest holds the lecture, so no job is writing the record.
+ */
+export async function remapDigest(docId: string, map: DeckMap, title: string): Promise<void> {
+  if (jobs.has(docId)) throw new HttpError(409, smsg().library.versions.busyDigest);
+  const paths = docPaths(docId);
+  const remapped = await persistQueue(docId, async () => {
+    const current = await readDigestRecord(docId);
+    if (!current) return false;
+    const mark = await readJsonFile<{ rev?: unknown }>(deckMarkPath(docId));
+    if (mark?.rev !== map.toRev) {
+      let before = await readSnapshot(docId, map.fromRev);
+      if (!before) {
+        before = current;
+        await writeJsonAtomic(snapshotPath(docId, map.fromRev), before);
+      }
+      const restored = map.restoreRev === undefined ? null : await readSnapshot(docId, map.restoreRev);
+      const record = remapRecord(before, map, restored);
+      await writeJsonAtomic(paths.digestJson, record);
+      await writeFileAtomic(paths.digestMd, digestMarkdown(title, map.newPageCount, record));
+      await writeJsonAtomic(deckMarkPath(docId), { rev: map.toRev });
+    }
+    // An apply keeps its snapshot for the undo (older ones can no longer be undone); an undo consumes them.
+    await removeSnapshots(docId, map.restoreRev === undefined ? map.fromRev : null);
+    return true;
+  });
+  if (!remapped) return;
+  try {
+    const course = await courseOf(docId);
+    if (course) await writeCourseMarkdown(course.id);
+  } catch (err) {
+    console.error(`[digest] ${docId}: could not update COURSE.md:`, err);
+  }
 }

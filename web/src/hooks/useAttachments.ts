@@ -59,6 +59,8 @@ export interface AttachmentsApi {
   settle: () => Promise<void>;
   /** Chips of the open document right now (read at call time, not at the last render). */
   count: () => number;
+  /** Remove the slide regions (their slide numbers belong to a deck that was swapped, DESIGN §28); images stay. */
+  dropRegions: () => void;
 }
 
 interface InFlight {
@@ -303,10 +305,19 @@ export function useAttachments(docId: string | null): AttachmentsApi {
     [docIdRef],
   );
 
+  const dropRegions = useCallback(() => {
+    const forDoc = stateRef.current.docId;
+    const regions = stateRef.current.items.filter((c) => c.kind === 'region');
+    if (regions.length === 0) return;
+    dispatch({ type: 'remove', keys: regions.map((c) => c.key) });
+    // Best effort, like remove(); a crop still running is deleted when it finishes (discardLate).
+    for (const c of regions) if (forDoc && c.attachment) api.deleteAttachment(forDoc, c.attachment.id).catch(() => {});
+  }, [dispatch]);
+
   const items = stateRef.current.docId === docId ? stateRef.current.items : NO_CHIPS;
   const uploading = isUploading(items);
   return useMemo(
-    () => ({ docId, items, uploading, addFiles, addRegion, addAnnotation, addAnnotations, remove, take, restore, settle, count }),
-    [docId, items, uploading, addFiles, addRegion, addAnnotation, addAnnotations, remove, take, restore, settle, count],
+    () => ({ docId, items, uploading, addFiles, addRegion, addAnnotation, addAnnotations, remove, take, restore, settle, count, dropRegions }),
+    [docId, items, uploading, addFiles, addRegion, addAnnotation, addAnnotations, remove, take, restore, settle, count, dropRegions],
   );
 }

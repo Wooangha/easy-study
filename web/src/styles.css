@@ -7553,3 +7553,359 @@ details[open] > summary::before {
     min-width: 40px;
   }
 }
+
+/* ---------------------------------------------------------------- 새 버전 올리기 (DESIGN §28) */
+
+/* The 새 버전 확인 dialog: like the LLM switch dialog, wider, its plan scrolling between the head and the buttons. */
+.version-dialog {
+  width: min(640px, calc(100vw - 32px));
+  max-height: calc(100dvh - 48px);
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-lg);
+}
+
+.version-dialog::backdrop {
+  background: var(--overlay);
+}
+
+.version-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px 20px 16px;
+  max-height: calc(100dvh - 50px);
+}
+
+.version-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.version-file {
+  margin: 0;
+  overflow: hidden;
+  font-size: 12.5px;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.version-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.version-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.version-chip {
+  padding: 1px 10px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: 12.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.version-chip.is-changed {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.version-chip.is-added {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.version-chip.is-removed {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.version-warn {
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 13px;
+}
+
+.version-note {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.version-notes {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.version-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.version-heading {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.version-changes {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr));
+  gap: 10px 16px;
+}
+
+.version-change {
+  display: grid;
+  grid-template-columns: minmax(0, 160px) auto minmax(0, 160px);
+  align-items: center;
+  gap: 8px;
+}
+
+.version-arrow {
+  color: var(--muted);
+}
+
+.version-fig {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.version-fig figcaption,
+.version-caption {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.version-tag {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1.7;
+}
+
+.version-grid {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 10px;
+}
+
+.version-thumb {
+  display: block;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--slide-bg);
+}
+
+.version-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.version-fig.is-removed .version-thumb {
+  opacity: 0.6;
+}
+
+.version-apply-error {
+  flex: none;
+}
+
+/* The viewer's banner after a swap, between the toolbar and the slides. */
+.deck-banner {
+  flex: none;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  padding: 5px 8px 5px 12px;
+  background: var(--accent-soft);
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.deck-banner-text {
+  min-width: 0;
+}
+
+.deck-banner-counts {
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.deck-banner-steps {
+  display: inline-flex;
+  gap: 2px;
+}
+
+/* 수정 / 새로 next to the slide number while the banner shows. */
+.slide-change-badge {
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+.slide-change-badge.is-changed {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.slide-change-badge.is-added {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.context-chip.chip-deckUpdated {
+  cursor: help;
+}
+
+/* A p.N chip that is not a button (예전 p.N of the 빠진 슬라이드 archive). */
+.slide-chip.is-static {
+  color: var(--text-2);
+}
+
+.slide-chip.is-static:hover {
+  border-color: var(--border);
+}
+
+/* The 메모 tab's 빠진 슬라이드: collapsed, read-only. */
+.removed-slides {
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.removed-slides > summary {
+  cursor: pointer;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.removed-slides > summary:hover {
+  background: var(--surface-2);
+}
+
+.removed-slide {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.removed-slide-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.removed-thumb {
+  flex: none;
+  width: 96px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--slide-bg);
+  line-height: 0;
+}
+
+.removed-thumb img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.removed-items {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.removed-item {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.removed-item.is-yellow {
+  --annot-color: var(--annot-yellow);
+}
+
+.removed-item.is-green {
+  --annot-color: var(--annot-green);
+}
+
+.removed-item.is-pink {
+  --annot-color: var(--annot-pink);
+}
+
+.removed-item.is-blue {
+  --annot-color: var(--annot-blue);
+}
+
+.removed-item-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 480px) {
+  .version-card {
+    padding: 16px 14px 12px;
+  }
+
+  .version-grid {
+    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  }
+}

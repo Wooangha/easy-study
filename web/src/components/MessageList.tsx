@@ -3,6 +3,7 @@ import {
   ArrowDown,
   ArrowUp,
   ClipboardList,
+  FileUp,
   GraduationCap,
   Hourglass,
   ImageIcon,
@@ -308,6 +309,7 @@ const MessageItem = memo(function MessageItem(props: MessageItemProps) {
 const CONTEXT_ICONS: Record<ContextChipKind, LucideIcon | null> = {
   recovered: RefreshCw,
   switched: Shuffle,
+  deckUpdated: FileUp,
   rollover: RefreshCw,
   primed: Library,
   overview: null,
@@ -345,11 +347,18 @@ function ContextLine({ message }: { message: ChatMessage }) {
 
 function UserBubble({ message: m, onGoToSlide }: MessageItemProps) {
   const pending = m.id === PENDING_USER_ID;
+  // A question whose slide a new version dropped (DESIGN §28) is shown on the nearest kept slide and says where it was.
+  const removed = m.removedFrom;
   return (
     <div className="msg msg-user" data-msg-id={m.id}>
       <div className="msg-user-meta">
-        <button type="button" className="slide-chip" onClick={() => onGoToSlide(m.slide)} title={msg().chat.shared.goToThisSlide}>
-          p.{m.slide}
+        <button
+          type="button"
+          className="slide-chip"
+          onClick={() => onGoToSlide(m.slide)}
+          title={removed ? msg().versions.messageChipTitle(removed.slide) : msg().chat.shared.goToThisSlide}
+        >
+          {removed ? msg().versions.messageChip(m.slide, removed.slide) : `p.${m.slide}`}
         </button>
         <span className="msg-time">{pending ? msg().chat.messages.sending : formatTime(m.createdAt)}</span>
       </div>

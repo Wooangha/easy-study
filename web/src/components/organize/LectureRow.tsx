@@ -1,4 +1,4 @@
-import { Folder, GripVertical, Hourglass, Mic, Pencil, TriangleAlert } from 'lucide-react';
+import { FileUp, Folder, GripVertical, Hourglass, Mic, Pencil, TriangleAlert } from 'lucide-react';
 import { useState } from 'react';
 import type { DocMeta } from '../../../../shared/types.ts';
 import { thumbUrl } from '../../api.ts';
@@ -6,6 +6,7 @@ import { msg } from '../../i18n/index.ts';
 import { formatDate } from '../../lib/format.ts';
 import { dndId, type DropData } from '../../lib/libraryDnd.ts';
 import type { LayoutEntry } from '../../lib/libraryLayout.ts';
+import { useNewVersionPicker } from '../NewVersionDialog.tsx';
 import { RecordingUploadBadge, useRecordingUploadPicker } from '../recording/RecordingUploads.tsx';
 import { SlideImage } from '../SlideImage.tsx';
 import { dropMarkClass, useDropMark, useOrgItem } from './LibraryDnd.tsx';
@@ -42,6 +43,7 @@ export function LectureRow({ doc, index, courseId, entries, onOpen, onMove, onRe
   const mark = useDropMark(dndId.lecture(doc.id));
   const ready = doc.status === 'ready';
   const pickRecording = useRecordingUploadPicker();
+  const pickNewVersion = useNewVersionPicker();
 
   const sections: MenuSection[] = [
     {
@@ -60,6 +62,17 @@ export function LectureRow({ doc, index, courseId, entries, onOpen, onMove, onRe
                 icon: Mic,
                 hint: m.uploadRecordingHint,
                 onSelect: () => pickRecording(doc),
+              },
+            ]
+          : []),
+        ...(ready && pickNewVersion
+          ? [
+              {
+                key: 'new-version',
+                label: msg().versions.menu,
+                icon: FileUp,
+                hint: msg().versions.menuHint,
+                onSelect: () => pickNewVersion(doc),
               },
             ]
           : []),

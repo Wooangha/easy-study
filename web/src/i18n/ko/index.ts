@@ -6,8 +6,9 @@ import { format } from './format.ts';
 import { recording } from './recording.ts';
 import { settings } from './settings.ts';
 import { shell } from './shell.ts';
+import { versions } from './versions.ts';
 import { viewer } from './viewer.ts';
 
-export const ko = { common, shell, chat, recording, viewer, settings, format };
+export const ko = { common, shell, chat, recording, viewer, settings, format, versions };
 
 export type Messages = typeof ko;

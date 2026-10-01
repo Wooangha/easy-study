@@ -13,6 +13,8 @@ type Entry = { layout: SlideTextLayout } | { layout: null; pending: false };
 
 const caches = new Map<string, Map<number, Entry>>();
 const inflight = new Map<string, Promise<LayoutResult>>();
+/** Bumped by dropTextLayouts: an answer to a request made before is not kept (a swapped deck, DESIGN §28). */
+const generations = new Map<string, number>();
 
 export type LayoutFetcher = (docId: string, slide: number) => Promise<SlideTextLayout>;
 
@@ -67,24 +69,30 @@ export function loadTextLayout(docId: string, slide: number, fetcher: LayoutFetc
   const key = `${docId}/${slide}`;
   const running = inflight.get(key);
   if (running) return running;
+  const generation = generations.get(docId) ?? 0;
+  const current = () => (generations.get(docId) ?? 0) === generation;
   const promise = fetcher(docId, slide)
     .then((layout): LayoutResult => {
-      remember(docId, slide, { layout });
+      if (current()) remember(docId, slide, { layout });
       return { layout };
     })
     .catch((e: unknown): LayoutResult => {
       const pending = layoutPendingOf(e);
-      if (!pending) remember(docId, slide, { layout: null, pending: false });
+      if (!pending && current()) remember(docId, slide, { layout: null, pending: false });
       return { layout: null, pending };
     })
-    .finally(() => inflight.delete(key));
+    .finally(() => {
+      if (inflight.get(key) === promise) inflight.delete(key);
+    });
   inflight.set(key, promise);
   return promise;
 }
 
-/** Forget a document's layouts (its annotation store was disposed). */
+/** Forget a document's layouts (its annotation store was disposed, or its deck swapped). */
 export function dropTextLayouts(docId: string): void {
   caches.delete(docId);
+  generations.set(docId, (generations.get(docId) ?? 0) + 1);
+  for (const key of [...inflight.keys()]) if (key.startsWith(`${docId}/`)) inflight.delete(key);
 }
 
 /** Held slides of a document, oldest first (tests). */

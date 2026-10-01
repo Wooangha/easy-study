@@ -33,6 +33,12 @@ The app updates itself: when a new version is out, a dot appears on the gear and
 3. Open a lecture and ask. The tutor gets the whole deck once, then the slide you are on and its neighbors with every question.
 4. Optional: **Make digest** writes a per-slide summary (`DIGEST.md`) that later sessions reuse; every Q&A is kept in `STUDY_NOTES.md`.
 
+When the professor posts an updated deck, use the lecture's **⋯ › Upload new version** (0.6.8). The new slides are
+matched to the old ones (same, changed, new, removed); after **Switch to the new version**, annotations and memos,
+question markers, chats and notes, the recordings' slide alignment and the digest follow their slides. Annotations and
+memos of removed slides are kept in the **Memos** tab › **Removed slides**, and their questions move to the nearest
+slide. A banner above the slides steps through the changed slides and offers **Undo** (the last switch only).
+
 LLMs: sign in to `claude` (Claude Code) or `codex` once in a terminal, or set `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`.
 
 ## Recording lectures

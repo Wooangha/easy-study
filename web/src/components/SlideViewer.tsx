@@ -71,12 +71,14 @@ import { usePlayhead } from '../lib/recording/playhead.ts';
 import { recorder } from '../lib/recording/recorder.ts';
 import { isNumber, readStorage, storageKeys, writeStorage } from '../lib/storage.ts';
 import { toast } from '../lib/toast.ts';
+import { bannerShown, changeBadges } from '../lib/versionPlan.ts';
 import { AnnotationLayer, type Draft, type DragPreview } from './annotations/AnnotationLayer.tsx';
 import { AnnotationTools, NO_FILTER, toolHint, useMediaQuery, type SlideFilter } from './annotations/AnnotationTools.tsx';
 import { LayerContext, type LayerActions, type LayerEnv } from './annotations/context.ts';
 import { ChatIcon } from './annotations/icons.tsx';
 import { ItemMenu } from './annotations/ItemMenu.tsx';
 import { MemoCard } from './annotations/MemoCard.tsx';
+import { DeckBanner } from './DeckBanner.tsx';
 import { SlideImage } from './SlideImage.tsx';
 
 export interface SlideViewerHandle {
@@ -241,6 +243,8 @@ interface SlideViewerProps {
   replay?: { rid: string; t: number } | null;
   /** The library's lectures (memo links). */
   docs?: DocMeta[] | null;
+  /** 되돌리기 of the banner after a new version of the PDF (DESIGN §28). */
+  onUndoVersion?: () => void;
   ref?: Ref<SlideViewerHandle>;
 }
 
@@ -286,6 +290,7 @@ export function SlideViewer({
   notes = null,
   replay = null,
   docs = null,
+  onUndoVersion,
   ref,
 }: SlideViewerProps) {
   const pageCount = Math.max(0, doc.pageCount);
@@ -348,6 +353,17 @@ export function SlideViewer({
   const compactMemos = compactTools || coarse;
   const { ensure: loadLayout, peek: peekLayout } = useTextLayout(doc.id);
   const summary = snapshot.summary;
+
+  // ---- A new version of the PDF (DESIGN §28): the banner until dismissed here, the 수정 / 새로 badges meanwhile ----
+  // (The viewer is keyed by the deck's rev: a swap mounts it anew.)
+  const [seenRev, setSeenRev] = useState(() => readStorage<number | null>(storageKeys.deckSeen(doc.id), null, isNumber));
+  const change = bannerShown(doc.lastChange, seenRev) ? doc.lastChange : null;
+  const badges = useMemo(() => (change ? changeBadges(change) : null), [change]);
+  const dismissChange = useCallback(() => {
+    if (!doc.lastChange) return;
+    writeStorage(storageKeys.deckSeen(doc.id), doc.lastChange.rev);
+    setSeenRev(doc.lastChange.rev);
+  }, [doc.id, doc.lastChange]);
 
   /** The slides shown: every slide, or (표시 있는 슬라이드만 / a tag) the summary's slides with items. */
   const shown = useMemo<number[]>(() => {
@@ -1362,6 +1378,7 @@ export function SlideViewer({
         replay={annotations ? replayNow : null}
         layerShown={layerShown}
         unsaved={snapshot.unsaved.has(n)}
+        change={badges?.get(n) ?? null}
       />,
     );
   }
@@ -1457,6 +1474,9 @@ export function SlideViewer({
             </button>
           </div>
         </div>
+        {change && (
+          <DeckBanner change={change} focused={focused} onGoToSlide={scrollToSlide} onUndo={onUndoVersion} onDismiss={dismissChange} />
+        )}
         <div
           className="viewer-scroll"
           ref={scrollerRef}
@@ -1551,6 +1571,8 @@ interface SlideItemProps {
   layerShown: boolean;
   /** The last write of this slide failed ("저장 안 됨"). */
   unsaved: boolean;
+  /** Changed / added by the last new version, while its banner shows (DESIGN §28). */
+  change: 'changed' | 'added' | null;
 }
 
 const SlideItem = memo(function SlideItem({
@@ -1578,6 +1600,7 @@ const SlideItem = memo(function SlideItem({
   replay,
   layerShown,
   unsaved,
+  change,
 }: SlideItemProps) {
   // memo(): the language is read here too, so a change re-renders the slide and its annotations.
   useLang();
@@ -1646,6 +1669,14 @@ const SlideItem = memo(function SlideItem({
             </span>
           )}
           {slide}
+          {change && (
+            <span
+              className={`slide-change-badge is-${change}`}
+              title={change === 'changed' ? msg().versions.banner.badgeChangedTitle : msg().versions.banner.badgeAddedTitle}
+            >
+              {change === 'changed' ? msg().versions.banner.badgeChanged : msg().versions.banner.badgeAdded}
+            </span>
+          )}
         </span>
         {qaCount > 0 && (
           <button

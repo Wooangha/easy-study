@@ -17,6 +17,7 @@ import type {
   DocMeta,
   HealthResponse,
   LibraryLayout,
+  NextVersionInfo,
   NotesResponse,
   PatchSlideAnnotationsRequest,
   PrimeRequest,
@@ -26,6 +27,7 @@ import type {
   RecordingInfo,
   RecordingLanguage,
   RecordingTranscript,
+  RemovedSlide,
   SendMessageRequest,
   Session,
   SessionSummary,
@@ -287,9 +289,23 @@ const groupPath = (groupId: string) => `/api/groups/${enc(groupId)}`;
 
 export const getHealth = () => request<HealthResponse>('/api/health');
 
-/** Fill round-2 fields an older server may omit, so the UI can rely on them. */
+/**
+ * DocMeta.deckRev of every lecture seen (DESIGN §28), for the `v=` of its slide image URLs: the server caches those
+ * for good, so a swapped deck gets new URLs. Absent (rev 0): the URLs stay as they always were.
+ */
+const deckRevs = new Map<string, number>();
+
+/** Fill round-2 fields an older server may omit, so the UI can rely on them; remember the deck's rev. */
 function normalizeDoc(d: DocMeta): DocMeta {
+  if (d.deckRev && d.deckRev > 0) deckRevs.set(d.id, d.deckRev);
+  else deckRevs.delete(d.id);
   return { ...d, courseId: d.courseId ?? null, digestStatus: d.digestStatus ?? 'none' };
+}
+
+/** `url` of a slide image of `docId` with the deck's rev (`v=`), unchanged at rev 0. */
+function versioned(docId: string, url: string): string {
+  const rev = deckRevs.get(docId);
+  return rev ? `${url}${url.includes('?') ? '&' : '?'}v=${rev}` : url;
 }
 
 export const listDocs = () => request<DocMeta[]>('/api/docs').then((list) => list.map(normalizeDoc));
@@ -312,7 +328,7 @@ export const retryDoc = (docId: string) => postJSON<DocMeta>(`${docPath(docId)}/
  * Original 1600 px PNG of a slide. The browser only falls back to it when a WebP rendition fails to load:
  * a decoded PNG costs 4 bytes per pixel in the image cache, lossy WebP about 1.5 (DESIGN §15).
  */
-export const slideUrl = (docId: string, slide: number) => `${docPath(docId)}/slides/${slide}.png`;
+export const slideUrl = (docId: string, slide: number) => versioned(docId, `${docPath(docId)}/slides/${slide}.png`);
 
 /** Widths of the lossy WebP display renditions — the server's VIEW_WIDTHS (server/assets.ts, checked by a test). */
 export const VIEW_WIDTHS = [1000, 1600] as const;
@@ -320,14 +336,14 @@ export type ViewWidth = (typeof VIEW_WIDTHS)[number];
 
 /** Lossy WebP display rendition of a slide (the server answers the PNG until the rendition exists). */
 export const viewUrl = (docId: string, slide: number, width: ViewWidth) =>
-  `${docPath(docId)}/view/${slide}.webp?w=${width}`;
+  versioned(docId, `${docPath(docId)}/view/${slide}.webp?w=${width}`);
 
 /** `srcset` with every display rendition; pair it with a `sizes` that matches the rendered width. */
 export const viewSrcSet = (docId: string, slide: number) =>
   VIEW_WIDTHS.map((w) => `${viewUrl(docId, slide, w)} ${w}w`).join(', ');
 
 /** Small WebP thumbnail (240 px wide) for lists. */
-export const thumbUrl = (docId: string, slide: number) => `${docPath(docId)}/thumbs/${slide}.webp`;
+export const thumbUrl = (docId: string, slide: number) => versioned(docId, `${docPath(docId)}/thumbs/${slide}.webp`);
 
 export const listSessions = (docId: string) => request<SessionSummary[]>(`${docPath(docId)}/sessions`);
 
@@ -504,6 +520,57 @@ function uploadOnce(
     };
     xhr.send(file);
   });
+}
+
+// ---------------------------------------------------------------------------
+// New version of a lecture PDF (DESIGN §28): upload → conversion → plan → apply (or drop), undo
+// ---------------------------------------------------------------------------
+
+const versionsPath = (docId: string) => `${docPath(docId)}/versions`;
+
+/**
+ * Upload a new version of a lecture's PDF (raw bytes, X-Filename), with progress. Resolves with the pending new
+ * version (202, usually 'processing'; poll getNextVersion). 400 not a PDF, 409 the lecture is not ready. A pending
+ * new version is replaced.
+ */
+export async function uploadNextVersion(
+  docId: string,
+  file: File,
+  options: { onProgress?: (fraction: number) => void; signal?: AbortSignal } = {},
+): Promise<NextVersionInfo> {
+  const headers = { 'Content-Type': 'application/pdf', 'X-Filename': enc(file.name) };
+  const body = await uploadWithLogin(versionsPath(docId), headers, file, msg().common.api.uploadFailed, options.onProgress, options.signal);
+  return body as NextVersionInfo;
+}
+
+/** The pending new version (conversion progress, then the plan). 404 when there is none. */
+export const getNextVersion = (docId: string) =>
+  request<NextVersionInfo>(`${versionsPath(docId)}/next`, { cache: 'no-store' });
+
+/** Drop the pending new version (its conversion stops). Idempotent. */
+export const dropNextVersion = (docId: string) => request<void>(`${versionsPath(docId)}/next`, { method: 'DELETE' });
+
+/** Swap the deck for the pending new version. Resolves with the swapped lecture; 409 with the reason when it cannot now. */
+export const applyNextVersion = (docId: string) => postJSON<DocMeta>(`${versionsPath(docId)}/next/apply`).then(normalizeDoc);
+
+/** Bring back the deck before the last new version (DocMeta.lastChange.undoable). 409 when there is nothing to undo or busy. */
+export const undoLastVersion = (docId: string) => postJSON<DocMeta>(`${versionsPath(docId)}/undo`).then(normalizeDoc);
+
+/** A thumbnail of the pending new version's slide; `createdAt` (NextVersionInfo) tells two uploads apart. */
+export const nextThumbUrl = (docId: string, slide: number, createdAt?: string) =>
+  `${versionsPath(docId)}/next/thumbs/${slide}.webp${createdAt ? `?t=${enc(createdAt)}` : ''}`;
+
+/** The 빠진 슬라이드 archive: the 필기 of slides a new version dropped, newest deck first. */
+export const getRemovedSlides = (docId: string) =>
+  request<RemovedSlide[]>(`${annotationsPath(docId)}/removed`, { cache: 'no-store' });
+
+/** The thumbnail of a slide in the 빠진 슬라이드 archive (RemovedSlide.thumb). */
+export const removedThumbUrl = (docId: string, rev: number, slide: number) =>
+  `${annotationsPath(docId)}/removed/${rev}/${slide}.webp`;
+
+/** User-facing message for a failed versions request: the server's own words (its 409s say why). */
+export function versionErrorMessage(e: unknown): string {
+  return annotationErrorMessage(e);
 }
 
 // ---------------------------------------------------------------------------
@@ -841,7 +908,7 @@ export const putSlideAnnotations = (docId: string, slide: number, body: PutSlide
 export const patchSlideAnnotations = (docId: string, slide: number, body: PatchSlideAnnotationsRequest, client?: string) =>
   sendJSON<SlideAnnotations>('PATCH', `${annotationsPath(docId)}/${slide}`, body, clientHeaders(client));
 
-/** SSE of a lecture's annotations: `slide` (ops), `slide-reset`, `summary`, `qa`, `ping`. With ?lang= (no header). */
+/** SSE of a lecture's annotations: `slide` (ops), `slide-reset`, `summary`, `qa`, `deck`, `ping`. With ?lang= (no header). */
 export function annotationEventsUrl(docId: string, client?: string): string {
   return langUrl(`${annotationsPath(docId)}/events${client ? `?client=${enc(client)}` : ''}`);
 }

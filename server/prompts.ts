@@ -325,10 +325,11 @@ export const RECAP_HEADING = 'Earlier in this study session (summary of previous
  * Why a new provider conversation was started although the study session already has Q&A:
  * 'budget' = the image budget was reached (rollover), 'resume_invalid' = the provider no longer has the
  * previous conversation, 'context_overflow' = it became too large for the model, 'provider_switch' = the
- * student changed the session's LLM (the earlier answers came from another model), 'restart' = any other
- * reason (e.g. the provider state was reset).
+ * student changed the session's LLM (the earlier answers came from another model), 'deck_update' = the professor
+ * posted a new version of the deck and it replaced the old one (DESIGN §28: the recap's slide numbers are the new
+ * deck's), 'restart' = any other reason (e.g. the provider state was reset).
  */
-export type RestartReason = 'budget' | 'resume_invalid' | 'context_overflow' | 'provider_switch' | 'restart';
+export type RestartReason = 'budget' | 'resume_invalid' | 'context_overflow' | 'provider_switch' | 'deck_update' | 'restart';
 
 const CONTINUE_NATURALLY = 'The student sees one continuous chat — continue naturally without mentioning the restart.)';
 
@@ -346,6 +347,10 @@ const RESTART_NOTES: Record<RestartReason, string> = {
   provider_switch:
     '(The student switched this study session to you from another model: the answers recapped above were given by ' +
     `that model, and the conversation continues here with the deck attached again above. ${CONTINUE_NATURALLY}`,
+  deck_update:
+    '(The professor posted a new version of this lecture deck, so the conversation was restarted with it: the deck ' +
+    'attached above is the new version, and the slide numbers in the summary above are its numbers. Earlier answers may ' +
+    `mention old slide numbers or content that has changed since. ${CONTINUE_NATURALLY}`,
   restart: `(This study session continues in a new conversation, so the deck was attached again above. ${CONTINUE_NATURALLY}`,
 };
 
@@ -354,8 +359,13 @@ export function restartNote(reason: RestartReason): string {
   return RESTART_NOTES[reason];
 }
 
-export function recapLine(slide: number, question: string, answer: string): string {
-  return `- (slide ${slide}) Q: ${question} / A: ${answer}`;
+/**
+ * One recapped Q&A. `removed`: a new version of the deck dropped the slide the question was about (ChatMessage.removedFrom,
+ * DESIGN §28), so `slide` is only the nearest slide that is still there.
+ */
+export function recapLine(slide: number, question: string, answer: string, removed = false): string {
+  const where = removed ? `near slide ${slide}; the question's own slide is no longer in the deck` : `slide ${slide}`;
+  return `- (${where}) Q: ${question} / A: ${answer}`;
 }
 
 /** Appended to a recapped question that carried attachments (their images are not sent again). */

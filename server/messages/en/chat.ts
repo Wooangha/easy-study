@@ -182,6 +182,10 @@ export const chat = {
     slidesFailed: (slides) =>
       `Couldn't make the digest of ${slides.length === 1 ? 'slide' : 'slides'} ${slides.join(', ')} (continue the digest to try again)`,
     summaryFailed: (error) => `Couldn't make the lecture summary: ${error}`,
+    newVersion: (slides) =>
+      slides > 0
+        ? `${slides} ${slides === 1 ? 'slide' : 'slides'} changed in the new version and need${slides === 1 ? 's' : ''} a new digest.`
+        : 'The lecture summary needs to be made again for the new version.',
     markdown: {
       title: (lecture) => `${lecture} — digest`,
       incomplete: (done, total) => `Incomplete digest: ${done}/${total} ${total === 1 ? 'slide' : 'slides'}`,

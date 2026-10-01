@@ -15,7 +15,9 @@
 //          WebP), thumbnails (WebP) and inline JPEGs for every slide, and inline JPEGs for every contact sheet;
 //   - AttachmentJob (runAttachmentWorker, DESIGN §21): one attachment image in attachments/<id>.jpg|png, either a
 //     region of a slide (cropped from slides/NNN.png, with the text of the PDF inside the region) or an image the
-//     student uploaded (EXIF orientation applied, metadata dropped), encoded like the inline JPEGs.
+//     student uploaded (EXIF orientation applied, metadata dropped), encoded like the inline JPEGs;
+//   - MatchJob (runMatchWorker, DESIGN §28): a lecture's deck and a new version of its PDF → which new slide each old
+//     slide became (server/slideMatch.ts), from both PDFs rendered small, their text and word boxes. Writes nothing.
 //
 // Parent side: run*Worker() forks this very file with process.execPath (server/imageWorker.ts in development
 // and tests, dist-server/server/imageWorker.js in the production build) and talks to it over the IPC channel.
@@ -48,6 +50,7 @@ import { trackChild } from './children.ts';
 import { childProcessEnv } from './config.ts';
 import { TEXT_ENGINE, TEXT_ENGINE_FILE, layoutFileName, slideFileName, textFileName } from './pageNames.ts';
 import type { PdfDocument, PdfPage } from './pdf.ts';
+import type { SlideFeatures, SlideMatch } from './slideMatch.ts';
 
 // ---------------------------------------------------------------------------
 // Protocol (shared by both sides)
@@ -175,6 +178,27 @@ export interface AttachmentWorkerRun {
   kill(): void;
 }
 
+/**
+ * Job of runMatchWorker() (DESIGN §28): the slides of a lecture's deck (`oldDir`) matched to those of a new version of
+ * its PDF (`newDir`). Both PDFs are read by the same engine; a deck without its source.pdf is read from its rendered
+ * slides and text files instead.
+ */
+export interface MatchJob {
+  kind: 'match';
+  /** Absolute path of the lecture's folder (source.pdf; else slides/NNN.png and text/NNN.txt). */
+  oldDir: string;
+  /** The lecture's page count (its file names are padded for it). */
+  oldPageCount: number;
+  /** Absolute path of the new version's folder (source.pdf). */
+  newDir: string;
+}
+
+export interface MatchWorkerRun {
+  /** Resolves with the match; rejects when a PDF cannot be read, or on kill(). */
+  readonly done: Promise<SlideMatch>;
+  kill(): void;
+}
+
 export interface PdfInfo {
   pageCount: number;
   /** Width / height of page 1 in points, /Rotate applied. */
@@ -208,6 +232,7 @@ type ChildMessage =
   | { type: 'warning'; message: string }
   | { type: 'sheets'; entries: SheetEntry[] }
   | { type: 'attachment'; result: AttachmentWorkerResult }
+  | { type: 'match'; result: SlideMatch }
   | { type: 'done'; written: number; failed: ImageFailure[] }
   | { type: 'error'; message: string };
 
@@ -236,8 +261,8 @@ export interface ImageWorkerRun {
 
 const STDERR_TAIL_CHARS = 2_000;
 
-/** The error a run rejects with after kill() (name 'ImageWorkerStopped'). */
-function stoppedError(): Error {
+/** The error a run rejects with after kill() (name 'ImageWorkerStopped'); also a conversion's that was stopped between runs. */
+export function stoppedError(): Error {
   const err = new Error('image worker was stopped');
   err.name = 'ImageWorkerStopped';
   return err;
@@ -272,7 +297,7 @@ interface WorkerProcess {
  * Forks a worker for `job`. Messages other than the final one go to `onMessage` as they arrive; `label`
  * names the worker in error messages ("image worker", "PDF worker").
  */
-function forkWorker(job: ImageJob | PdfJob | TextJob | AttachmentJob, label: string, options: ImageWorkerOptions, onMessage: (message: ChildMessage) => void): WorkerProcess {
+function forkWorker(job: ImageJob | PdfJob | TextJob | AttachmentJob | MatchJob, label: string, options: ImageWorkerOptions, onMessage: (message: ChildMessage) => void): WorkerProcess {
   // Registered until it exits: no way out of the server leaves a worker running (server/children.ts).
   const child = trackChild(
     fork(imageWorkerPath(), [], {
@@ -411,6 +436,19 @@ export function runAttachmentWorker(job: AttachmentJob, options: ImageWorkerOpti
   });
   const done = worker.done.then((): AttachmentWorkerResult => {
     if (!result) throw new Error('image worker finished without the attachment');
+    return result;
+  });
+  return { done, kill: worker.kill };
+}
+
+/** Matches a lecture's deck to a new version of its PDF in a new worker process (DESIGN §28). */
+export function runMatchWorker(job: MatchJob, options: ImageWorkerOptions = {}): MatchWorkerRun {
+  let result: SlideMatch | null = null;
+  const worker = forkWorker(job, 'PDF worker', options, (message) => {
+    if (message.type === 'match') result = message.result;
+  });
+  const done = worker.done.then((): SlideMatch => {
+    if (!result) throw new Error('PDF worker finished without the match');
     return result;
   });
   return { done, kill: worker.kill };
@@ -712,14 +750,17 @@ function pageText(page: PdfPage, clean: (text: string) => string): string {
  * cannot be read gets an empty one (the file says the run happened: the client then highlights without snapping).
  */
 function pageLayout(page: PdfPage): string {
-  let lines: SlideTextLayout['lines'] = [];
-  try {
-    lines = page.textLayout();
-  } catch {
-    lines = [];
-  }
-  const layout: SlideTextLayout = { version: 1, engine: TEXT_ENGINE, lines };
+  const layout: SlideTextLayout = { version: 1, engine: TEXT_ENGINE, lines: pageLayoutLines(page) };
   return JSON.stringify(layout);
+}
+
+/** The word boxes of a page ([] when they cannot be read). */
+function pageLayoutLines(page: PdfPage): SlideTextLayout['lines'] {
+  try {
+    return page.textLayout();
+  } catch {
+    return [];
+  }
 }
 
 /** text/.engine, written after every text file: the text of this document comes from the current engine. */
@@ -902,6 +943,97 @@ async function runUploadJob(job: UploadJob, send: (message: ChildMessage) => Pro
   await send({ type: 'done', written: 1, failed: [] });
 }
 
+/** Long edge of the renders the matcher's pictures are made from (it keeps THUMB_W x THUMB_H of each). */
+const MATCH_RENDER_EDGE = 480;
+
+/**
+ * A lecture's deck and a new version of its PDF → the match (server/slideMatch.ts, DESIGN §28). Each slide: its text
+ * (as text/NNN.txt has it), its word boxes, and a THUMB_W x THUMB_H grayscale picture (rendered small, stretched). The
+ * old deck comes from its source.pdf (the same engine as the new one, whatever converted it); without one, or when it
+ * does not have the lecture's page count, from its slides/NNN.png and text files.
+ */
+async function runMatchJob(job: MatchJob, send: (message: ChildMessage) => Promise<void>): Promise<void> {
+  const [{ openPdf, cleanPageText }, { THUMB_W, THUMB_H, matchSlides }, sharp] = await Promise.all([
+    import('./pdf.ts'),
+    import('./slideMatch.ts'),
+    import('sharp').then((mod) => mod.default),
+  ]);
+  sharp.cache(false);
+  sharp.concurrency(Math.min(2, os.availableParallelism()));
+
+  /** The picture: flattened on white, gray, stretched to THUMB_W x THUMB_H, one byte per pixel. */
+  const thumbOf = async (input: SharpPipeline): Promise<Uint8Array> => {
+    const { data, info } = await input
+      .flatten({ background: '#ffffff' })
+      .greyscale()
+      .resize(THUMB_W, THUMB_H, { fit: 'fill' })
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    if (info.channels === 1) return new Uint8Array(data);
+    const gray = new Uint8Array(THUMB_W * THUMB_H);
+    for (let i = 0; i < gray.length; i++) gray[i] = data[i * info.channels];
+    return gray;
+  };
+
+  /** Every page of a PDF, or null when it cannot be read (or has another page count than `pageCount`). */
+  const fromPdf = async (file: string, pageCount?: number): Promise<SlideFeatures[] | null> => {
+    let doc: PdfDocument;
+    try {
+      doc = await openPdf(file);
+    } catch (err) {
+      if (pageCount !== undefined) return null;
+      throw err;
+    }
+    try {
+      if (doc.pageCount < 1) throw new Error('the PDF has no pages');
+      if (pageCount !== undefined && doc.pageCount !== pageCount) return null;
+      const slides: SlideFeatures[] = [];
+      for (let n = 1; n <= doc.pageCount; n++) {
+        const { rendered, text, layout } = doc.withPage(n, (page) => ({
+          rendered: page.render(MATCH_RENDER_EDGE),
+          text: pageText(page, cleanPageText),
+          layout: pageLayoutLines(page),
+        }));
+        const thumb = await thumbOf(sharp(rendered.data, { raw: { width: rendered.width, height: rendered.height, channels: 4 } }).removeAlpha());
+        slides.push({ text, layout, thumb });
+      }
+      return slides;
+    } finally {
+      doc.close();
+    }
+  };
+
+  /** The lecture's rendered slides and text files (a missing file: no text, a blank picture). */
+  const fromFiles = async (dir: string, pageCount: number): Promise<SlideFeatures[]> => {
+    const slides: SlideFeatures[] = [];
+    for (let n = 1; n <= pageCount; n++) {
+      const text = await fs.readFile(path.join(dir, 'text', textFileName(n, pageCount)), 'utf8').catch(() => '');
+      let layout: SlideTextLayout['lines'] | null = null;
+      try {
+        const parsed = JSON.parse(await fs.readFile(path.join(dir, 'text', layoutFileName(n, pageCount)), 'utf8')) as Partial<SlideTextLayout>;
+        if (Array.isArray(parsed.lines)) layout = parsed.lines;
+      } catch {
+        layout = null;
+      }
+      let thumb: Uint8Array;
+      try {
+        thumb = await thumbOf(sharp(path.join(dir, 'slides', slideFileName(n, pageCount))));
+      } catch {
+        thumb = new Uint8Array(THUMB_W * THUMB_H).fill(255);
+      }
+      slides.push({ text, layout, thumb });
+    }
+    return slides;
+  };
+
+  const oldSlides = (await fromPdf(path.join(job.oldDir, 'source.pdf'), job.oldPageCount)) ?? (await fromFiles(job.oldDir, job.oldPageCount));
+  const newSlides = await fromPdf(path.join(job.newDir, 'source.pdf'));
+  if (!newSlides) throw new Error('the new PDF could not be read');
+  const result = matchSlides(oldSlides, newSlides);
+  await send({ type: 'match', result });
+  await send({ type: 'done', written: 0, failed: [] });
+}
+
 /** The libvips loaders of UploadImageType (the file loaders are their subclasses); every other loader is blocked. */
 const UPLOAD_LOADERS = ['VipsForeignLoadPng', 'VipsForeignLoadJpeg', 'VipsForeignLoadWebp', 'VipsForeignLoadNsgif', 'VipsForeignLoadHeif'];
 
@@ -1004,6 +1136,21 @@ function isValidTextJob(value: unknown): value is TextJob {
   );
 }
 
+function isValidMatchJob(value: unknown): value is MatchJob {
+  const job = value as Partial<MatchJob> | null;
+  return (
+    typeof job === 'object' &&
+    job !== null &&
+    job.kind === 'match' &&
+    typeof job.oldDir === 'string' &&
+    path.isAbsolute(job.oldDir) &&
+    typeof job.newDir === 'string' &&
+    path.isAbsolute(job.newDir) &&
+    Number.isInteger(job.oldPageCount) &&
+    (job.oldPageCount ?? 0) >= 1
+  );
+}
+
 function isValidJob(value: unknown): value is ImageJob {
   const job = value as Partial<ImageJob> | null;
   return (
@@ -1030,9 +1177,11 @@ function childMain(): void {
         ? () => runTextJob(value, send)
         : isValidAttachmentJob(value)
           ? () => (value.kind === 'region' ? runRegionJob(value, send) : runUploadJob(value, send))
-          : isValidJob(value)
-            ? () => runJob(value, send)
-            : null;
+          : isValidMatchJob(value)
+            ? () => runMatchJob(value, send)
+            : isValidJob(value)
+              ? () => runJob(value, send)
+              : null;
     if (!run) {
       void send({ type: 'error', message: 'invalid worker job' }).finally(() => process.exit(1));
       return;

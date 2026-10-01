@@ -1,6 +1,7 @@
 // Chat sessions persisted as library/<docId>/sessions/<sessionId>.json, and the review notes
 // generated from them (notes/<sessionId>.md + STUDY_NOTES.md, DESIGN §7). Questions with attachments (DESIGN
-// §21) show them under the question in both, linked relatively (attachments/<id>.jpg|png).
+// §21) show them under the question in both, linked relatively (attachments/<id>.jpg|png). When a new version of the
+// lecture's deck replaces it (DESIGN §28), remapSessionSlides moves every message to its slide in the new deck.
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -8,11 +9,13 @@ import { ATTACHMENT_ID_RE, EFFORT_ID_RE, SESSION_ID_RE } from '../shared/types.t
 import { readSessionUsage, readUsageLimits } from '../shared/usage.ts';
 import type {
   ChatMessage,
+  ContextInfo,
   LlmChoice,
   LlmSwitch,
   NoteEntry,
   NotesResponse,
   ProviderId,
+  RemovedFrom,
   Session,
   SessionSummary,
   SlideNotes,
@@ -23,7 +26,7 @@ import { HttpError } from './config.ts';
 import { initialProviderState } from './context.ts';
 import { isLang, slang, smsg } from './i18n.ts';
 import type { Lang } from './i18n.ts';
-import type { SessionChange, SessionRecord } from './internal-types.ts';
+import type { DeckMap, ProviderState, SessionChange, SessionRecord } from './internal-types.ts';
 import {
   createKeyedQueue,
   demoteHeadings,
@@ -49,6 +52,12 @@ const PROVIDER_LABELS: Record<ProviderId, string> = {
 
 const MAX_TITLE_CHARS = 120;
 const MAX_HEADING_QUESTION_CHARS = 120;
+
+/**
+ * A session record with the deck mark of DESIGN §28: the DocMeta.deckRev its slide numbers are in (absent = 0, or a
+ * session made before decks were swapped). remapSessionSlides does nothing to a record that already has its toRev.
+ */
+type DeckRecord = SessionRecord & { deckRev?: number };
 
 /** Serializes writes of one session file (key: docId/sessionId). */
 const sessionQueue = createKeyedQueue();
@@ -150,7 +159,7 @@ export async function createSession(docId: string, input: CreateSessionInput): P
   while (await fileExists(sessionFile(docId, id))) id = newSessionId(now);
 
   const createdAt = now.toISOString();
-  const record: SessionRecord = {
+  const record: DeckRecord = {
     version: 1,
     id,
     docId,
@@ -166,6 +175,8 @@ export async function createSession(docId: string, input: CreateSessionInput): P
     messages: [],
   };
   if (input.effort) record.effort = input.effort;
+  // Its slide numbers are the current deck's (DESIGN §28).
+  if (doc.deckRev) record.deckRev = doc.deckRev;
   await writeRecord(record);
   return record;
 }
@@ -197,7 +208,7 @@ async function readRecord(docId: string, sessionId: string): Promise<SessionReco
   const value = await readJsonFile<unknown>(sessionFile(docId, sessionId));
   if (!isSessionRecord(value)) return null;
   // The file location is authoritative for the ids.
-  const record: SessionRecord = { ...value, id: sessionId, docId };
+  const record: DeckRecord = { ...value, id: sessionId, docId };
   // The effort reaches a CLI's arguments: anything but a valid level means the default.
   if (record.effort !== undefined && (typeof record.effort !== 'string' || !EFFORT_ID_RE.test(record.effort))) delete record.effort;
   // Totals are added to: only well-formed ones are kept (absent in sessions made before usage was recorded).
@@ -212,6 +223,7 @@ async function readRecord(docId: string, sessionId: string): Promise<SessionReco
   if (switches) record.switches = switches;
   else delete record.switches;
   if (!isLang(record.lang)) delete record.lang;
+  if (record.deckRev !== undefined && !(Number.isInteger(record.deckRev) && record.deckRev >= 0)) delete record.deckRev;
   return record;
 }
 
@@ -303,7 +315,8 @@ export async function saveSession(record: SessionRecord): Promise<void> {
   await writeRecord(record);
 }
 
-async function loadRecords(docId: string): Promise<SessionRecord[]> {
+/** Ids of the session files of a document. */
+async function sessionIds(docId: string): Promise<string[]> {
   let names: string[];
   try {
     names = await fs.readdir(docPaths(docId).sessionsDir);
@@ -311,12 +324,29 @@ async function loadRecords(docId: string): Promise<SessionRecord[]> {
     if (isNotFound(err)) return [];
     throw err;
   }
-  const ids = names
+  return names
     .filter((name) => name.endsWith('.json'))
     .map((name) => name.slice(0, -'.json'.length))
     .filter((id) => SESSION_ID_RE.test(id));
-  const records = await Promise.all(ids.map((id) => readRecord(docId, id)));
+}
+
+async function loadRecords(docId: string): Promise<SessionRecord[]> {
+  const records = await Promise.all((await sessionIds(docId)).map((id) => readRecord(docId, id)));
   return records.filter((record): record is SessionRecord => record !== null);
+}
+
+/**
+ * Read-modify-write of one session file inside its queue, so it cannot interleave with other writes of the session;
+ * `change` returns whether it changed the record (only then is it written, `updatedAt` as it is). A session deleted
+ * meanwhile (or malformed) is left alone, never written again. Returns whether the record was written.
+ */
+function updateRecord(docId: string, sessionId: string, change: (record: DeckRecord) => boolean): Promise<boolean> {
+  return sessionQueue(`${docId}/${sessionId}`, async () => {
+    const record = await readRecord(docId, sessionId);
+    if (!record || !change(record)) return false;
+    await writeJsonAtomic(sessionFile(docId, sessionId), record);
+    return true;
+  });
 }
 
 /** Sessions of a document, most recently active first. */
@@ -410,10 +440,9 @@ export async function recoverInterruptedSessions(): Promise<number> {
   let repaired = 0;
   for (const doc of await listStoredDocs()) {
     let docChanged = false;
-    for (const record of await loadRecords(doc.id)) {
+    for (const id of await sessionIds(doc.id)) {
       // No request at startup: the language of the turn that was stopped.
-      if (repairInterruptedMessages(record, record.lang ?? 'ko')) {
-        await writeRecord(record);
+      if (await updateRecord(doc.id, id, (record) => repairInterruptedMessages(record, record.lang ?? 'ko'))) {
         repaired++;
         docChanged = true;
       }
@@ -421,6 +450,132 @@ export async function recoverInterruptedSessions(): Promise<number> {
     if (docChanged) await writeNotes(doc.id);
   }
   return repaired;
+}
+
+// ---------------------------------------------------------------------------
+// A new version of the deck (DESIGN §28)
+// ---------------------------------------------------------------------------
+
+/**
+ * Moves every session of the lecture from the old deck's slide numbers to the new deck's (DESIGN §28 "Remaps ›
+ * Sessions"), each inside its session queue: the slide of every message and of its region attachments (a dropped slide
+ * → the nearest kept one, with `removedFrom`; an undo puts back what the apply from `restoreRev` moved), the slides
+ * of the turns' ContextInfo, and a provider conversation made with the old deck dropped (the next turn starts a new
+ * one with the new deck: ProviderState.deckUpdated). `updatedAt` is kept. Idempotent: a record that already has
+ * `map.toRev` is left alone. Called by the orchestrator while the lecture's turns are held off (chat.reserveDocTurns).
+ */
+export async function remapSessionSlides(docId: string, map: DeckMap): Promise<void> {
+  for (const id of await sessionIds(docId)) {
+    await updateRecord(docId, id, (record) => {
+      if ((record.deckRev ?? 0) >= map.toRev) return false;
+      for (const message of record.messages) remapMessage(message, map);
+      record.providerState = deckUpdatedState(record.providerState);
+      record.deckRev = map.toRev;
+      return true;
+    });
+  }
+}
+
+/** How many questions of the lecture's sessions are about one of `slides` (VersionPlan.onRemoved.questions). */
+export async function questionCountOnSlides(docId: string, slides: number[]): Promise<number> {
+  const wanted = new Set(slides);
+  if (wanted.size === 0) return 0;
+  let count = 0;
+  for (const record of await loadRecords(docId)) {
+    for (const message of record.messages) {
+      if (message?.role === 'user' && message.kind === 'question' && wanted.has(message.slide)) count++;
+    }
+  }
+  return count;
+}
+
+function remapMessage(message: ChatMessage, map: DeckMap): void {
+  if (!message || typeof message !== 'object') return;
+  remapSlideRef(message, map);
+  if (Array.isArray(message.attachments)) {
+    for (const attachment of message.attachments) {
+      if (attachment?.kind === 'region' && typeof attachment.slide === 'number') remapSlideRef(attachment, map);
+    }
+  }
+  const context = message.context;
+  if (context && typeof context === 'object') {
+    context.attachedSlides = remapSlideList(context.attachedSlides, map);
+    context.reusedSlides = remapSlideList(context.reusedSlides, map);
+  }
+}
+
+/**
+ * Moves a message or a region attachment to the new deck. A slide the new deck dropped → the nearest kept slide and
+ * `removedFrom` {fromRev, old slide}; on an undo, what the apply from `restoreRev` moved goes back to its slide.
+ */
+function remapSlideRef(item: { slide?: number; removedFrom?: RemovedFrom }, map: DeckMap): void {
+  if (map.restoreRev !== undefined && item.removedFrom?.rev === map.restoreRev) {
+    item.slide = clampSlide(item.removedFrom.slide, map.newPageCount);
+    delete item.removedFrom;
+    return;
+  }
+  const old = clampSlide(item.slide, map.oldPageCount);
+  const next = newSlideOf(map, old);
+  if (next !== null) {
+    item.slide = next;
+    return;
+  }
+  item.slide = nearestKeptSlide(map, old);
+  item.removedFrom = { rev: map.fromRev, slide: old };
+}
+
+/** ContextInfo slide lists: mapped, the dropped slides left out. */
+function remapSlideList(slides: ContextInfo['attachedSlides'], map: DeckMap): number[] {
+  const out: number[] = [];
+  for (const slide of Array.isArray(slides) ? slides : []) {
+    if (!Number.isInteger(slide) || slide < 1 || slide > map.oldPageCount) continue;
+    const next = newSlideOf(map, slide);
+    if (next !== null) out.push(next);
+  }
+  return out;
+}
+
+/** The old slide's number in the new deck, or null when the new deck dropped it. */
+function newSlideOf(map: DeckMap, old: number): number | null {
+  const next = map.oldToNew[old - 1];
+  return typeof next === 'number' ? next : null;
+}
+
+/** Where a dropped slide's things go: the closest preceding old slide that was kept, else the closest following, else 1. */
+function nearestKeptSlide(map: DeckMap, old: number): number {
+  for (let slide = old - 1; slide >= 1; slide--) {
+    const next = newSlideOf(map, slide);
+    if (next !== null) return next;
+  }
+  for (let slide = old + 1; slide <= map.oldPageCount; slide++) {
+    const next = newSlideOf(map, slide);
+    if (next !== null) return next;
+  }
+  return 1;
+}
+
+function clampSlide(slide: unknown, pageCount: number): number {
+  const n = typeof slide === 'number' && Number.isFinite(slide) ? Math.round(slide) : 1;
+  return Math.min(Math.max(n, 1), Math.max(1, pageCount));
+}
+
+/**
+ * The provider state after the deck changed: a conversation made with the old deck (primed, resumable, with history,
+ * or dropped by an LLM switch or an earlier swap and not restarted yet) is dropped and the next turn starts a new one
+ * with the new deck as a forced rollover (`deckUpdated`; `switched` kept); otherwise a fresh state. The generation stays.
+ */
+function deckUpdatedState(state: ProviderState): ProviderState {
+  const generation = Number.isInteger(state.generation) && state.generation >= 0 ? state.generation : 0;
+  const next: ProviderState = { ...initialProviderState(), generation };
+  if (state.switched === true) next.switched = true;
+  const hadConversation =
+    state.primed === true ||
+    (state.resume ?? null) !== null ||
+    (Array.isArray(state.history) && state.history.length > 0) ||
+    state.switched === true ||
+    state.deckUpdated === true;
+  if (hadConversation) next.deckUpdated = true;
+  return next;
 }
 
 // ---------------------------------------------------------------------------

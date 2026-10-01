@@ -311,16 +311,18 @@ export function clipboardImages<T extends FileLike>(text: string, files: readonl
 // Labels and messages
 // ---------------------------------------------------------------------------
 
-type Labelled = Pick<Attachment, 'kind' | 'slide' | 'name' | 'annotation'>;
+type Labelled = Pick<Attachment, 'kind' | 'slide' | 'name' | 'annotation' | 'removedFrom'>;
 
 /**
  * "p.12 영역" / "p.12 메모" (a region made from a 필기, Attachment.annotation, DESIGN §25) / the file name / "이미지".
- * The kinds are named by chat.attachments.kinds (and kindTitles in attachmentTitle).
+ * The kinds are named by chat.attachments.kinds (and kindTitles in attachmentTitle). A region whose slide a new
+ * version dropped (Attachment.removedFrom, DESIGN §28) says where it was: "p.12 영역 (빠진 장 p.15)".
  */
 export function attachmentLabel(a: Labelled): string {
   const m = msg().chat.attachments;
   if (a.kind === 'region') {
     const what = a.annotation ? m.kinds[a.annotation.type] : m.region;
+    if (a.slide && a.removedFrom) return m.onRemovedPage(a.slide, what, a.removedFrom.slide);
     return a.slide ? m.onPage(a.slide, what) : a.annotation ? what : m.selectedRegion;
   }
   return a.name?.trim() || m.image;

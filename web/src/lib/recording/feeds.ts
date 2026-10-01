@@ -2,7 +2,7 @@
 // 녹음 tab): the transcript loaded once, then kept up to date by the SSE stream while something still happens to
 // the recording (recording, conversion, transcription, an AI alignment). One stream per recording, reference
 // counted; it closes a little after the last viewer leaves.
-import type { RecordingInfo, RecordingTranscript } from '../../../../shared/types.ts';
+import type { AlignmentMarker, RecordingInfo, RecordingTranscript } from '../../../../shared/types.ts';
 import { checkSessionSoon, getRecordingTranscript, recordingErrorMessage, recordingEventsUrl } from '../../api.ts';
 import {
   RecordingEventsClient,
@@ -21,6 +21,8 @@ export interface FeedSnapshot extends FeedState {
   connection: ConnectionState;
   /** An "AI 정밀 정렬" was started here and its result has not arrived yet. */
   aligning: boolean;
+  /** The recording's markers as the server stores them (RecordingTranscript.markers); null when it did not say. */
+  markers: AlignmentMarker[] | null;
 }
 
 /** How long a stream stays open after its last viewer left (switching tabs back and forth). */
@@ -54,6 +56,7 @@ class Feed {
       error: null,
       connection: 'stopped',
       aligning: false,
+      markers: null,
     };
   }
 
@@ -89,7 +92,7 @@ class Feed {
     this.loading = true;
     try {
       const t = await getRecordingTranscript(this.docId, this.rid);
-      this.set({ segments: sortSegments(t.segments), loaded: true, error: null });
+      this.set({ segments: sortSegments(t.segments), loaded: true, error: null, markers: t.markers ?? null });
     } catch (e) {
       // A recording without a transcript yet may answer 404/409: start from nothing, the stream fills it in.
       this.set({ loaded: true, error: this.snapshot.info && isInProgress(this.snapshot.info) ? null : recordingErrorMessage(e) });
@@ -142,7 +145,7 @@ class Feed {
   }
 
   setTranscript(t: RecordingTranscript): void {
-    this.set({ segments: sortSegments(t.segments), loaded: true, error: null });
+    this.set({ segments: sortSegments(t.segments), loaded: true, error: null, markers: t.markers ?? null });
   }
 
   /**
@@ -180,13 +183,19 @@ class Feed {
     this.client?.reconnectNow();
   }
 
+  /** Shown somewhere (a subscriber). */
+  get watched(): boolean {
+    return this.listeners.size > 0;
+  }
+
   dispose(): void {
     if (this.listeners.size > 0) return;
+    window.clearTimeout(this.lingerTimer);
     this.client?.stop();
     this.client = null;
     window.clearTimeout(this.alignTimer);
     window.clearTimeout(this.quietTimer);
-    feeds.delete(key(this.docId, this.rid));
+    if (feeds.get(key(this.docId, this.rid)) === this) feeds.delete(key(this.docId, this.rid));
   }
 }
 
@@ -211,6 +220,18 @@ export function recordingFeed(docId: string, rid: string, seed: { info?: Recordi
 /** The feed of a recording if one exists (no side effects: for render). */
 export function peekRecordingFeed(docId: string, rid: string): Feed | null {
   return feeds.get(key(docId, rid)) ?? null;
+}
+
+/**
+ * A lecture's deck was swapped (DESIGN §28): the server renumbered its recordings' slides and markers. The feeds shown
+ * load their transcript again; the others are dropped.
+ */
+export function reloadRecordingFeeds(docId: string): void {
+  for (const feed of [...feeds.values()]) {
+    if (feed.docId !== docId) continue;
+    if (feed.watched) feed.reload();
+    else feed.dispose();
+  }
 }
 
 /** The info of a recording changed (list refresh, rename, pause…): tell its feed, if one exists. */

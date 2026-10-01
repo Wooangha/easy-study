@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { FileText, Folder, ImageIcon, TriangleAlert } from 'lucide-react';
 import type { AnnotationItem, Attachment, DocMeta, RegionRect } from '../../shared/types.ts';
-import { ApiError, errorMessage, startDigest } from './api.ts';
+import { ApiError, errorMessage, startDigest, undoLastVersion, versionErrorMessage } from './api.ts';
 import { AttachmentContext, AttachmentPreview, type AttachmentActions } from './components/Attachments.tsx';
 import { ChatPanel, type PanelTab, type ScrollRequest } from './components/ChatPanel.tsx';
 import { ConfirmHost } from './components/ConfirmDialog.tsx';
 import { DigestPanel, type DigestMode } from './components/DigestPanel.tsx';
 import { DocStatusView, LibraryView } from './components/LibraryView.tsx';
 import { MemoListPanel } from './components/MemoListPanel.tsx';
+import { NewVersionContext, NewVersionDialog } from './components/NewVersionDialog.tsx';
 import { NotesPanel, type NotesFilter } from './components/NotesPanel.tsx';
 import { RecordControl, RecordingStrip } from './components/recording/RecorderBar.tsx';
 import { RecordingUploadContext } from './components/recording/RecordingUploads.tsx';
@@ -22,7 +23,7 @@ import { useAnnotations } from './hooks/useAnnotations.ts';
 import { useAttachments } from './hooks/useAttachments.ts';
 import { useCourses } from './hooks/useCourses.ts';
 import { useDigest } from './hooks/useDigest.ts';
-import { useDocs } from './hooks/useDocs.ts';
+import { isPdfFile, useDocs } from './hooks/useDocs.ts';
 import { useHealth } from './hooks/useHealth.ts';
 import { useLatest } from './hooks/useLatest.ts';
 import { useNeighbors } from './hooks/useNeighbors.ts';
@@ -40,6 +41,7 @@ import {
   withoutAttachments,
   type DragKinds,
 } from './lib/attachments.ts';
+import { onDeckEvent } from './lib/annotations/store.ts';
 import { confirmDialog } from './lib/confirm.ts';
 import {
   SHELL_LEAVE_MS,
@@ -55,13 +57,15 @@ import {
   type PageBusy,
   type SettingsSection,
 } from './lib/desktop.ts';
+import { reloadRecordingFeeds } from './lib/recording/feeds.ts';
 import { RECORDING_ACCEPT } from './lib/recording/labels.ts';
 import { recorder } from './lib/recording/recorder.ts';
 import { getRecordingUploads, subscribeRecordingUploads, uploadRecordingFiles } from './lib/recording/uploads.ts';
 import { earlierLectures } from './lib/courseContext.ts';
 import { providerWithModel } from './lib/format.ts';
-import { isString, readStorage, storageKeys, writeStorage } from './lib/storage.ts';
+import { isNumber, isString, readStorage, storageKeys, writeStorage } from './lib/storage.ts';
 import { toast } from './lib/toast.ts';
+import { DeckRevs, remapSlide } from './lib/versionPlan.ts';
 
 const isDigestMode = (v: unknown): v is DigestMode => v === 'current' || v === 'all';
 
@@ -86,6 +90,8 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
     loadError,
     uploads,
     refresh: refreshDocs,
+    refreshDoc,
+    replace: replaceDoc,
     upload,
     patchDoc,
     retry: retryDoc,
@@ -361,6 +367,101 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
     setScrollRequest(null);
     setPlayRequest(null);
   }, [readyDocId]);
+
+  // ---- A new version of a lecture's PDF (DESIGN §28) ----------------------------------------------------------
+  // A swap of the deck arrives as the annotation stream's `deck` event, as the answer of an apply / undo made here, or
+  // (when the event was missed) as a DocMeta with a newer deckRev; each swap is handled once (DeckRevs). The slide
+  // positions follow their slides; what the app holds of the lecture is loaded again (the viewer is keyed by the
+  // deck's rev, and useDocs replaces the annotation store together with the DocMeta).
+  const [deckRevs] = useState(() => new DeckRevs());
+  const focusedRef = useLatest(focusedSlide);
+  const readyDocIdRef = useLatest(readyDocId);
+  const dropRegionChips = attachments.dropRegions;
+  /** The remembered slide, the pinned slide and the notes filter follow their slides (no map: kept, or cleared). */
+  const remapPositions = useCallback(
+    (target: string, oldToNew: readonly (number | null)[] | null) => {
+      const open = target === readyDocIdRef.current;
+      if (oldToNew) {
+        const from = open ? focusedRef.current : readStorage<number | null>(storageKeys.slide(target), null, isNumber);
+        if (from !== null) writeStorage(storageKeys.slide(target), remapSlide(from, oldToNew));
+      }
+      if (!open) return;
+      setPinnedSlide((p) => (p === null || !oldToNew ? null : remapSlide(p, oldToNew)));
+      setNotesFilter((f) => (typeof f === 'number' ? (oldToNew ? remapSlide(f, oldToNew) : 'all') : f));
+    },
+    [readyDocIdRef, focusedRef],
+  );
+  /** Load again what is held of a swapped lecture: the server renumbered its notes, sessions, recordings and 정리본. */
+  const reloadSwapped = useCallback(
+    (target: string) => {
+      reloadRecordingFeeds(target);
+      if (target !== readyDocIdRef.current) return;
+      dropRegionChips();
+      void refreshNotes(target);
+      void refreshDigest(target);
+      void refreshRecordings(target);
+      void studyRef.current.refreshSessions(target);
+      studyRef.current.reloadOpen();
+    },
+    [readyDocIdRef, dropRegionChips, refreshNotes, refreshDigest, refreshRecordings, studyRef],
+  );
+  const handleDeckSwap = useCallback(
+    async (target: string, rev: number, oldToNew: readonly (number | null)[] | null, meta?: DocMeta) => {
+      const first = deckRevs.take(target, rev);
+      // The positions first: the viewer mounted for the new deck reads the remembered slide.
+      if (first) remapPositions(target, oldToNew);
+      if (meta) replaceDoc(meta);
+      else if (first) await refreshDoc(target);
+      if (first) reloadSwapped(target);
+    },
+    [deckRevs, remapPositions, replaceDoc, refreshDoc, reloadSwapped],
+  );
+  const handleDeckSwapRef = useLatest(handleDeckSwap);
+  useEffect(
+    () => onDeckEvent((target, event) => void handleDeckSwapRef.current(target, event.rev, event.oldToNew)),
+    [handleDeckSwapRef],
+  );
+  // A swap seen only in the open lecture's DocMeta (the event was missed: asleep, offline): reloaded, positions kept.
+  const openDeckRev = doc?.status === 'ready' ? (doc.deckRev ?? 0) : null;
+  useEffect(() => {
+    if (!readyDocId || openDeckRev === null || !deckRevs.see(readyDocId, openDeckRev)) return;
+    remapPositions(readyDocId, null);
+    reloadSwapped(readyDocId);
+  }, [readyDocId, openDeckRev, deckRevs, remapPositions, reloadSwapped]);
+
+  // 새 버전 올리기 from a lecture menu: pick a PDF, then the dialog uploads it and shows the plan.
+  const newVersionInputRef = useRef<HTMLInputElement>(null);
+  const newVersionTarget = useRef<DocMeta | null>(null);
+  const [newVersion, setNewVersion] = useState<{ docId: string; file: File } | null>(null);
+  const newVersionDoc = newVersion ? (docs?.find((d) => d.id === newVersion.docId) ?? null) : null;
+  const pickNewVersionFor = useCallback((target: DocMeta) => {
+    newVersionTarget.current = target;
+    newVersionInputRef.current?.click();
+  }, []);
+  const onVersionApplied = useCallback(
+    (meta: DocMeta, oldToNew: (number | null)[]) => {
+      void handleDeckSwap(meta.id, meta.deckRev ?? 0, oldToNew, meta);
+      toast(msg().versions.dialog.applied(meta.title), 'success');
+    },
+    [handleDeckSwap],
+  );
+  /** 되돌리기 of the viewer's banner: the deck before the last new version comes back. */
+  const undoVersion = useCallback(async () => {
+    const target = readyDocId;
+    if (!target) return;
+    const m = msg().versions.banner;
+    if (!(await confirmDialog({ title: m.undoConfirmTitle, message: m.undoConfirmMessage, confirmLabel: m.undo }))) return;
+    let meta: DocMeta;
+    try {
+      meta = await undoLastVersion(target);
+    } catch (e) {
+      toast(m.undoFailed(versionErrorMessage(e)), 'error');
+      return;
+    }
+    toast(m.undoneToast, 'success');
+    // The `deck` event normally came first with the map of the slides; without it the positions are kept.
+    await handleDeckSwap(target, meta.deckRev ?? 0, null, meta);
+  }, [readyDocId, handleDeckSwap]);
 
   // ---- Upload target: the course new PDFs go into ------------------------------------------------
   // Chosen in the library, and following the course of the lecture that is open ("you are in Compiler").
@@ -682,7 +783,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
         <SplitPane
           left={
             <SlideViewer
-              key={doc.id}
+              key={`${doc.id}:${doc.deckRev ?? 0}`}
               ref={viewerRef}
               doc={doc}
               qaCounts={notesState.qaCounts}
@@ -699,6 +800,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
               onOpenDoc={openDoc}
               notes={notesState.notes}
               docs={docs}
+              onUndoVersion={() => void undoVersion()}
             />
           }
           right={
@@ -740,7 +842,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
               scrollTo={scrollRequest}
               memos={
                 <MemoListPanel
-                  key={doc.id}
+                  key={`${doc.id}:${doc.deckRev ?? 0}`}
                   docId={doc.id}
                   focusedSlide={focusedSlide}
                   onOpenMemo={openMemo}
@@ -899,7 +1001,9 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
       )}
 
       <RecordingUploadContext.Provider value={pickRecordingFor}>
-        <main className="main">{main}</main>
+        <NewVersionContext.Provider value={pickNewVersionFor}>
+          <main className="main">{main}</main>
+        </NewVersionContext.Provider>
       </RecordingUploadContext.Provider>
       <input
         ref={recordingFileRef}
@@ -928,6 +1032,32 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
           void handleFiles(files);
         }}
       />
+      <input
+        ref={newVersionInputRef}
+        type="file"
+        accept="application/pdf,.pdf"
+        hidden
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          e.target.value = ''; // allow picking the same file again
+          const target = newVersionTarget.current;
+          newVersionTarget.current = null;
+          if (!target || !file) return;
+          if (!isPdfFile(file)) {
+            toast(msg().chat.attachments.pdfOnly(file.name), 'error');
+            return;
+          }
+          setNewVersion({ docId: target.id, file });
+        }}
+      />
+      {newVersion && newVersionDoc && (
+        <NewVersionDialog
+          doc={newVersionDoc}
+          file={newVersion.file}
+          onClose={() => setNewVersion(null)}
+          onApplied={onVersionApplied}
+        />
+      )}
       {dragOver && (
         <div className="drop-overlay" aria-hidden>
           <div className="drop-overlay-card">

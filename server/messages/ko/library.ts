@@ -18,6 +18,25 @@ export const library = {
     deleteWhileDigest: '정리본을 만드는 중에는 지울 수 없습니다. 정리본 만들기를 먼저 중단해 주세요',
     deleteWhileAnswering: '답변을 생성하는 중에는 지울 수 없습니다. 답변이 끝난 뒤에 다시 시도해 주세요',
   },
+  /** server/versions.ts and the routes of a new version of a lecture's PDF (DESIGN §28, 「새 버전 올리기」). */
+  versions: {
+    /** 409 of every write for the lecture while its deck is swapped (and of a second swap). */
+    swapping: '새 버전으로 바꾸는 중이에요. 잠시 후 다시 해 주세요.',
+    /** 409 of an upload (or a swap) while the lecture itself is not converted. */
+    notReady: '강의 변환이 끝난 뒤에 새 버전을 올릴 수 있어요.',
+    nextNotReady: '새 버전을 아직 준비하고 있어요. 준비가 끝난 뒤에 다시 해 주세요.',
+    noNext: '올린 새 버전이 없어요.',
+    /** 409 of apply: the deck was swapped (or undone) since the new version was matched. */
+    stalePlan: '그사이 강의 슬라이드가 바뀌었어요. 새 버전을 다시 올려 주세요.',
+    nothingToUndo: '되돌릴 변경이 없어요.',
+    busyAnswering: '답변하는 중에는 바꿀 수 없어요. 답변이 끝난 뒤에 다시 해 주세요.',
+    busyDigest: '정리본을 만드는 중에는 바꿀 수 없어요. 끝나거나 멈춘 뒤에 다시 해 주세요.',
+    busyRecording: '이 강의를 녹음하는 중에는 바꿀 수 없어요.',
+    busyTranscribing: '녹음을 받아쓰거나 정렬하는 중에는 바꿀 수 없어요. 끝난 뒤에 다시 해 주세요.',
+    /** NextVersionInfo.error of a conversion the server stopped (a restart). */
+    interrupted: '변환이 중단됐어요. 다시 올려 주세요.',
+    notPdf: 'PDF 파일만 올릴 수 있어요.',
+  },
   /** server/courses.ts */
   courses: {
     nameRequired: {

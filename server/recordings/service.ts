@@ -28,7 +28,8 @@ import type {
 import { HttpError, desktopMode, libraryDir } from '../config.ts';
 import { DEFAULT_LANG, isLang, runInLang, slang, smsg } from '../i18n.ts';
 import type { Lang } from '../i18n.ts';
-import { docPaths, isNotFound, loadDocAssets, readStoredDoc, renameWithRetry, rmWithRetry } from '../library.ts';
+import type { DeckMap } from '../internal-types.ts';
+import { docPaths, isDocSwapping, isNotFound, loadDocAssets, readStoredDoc, renameWithRetry, rmWithRetry } from '../library.ts';
 import type { Label } from './align/align.ts';
 import { hasSlideText, timelinePrior } from './align/align.ts';
 import { DEFAULT_EMIT, emissions } from './align/dp.ts';
@@ -65,6 +66,7 @@ import {
   isRecordingId,
   listRecordingIds,
   newRecordingId,
+  readDeckArchive,
   readLlmLabels,
   readMarkers,
   readMeta,
@@ -73,6 +75,8 @@ import {
   readWindows,
   recordingPaths,
   recordingsDir,
+  removeDeckArchive,
+  writeDeckArchive,
   writeJsonLines,
   writeLlmLabels,
   writeMarkers,
@@ -80,7 +84,7 @@ import {
   writeTimeline,
   writeTranscriptState,
 } from './store.ts';
-import type { LlmLabels, RecordingMeta, RecordingPaths, TranscriptState } from './store.ts';
+import type { DeckArchive, LlmLabels, RecordingMeta, RecordingPaths, TranscriptState } from './store.ts';
 import { readWavInfo, wavHeader, writeWavSlice } from './wav.ts';
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -220,6 +224,8 @@ class Rec {
   /** Controllers of work to stop when the recording is deleted (conversion, AI alignment). */
   readonly jobs = new Set<AbortController>();
   aiRunning = false;
+  /** Bumped by every remap to a new deck (DESIGN §28): labels computed before it count the old slides. */
+  deckGen = 0;
   private chain: Promise<unknown> = Promise.resolve();
   private pending = 0;
   private statusTimer: NodeJS.Timeout | null = null;
@@ -420,7 +426,7 @@ class Rec {
   }
 
   transcriptView(): RecordingTranscript {
-    return { recordingId: this.id, segments: this.transcript.segments.map((s) => ({ ...s })) };
+    return { recordingId: this.id, segments: this.transcript.segments.map((s) => ({ ...s })), markers: this.markers.map((m) => ({ ...m })) };
   }
 
   /** Status event now (`immediate`) or at most every statusThrottleMs. */
@@ -822,8 +828,19 @@ class Rec {
     return this.aligning;
   }
 
+  /** A local alignment runs (or waits to run once more). */
+  get isAligning(): boolean {
+    return this.aligning !== null;
+  }
+
+  /** Resolves when no local alignment runs. */
+  async settleAlignment(): Promise<void> {
+    while (this.aligning) await this.aligning;
+  }
+
   private async alignOnce(): Promise<void> {
     this.lastAlignAt = Date.now();
+    const gen = this.deckGen;
     const snapshot = this.transcript.segments.map((s) => ({ id: s.id, start: s.start, end: s.end, text: s.text }));
     if (snapshot.length === 0 || this.deleted) return;
     const material = (await deckOf(this.docId)).entries.map(slideMaterial);
@@ -837,7 +854,11 @@ class Rec {
       llm: llm ? snapshot.map((s) => (String(s.id) in llm.labels ? llm.labels[String(s.id)] : undefined)) : undefined,
     });
     if (this.deleted) return;
-    await this.serial(() => this.applyLabels(snapshot.map((s) => s.id), labels, llm ? 'llm' : 'lexical'));
+    await this.serial(async () => {
+      // The deck was swapped meanwhile (DESIGN §28): these labels count the old slides, so align once more.
+      if (gen !== this.deckGen) this.alignAgain = true;
+      else await this.applyLabels(snapshot.map((s) => s.id), labels, llm ? 'llm' : 'lexical');
+    });
   }
 
   private async applyLabels(ids: number[], labels: Label[], kind: AlignmentKind): Promise<void> {
@@ -865,6 +886,106 @@ class Rec {
     await writeMarkers(this.docId, this.id, markers);
     this.meta.hasManualMarkers = markers.length > 0;
     await this.saveMeta();
+  }
+
+  // --- new version of the lecture (DESIGN §28) ------------------------------------------------------------------
+
+  /**
+   * The lecture's deck was swapped: the segments' slides, the timeline, the markers and the AI labels follow `map`.
+   * A segment on a removed slide loses it (null), events / markers / labels on one are dropped; all of that is kept in
+   * deck-r<fromRev>.json, and an undo (map.restoreRev) puts back what the swap from that rev kept, then removes its
+   * file. Done once per rev (meta.deckRev); what it writes is in the archive first, so a crash repeats the same
+   * writes. No realign. Runs in serial().
+   */
+  async remapDeck(map: DeckMap): Promise<void> {
+    if ((this.meta.deckRev ?? 0) >= map.toRev) return;
+    this.deckGen++;
+    let archive = await readDeckArchive(this.docId, this.id, map.fromRev);
+    if (archive?.toRev !== map.toRev || !archive.next) {
+      archive = await this.deckArchive(map);
+      await writeDeckArchive(this.docId, this.id, archive);
+    }
+    const next = archive.next as NonNullable<DeckArchive['next']>;
+    const changed: Array<{ id: number; slide: number | null }> = [];
+    for (const s of this.transcript.segments) {
+      const slide = next.slides[String(s.id)];
+      if (slide !== undefined && s.slide !== slide) {
+        s.slide = slide;
+        changed.push({ id: s.id, slide });
+      }
+    }
+    if (changed.length > 0) await writeTranscriptState(this.docId, this.transcript);
+    if (!sameJson(this.timeline, next.timeline)) {
+      this.timeline = next.timeline;
+      await writeTimeline(this.docId, this.id, this.timeline);
+    }
+    if (!sameJson(this.markers, next.markers)) await this.setMarkers(next.markers);
+    if (next.llm && !sameJson(this.llm, next.llm)) {
+      this.llm = next.llm;
+      await writeLlmLabels(this.docId, this.id, next.llm);
+    }
+    if (map.restoreRev !== undefined) await removeDeckArchive(this.docId, this.id, map.restoreRev);
+    this.meta.deckRev = map.toRev;
+    await this.saveMeta();
+    // What the undo needs stays (nothing cleared: no file).
+    const c = archive.cleared;
+    if (Object.keys(c.segments).length + c.timeline.length + c.markers.length + Object.keys(c.llm).length === 0) {
+      await removeDeckArchive(this.docId, this.id, map.fromRev);
+    } else await writeDeckArchive(this.docId, this.id, { fromRev: map.fromRev, toRev: map.toRev, cleared: c });
+    // The slide material and what was derived from it belong to the old deck.
+    this.material = null;
+    this.lexIndex = null;
+    this.recentPrior.clear();
+    if (changed.length > 0) this.hub.send({ type: 'realigned', segments: changed });
+    this.emitStatus(true);
+  }
+
+  /** The archive of a remap: what it clears and drops, and the state it writes (with the undo's restore in it). */
+  private async deckArchive(map: DeckMap): Promise<DeckArchive> {
+    const to = (slide: number): number | null => map.oldToNew[slide - 1] ?? null;
+    const cleared: DeckArchive['cleared'] = { segments: {}, timeline: [], markers: [], llm: {} };
+    const slides: Record<string, number | null> = {};
+    for (const s of this.transcript.segments) {
+      const slide = s.slide === null ? null : to(s.slide);
+      if (s.slide !== null && slide === null) cleared.segments[String(s.id)] = s.slide;
+      slides[String(s.id)] = slide;
+    }
+    const timeline: SlideViewEvent[] = [];
+    for (const e of this.timeline) {
+      const slide = to(e.slide);
+      if (slide === null) cleared.timeline.push(e);
+      else timeline.push({ t: e.t, slide });
+    }
+    const markers: AlignmentMarker[] = [];
+    for (const m of this.markers) {
+      const slide = m.slide === null ? null : to(m.slide);
+      if (m.slide !== null && slide === null) cleared.markers.push(m);
+      else markers.push({ t: m.t, slide });
+    }
+    let llm: LlmLabels | null = null;
+    if (this.llm) {
+      const labels: Record<string, number | null> = {};
+      for (const [id, label] of Object.entries(this.llm.labels)) {
+        const slide = typeof label === 'number' ? to(label) : null;
+        if (typeof label === 'number' && slide === null) cleared.llm[id] = label;
+        else labels[id] = slide;
+      }
+      llm = { ...this.llm, labels };
+    }
+    const restore = map.restoreRev === undefined ? null : await readDeckArchive(this.docId, this.id, map.restoreRev);
+    if (restore) {
+      // What the swap being undone took away; what was set since (a marker at the same time, a new label) stays.
+      const back = restore.cleared;
+      for (const [id, slide] of Object.entries(back.segments)) if (slides[id] === null) slides[id] = slide;
+      const seen = new Set(timeline.map((e) => `${e.t}:${e.slide}`));
+      timeline.push(...back.timeline.filter((e) => !seen.has(`${e.t}:${e.slide}`)));
+      timeline.sort((a, b) => a.t - b.t);
+      const times = new Set(markers.map((m) => m.t));
+      markers.push(...back.markers.filter((m) => !times.has(m.t)));
+      markers.sort((a, b) => a.t - b.t);
+      if (llm) for (const [id, slide] of Object.entries(back.llm)) if (!(id in llm.labels)) llm.labels[id] = slide;
+    }
+    return { fromRev: map.fromRev, toRev: map.toRev, cleared, next: { slides, timeline, markers, llm } };
   }
 
   // --- uploads --------------------------------------------------------------------------------------------------
@@ -1049,6 +1170,7 @@ function slideMaterial(d: DeckEntry): string {
 }
 
 const sameTexts = (a: string[], b: string[]) => a.length === b.length && a.every((t, i) => t === b[i]);
+const sameJson = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
 // ---------------------------------------------------------------------------------------------------------------
 // Registry
@@ -1134,6 +1256,11 @@ async function requireReadyDoc(docId: string): Promise<{ pageCount: number }> {
 
 async function requireDocExists(docId: string): Promise<void> {
   if (!(await readStoredDoc(docId))) throw new HttpError(404, smsg().common.notFound.doc);
+}
+
+/** While the lecture is swapped to a new version (DESIGN §28) its recordings take no writes, like the rest of it. */
+function refuseWhileSwapping(docId: string): void {
+  if (isDocSwapping(docId)) throw new HttpError(409, smsg().library.versions.swapping);
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -1405,8 +1532,9 @@ export async function createLiveRecording(docId: string, body: Partial<Record<ke
   const language = parseLanguage(body.language);
   const model = parseModel(body.model);
   if (body.liveTranscribe !== undefined && typeof body.liveTranscribe !== 'boolean') throw new HttpError(400, smsg().recordings.request.badLiveTranscribe);
+  refuseWhileSwapping(docId);
   if (creatingLive) throw new HttpError(409, smsg().recordings.live.starting);
-  creatingLive = true;
+  creatingLive = docId;
   try {
     const live = await liveRec();
     // Stopped with audio still to come that never came (the device that recorded it is gone): end it with what is stored.
@@ -1421,11 +1549,12 @@ export async function createLiveRecording(docId: string, body: Partial<Record<ke
     }
     return await createLive(docId, body, language, model);
   } finally {
-    creatingLive = false;
+    creatingLive = null;
   }
 }
 
-let creatingLive = false;
+/** The document a live recording is being created for (one at a time). */
+let creatingLive: string | null = null;
 
 async function createLive(
   docId: string,
@@ -1462,11 +1591,13 @@ async function createLive(
 }
 
 export async function appendLiveAudio(docId: string, rid: string, offset: number, body: Buffer): Promise<{ offset: number }> {
+  refuseWhileSwapping(docId);
   const rec = await loadRec(docId, rid);
   return rec.serial(() => rec.append(offset, body), true);
 }
 
 export async function addSlideEvents(docId: string, rid: string, raw: unknown): Promise<void> {
+  refuseWhileSwapping(docId);
   const { pageCount } = await requireReadyDoc(docId);
   if (!Array.isArray(raw) || raw.length > 1000) throw new HttpError(400, smsg().recordings.request.slideEventsRequired);
   const events: SlideViewEvent[] = raw.map((e: unknown) => {
@@ -1482,16 +1613,19 @@ export async function addSlideEvents(docId: string, rid: string, raw: unknown): 
 }
 
 export async function pauseRecording(docId: string, rid: string): Promise<RecordingInfo> {
+  refuseWhileSwapping(docId);
   const rec = await loadRec(docId, rid);
   return rec.serial(() => rec.pause(), true);
 }
 
 export async function resumeRecording(docId: string, rid: string): Promise<RecordingInfo> {
+  refuseWhileSwapping(docId);
   const rec = await loadRec(docId, rid);
   return rec.serial(() => rec.resume(), true);
 }
 
 export async function stopRecording(docId: string, rid: string, bytes: unknown): Promise<RecordingInfo> {
+  refuseWhileSwapping(docId);
   if (bytes !== undefined && (typeof bytes !== 'number' || !Number.isSafeInteger(bytes) || bytes < 0)) {
     throw new HttpError(400, smsg().recordings.request.badBytes);
   }
@@ -1500,6 +1634,7 @@ export async function stopRecording(docId: string, rid: string, bytes: unknown):
 }
 
 export async function renameRecording(docId: string, rid: string, title: unknown): Promise<RecordingInfo> {
+  refuseWhileSwapping(docId);
   const clean = cleanTitle(title);
   if (!clean) throw new HttpError(400, smsg().recordings.request.titleRequired);
   const rec = await loadRec(docId, rid);
@@ -1513,6 +1648,7 @@ export async function renameRecording(docId: string, rid: string, title: unknown
 
 /** PUT …/markers: replaces the markers and re-aligns with them as hard constraints. */
 export async function putMarkers(docId: string, rid: string, raw: unknown): Promise<RecordingTranscript> {
+  refuseWhileSwapping(docId);
   const { pageCount } = await requireReadyDoc(docId);
   if (!Array.isArray(raw) || raw.length > 500) throw new HttpError(400, smsg().recordings.request.markersRequired);
   const byTime = new Map<number, AlignmentMarker>();
@@ -1532,6 +1668,7 @@ export async function putMarkers(docId: string, rid: string, raw: unknown): Prom
 }
 
 export async function deleteRecording(docId: string, rid: string): Promise<void> {
+  refuseWhileSwapping(docId);
   const rec = await loadRec(docId, rid);
   // Until the folder is gone, nothing may load the recording again from its files (an SSE reconnect, a retry).
   deleting.add(rec.key);
@@ -1593,20 +1730,31 @@ export async function playbackSource(
 
 // --- uploads --------------------------------------------------------------------------------------------------
 
+/** Folders of uploads still arriving (before finishUpload / abortUpload) → their document. */
+const uploading = new Map<string, string>();
+
 /** A new upload's folder and id (the caller streams the body into `partFile`, then calls finishUpload). */
 export async function beginUpload(docId: string): Promise<{ id: string; dir: string; partFile: string }> {
-  await requireReadyDoc(docId);
-  if (!findFfmpeg()) {
-    const m = smsg().recordings.upload;
-    throw new HttpError(503, desktopMode(process.env, []) ? m.ffmpegNotFoundDesktop : m.ffmpegMissing);
-  }
+  refuseWhileSwapping(docId);
   const id = newRecordingId();
   const dir = recordingPaths(docId, id).dir;
-  await fs.mkdir(dir, { recursive: true });
+  uploading.set(dir, docId);
+  try {
+    await requireReadyDoc(docId);
+    if (!findFfmpeg()) {
+      const m = smsg().recordings.upload;
+      throw new HttpError(503, desktopMode(process.env, []) ? m.ffmpegNotFoundDesktop : m.ffmpegMissing);
+    }
+    await fs.mkdir(dir, { recursive: true });
+  } catch (err) {
+    uploading.delete(dir);
+    throw err;
+  }
   return { id, dir, partFile: path.join(dir, 'source.part') };
 }
 
 export async function abortUpload(dir: string): Promise<void> {
+  uploading.delete(dir);
   await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
 }
 
@@ -1633,32 +1781,37 @@ export async function finishUpload(
   options: UploadOptions = { language: 'auto', model: defaultModel() },
 ): Promise<RecordingInfo> {
   const paths = recordingPaths(docId, id);
-  const sourceFile = `source.${ext}`;
-  await fs.rename(path.join(paths.dir, 'source.part'), path.join(paths.dir, sourceFile));
-  const base = originalName.replace(/\.[A-Za-z0-9]{1,5}$/, '');
-  const now = new Date();
-  const meta: RecordingMeta = {
-    version: 1,
-    id,
-    docId,
-    title: cleanTitle(base) ?? defaultUploadTitle(now),
-    source: 'upload',
-    status: 'converting',
-    language: options.language,
-    model: options.model,
-    liveTranscribe: false,
-    createdAt: now.toISOString(),
-    transcriptStatus: 'queued',
-    transcribedSec: 0,
-    alignment: 'none',
-    hasManualMarkers: false,
-    sourceFile,
-    originalName: cleanTitle(originalName) ?? sourceFile,
-    lang: slang(),
-  };
-  await writeMeta(meta);
-  const rec = await loadRec(docId, id);
-  return rec.info();
+  try {
+    const sourceFile = `source.${ext}`;
+    await fs.rename(path.join(paths.dir, 'source.part'), path.join(paths.dir, sourceFile));
+    const base = originalName.replace(/\.[A-Za-z0-9]{1,5}$/, '');
+    const now = new Date();
+    const meta: RecordingMeta = {
+      version: 1,
+      id,
+      docId,
+      title: cleanTitle(base) ?? defaultUploadTitle(now),
+      source: 'upload',
+      status: 'converting',
+      language: options.language,
+      model: options.model,
+      liveTranscribe: false,
+      createdAt: now.toISOString(),
+      transcriptStatus: 'queued',
+      transcribedSec: 0,
+      alignment: 'none',
+      hasManualMarkers: false,
+      sourceFile,
+      originalName: cleanTitle(originalName) ?? sourceFile,
+      lang: slang(),
+    };
+    await writeMeta(meta);
+    const rec = await loadRec(docId, id);
+    return rec.info();
+  } finally {
+    // From here on the recording itself is busy (converting) for recordingsBusy.
+    uploading.delete(paths.dir);
+  }
 }
 
 // --- AI alignment ----------------------------------------------------------------------------------------------
@@ -1680,6 +1833,8 @@ export async function startAiAlignment(docId: string, rid: string, job: AiAlignJ
   if (rec.windowsLeft() > 0 || rec.isLive) throw new HttpError(409, m.notFinished);
   const { AI_CHUNK_SEGMENTS, buildAlignPrompt, parseAlignRuns } = await import('./aiPrompt.ts');
   const deck = await deckOf(docId);
+  refuseWhileSwapping(docId);
+  const gen = rec.deckGen;
   const controller = new AbortController();
   rec.jobs.add(controller);
   rec.aiRunning = true;
@@ -1696,8 +1851,14 @@ export async function startAiAlignment(docId: string, rid: string, job: AiAlignJ
         chunk.forEach((s, i) => (labels[String(s.id)] = parsed[i]));
         previous = parsed[parsed.length - 1];
         if (rec.deleted) return;
-        rec.llm = { provider: job.provider, model: job.model, at: new Date().toISOString(), labels: { ...labels } };
-        await rec.serial(() => writeLlmLabels(docId, rid, rec.llm as LlmLabels));
+        const stale = await rec.serial(async () => {
+          // The deck was swapped meanwhile (DESIGN §28): these labels count the old slides; the run stops here.
+          if (rec.deckGen !== gen) return true;
+          rec.llm = { provider: job.provider, model: job.model, at: new Date().toISOString(), labels: { ...labels } };
+          await writeLlmLabels(docId, rid, rec.llm);
+          return false;
+        });
+        if (stale) return;
         await rec.realign();
       }
       await rec.serial(async () => {
@@ -1756,6 +1917,49 @@ export async function catchUpLiveSpeech(docId: string, signal?: AbortSignal): Pr
   if (last < 0 || rec.backlogMs(last) > QUESTION_BACKLOG_MS) return;
   if (!config.models.isInstalled(rec.meta.model)) return;
   await rec.waitForWindows(last, config.questionSpeechWaitMs, signal);
+}
+
+// --- new version of the lecture (DESIGN §28) ----------------------------------------------------------------------
+
+/**
+ * Why the lecture's deck cannot be swapped now because of its recordings (a message), or null: a live recording of it
+ * (also one stopped with audio still to come), a transcription queued or running, an upload arriving or converting, a
+ * local or AI alignment running. Synchronous after the recordings being loaded are in: the caller sets its gate next.
+ */
+export async function recordingsBusy(docId: string): Promise<string | null> {
+  const prefix = `${docId}/`;
+  await Promise.all([...recs].filter(([key]) => key.startsWith(prefix)).map(([, pending]) => pending.catch(() => null)));
+  const mine = [...loaded.values()].filter((rec) => rec.docId === docId && !rec.deleted);
+  const m = smsg().library.versions;
+  if (creatingLive === docId || mine.some((rec) => rec.meta.source === 'live' && !rec.meta.finalized)) return m.busyRecording;
+  const transcribing =
+    [...uploading.values()].includes(docId) ||
+    runningJob?.rec.docId === docId ||
+    queue.some((j) => j.rec.docId === docId) ||
+    mine.some((rec) => rec.meta.status === 'converting' || rec.isAligning || rec.aiRunning);
+  return transcribing ? m.busyTranscribing : null;
+}
+
+/**
+ * The lecture's deck was swapped (versions.ts, while its gate is up): every recording's slides follow `map`
+ * (Rec.remapDeck), after an alignment in flight, through its queue. Folders of uploads still arriving (no meta.json)
+ * are skipped. Idempotent; one recording failing does not stop the others (the first error is thrown at the end).
+ */
+export async function remapDocRecordings(docId: string, map: DeckMap): Promise<void> {
+  let failure: unknown = null;
+  for (const rid of await listRecordingIds(docId)) {
+    try {
+      if (!recs.has(recKey(docId, rid)) && !(await readMeta(docId, rid))) continue;
+      const rec = await loadRec(docId, rid);
+      await rec.settleAlignment();
+      await rec.serial(() => rec.remapDeck(map));
+    } catch (err) {
+      if (err instanceof HttpError && err.status === 404) continue; // deleted meanwhile
+      console.warn(`[recordings] ${docId}/${rid}: remap to deck r${map.toRev} failed: ${errorText(err)}`);
+      failure ??= err;
+    }
+  }
+  if (failure) throw failure;
 }
 
 // --- lifecycle -------------------------------------------------------------------------------------------------

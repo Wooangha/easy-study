@@ -571,6 +571,11 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
 
   const liveTurn = docId && sessionId ? (turnsRef.current.get(turnKey(docId, sessionId)) ?? null) : null;
 
+  /** Load the open session again (its messages were renumbered: a new version of the PDF, DESIGN §28). */
+  const reloadOpen = useCallback(() => {
+    if (docId && sessionId) void reloadSession(docId, sessionId);
+  }, [docId, sessionId, reloadSession]);
+
   /** Stop: ask the server to abort (saves the partial answer), then cut the stream if it lingers. */
   const stop = useCallback(() => {
     const turn = liveTurn;
@@ -670,6 +675,7 @@ export function useStudySession({ docId, choice, neighbors, onTurnFinished, onSe
     switchLlm,
     deleteSession,
     refreshSessions,
+    reloadOpen,
   };
 }
 

@@ -208,6 +208,12 @@ export const chat = {
     failed: '정리본을 만들지 못했습니다',
     slidesFailed: (slides: number[]) => `슬라이드 ${slides.join(', ')}의 정리본을 만들지 못했습니다 (이어서 만들기로 다시 시도할 수 있습니다)`,
     summaryFailed: (error: string) => `강의 요약을 만들지 못했습니다: ${error}`,
+    /**
+     * The note after a new version of the PDF (DESIGN §28): `slides` = the new deck's changed and added slides, which have
+     * no entry now (0 = slides were only removed or moved: just the summary is out of date).
+     */
+    newVersion: (slides: number) =>
+      slides > 0 ? `새 버전으로 바뀐 장 ${slides}개를 다시 정리해야 해요.` : '새 버전에 맞춰 강의 요약을 다시 만들어야 해요.',
     /** DIGEST.md. */
     markdown: {
       /** The top heading after `# `. */

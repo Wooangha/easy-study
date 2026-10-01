@@ -99,6 +99,8 @@ function DigestTabBadge({ info }: { info: DigestInfo | null }) {
         </span>
       );
     case 'ready':
+      // Slides still missing (a new version of the deck changed some, DESIGN §28): not done yet.
+      if (info.done < info.total) return <span className="tab-count is-warn">{m.digestPartial}</span>;
       return (
         <span className="tab-count is-ok" role="img" aria-label={m.digestDone}>
           <Check />

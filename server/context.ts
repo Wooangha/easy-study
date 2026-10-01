@@ -20,9 +20,10 @@
 //   attachment made from a 필기 carries the item's text after the selection text. Priming takes neither.
 // - When the conversation would exceed the provider's image budget, or the orchestrator reports that
 //   the provider lost the conversation / found it too large (BuildTurnInput.forceNewConversation), or
-//   the session's LLM was changed and its conversation dropped (ProviderState.switched), a fresh
-//   conversation is started (rollover): the deck is primed again and a text recap of the latest Q&A
-//   is included, closed by a note saying why. Request sizes in bytes and tokens are enforced by the
+//   the session's LLM was changed and its conversation dropped (ProviderState.switched), or the lecture's
+//   deck was replaced by a new version (ProviderState.deckUpdated, DESIGN §28), a fresh conversation is
+//   started (rollover): the deck is primed again and a text recap of the latest Q&A is included, closed by
+//   a note saying why. Request sizes in bytes and tokens are enforced by the
 //   providers, which see the encoded request (they fail with ProviderError 'context_overflow', which leads here).
 //
 // Everything in this file is pure: no filesystem access, no clock, no randomness. Paths and texts
@@ -201,8 +202,10 @@ export function buildTurn(input: BuildTurnInput): BuildTurnOutput {
   const overBudget = !needsPrime && state.imagesSent + cost > maxImages;
   // The session's LLM was changed and the conversation it had dropped (ProviderState.switched).
   const switched = state.switched === true;
+  // The lecture's deck was replaced by a new version and the conversation dropped (ProviderState.deckUpdated).
+  const deckUpdated = state.deckUpdated === true;
   // The orchestrator forces a new conversation when the provider lost the old one or it grew too large.
-  const rollover = overBudget || forced !== null || switched;
+  const rollover = overBudget || forced !== null || switched || deckUpdated;
   const startsConversation = needsPrime || rollover;
 
   // Slides whose image the provider conversation already has (none in a fresh conversation).
@@ -232,10 +235,12 @@ export function buildTurn(input: BuildTurnInput): BuildTurnOutput {
     // The document has transcribed lecture recordings (DESIGN §22): one line, the speech itself comes with questions.
     if (input.lectureSpeech) out.text(prompts.LECTURE_RECORDINGS_NOTE);
     // Recap the Q&A so far whenever a conversation starts in a session that already has some
-    // (after a rollover, a recovery, an LLM switch, or a provider state that was reset).
-    const reason: prompts.RestartReason = forced ?? (switched ? 'provider_switch' : overBudget ? 'budget' : 'restart');
+    // (after a rollover, a recovery, an LLM switch, a new deck, or a provider state that was reset). A new deck
+    // and an LLM switch together: the new deck's note (its slide numbers matter more than who answered before).
+    const reason: prompts.RestartReason =
+      forced ?? (deckUpdated ? 'deck_update' : switched ? 'provider_switch' : overBudget ? 'budget' : 'restart');
     appendRecap(out, Array.isArray(session.messages) ? session.messages : [], settings.recapTurns, reason);
-    // A fresh state: no `switched` any more, the switch's new conversation is this one.
+    // A fresh state: no `switched` / `deckUpdated` any more, their new conversation is this one.
     nextState = {
       resume: null, // filled in by the orchestrator from the provider result
       primed: true,
@@ -274,6 +279,7 @@ export function buildTurn(input: BuildTurnInput): BuildTurnOutput {
   };
   if (forced !== null) context.recoveredFrom = forced;
   if (switched) context.switched = true;
+  if (deckUpdated) context.deckUpdated = true;
   if (attachments.length > 0) context.attachments = attachments.length;
   if (memosIncluded > 0) context.memos = memosIncluded;
 
@@ -497,6 +503,7 @@ function appendRecap(out: PartsBuilder, messages: ChatMessage[], recapTurns: num
       p.slide,
       squeeze(p.question, RECAP_CHARS) + (p.attachments > 0 ? prompts.recapAttachmentsNote(p.attachments) : ''),
       squeeze(p.answer, RECAP_CHARS),
+      p.removed,
     ),
   );
   out.text([prompts.RECAP_HEADING, ...lines, '', prompts.restartNote(reason)].join('\n'));
@@ -919,15 +926,24 @@ function selectSheets(sheets: Sheet[], maxImages: number, focusImages: number): 
   return sheets.slice(0, budget);
 }
 
-function completedPairs(messages: ChatMessage[]): Array<{ slide: number; question: string; answer: string; attachments: number }> {
-  const pairs: Array<{ slide: number; question: string; answer: string; attachments: number }> = [];
+/** A completed Q&A pair; `removed` = a new version of the deck dropped the question's slide (ChatMessage.removedFrom). */
+interface CompletedPair {
+  slide: number;
+  question: string;
+  answer: string;
+  attachments: number;
+  removed: boolean;
+}
+
+function completedPairs(messages: ChatMessage[]): CompletedPair[] {
+  const pairs: CompletedPair[] = [];
   for (let i = 0; i < messages.length; i++) {
     const q = messages[i];
     if (q.role !== 'user' || q.kind !== 'question') continue;
     const a = messages[i + 1];
     if (a && a.role === 'assistant' && a.status === 'complete' && a.text.trim()) {
       const attachments = Array.isArray(q.attachments) ? q.attachments.length : 0;
-      pairs.push({ slide: q.slide, question: q.text, answer: a.text, attachments });
+      pairs.push({ slide: q.slide, question: q.text, answer: a.text, attachments, removed: !!q.removedFrom });
     }
   }
   return pairs;
@@ -1005,6 +1021,7 @@ function normalizeState(raw: ProviderState | undefined | null, pageCount: number
     history: Array.isArray(raw.history) ? raw.history : [],
   };
   if (raw.switched === true) state.switched = true;
+  if (raw.deckUpdated === true) state.deckUpdated = true;
   return state;
 }
 

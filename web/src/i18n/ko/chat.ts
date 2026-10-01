@@ -60,6 +60,9 @@ export const chat = {
     switched: '바꾼 LLM으로 새 대화 시작',
     switchedTitle: 'LLM을 바꿔서 새 대화를 시작하고, 슬라이드와 최근 대화 요약을 다시 전달한 뒤 답했어요.',
     rollover: '새 대화로 이어감',
+    /** ContextInfo.deckUpdated (DESIGN §28). */
+    deckUpdated: '새 버전 슬라이드로 다시 시작',
+    deckUpdatedTitle: '강의 PDF가 새 버전으로 바뀌어서 새 대화를 시작하고, 새 슬라이드와 최근 대화 요약을 다시 전달한 뒤 답했어요.',
     primed: '전체 슬라이드 전달',
     overviewImages: (n: number) => `개요 이미지 ${n}장`,
     /** `pages` = "p.12·13". */
@@ -241,6 +244,8 @@ export const chat = {
     regionTitle: (where: string) => `${where}에서 선택한 영역`,
     /** "p.12 영역" (`what` = region or a kind). */
     onPage: (slide: number, what: string) => `p.${slide} ${what}`,
+    /** A region whose slide a new version dropped (Attachment.removedFrom, DESIGN §28): "p.12 영역 (빠진 장 p.15)". */
+    onRemovedPage: (slide: number, what: string, old: number) => `p.${slide} ${what} (빠진 장 p.${old})`,
     region: '영역',
     selectedRegion: '선택 영역',
     image: '이미지',

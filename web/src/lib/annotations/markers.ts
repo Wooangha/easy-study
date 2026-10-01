@@ -58,7 +58,8 @@ export function deriveMarkers(
     for (const entry of group.entries) {
       const question = entry.question;
       for (const a of question.attachments ?? []) {
-        if (a.kind !== 'region' || !a.slide || !a.rect) continue;
+        // A region whose slide a new version dropped (DESIGN §28) has no place on the slide it now names.
+        if (a.kind !== 'region' || !a.slide || !a.rect || a.removedFrom) continue;
         const doc = docFor(a.slide);
         if (!doc) continue;
         const key: MarkerKey = { sessionId: entry.sessionId, messageId: question.id, attachmentId: a.id };

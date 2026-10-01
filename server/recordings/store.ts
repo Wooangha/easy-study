@@ -6,6 +6,7 @@
 //   windows.jsonl    ASR windows as they are cut (segmenter.ts), append-only
 //   transcript.json  TranscriptState: segments (with slides) + which windows are done, atomic writes
 //   timeline.json    SlideViewEvent[] (live), markers.json AlignmentMarker[], align-llm.json LLM labels
+//   deck-r<rev>.json DeckArchive: what the swap of the lecture's deck from `rev` cleared or dropped (DESIGN §28)
 // Recording ids: `rec-` + YYYYMMDD-HHMMSS + 4 hex (sortable, RECORDING_ID_RE).
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
@@ -64,6 +65,11 @@ export interface RecordingMeta {
    * (conversion, transcription; resumed after a restart too) runs in it, so the errors it stores read in it.
    */
   lang?: Lang;
+  /**
+   * DESIGN §28: the DocMeta.deckRev the slides are numbered in, set when a new version of the lecture remapped them
+   * (absent: never remapped). A remap to a rev not above it does nothing.
+   */
+  deckRev?: number;
 }
 
 export interface TranscriptState {
@@ -82,6 +88,31 @@ export interface LlmLabels {
   at: string;
   /** segment id → slide (null = off-slide). */
   labels: Record<string, number | null>;
+}
+
+/**
+ * What the swap of the lecture's deck from `fromRev` to `toRev` cleared or dropped, numbered in deck `fromRev`
+ * (DESIGN §28): the undo of that swap (DeckMap.restoreRev = fromRev) puts it back and removes the file.
+ */
+export interface DeckArchive {
+  fromRev: number;
+  toRev: number;
+  cleared: {
+    /** segment id → the slide it was on. */
+    segments: Record<string, number>;
+    timeline: SlideViewEvent[];
+    markers: AlignmentMarker[];
+    /** segment id → its align-llm label. */
+    llm: Record<string, number>;
+  };
+  /** What the remap writes, until it is written: a crash in between writes it again (nothing is mapped twice). */
+  next?: {
+    /** segment id → slide. */
+    slides: Record<string, number | null>;
+    timeline: SlideViewEvent[];
+    markers: AlignmentMarker[];
+    llm: LlmLabels | null;
+  };
 }
 
 export interface RecordingPaths {
@@ -271,4 +302,37 @@ export async function readLlmLabels(docId: string, rid: string): Promise<LlmLabe
 
 export async function writeLlmLabels(docId: string, rid: string, labels: LlmLabels): Promise<void> {
   await writeJsonAtomic(recordingPaths(docId, rid).llm, labels);
+}
+
+function deckArchivePath(docId: string, rid: string, rev: number): string {
+  return path.join(recordingPaths(docId, rid).dir, `deck-r${rev}.json`);
+}
+
+const slideNumbers = (value: unknown): Record<string, number> =>
+  Object.fromEntries(Object.entries(value && typeof value === 'object' ? value : {}).filter(([, v]) => Number.isInteger(v))) as Record<string, number>;
+
+export async function readDeckArchive(docId: string, rid: string, rev: number): Promise<DeckArchive | null> {
+  const value = await readJsonFile<DeckArchive>(deckArchivePath(docId, rid, rev));
+  if (!value || typeof value !== 'object' || !value.cleared || typeof value.cleared !== 'object') return null;
+  const c = value.cleared;
+  const n = value.next;
+  return {
+    fromRev: value.fromRev,
+    toRev: value.toRev,
+    ...(n && typeof n.slides === 'object' && n.slides && Array.isArray(n.timeline) && Array.isArray(n.markers) ? { next: n } : {}),
+    cleared: {
+      segments: slideNumbers(c.segments),
+      timeline: Array.isArray(c.timeline) ? c.timeline.filter((e) => e && typeof e.t === 'number' && typeof e.slide === 'number') : [],
+      markers: Array.isArray(c.markers) ? c.markers.filter((m) => m && typeof m.t === 'number' && typeof m.slide === 'number') : [],
+      llm: slideNumbers(c.llm),
+    },
+  };
+}
+
+export async function writeDeckArchive(docId: string, rid: string, archive: DeckArchive): Promise<void> {
+  await writeJsonAtomic(deckArchivePath(docId, rid, archive.fromRev), archive);
+}
+
+export async function removeDeckArchive(docId: string, rid: string, rev: number): Promise<void> {
+  await fs.rm(deckArchivePath(docId, rid, rev), { force: true });
 }

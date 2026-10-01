@@ -1,15 +1,24 @@
 // HTTP routes of slide annotations (DESIGN §25): the per-lecture summary, the per-slide documents (GET / PUT /
-// PATCH with optimistic concurrency), the SSE stream of a document, the text layout of a slide and the library-wide
-// tag list. Mounted by server/index.ts inside the API router, after the Host/Origin guard and the login (remote
+// PATCH with optimistic concurrency), the SSE stream of a document, the 빠진 슬라이드 archive (DESIGN §28), the text
+// layout of a slide and the library-wide tag list. Mounted by server/index.ts inside the API router, after the Host/Origin guard and the login (remote
 // mode): every route needs a session there. Errors are HttpErrors → JSON {error, …} through the API's error handler.
-// Ids are validated before any file is touched; `/annotations` and `/annotations/events` are registered before
-// `/annotations/:slide` so the slide validator never sees 'events'.
+// Ids are validated before any file is touched; `/annotations`, `/annotations/events` and `/annotations/removed` are
+// registered before `/annotations/:slide` so the slide validator never sees 'events' or 'removed'.
 import path from 'node:path';
 import express from 'express';
 import type { Request, Response } from 'express';
 import { ANNOTATION_CLIENT_HEADER, ANNOTATION_CLIENT_ID_RE, DOC_ID_RE } from '../shared/types.ts';
 import type { TextLayoutMissingResponse } from '../shared/types.ts';
-import { listAnnotationTags, patchSlideAnnotations, putSlideAnnotations, readSlideAnnotations, readSummary, subscribeAnnotations } from './annotations.ts';
+import {
+  listAnnotationTags,
+  listRemovedSlides,
+  patchSlideAnnotations,
+  putSlideAnnotations,
+  readSlideAnnotations,
+  readSummary,
+  removedThumbFile,
+  subscribeAnnotations,
+} from './annotations.ts';
 import { HttpError } from './config.ts';
 import { smsg } from './i18n.ts';
 import { docPaths, notReadyError, readStoredDoc, requestTextBackfill, textExtractionPending } from './library.ts';
@@ -42,6 +51,10 @@ export function createAnnotationsRouter(): express.Router {
   // An integer ≥ 1; the range (1..pageCount) is checked by the store.
   router.param('slide', (_req, _res, next, value: string) => {
     next(/^[1-9]\d{0,5}$/.test(value) ? undefined : new HttpError(404, smsg().common.notFound.slide));
+  });
+  // A deckRev of the 빠진 슬라이드 archive.
+  router.param('rev', (_req, _res, next, value: string) => {
+    next(/^\d{1,9}$/.test(value) ? undefined : new HttpError(404, smsg().common.notFound.slide));
   });
 
   /** Library-wide tag counts, for autocomplete. */
@@ -78,6 +91,24 @@ export function createAnnotationsRouter(): express.Router {
       if (closed) unsubscribe();
     } catch {
       if (!res.writableEnded) res.end();
+    }
+  });
+
+  /** The 빠진 슬라이드 archive (RemovedSlide[], DESIGN §28): the 필기 of slides a new version dropped. */
+  router.get(`${base}/removed`, async (req, res) => {
+    res.set('Cache-Control', 'no-cache');
+    res.json(await listRemovedSlides(req.params.docId as string));
+  });
+
+  /** The old thumbnail of an archived slide (`<slide>.webp`; nothing else is served from the archive). */
+  router.get(`${base}/removed/:rev/:file`, async (req, res) => {
+    const file = await removedThumbFile(req.params.docId as string, Number(req.params.rev), req.params.file as string);
+    if (!file) throw new HttpError(404, smsg().common.notFound.slide);
+    try {
+      await sendFile(res, file, { cacheControl: false, headers: { 'Cache-Control': 'no-cache', 'Content-Type': 'image/webp' } });
+    } catch (err) {
+      if (!res.headersSent) throw new HttpError(404, smsg().common.notFound.slide);
+      if ((err as NodeJS.ErrnoException).code !== 'ECONNABORTED') console.warn(`[http] ${req.path}: ${(err as Error).message}`);
     }
   });
 

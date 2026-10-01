@@ -9,6 +9,10 @@
 // device wrote first) is rebased: the server's document plus our ops, retried once; only a second 409 replaces the
 // document and says so. A network failure keeps the local state, retries once, then shows "저장 안 됨" on the slide
 // until a later write succeeds. Undo/redo is one global stack per document (history.ts).
+//
+// A `deck` event (DESIGN §28: a new version of the PDF applied, or undone) makes everything held numbered in the old
+// deck: the store stops (no more writes, loads or stream) and tells the app (onDeckEvent), which replaces it
+// (resetAnnotationStore) once it shows the new deck; the subscribers of useAnnotations move to the new store.
 import {
   MAX_ANNOTATION_ITEMS,
   MAX_ANNOTATION_OPS,
@@ -100,7 +104,7 @@ export const conflictReloaded = (): string => msg().viewer.store.conflictReloade
 export const tooManyItems = (): string => msg().viewer.store.tooManyItems(MAX_ANNOTATION_ITEMS);
 export const tooManyHidden = (): string => msg().viewer.store.tooManyHidden;
 
-const EVENT_NAMES = ['slide', 'slide-reset', 'summary', 'qa', 'ping', 'message'] as const;
+const EVENT_NAMES = ['slide', 'slide-reset', 'summary', 'qa', 'deck', 'ping', 'message'] as const;
 
 const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object';
 
@@ -142,10 +146,18 @@ export function parseAnnotationEvent(eventName: string, data: string): Annotatio
       if (!isObject(v) || typeof v.sessionId !== 'string') return null;
       return { type: 'qa', sessionId: v.sessionId, updatedAt: typeof v.updatedAt === 'string' ? v.updatedAt : null };
     }
+    case 'deck': {
+      if (!isObject(v) || typeof v.rev !== 'number' || (v.kind !== 'apply' && v.kind !== 'undo') || !Array.isArray(v.oldToNew)) return null;
+      const oldToNew = v.oldToNew.map((n) => (typeof n === 'number' && Number.isInteger(n) && n >= 1 ? n : null));
+      return { type: 'deck', rev: v.rev, kind: v.kind, oldToNew };
+    }
     default:
       return null;
   }
 }
+
+/** The `deck` event (DESIGN §28). */
+export type DeckEvent = Extract<AnnotationEvent, { type: 'deck' }>;
 
 interface WriteState {
   /** Ops applied locally, not sent yet. */
@@ -182,6 +194,8 @@ export class DocAnnotations {
   private lingerTimer: unknown = null;
   private wasOpen = false;
   private disposed = false;
+  /** A `deck` event arrived: what is held is numbered in the old deck; nothing is written, loaded or streamed. */
+  private swapped = false;
   private focus = 1;
 
   constructor(docId: string, deps: StoreDeps) {
@@ -201,11 +215,16 @@ export class DocAnnotations {
     this.syncStream();
     return () => {
       this.listeners.delete(listener);
-      if (this.listeners.size === 0) {
+      if (this.listeners.size === 0 && !this.disposed) {
         if (this.lingerTimer !== null) this.deps.timers.clearTimeout(this.lingerTimer);
         this.lingerTimer = this.deps.timers.setTimeout(() => this.dispose(), LINGER_MS);
       }
     };
+  }
+
+  /** A `deck` event stopped this store: the app replaces it with resetAnnotationStore. */
+  get isSwapped(): boolean {
+    return this.swapped;
   }
 
   /** A session of this document finished a turn or was deleted elsewhere (the `qa` event): refresh the notes. */
@@ -239,12 +258,13 @@ export class DocAnnotations {
 
   /** Load the summary once (again with `force`, e.g. after a `summary` event or a reconnect). */
   ensureSummary(force = false): Promise<void> {
+    if (this.swapped) return Promise.resolve();
     if (this.summaryLoad) return this.summaryLoad;
     if (this.snapshot.summary && !force) return Promise.resolve();
     this.summaryLoad = this.deps
       .getSummary(this.docId)
       .then((summary) => {
-        if (this.disposed) return;
+        if (this.disposed || this.swapped) return;
         this.set({ summary, summaryError: null });
       })
       .catch((e: unknown) => {
@@ -272,6 +292,7 @@ export class DocAnnotations {
   }
 
   private fetchSlide(slide: number): Promise<SlideAnnotations | null> {
+    if (this.swapped) return Promise.resolve(null);
     const running = this.loads.get(slide);
     if (running) return running;
     const failedAt = this.loadFailedAt.get(slide);
@@ -279,7 +300,7 @@ export class DocAnnotations {
     const promise = this.deps
       .getSlide(this.docId, slide)
       .then((fetched) => {
-        if (this.disposed) return null;
+        if (this.disposed || this.swapped) return null;
         this.loadFailedAt.delete(slide);
         return this.reconcile(slide, fetched);
       })
@@ -344,7 +365,7 @@ export class DocAnnotations {
    * the server's document.
    */
   mutate(slide: number, ops: readonly AnnotationOp[], options: { undoable?: boolean } = {}): boolean {
-    if (this.disposed || ops.length === 0) return false;
+    if (this.disposed || this.swapped || ops.length === 0) return false;
     const doc = this.snapshot.slides.get(slide) ?? emptySlideAnnotations(slide);
     if (itemsAfter(doc, ops) > MAX_ANNOTATION_ITEMS) {
       this.deps.toast(tooManyItems(), 'error');
@@ -368,7 +389,7 @@ export class DocAnnotations {
 
   private flush(slide: number): void {
     const w = this.write(slide);
-    if (w.inflight || w.pending.length === 0 || this.disposed) return;
+    if (w.inflight || w.pending.length === 0 || this.disposed || this.swapped) return;
     if (w.retryTimer !== null) {
       this.deps.timers.clearTimeout(w.retryTimer);
       w.retryTimer = null;
@@ -385,7 +406,7 @@ export class DocAnnotations {
         w.inflight = null;
         w.rebased = false;
         w.networkRetried = false;
-        if (this.disposed) return;
+        if (this.disposed || this.swapped) return;
         this.setUnsaved(slide, false);
         this.reconcile(slide, result);
         if (w.stale) {
@@ -400,7 +421,7 @@ export class DocAnnotations {
   private onWriteFailed(slide: number, ops: AnnotationOp[], e: unknown): void {
     const w = this.write(slide);
     w.inflight = null;
-    if (this.disposed) return;
+    if (this.disposed || this.swapped) return;
     const current = conflictCurrentOf(e);
     if (current) {
       if (!w.rebased) {
@@ -501,7 +522,7 @@ export class DocAnnotations {
   // ---- the stream -----------------------------------------------------------------------------------------------
 
   private syncStream(): void {
-    if (this.client || this.listeners.size === 0) return;
+    if (this.client || this.listeners.size === 0 || this.swapped || this.disposed) return;
     this.client = new RecordingEventsClient<AnnotationEvent>({
       url: () => this.deps.eventsUrl(this.docId, this.clientId),
       create: this.deps.createEventSource,
@@ -530,6 +551,9 @@ export class DocAnnotations {
         return;
       case 'qa':
         for (const l of this.qaListeners) l({ sessionId: event.sessionId, updatedAt: event.updatedAt });
+        return;
+      case 'deck':
+        this.onDeck(event);
         return;
       case 'slide': {
         const held = this.snapshot.slides.get(event.slide);
@@ -577,25 +601,114 @@ export class DocAnnotations {
     this.flushAll();
   }
 
+  /**
+   * The deck was swapped (DESIGN §28): stop — the stream (the server ends it anyway), the writes not sent yet (they are
+   * numbered in the old deck; the server refused them during the swap), any load — and tell the app. Without anyone
+   * listening, the store is replaced right away.
+   */
+  private onDeck(event: DeckEvent): void {
+    if (this.swapped) return;
+    this.swapped = true;
+    this.client?.stop();
+    this.client = null;
+    if (this.summaryTimer !== null) this.deps.timers.clearTimeout(this.summaryTimer);
+    this.summaryTimer = null;
+    for (const w of this.writes.values()) {
+      if (w.retryTimer !== null) this.deps.timers.clearTimeout(w.retryTimer);
+      w.retryTimer = null;
+      w.pending = [];
+    }
+    for (const l of [...deckListeners]) l(this.docId, event);
+    if (deckListeners.size === 0 && stores.get(this.docId) === this) resetAnnotationStore(this.docId);
+  }
+
   reconnectNow(): void {
+    if (this.swapped) return;
     this.client?.reconnectNow();
     this.flushAll();
   }
 
   dispose(): void {
     if (this.listeners.size > 0) return;
+    this.close();
+  }
+
+  /** Stop for good: the stream, the timers; forgotten (with its text layouts) while it is the document's store. */
+  close(): void {
     this.disposed = true;
     this.client?.stop();
     this.client = null;
+    if (this.lingerTimer !== null) this.deps.timers.clearTimeout(this.lingerTimer);
+    this.lingerTimer = null;
     if (this.summaryTimer !== null) this.deps.timers.clearTimeout(this.summaryTimer);
     this.summaryTimer = null;
     for (const w of this.writes.values()) if (w.retryTimer !== null) this.deps.timers.clearTimeout(w.retryTimer);
-    dropTextLayouts(this.docId);
-    if (stores.get(this.docId) === this) stores.delete(this.docId);
+    if (stores.get(this.docId) === this) {
+      stores.delete(this.docId);
+      dropTextLayouts(this.docId);
+    }
+  }
+
+  /** A fresh store of the same document with the same API (resetAnnotationStore). */
+  successor(): DocAnnotations {
+    return new DocAnnotations(this.docId, this.deps);
   }
 }
 
 const stores = new Map<string, DocAnnotations>();
+/** subscribeAnnotations: per document, what moves each subscription to the store that replaced the old one. */
+const followers = new Map<string, Set<() => void>>();
+const deckListeners = new Set<(docId: string, event: DeckEvent) => void>();
+
+/** Every `deck` event of any open lecture (the app updates the lecture, its positions and what it holds of it). */
+export function onDeckEvent(listener: (docId: string, event: DeckEvent) => void): () => void {
+  deckListeners.add(listener);
+  return () => {
+    deckListeners.delete(listener);
+  };
+}
+
+/**
+ * Forget everything held for a document — its store (closed: no more writes or stream) and its text layouts — after
+ * its deck was swapped (DESIGN §28). The subscribers of subscribeAnnotations move to a fresh store, which loads the
+ * new deck's annotations.
+ */
+export function resetAnnotationStore(docId: string): void {
+  const old = stores.get(docId);
+  dropTextLayouts(docId);
+  if (!old) return;
+  stores.delete(docId);
+  old.close();
+  const follow = followers.get(docId);
+  if (!follow || follow.size === 0) return;
+  stores.set(docId, old.successor());
+  for (const move of [...follow]) move();
+}
+
+/**
+ * Subscribe to the store of a document (created on first use), following it when resetAnnotationStore replaces it:
+ * the listener is then subscribed to the new store and called once.
+ */
+export function subscribeAnnotations(docId: string, listener: Listener): () => void {
+  let unsubscribe = annotationStore(docId).subscribe(listener);
+  const move = () => {
+    unsubscribe();
+    unsubscribe = annotationStore(docId).subscribe(listener);
+    listener();
+  };
+  let set = followers.get(docId);
+  if (!set) {
+    set = new Set();
+    followers.set(docId, set);
+  }
+  set.add(move);
+  return () => {
+    const current = followers.get(docId);
+    current?.delete(move);
+    if (current?.size === 0) followers.delete(docId);
+    unsubscribe();
+  };
+}
 
 /** The store of a document (created on first use, with the real API unless `deps` are given). */
 export function annotationStore(docId: string, deps: StoreDeps = defaultDeps): DocAnnotations {

@@ -10,6 +10,7 @@ const NOT_LOADED: FeedSnapshot = {
   error: null,
   connection: 'stopped',
   aligning: false,
+  markers: null,
 };
 
 /** `info` (what the list knows) seeds a feed that is created now; later infos arrive through updateFeedInfo. */

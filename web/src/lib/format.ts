@@ -94,6 +94,7 @@ export function pageList(slides: number[]): string {
 export type ContextChipKind =
   | 'recovered'
   | 'switched'
+  | 'deckUpdated'
   | 'rollover'
   | 'primed'
   | 'overview'
@@ -129,10 +130,12 @@ export function describeContext(ctx: ContextInfo | undefined): ContextChip[] {
   const m = msg().chat.context;
   const out: ContextChip[] = [];
   const recovered = ctx.recoveredFrom ? recoveredChip(ctx.recoveredFrom) : undefined;
-  // A recovery or an LLM switch is a forced rollover: its chip replaces the plain "new conversation" one.
+  // A recovery, an LLM switch or a new version of the PDF (DESIGN §28) is a forced rollover: its chip replaces the
+  // plain "new conversation" one.
   if (recovered) out.push({ kind: 'recovered', ...recovered });
-  else if (ctx.switched) {
-    out.push({ kind: 'switched', text: m.switched, title: m.switchedTitle });
+  else if (ctx.switched || ctx.deckUpdated) {
+    if (ctx.deckUpdated) out.push({ kind: 'deckUpdated', text: m.deckUpdated, title: m.deckUpdatedTitle });
+    if (ctx.switched) out.push({ kind: 'switched', text: m.switched, title: m.switchedTitle });
   } else if (ctx.rollover) out.push({ kind: 'rollover', text: m.rollover });
   if (ctx.primed) out.push({ kind: 'primed', text: m.primed });
   if (ctx.overviewImages > 0) out.push({ kind: 'overview', text: m.overviewImages(ctx.overviewImages) });
