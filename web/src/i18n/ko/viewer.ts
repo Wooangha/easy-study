@@ -34,7 +34,7 @@ export const viewer = {
   toasts: {
     layoutPending: '이 슬라이드의 글자 위치를 준비하는 중이에요 — 잠시 뒤 다시 해 보세요',
     noText: '이 슬라이드에서는 글자를 찾지 못했어요',
-    longPress: '길게 누른 채로 끌어서 영역을 선택하세요',
+    longPress: '손가락은 길게 누른 채로 끌어서 영역을 선택하세요 (펜·마우스는 바로 끌기)',
     memoNotFound: '그 메모를 찾을 수 없어요',
     undone: '되돌렸어요',
     redone: '다시 실행했어요',
@@ -71,9 +71,9 @@ export const viewer = {
       memo: '메모',
     },
     titles: {
-      select: '선택·첨부: 필기를 클릭해 옮기거나 지우고, 빈 곳을 끌면 그 영역을 질문에 첨부해요',
+      select: '선택·첨부: 필기를 클릭해 옮기거나 지우고, 빈 곳을 끌면 그 영역을 질문에 첨부해요 (펜·마우스는 바로 끌기, 손가락은 길게 눌러 끌기)',
       marquee: '범위 선택: 빈 곳에서 끌어 여러 필기를 한꺼번에 골라요 · Shift+클릭으로 더하고 빼요 (다시 누르거나 Esc로 끔)',
-      pen: '펜: Apple Pencil·S Pen·마우스로 써요 — 손가락은 스크롤·확대 (다시 누르거나 Esc로 끔)',
+      pen: '펜: Apple Pencil·S Pen·마우스로 써요 — 한 손가락은 스크롤, 두 손가락은 확대, 손바닥은 무시해요 (다시 누르거나 Esc로 끔)',
       eraser: '지우개: 지나간 펜 획을 지워요 (다시 누르거나 Esc로 끔)',
       highlight: '형광펜: 글줄 위에서 끌면 그 줄에 맞춰 칠해요 (다시 누르거나 Esc로 끔)',
       textHighlight: '텍스트 형광: 글자 위에서 끌면 단어에 맞춰 칠하고, 칠한 글 위를 다시 끌면 범위가 바뀌어요 (다시 누르거나 Esc로 끔)',
@@ -83,10 +83,10 @@ export const viewer = {
       memo: '메모: 클릭한 자리에 스티커 메모를 붙여요 (다시 누르거나 Esc로 끔)',
     },
     /** The toolbar's one-line hint (toolHint). */
-    hintSelect: 'j/k · ↑/↓ · 빈 곳을 끌면 영역 첨부',
+    hintSelect: 'j/k · ↑/↓ · 빈 곳을 끌면 영역 첨부 (손가락은 길게 눌러 끌기)',
     hintMarquee: '범위 선택: 빈 곳에서 끌어 여러 개 고르기 · Shift+클릭 더하기·빼기 · Esc',
     /** 펜's hint: `finger` = 손가락으로도 쓰기 is on. */
-    hintPen: (finger: boolean): string => (finger ? '펜: 펜·손가락·마우스로 쓰기 · Esc' : '펜: Apple Pencil·마우스로 쓰기 · 손가락은 스크롤'),
+    hintPen: (finger: boolean): string => (finger ? '펜: 펜·손가락·마우스로 쓰기 · Esc' : '펜: Apple Pencil·마우스로 쓰기 · 손가락은 스크롤·확대 (손바닥은 무시)'),
     hintEraser: '지우개: 지나간 펜 획을 지워요',
     /** A drawing tool's hint: `label` is the tool's name, `click` whether it draws with a click (text, memo). */
     hintDraw: (label: string, click: boolean) => `${label}: 빈 곳에서 ${click ? '클릭' : '끌기'} · 필기는 클릭해 옮기기 · Esc`,

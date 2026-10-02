@@ -786,6 +786,8 @@ details[open] > summary::before {
   flex: 1;
   min-width: 0;
   display: flex;
+  /* The chat pane of a collapsed split is parked in it (below). */
+  position: relative;
 }
 
 .split-pane {
@@ -803,23 +805,28 @@ details[open] > summary::before {
   flex: 1 1 0;
 }
 
+/* The divider: the separator that is dragged (.split-handle) and, beside it, the button that folds the chat. */
 .split-divider {
-  /* Its line: thicker and in the accent color while pointed at, focused or dragged. */
-  --split-line: 1px;
-  --split-line-color: var(--border);
   flex: none;
   width: 7px;
   margin: 0 -3px;
   position: relative;
   z-index: 2;
+}
+
+.split-handle {
+  /* Its line: thicker and in the accent color while pointed at, focused, pressed or dragged. */
+  --split-line: 1px;
+  --split-line-color: var(--border);
+  position: absolute;
+  inset: 0;
   cursor: col-resize;
   touch-action: none;
   -webkit-user-select: none;
   user-select: none;
-  background: transparent;
 }
 
-.split-divider::after {
+.split-handle::after {
   content: '';
   position: absolute;
   top: 0;
@@ -833,21 +840,21 @@ details[open] > summary::before {
     left 0.12s;
 }
 
-.split-divider:focus-visible,
-.split.is-dragging .split-divider {
+.split-handle:focus-visible,
+.split-handle.is-pressed {
   --split-line: 3px;
   --split-line-color: var(--accent);
 }
 
 /* Not on a touch screen, where the hover stays after a tap. */
 @media (hover: hover) {
-  .split-divider:hover {
+  .split-handle:hover {
     --split-line: 3px;
     --split-line-color: var(--accent);
   }
 }
 
-.split-divider:focus-visible {
+.split-handle:focus-visible {
   outline: none;
 }
 
@@ -857,8 +864,15 @@ details[open] > summary::before {
   user-select: none;
 }
 
-.split.is-dragging .split-pane {
-  pointer-events: none;
+/*
+ * A mouse that drags the divider does not hover the panes. Only while it is really dragged (SplitPane.tsx: the press
+ * left its slop; whatever ends the press ends this), never for a press alone — and never on a touch screen, where the
+ * divider holds its own finger or pencil anyway: nothing there may take the pen and the fingers from the panes.
+ */
+@media (hover: hover) and (pointer: fine) {
+  .split.is-dragging .split-pane {
+    pointer-events: none;
+  }
 }
 
 /* Narrow screens (SplitPane.tsx sets the class at STACKED_QUERY): slides on top, chat below, a horizontal divider. */
@@ -870,10 +884,13 @@ details[open] > summary::before {
   width: auto;
   height: 7px;
   margin: -3px 0;
+}
+
+.split.is-stacked .split-handle {
   cursor: row-resize;
 }
 
-.split.is-stacked .split-divider::after {
+.split.is-stacked .split-handle::after {
   top: calc((7px - var(--split-line)) / 2);
   bottom: auto;
   left: 0;
@@ -890,14 +907,17 @@ details[open] > summary::before {
   cursor: row-resize;
 }
 
-/* The grip: a short bar in the middle of the divider, on touch screens only (a mouse sees the thin line). */
+/*
+ * The grip: a short bar in the middle of the divider, on touch screens only (a mouse sees the thin line). Side by
+ * side it is longer: the collapse button sits on its middle.
+ */
 .split-grip {
   display: none;
   position: absolute;
   top: 50%;
   left: 50%;
   width: 5px;
-  height: 44px;
+  height: 76px;
   transform: translate(-50%, -50%);
   border-radius: 3px;
   background: var(--muted);
@@ -910,30 +930,159 @@ details[open] > summary::before {
   height: 5px;
 }
 
-.split-divider:focus-visible .split-grip,
-.split.is-dragging .split-grip {
+.split-handle:focus-visible .split-grip,
+.split-handle.is-pressed .split-grip {
   background: var(--accent);
 }
 
 /*
+ * The button that folds the chat away and brings it back: a small circle on the divider — in its middle side by
+ * side, near its end when stacked (clear of the grip and of the tabs of the lower pane).
+ */
+.split-toggle {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 22px;
+  height: 22px;
+  transform: translate(-50%, -50%);
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  background: var(--surface-raised);
+  color: var(--text-2);
+  font-size: 12px;
+  box-shadow: var(--shadow-sm);
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    opacity 0.12s,
+    color 0.12s,
+    border-color 0.12s;
+}
+
+.split.is-stacked .split-toggle {
+  left: auto;
+  right: 14px;
+  transform: translateY(-50%);
+}
+
+@media (hover: hover) {
+  .split-toggle:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+}
+
+/* A mouse sees the button only while it points at the divider or the keyboard is on it — and always when collapsed. */
+@media (hover: hover) and (pointer: fine) {
+  .split:not(.is-collapsed) .split-toggle {
+    opacity: 0;
+  }
+
+  .split:not(.is-collapsed) .split-divider:hover .split-toggle,
+  .split:not(.is-collapsed) .split-handle:focus-visible + .split-toggle,
+  .split:not(.is-collapsed) .split-toggle:focus-visible {
+    opacity: 1;
+  }
+}
+
+/*
+ * Collapsed: the slides take everything and the divider is a strip at the edge with only the button. The chat pane
+ * stays what it was — laid out at its size under the slides, hidden (and inert) —, so an answer or a recording goes
+ * on and the place it was scrolled to is kept.
+ */
+.split.is-collapsed .split-left {
+  flex: 1 1 0;
+}
+
+.split.is-collapsed .split-right {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: calc((1 - var(--split, 0.58)) * 100%);
+  visibility: hidden;
+}
+
+.split.is-collapsed .split-divider {
+  width: 24px;
+  margin: 0;
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+}
+
+/* Nothing to drag. */
+.split.is-collapsed .split-handle {
+  display: none;
+}
+
+.split.is-stacked.is-collapsed .split-right {
+  top: auto;
+  left: 0;
+  width: auto;
+  height: calc((1 - var(--split, 0.46)) * 100%);
+}
+
+.split.is-stacked.is-collapsed .split-divider {
+  width: auto;
+  height: 24px;
+  border-left: 0;
+  border-top: 1px solid var(--border);
+}
+
+/*
  * A finger or a pencil cannot hit 7 px: there the divider is grabbed 25 px wide, over the edges of the panes (the
- * layout stays), and shows its grip.
+ * layout stays), and shows its grip. The area grows over the chat pane: at most 6 px of it lie over the slides, where
+ * a palm rests and strokes end.
  */
 @media (pointer: coarse) {
-  .split-divider::before {
+  .split-handle::before {
     content: '';
     position: absolute;
-    inset: 0 -9px;
+    inset: 0 -15px 0 -3px;
     touch-action: none;
   }
 
-  /* More of it over the slides than over the tabs of the lower pane, which stay tappable. */
-  .split.is-stacked .split-divider::before {
-    inset: -12px 0 -6px;
+  /* Less of it when stacked: the tabs of the lower pane stay tappable. */
+  .split.is-stacked .split-handle::before {
+    inset: -3px 0 -9px;
   }
 
   .split-grip {
     display: block;
+  }
+
+  .split-toggle {
+    width: 28px;
+    height: 28px;
+    font-size: 15px;
+  }
+
+  /* 36 px for a finger: what the circle lacks is added around it (from its border), but not over the slides. */
+  .split-toggle::before {
+    content: '';
+    position: absolute;
+    inset: -5px -9px -5px -1px;
+  }
+
+  .split.is-stacked .split-toggle::before {
+    inset: -1px -5px -9px;
+  }
+
+  .split.is-collapsed .split-toggle::before {
+    inset: -5px;
+  }
+
+  .split.is-collapsed .split-divider {
+    width: 32px;
+  }
+
+  .split.is-stacked.is-collapsed .split-divider {
+    width: auto;
+    height: 32px;
   }
 }
 
@@ -1093,7 +1242,10 @@ details[open] > summary::before {
   height: 100%;
   object-fit: contain;
   user-select: none;
+  -webkit-user-select: none;
+  /* A long press with a finger or a stylus neither lifts the image for a drag nor opens its menu (iPadOS). */
   -webkit-user-drag: none;
+  -webkit-touch-callout: none;
 }
 
 .slide-error {
@@ -6856,21 +7008,46 @@ details[open] > summary::before {
   cursor: crosshair;
 }
 
-/* 펜 / 지우개 (DESIGN §29, palm rejection): a stylus or the mouse writes, also over items; fingers keep scrolling and
-   pinching the slides (the viewer's own zoom: no page zoom, no double-tap zoom) — a stylus is kept from scrolling by
-   the viewer's touch listener. With 손가락으로도 쓰기, fingers write too. */
+/* 펜 / 지우개 (DESIGN §29, palm rejection): a stylus or the mouse writes, also over items. The browser does nothing
+   of its own with a touch over the slides — a palm that starts a native scroll takes the pen's touches for as long as
+   that scroll tracks: the viewer scrolls (one finger) and pinches (two) itself and tells the palm from a finger
+   (SlideViewer's touch listeners, lib/touchPan.ts). With 손가락으로도 쓰기 fingers write on the slides and scroll
+   beside them. */
 .viewer.is-ink-tool .slide-box {
-  touch-action: pan-x pan-y;
-  cursor: crosshair;
-}
-
-.viewer.is-ink-tool .annot-shape,
-.viewer.is-ink-tool .annot-text {
-  cursor: crosshair;
-}
-
-.viewer.is-ink-tool.is-finger-ink .slide-box {
   touch-action: none;
+  cursor: crosshair;
+}
+
+.viewer.is-ink-tool:not(.is-finger-ink) .viewer-scroll {
+  touch-action: none;
+}
+
+/* Nothing of the layer is a pointer target there (the pen writes over everything and the eraser hit-tests by
+   geometry): a press always lands on the slide box, a node that stays — a stroke drawn a moment ago is re-rendered
+   when its write is answered, and the end of a touch that began on a replaced node reaches nobody. Memo cards and
+   question markers stay controls. */
+.viewer.is-ink-tool .annot-layer svg,
+.viewer.is-ink-tool .annot-shape,
+.viewer.is-ink-tool .annot-text:not(.is-editing),
+.viewer.is-ink-tool .annot-handle,
+.viewer.is-ink-tool .slide-box img {
+  pointer-events: none;
+}
+
+/* The debug overlay of the tablet input (lib/inkDebug.ts, ?inkdebug=1): fixed over the viewer's bottom left corner. */
+.ink-debug {
+  position: fixed;
+  z-index: 90;
+  margin: 0;
+  padding: 4px 6px;
+  max-width: min(70vw, 440px);
+  overflow: hidden;
+  border-radius: 6px;
+  background: rgb(15 18 25 / 0.78);
+  color: #d7f5dd;
+  font: 10px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre;
+  pointer-events: none;
 }
 
 .annot-unsaved {

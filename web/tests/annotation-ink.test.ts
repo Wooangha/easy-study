@@ -4,8 +4,10 @@
 // touches, a stroke as items (moved / resized / recolored like a shape, `pts` never patched, counted apart from the
 // other items), the rendering (a nested <svg> with the image's aspect; a move shifts it, one box around a group), the
 // toolbar (되돌리기 / 다시 실행, folding when it has no room) and the item menu under 펜, the per-device settings, the
-// 빠진 슬라이드 row and the dark-mode edge of the ink swatches; which pointer and touch events start, block or keep a
-// stroke (a pen that is not the primary pointer, a tap on a control, a cancel right after the press).
+// 빠진 슬라이드 row and the dark-mode edge of the ink swatches; which pointer and touch events start a gesture, end one
+// whose contact is gone or are kept from the browser (a pen that is not the primary pointer, a tap on a control, a
+// press that finds a stale gesture, a touch list without the gesture's touch), and a stylus as a mouse in the other
+// tools.
 // Run: node --test web/tests/*.test.ts
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -20,20 +22,28 @@ import { INK_WIDTHS, MAX_ANNOTATION_ITEMS, type HighlightItem, type InkItem, typ
 import { applyOps, canAddItems, emptySlideAnnotations, moveItems, newInk, resizeRect } from '../src/lib/annotations/geometry.ts';
 import {
   acceptsPress,
-  blocksInkTouch,
+  blocksTouch,
+  CONTACT_MATCH_PX,
+  contactFor,
+  contactGone,
   eraserHits,
+  fingerPointer,
+  HIT_SLOP_PX,
   hitTestItems,
-  INK_CANCEL_SLOP_PX,
   itemArea,
   itemHit,
-  keepsCancelledStroke,
   marqueeSelect,
   onInkControl,
+  pressOver,
   pressPlan,
+  releasedUnseen,
   slopFor,
+  TOUCH_HIT_SLOP_PX,
   unionIds,
-  type InkTouch,
+  type Contact,
+  type HeldGesture,
   type PressInput,
+  type ViewerTouch,
 } from '../src/lib/annotations/gesture.ts';
 import { imageAspectOf, inkPathOf, inkPressure, inkSamples } from '../src/lib/annotations/ink.ts';
 import { getFingerInk, getInkColor, getInkWidth, setInkColor, setInkWidth } from '../src/lib/annotations/settings.ts';
@@ -337,20 +347,37 @@ describe('the pointer and touch events of 펜 / 지우개', () => {
     assert.equal(acceptsPress({ isPrimary: true, pointerType: 'mouse', button: 2 }), false);
   });
 
-  const touch = (patch: Partial<InkTouch>): boolean => blocksInkTouch({ type: 'touchstart', stroke: false, stylus: false, control: false, active: false, ...patch });
+  const touch = (patch: Partial<ViewerTouch>): boolean => blocksTouch({ type: 'touchstart', penMode: false, stylus: false, control: false, contact: false, stroke: false, ...patch });
 
-  test('a stylus never scrolls the slides, but its tap on a control (badge, marker, memo card, menu) is not swallowed', () => {
+  test('a stylus never scrolls the slides, with any tool, but its tap on a control (badge, marker, memo card, menu) is not swallowed', () => {
     assert.equal(touch({ stylus: true }), true);
     assert.equal(touch({ stylus: true, type: 'touchmove' }), true);
     assert.equal(touch({ stylus: true, control: true }), false, 'the touchstart reaches the button');
     assert.equal(touch({ stylus: true, control: true, type: 'touchmove' }), true);
-    // During a stroke every touch is blocked, on a control too (a palm put down meanwhile).
-    assert.equal(touch({ stroke: true, control: true }), true);
-    assert.equal(touch({ stroke: true, type: 'touchmove' }), true);
-    // A finger scrolls, unless a gesture is live.
+    // While a stroke's contact is down every touch is blocked, on a control too (a palm put down meanwhile).
+    assert.equal(touch({ stroke: true, contact: true, control: true }), true);
+    assert.equal(touch({ stroke: true, contact: true, type: 'touchmove' }), true);
+    // A finger scrolls, unless the contact of a live gesture is down.
     assert.equal(touch({}), false);
     assert.equal(touch({ type: 'touchmove' }), false);
-    assert.equal(touch({ type: 'touchmove', active: true }), true);
+    assert.equal(touch({ type: 'touchmove', contact: true }), true);
+    assert.equal(touch({ contact: true }), false, 'the touchstart of a second finger during a drag is left alone');
+  });
+
+  test('a gesture object alone blocks nothing: a stroke whose contact is not on the glass lets fingers through', () => {
+    // The release of a stroke was lost: without its contact among the touches, a finger still scrolls and taps.
+    assert.equal(touch({ stroke: true, contact: false }), false);
+    assert.equal(touch({ stroke: true, contact: false, type: 'touchmove' }), false);
+    assert.equal(touch({ stroke: true, contact: false, control: true }), false);
+  });
+
+  test('under 펜 / 지우개 the browser gets no touch over the slides (the viewer scrolls and pinches itself); a control keeps its tap', () => {
+    assert.equal(touch({ penMode: true }), true, 'a finger or a palm: no native scroll, no double-tap zoom');
+    assert.equal(touch({ penMode: true, type: 'touchmove' }), true);
+    assert.equal(touch({ penMode: true, control: true }), false, 'a tap on the Q&A badge still clicks');
+    assert.equal(touch({ penMode: true, control: true, type: 'touchmove' }), false);
+    assert.equal(touch({ penMode: true, control: true, stylus: true }), false);
+    assert.equal(touch({ penMode: true, control: true, stroke: true, contact: true }), true);
   });
 
   test('what counts as a control', () => {
@@ -363,12 +390,150 @@ describe('the pointer and touch events of 펜 / 지우개', () => {
     assert.equal(onInkControl({}), false);
   });
 
-  test('a stroke cancelled before it went 12 px (an S Pen fling Chrome made a scroll) is dropped; a longer one is kept', () => {
-    assert.equal(INK_CANCEL_SLOP_PX, 12);
-    assert.equal(keepsCancelledStroke(0), false);
-    assert.equal(keepsCancelledStroke(11.9), false);
-    assert.equal(keepsCancelledStroke(12), true);
-    assert.equal(keepsCancelledStroke(80), true);
+});
+
+describe('a gesture never outlives its contact (the release went unseen)', () => {
+  const held = (patch: Partial<HeldGesture> = {}): HeldGesture => ({ pointerId: 5, pointerType: 'pen', stroke: true, active: true, ...patch });
+  const press = (current: HeldGesture | null, pointerType: string, pointerId: number, isPrimary = true) => pressOver(current, { pointerId, pointerType, isPrimary });
+
+  test('no gesture registered: the press starts one', () => {
+    assert.equal(press(null, 'pen', 7), 'start');
+  });
+
+  test('a new press of the pen or the mouse finishes a stroke still registered (what was drawn stays) and goes on', () => {
+    // iPadOS gives every contact of the Pencil a new pointerId: the old stroke's pointerup was lost.
+    assert.equal(press(held(), 'pen', 6, false), 'finish');
+    assert.equal(press(held({ pointerType: 'mouse', pointerId: 1 }), 'mouse', 1), 'finish', 'the mouse is always pointer 1');
+    assert.equal(press(held({ pointerType: 'mouse', pointerId: 1 }), 'pen', 9), 'finish');
+    assert.equal(press(held(), 'mouse', 1), 'finish');
+    // The gesture's own pointer pressed again: it cannot have been down.
+    assert.equal(press(held(), 'pen', 5), 'finish');
+    assert.equal(press(held({ pointerType: 'touch', pointerId: 3 }), 'touch', 3), 'finish');
+  });
+
+  test('any other gesture left behind is dropped by the next press of the pen or the mouse', () => {
+    const drag = held({ stroke: false });
+    assert.equal(press(drag, 'pen', 6), 'drop', 'a move whose release was lost does not make the slides ignore the pen');
+    assert.equal(press(held({ stroke: false, active: false }), 'pen', 6), 'drop');
+    assert.equal(press(held({ stroke: false, pointerType: 'mouse', pointerId: 1 }), 'mouse', 1), 'drop');
+  });
+
+  test('a pen replaces what a finger or a palm started, a stroke under 손가락으로도 쓰기 too', () => {
+    assert.equal(press(held({ pointerType: 'touch', pointerId: 3 }), 'pen', 6), 'drop', 'the palm wrote it');
+    assert.equal(press(held({ pointerType: 'touch', pointerId: 3, stroke: false, active: false }), 'pen', 6), 'drop');
+  });
+
+  test('a palm or a second finger during a gesture is not a press; only the first finger of a new sequence replaces a finger’s gesture', () => {
+    assert.equal(press(held(), 'touch', 3), 'ignore', 'a palm landing during a stroke of the pen');
+    assert.equal(press(held(), 'touch', 3, false), 'ignore');
+    assert.equal(press(held({ pointerType: 'mouse', pointerId: 1, stroke: false }), 'touch', 3), 'ignore');
+    // Not live yet: a palm does not cancel the pen's pending drag.
+    assert.equal(press(held({ stroke: false, active: false }), 'touch', 3), 'ignore');
+    const finger = held({ pointerType: 'touch', pointerId: 3, stroke: false });
+    assert.equal(press(finger, 'touch', 4, false), 'ignore', 'a second finger during a live drag');
+    assert.equal(press({ ...finger, active: false }, 'touch', 4, false), 'cancel', 'two fingers pinch');
+    assert.equal(press(finger, 'touch', 8, true), 'drop', 'a new first finger: the old one is gone');
+    assert.equal(press(held({ pointerType: 'touch', pointerId: 3 }), 'touch', 8, true), 'finish');
+  });
+
+  test('a move shows the release went unseen: the mouse with no button held, the pen hovering', () => {
+    const mouse = { pointerId: 1, pointerType: 'mouse' };
+    assert.equal(releasedUnseen(mouse, { pointerId: 1, pointerType: 'mouse', buttons: 0, pressure: 0 }), true);
+    assert.equal(releasedUnseen(mouse, { pointerId: 1, pointerType: 'mouse', buttons: 1, pressure: 0.5 }), false);
+    const pen = { pointerId: 5, pointerType: 'pen' };
+    assert.equal(releasedUnseen(pen, { pointerId: 5, pointerType: 'pen', buttons: 0, pressure: 0 }), true);
+    assert.equal(releasedUnseen(pen, { pointerId: 9, pointerType: 'pen', buttons: 0, pressure: 0 }), true, 'one pen, whatever its pointerId');
+    assert.equal(releasedUnseen(pen, { pointerId: 5, pointerType: 'pen', buttons: 1, pressure: 0.3 }), false, 'writing');
+    assert.equal(releasedUnseen(pen, { pointerId: 5, pointerType: 'pen', buttons: 0, pressure: 0.3 }), false, 'pressure: still on the glass');
+    // Another kind of pointer says nothing about it; a finger does not hover.
+    assert.equal(releasedUnseen(pen, { pointerId: 1, pointerType: 'mouse', buttons: 0, pressure: 0 }), false);
+    assert.equal(releasedUnseen({ pointerId: 3, pointerType: 'touch' }, { pointerId: 3, pointerType: 'touch', buttons: 0, pressure: 0 }), false);
+  });
+
+  test('a hover does not end a stroke whose contact is on the glass (iPadOS sends the Pencil’s hover apart from its contact)', () => {
+    const pen = { pointerId: 5, pointerType: 'pen', downAt: 2000 };
+    const hover = { pointerId: 1, pointerType: 'pen', buttons: 0, pressure: 0 };
+    // The touch events still list the stroke's own touch: a last hover move that arrives after the press ends nothing.
+    assert.equal(releasedUnseen(pen, { ...hover, timeStamp: 2010 }, true), false);
+    assert.equal(releasedUnseen(pen, { ...hover, timeStamp: 2010 }, false), true, 'its touch is gone, or it has none (no touch events)');
+    // A hover sent before the press (it waited behind it) says nothing about the release.
+    assert.equal(releasedUnseen(pen, { ...hover, timeStamp: 1990 }), false);
+    assert.equal(releasedUnseen(pen, { ...hover, timeStamp: 2000 }), false);
+    assert.equal(releasedUnseen(pen, hover), true, 'no time known');
+    // The mouse alike: a move from before the press is not its release.
+    const mouse = { pointerId: 1, pointerType: 'mouse', downAt: 2000 };
+    assert.equal(releasedUnseen(mouse, { pointerId: 1, pointerType: 'mouse', buttons: 0, pressure: 0, timeStamp: 1999 }), false);
+    assert.equal(releasedUnseen(mouse, { pointerId: 1, pointerType: 'mouse', buttons: 0, pressure: 0, timeStamp: 2500 }), true);
+  });
+
+  const at = (id: number, x: number, y: number, stylus = false): Contact => ({ id, x, y, stylus });
+
+  test('the touch of a gesture: the stylus for a pen, the nearest finger for a finger', () => {
+    const touches = [at(1, 300, 400), at(2, 100, 100, true), at(3, 110, 105)];
+    assert.equal(contactFor({ pointerType: 'pen', at: { x: 100, y: 100 } }, touches), 2);
+    assert.equal(contactFor({ pointerType: 'pen', at: { x: 900, y: 900 } }, touches), 2, 'the stylus, wherever the pointer says it is');
+    assert.equal(contactFor({ pointerType: 'touch', at: { x: 108, y: 104 } }, touches), 3, 'never the stylus for a finger');
+    assert.equal(contactFor({ pointerType: 'touch', at: { x: 298, y: 401 } }, touches), 1);
+    assert.equal(contactFor({ pointerType: 'touch', at: { x: 300 + CONTACT_MATCH_PX + 1, y: 400 } }, [touches[0]]), undefined, 'too far to be it');
+    // A pen whose touch is not marked as a stylus is not guessed among the fingers (a palm lies right next to it).
+    assert.equal(contactFor({ pointerType: 'pen', at: { x: 300, y: 400 } }, [at(1, 300, 400)]), undefined);
+    assert.equal(contactFor({ pointerType: 'pen', at: { x: 0, y: 0 } }, []), undefined);
+  });
+
+  test('a touch list without the gesture’s touch: the contact is gone (its touchend reached nobody)', () => {
+    const palm = at(1, 300, 400);
+    const stylus = at(2, 100, 100, true);
+    assert.equal(contactGone({ pointerType: 'pen', touchId: 2 }, [palm, stylus], true), false);
+    assert.equal(contactGone({ pointerType: 'pen', touchId: 2 }, [palm], true), true, 'a new contact landed and the pen is not there');
+    assert.equal(contactGone({ pointerType: 'pen', touchId: 2 }, [], false), true);
+    assert.equal(contactGone({ pointerType: 'touch', touchId: 1 }, [palm], false), false);
+    assert.equal(contactGone({ pointerType: 'touch', touchId: 1 }, [at(4, 0, 0)], false), true);
+    // A pen whose touch was never seen: where every touch says what it is (iOS), no stylus means no pen.
+    assert.equal(contactGone({ pointerType: 'pen' }, [palm], true), true);
+    assert.equal(contactGone({ pointerType: 'pen' }, [palm, stylus], true), false);
+    assert.equal(contactGone({ pointerType: 'pen' }, [palm], false), false, 'an S Pen: its touch is not marked, nothing is known');
+    assert.equal(contactGone({ pointerType: 'touch' }, [], true), false);
+    // The mouse has no touch.
+    assert.equal(contactGone({ pointerType: 'mouse' }, [], true), false);
+  });
+});
+
+describe('a stylus is a mouse in every tool that is not 펜 / 지우개', () => {
+  const other = { kind: 'other' } as const;
+  const plan = (patch: Partial<PressInput>) => pressPlan({ tool: 'select', target: other, item: null, selected: false, touch: fingerPointer(patch.pointerType ?? 'mouse'), ...patch });
+
+  test('only a finger is imprecise; a stylus has the mouse’s hit slop', () => {
+    assert.equal(fingerPointer('touch'), true);
+    assert.equal(fingerPointer('pen'), false);
+    assert.equal(fingerPointer('mouse'), false);
+    const size = { width: 1000, height: 500 };
+    assert.equal(slopFor(size, fingerPointer('pen')).px, HIT_SLOP_PX);
+    assert.equal(slopFor(size, fingerPointer('touch')).px, TOUCH_HIT_SLOP_PX);
+  });
+
+  test('its drag moves an unselected item at once (a finger selects it first)', () => {
+    assert.deepEqual(plan({ pointerType: 'pen', item: LINE }), { kind: 'select', item: LINE, move: true });
+    assert.deepEqual(plan({ pointerType: 'mouse', item: LINE }), { kind: 'select', item: LINE, move: true });
+    assert.deepEqual(plan({ pointerType: 'touch', item: LINE }), { kind: 'select', item: LINE, move: false });
+    assert.deepEqual(plan({ pointerType: 'touch', item: LINE, selected: true }), { kind: 'select', item: LINE, move: true });
+    // Whatever `touch` says: the pointer type decides.
+    assert.deepEqual(plan({ pointerType: 'pen', touch: true, item: LINE }), { kind: 'select', item: LINE, move: true });
+  });
+
+  test('the shape tools and 범위 선택 draw like with the mouse: live after the drag threshold, not from the press', () => {
+    assert.deepEqual(plan({ tool: 'rect', pointerType: 'pen' }), { kind: 'draw', tool: 'rect', immediate: false });
+    assert.deepEqual(plan({ tool: 'rect', pointerType: 'touch' }), { kind: 'draw', tool: 'rect', immediate: true });
+    assert.deepEqual(plan({ tool: 'memo', pointerType: 'pen' }), { kind: 'draw', tool: 'memo', immediate: true }, 'a click tool');
+    assert.deepEqual(plan({ tool: 'marquee', pointerType: 'pen' }), { kind: 'marquee', add: false, immediate: false });
+    assert.deepEqual(plan({ tool: 'marquee', pointerType: 'touch' }), { kind: 'marquee', add: false, immediate: true });
+    assert.deepEqual(plan({ tool: 'select', pointerType: 'pen', target: { kind: 'handle', handle: 'se' }, item: LINE, selected: true }), { kind: 'resize', item: LINE, handle: 'se' });
+  });
+
+  test('on empty area with no tool it selects a region for 첨부 by a plain drag; only a finger long-presses', () => {
+    assert.deepEqual(plan({ pointerType: 'pen' }), { kind: 'region' });
+    assert.deepEqual(plan({ pointerType: 'touch' }), { kind: 'region' });
+    // The viewer starts the long-press timer for a finger only (Gesture.touch = fingerPointer).
+    assert.equal(fingerPointer('pen'), false);
   });
 });
 
@@ -460,9 +625,11 @@ describe('the toolbar and the item menu under 펜', () => {
   });
 
   test('the hints', () => {
-    assert.equal(toolHint('pen'), '펜: Apple Pencil·마우스로 쓰기 · 손가락은 스크롤');
+    assert.equal(toolHint('pen'), '펜: Apple Pencil·마우스로 쓰기 · 손가락은 스크롤·확대 (손바닥은 무시)');
     assert.equal(toolHint('pen', true), '펜: 펜·손가락·마우스로 쓰기 · Esc');
     assert.equal(toolHint('eraser'), '지우개: 지나간 펜 획을 지워요');
+    // A tablet learns how a finger selects a region (a stylus drags like the mouse).
+    assert.match(toolHint('select'), /손가락은 길게 눌러 끌기/);
   });
 
   const env: LayerEnv = {

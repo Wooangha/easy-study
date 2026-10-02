@@ -65,6 +65,7 @@ import { getRecordingUploads, subscribeRecordingUploads, uploadRecordingFiles } 
 import { earlierLectures } from './lib/courseContext.ts';
 import { providerWithModel } from './lib/format.ts';
 import { isString, readRememberedSlide, readStorage, rememberSlide, storageKeys, writeStorage } from './lib/storage.ts';
+import { openChatPane } from './lib/splitPane.ts';
 import { toast } from './lib/toast.ts';
 import { DeckSwaps, remapRemembered, remapSlide, type DeckSwapDeps } from './lib/versionPlan.ts';
 
@@ -208,6 +209,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
   } = attachments;
   const attachFiles = useCallback(
     (files: File[], options?: { pasted?: boolean }) => {
+      openChatPane();
       setTab('chat'); // the chips are shown in the composer
       addFiles(files, options);
     },
@@ -252,6 +254,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
   // `options.ink`: the viewer says whether its 펜 strokes are shown (DESIGN §29: a crop without them when hidden).
   const attachRegion = useCallback(
     (slide: number, rect: RegionRect, options?: RegionOptions) => {
+      openChatPane();
       setTab('chat');
       void addRegion(slide, rect, options);
     },
@@ -260,6 +263,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
   /** 첨부 of an annotation item (DESIGN §25): a chip in the composer, sent with the next question. */
   const attachItem = useCallback(
     (slide: number, item: AnnotationItem, options?: RegionOptions) => {
+      openChatPane();
       setTab('chat');
       void addAnnotation(slide, item, options);
     },
@@ -268,6 +272,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
   /** 첨부 of a group selection: the chat tab once, the free slots counted once (the 펜 strokes in one region). */
   const attachItems = useCallback(
     (slide: number, items: AnnotationItem[], options?: RegionOptions) => {
+      openChatPane();
       setTab('chat');
       void addAnnotations(slide, items, options);
     },
@@ -275,6 +280,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
   );
   const openNotesFor = useCallback(
     (slide: number) => {
+      openChatPane();
       setTab('notes');
       setNotesFilter(slide);
       void refreshNotes();
@@ -327,6 +333,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
         toast(msg().shell.app.qaSessionMissing, 'info');
         return;
       }
+      openChatPane();
       setTab('chat');
       if (s.sessionId !== sessionId) s.selectSession(sessionId);
       setScrollRequest({ sessionId, messageId, seq: ++scrollSeq.current, at: Date.now() });
@@ -344,6 +351,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
         toast(msg().shell.app.recordingMissing, 'info');
         return;
       }
+      openChatPane();
       changeTab('recordings');
       setPlayRequest({ rid, t, seq: ++playSeq.current });
     },
@@ -784,6 +792,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
   const askDisabledRef = useLatest(askDisabledReason);
   const askRegion = useCallback(
     async (slide: number, rect: RegionRect, options?: RegionOptions) => {
+      openChatPane();
       setTab('chat');
       const created = await addRegion(slide, rect, options);
       if (!created) return;

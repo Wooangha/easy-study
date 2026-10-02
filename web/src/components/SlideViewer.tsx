@@ -46,17 +46,22 @@ import {
 } from '../lib/annotations/geometry.ts';
 import {
   acceptsPress,
-  blocksInkTouch,
+  blocksTouch,
+  contactFor,
+  contactGone,
   eraserHits,
+  fingerPointer,
   hitTestItems,
-  keepsCancelledStroke,
   marqueeSelect,
   onInkControl,
   outlineOnly,
+  pressOver,
   pressPlan,
+  releasedUnseen,
   slopFor,
   toggleId,
   unionIds,
+  type Contact,
   type PressTarget,
 } from '../lib/annotations/gesture.ts';
 import { canRedoIn, canUndoIn } from '../lib/annotations/history.ts';
@@ -95,10 +100,12 @@ import {
 } from '../lib/attachments.ts';
 import { confirmDialog } from '../lib/confirm.ts';
 import { clamp, firstLine, slideSizes } from '../lib/format.ts';
+import { inkDebug } from '../lib/inkDebug.ts';
 import { usePlayhead } from '../lib/recording/playhead.ts';
 import { recorder } from '../lib/recording/recorder.ts';
 import { isNumber, readStorage, rememberSlide, storageKeys, writeStorage } from '../lib/storage.ts';
 import { toast } from '../lib/toast.ts';
+import { glideOver, inertiaTravel, PalmGuard, PAN_REST_PX, PAN_SLOP_PX, PAN_VELOCITY_MS, panVelocity, startsInertia, undoneByPen, type PanSample } from '../lib/touchPan.ts';
 import { bannerShown, changeBadges } from '../lib/versionPlan.ts';
 import { anchorIn, anchorScroll, boxIndexAt, pinchBegan, pinchScale, snapZoom, stepZoom, storedZoom, touchDistance, touchMidpoint, wheelZoom, zoomPercent } from '../lib/zoom.ts';
 import { AnnotationLayer, type Draft, type DragPreview } from './annotations/AnnotationLayer.tsx';
@@ -148,13 +155,25 @@ interface ItemSelection {
  * (DESIGN §25), drags a marquee with 범위 선택, or, without a tool, becomes a region selection (§21). A text highlight
  * under 텍스트 형광 is re-dragged: a draw that replaces that item's words. Under 펜 / 지우개 (§29) a stylus or the mouse
  * writes a stroke or erases strokes, over items too.
+ *
+ * It ends by its release, by pointercancel or lost capture, by its touch ending, and at the latest by the next press
+ * (gesture.ts pressOver): one that outlived its contact would make the slides ignore the pen and every finger.
  */
 interface Gesture {
   pointerId: number;
-  /** Touch or pen: a long press starts the selection (a drag right away scrolls). */
+  /** A finger (not the mouse, not a stylus): a long press starts the selection (a drag right away scrolls). */
   touch: boolean;
   /** PointerEvent.pointerType: 'mouse' | 'pen' | 'touch' (a pen replaces a gesture a finger or a palm started). */
   pointerType: string;
+  /**
+   * The touch (Touch.identifier) of the finger or stylus that makes it, once the touch events showed it: the gesture
+   * also ends when that touch does, and blocks other touches only while it is on the glass (gesture.ts contactGone).
+   */
+  touchId?: number;
+  /** Where its pointer was last (client px): a release that never arrives ends it there. */
+  lastClient: Point;
+  /** The timeStamp of its pointerdown: a hover move sent before it says nothing about its release (releasedUnseen). */
+  downAt: number;
   slide: number;
   box: HTMLElement;
   frame: Frame;
@@ -178,8 +197,6 @@ interface Gesture {
   memoBoxes?: Record<string, RegionRect>;
   /** ink: the stroke being written, drawn imperatively over the image (no React state per point). */
   live?: LiveInk;
-  /** ink: how far (CSS px) its farthest sample is from the press — a cancel before INK_CANCEL_SLOP_PX drops it. */
-  reach?: number;
   /** erase: the strokes touched so far (faded at once, removed on release), and where the eraser was last. */
   erased?: Set<string>;
   last?: Point;
@@ -203,6 +220,29 @@ interface Pinch {
   /** They moved past the slop (lib/zoom.ts pinchBegan): what was under their midpoint then stays under it. */
   began: boolean;
   anchor: ZoomAnchor | null;
+}
+
+/** One finger scrolling the slides under 펜 / 지우개 (lib/touchPan.ts): the viewer scrolls there, not the browser. */
+interface Pan {
+  /** Touch.identifier. */
+  id: number;
+  from: Point;
+  last: Point;
+  /** It moved past PAN_SLOP_PX: the slides follow it. */
+  began: boolean;
+  /** Where it last counted as moving (PAN_REST_PX): a finger resting on the glass still sends tiny moves. */
+  rest: Point;
+  /** Where the scroller should be (it rounds what it is given; the scroll ends clamp it). */
+  want: Point;
+  /** The last moves, for the velocity of the release. */
+  samples: PanSample[];
+}
+
+/** Where the slides were when the fingers of a pan / pinch began to move them: a pen landing puts them back (it was the palm). */
+interface TouchOrigin {
+  left: number;
+  top: number;
+  zoom: number;
 }
 
 /** Actions of the floating menu (stable: SlideItem is memoized). */
@@ -521,11 +561,20 @@ export function SlideViewer({
   }, [computeFocus]);
   useEffect(() => () => cancelAnimationFrame(rafRef.current), []);
 
+  /** The glide after a finger's pan under 펜 / 지우개 (the touch listeners below); anything else that scrolls stops it. */
+  const inertiaFrame = useRef(0);
+  const stopInertia = useCallback(() => {
+    cancelAnimationFrame(inertiaFrame.current);
+    inertiaFrame.current = 0;
+  }, []);
+  useEffect(() => stopInertia, [stopInertia]);
+
   const scrollToSlide = useCallback(
     (slide: number, behavior: ScrollBehavior = 'smooth') => {
       const scroller = scrollerRef.current;
       const el = slideEls.current[nearestIndex(shownRef.current, clamp(slide, 1, pageCount))];
       if (!scroller || !el) return;
+      stopInertia();
       const sr = scroller.getBoundingClientRect();
       const er = el.getBoundingClientRect();
       const viewH = scroller.clientHeight;
@@ -533,7 +582,7 @@ export function SlideViewer({
       const delta = er.height > viewH ? er.top - sr.top - 12 : er.top + er.height / 2 - (sr.top + viewH / 2);
       scroller.scrollTo({ top: scroller.scrollTop + delta, behavior });
     },
-    [pageCount, shownRef],
+    [pageCount, shownRef, stopInertia],
   );
 
   // ---- Zoom (lib/zoom.ts) --------------------------------------------------------------------------
@@ -576,6 +625,8 @@ export function SlideViewer({
       const scroller = scrollerRef.current;
       const track = trackRef.current;
       if (!scroller || !track) return;
+      // A glide writes scroll positions of its own, measured at the old zoom.
+      stopInertia();
       const z = snapZoom(next);
       if (z !== shownZoomRef.current) {
         shownZoomRef.current = z;
@@ -594,7 +645,7 @@ export function SlideViewer({
       // coming or going with the zoom) re-anchors by it.
       computeFocus();
     },
-    [computeFocus],
+    [computeFocus, stopInertia],
   );
 
   /** The zoom shown becomes the state (and is stored): when a pinch ends, a moment after the last wheel step. */
@@ -653,9 +704,9 @@ export function SlideViewer({
   useEffect(() => () => cancelAnimationFrame(pinchFrame.current), []);
 
   // ---- Region selection (DESIGN §21) -------------------------------------------------------------
-  // The default state (no drawing tool). Mouse: press on empty area and drag (≥ 6 px; a plain click keeps its
-  // meaning). Touch: hold still ~350 ms, then drag (a drag right away scrolls). Esc cancels. The rectangle is kept
-  // normalised to the slide image, so it does not depend on the zoom level or on which rendition is shown.
+  // The default state (no drawing tool). Mouse or stylus: press on empty area and drag (≥ 6 px; a plain click keeps
+  // its meaning). A finger: hold still ~350 ms, then drag (a drag right away scrolls). Esc cancels. The rectangle is
+  // kept normalised to the slide image, so it does not depend on the zoom level or on which rendition is shown.
   const [selection, setSelectionState] = useState<Selection | null>(null);
   const selectionRef = useRef<Selection | null>(null);
   const setSelection = useCallback((next: Selection | null) => {
@@ -673,8 +724,12 @@ export function SlideViewer({
   const onOpenDocRef = useLatest(onOpenDoc);
   const onOpenNotesRef = useLatest(onOpenNotes);
 
-  /** The pointer of the last press on the slides (a pen's barrel button opens no context menu under 펜 / 지우개). */
+  /** The pointer of the last press on the slides (a pen's barrel button or long press opens no context menu). */
   const lastPointerRef = useRef('mouse');
+  /** The touches on the glass as the last touch event listed them (Touch.identifier): is a gesture's contact still down? */
+  const liveTouchesRef = useRef<Set<number>>(new Set());
+  /** A stylus is among them: the pen is on the glass, whatever its hover moves seem to say. */
+  const stylusDownRef = useRef(false);
 
   /** Ends the gesture; a stroke being written is dropped and strokes the eraser faded show again (Esc, unmount). */
   const cancelGesture = useCallback(() => {
@@ -692,8 +747,8 @@ export function SlideViewer({
 
   /**
    * Ends the gesture with what it drew on the slides — a region being dragged, a shape's or a marquee's dashed preview,
-   * a move / resize preview — when the browser takes the pointer (pointercancel) or a pen replaces what a finger or a
-   * palm started.
+   * a move / resize preview — when the browser takes the pointer (pointercancel), a pen replaces what a finger or a
+   * palm started, or its contact turns out to be gone.
    */
   const dropGesture = useCallback(() => {
     cancelGesture();
@@ -964,6 +1019,7 @@ export function SlideViewer({
    */
   const endInk = (g: Gesture) => {
     const { live, erased } = g;
+    const began = performance.now();
     g.live = undefined;
     g.erased = undefined;
     cancelGesture();
@@ -975,49 +1031,79 @@ export function SlideViewer({
         op: 'add',
         item: newInk({ id: newAnnotationId(), color: live.color, createdAt, recordedAt }, piece, live.width),
       }));
-      if (ops.length > 0) mutate(g.slide, ops);
+      const saved = ops.length > 0 && mutate(g.slide, ops);
       requestAnimationFrame(() => live.remove());
+      if (inkDebug.on) inkDebug.log(`stroke ${live.points.length}pts → ${ops.length} item${ops.length === 1 ? '' : 's'}${saved ? '' : ' (not saved)'}`);
     }
     if (erased && erased.size > 0 && !mutate(g.slide, [...erased].map((id) => ({ op: 'remove', id })))) fadeStrokes(g.box, erased, false);
+    if (erased && inkDebug.on) inkDebug.log(`erased ${erased.size}`);
+    // The synchronous cost of a release (the store's write, its byte guard); the render that follows shows as a stall.
+    inkDebug.took('commit', began);
+  };
+
+  /**
+   * Ends the gesture where no release tells where: pointercancel, lost capture, its contact gone from the glass, a tool
+   * change, the page hidden. A stroke keeps what was written (and erased) so far — always: a short dash the browser
+   * cancels is still a dash —, anything else goes with what it drew (dropGesture). Nothing to end: nothing happens.
+   */
+  const abortGesture = () => {
+    const g = gestureRef.current;
+    if (!g) return;
+    if (g.mode === 'ink' || g.mode === 'erase') endInk(g);
+    else dropGesture();
   };
 
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
-    // A pen landing while two fingers pinch: the zoom stays where it is, the pen writes.
-    if (e.pointerType === 'pen') endPinch();
+    // First of all, before anything can return: the gesture this press finds registered. A press of its own pointer, of
+    // a pen or of a mouse means its contact has ended, whatever became of its release (gesture.ts pressOver) — a
+    // stroke keeps what was written and the new press goes on; a pen also replaces what a finger or a palm started
+    // before it (a hand resting on the slide must not block the pen). A palm or a second finger during a gesture is
+    // not a press for the slides; a second finger on a finger's press that is not live yet is a pinch.
+    const current = gestureRef.current;
+    const over = pressOver(current && { pointerId: current.pointerId, pointerType: current.pointerType, stroke: current.mode === 'ink' || current.mode === 'erase', active: current.active }, e);
+    const pd = inkDebug.on ? `pd ${e.pointerType} id${e.pointerId} prim${e.isPrimary ? 1 : 0} btn${e.buttons}` : '';
+    if (over === 'finish' || over === 'drop') {
+      inkDebug.log(`stale gesture ${over === 'finish' ? 'finished' : 'dropped'} (${current?.mode} id${current?.pointerId}, a new press)`);
+      if (over === 'finish') abortGesture();
+      else dropGesture();
+    } else if (over === 'cancel') {
+      inkDebug.log(`${pd} → second finger`);
+      cancelGesture();
+      return;
+    } else if (over === 'ignore') {
+      inkDebug.log(`${pd} → ignored (${current?.mode} of ${current?.pointerType} going on)`);
+      return;
+    }
     const target = e.target instanceof Element ? e.target : null;
     if (!target || target.closest('.region-menu, .annot-pop, .link-picker, .popover-menu')) return;
     lastPointerRef.current = e.pointerType;
     // Pressing anywhere else dismisses a finished selection's menu.
     if (selectionRef.current?.phase === 'menu') setSelection(null);
-    const current = gestureRef.current;
-    if (current) {
-      // A pen replaces what a finger or a palm started before it (a hand resting on the slide must not block the pen;
-      // a stroke a finger began is dropped, and what it drew goes). Any other second pointer (a pinch zoom) is not a
-      // selection.
-      if (e.pointerType === 'pen' && current.pointerType === 'touch') {
-        dropGesture();
-      } else {
-        if (!current.active) cancelGesture();
-        return;
-      }
-    }
     // A pen even when it is not the primary pointer: iPadOS makes only the first touch primary, a palm's.
-    if (!acceptsPress(e)) return;
+    if (!acceptsPress(e)) {
+      inkDebug.log(`${pd} → not a press`);
+      return;
+    }
     const annot = target.closest<HTMLElement>('.annot-layer [data-annot]');
     if (!annot && target.closest('button, a, input, select, textarea')) return;
     const box = target.closest<HTMLElement>('.slide-box');
     const slide = Number(box?.closest<HTMLElement>('.slide')?.dataset.slide);
-    if (!box || !Number.isInteger(slide) || slide < 1) return;
+    if (!box || !Number.isInteger(slide) || slide < 1) {
+      inkDebug.log(`${pd} → off the slides`);
+      return;
+    }
     const rect = box.getBoundingClientRect();
     const frame = frameOf(box, rect);
-    const touch = e.pointerType !== 'mouse';
+    // A finger is imprecise and scrolls by dragging; a stylus is a mouse (gesture.ts fingerPointer).
+    const touch = fingerPointer(e.pointerType);
     const start = toImagePoint(e.clientX, e.clientY, rect, frame);
     const activeTool = layerShown ? toolRef.current : 'select';
     // What was pressed: a handle or a marker by the DOM; otherwise the slide's items are hit-tested (the SVG's own
     // target is not enough — a big rectangle drawn later covers a small highlight — and thin bands get some slack;
     // an unselected rect / ellipse counts on its outline only, so a box's inside passes through to what is under it).
     // Memo cards handle their own presses (they stop propagation) and get here only as part of a group selection,
-    // when a press on the card (not on a control inside it) moves the whole group.
+    // when a press on the card (not on a control inside it) moves the whole group. Under 펜 / 지우개 nothing is
+    // hit-tested: the pen writes over everything (a press costs nothing however many strokes the slide has).
     const kind = annot?.dataset.annot;
     const handle = annot?.dataset.handle as Handle | undefined;
     const pressed: PressTarget = kind === 'marker' ? { kind: 'marker' } : kind === 'handle' && handle ? { kind: 'handle', handle } : { kind: 'other' };
@@ -1031,7 +1117,7 @@ export function SlideViewer({
         ? annot?.dataset.id
           ? itemOf(slide, annot.dataset.id)
           : null
-        : layerShown
+        : layerShown && !isInkTool(activeTool)
           ? hitTestItems(itemsOf(slide), start, slopFor(framePixels(rect, frame), touch), {
               visible: (it) => replayVisible(it, replayRef.current),
               outline: outlineOnly(selectedIds),
@@ -1049,11 +1135,14 @@ export function SlideViewer({
       buttons: e.buttons,
       fingerInk: fingerInkRef.current,
     });
+    inkDebug.log(`${pd} → ${plan.kind}`);
     if (plan.kind === 'ignore') return;
     const g: Gesture = {
       pointerId: e.pointerId,
       touch,
       pointerType: e.pointerType,
+      lastClient: { x: e.clientX, y: e.clientY },
+      downAt: e.nativeEvent.timeStamp,
       slide,
       box,
       frame,
@@ -1105,7 +1194,7 @@ export function SlideViewer({
         if (plan.immediate) g.active = true;
         return;
       case 'draw':
-        // Empty area with a tool: touch draws at once (the slide box takes no touch scrolling then).
+        // Empty area with a tool: a finger draws at once (the slide box takes no touch scrolling then).
         g.mode = 'draw';
         g.tool = plan.tool;
         gestureRef.current = g;
@@ -1130,7 +1219,6 @@ export function SlideViewer({
         // 펜: a stroke from the press, drawn live over the image; the release makes it items (endInk).
         g.mode = 'ink';
         g.active = true;
-        g.reach = 0;
         g.live = new LiveInk(box, frame, e.pointerType, inkColorRef.current, inkWidthRef.current);
         g.live.push(e.nativeEvent);
         gestureRef.current = g;
@@ -1147,7 +1235,7 @@ export function SlideViewer({
         eraseAlong(g, [e.nativeEvent]);
         return;
       case 'region':
-        // Empty area, no tool: the region gesture (a mouse drag; touch after a long press).
+        // Empty area, no tool: the region gesture (a drag of the mouse or a stylus; a finger after a long press).
         if (itemSelectionRef.current) setItemSelection(null);
         gestureRef.current = g;
         if (g.touch) {
@@ -1185,20 +1273,21 @@ export function SlideViewer({
   const onPointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
     const g = gestureRef.current;
     if (!g || e.pointerId !== g.pointerId) return;
+    const client = { x: e.clientX, y: e.clientY };
+    g.lastClient = client;
     if (g.mode === 'ink' || g.mode === 'erase') {
       // Every sample of the event (a pen moves many times per frame); the stroke is drawn at once, inside the event
       // (pointer events arrive once per frame), with the browser's predicted samples: the line stays under the tip.
       e.preventDefault();
       if (g.mode === 'erase') {
         eraseAlong(g, inkSamples(e.nativeEvent));
+        inkDebug.move('pm');
         return;
       }
-      for (const sample of g.live?.push(e.nativeEvent) ?? []) {
-        g.reach = Math.max(g.reach ?? 0, Math.hypot(sample.clientX - g.startClient.x, sample.clientY - g.startClient.y));
-      }
+      const samples = g.live?.push(e.nativeEvent) ?? [];
+      if (inkDebug.on) inkDebug.move('pm', samples.length, e.nativeEvent.getPredictedEvents?.().length ?? 0);
       return;
     }
-    const client = { x: e.clientX, y: e.clientY };
     if (g.mode === 'draw' || g.mode === 'move' || g.mode === 'resize' || g.mode === 'marquee') {
       if (!g.active) {
         if (!movedBeyond(g.startClient, client, DRAG_THRESHOLD_PX)) return;
@@ -1260,9 +1349,13 @@ export function SlideViewer({
     });
   };
 
-  const onPointerUp = (e: ReactPointerEvent<HTMLDivElement>) => {
-    const g = gestureRef.current;
-    if (!g || e.pointerId !== g.pointerId) return;
+  /**
+   * The release of the gesture at a client point: its pointerup — or, when that never arrives, the end of its touch or
+   * the first sign that its contact is gone (the listeners below). Only the registered gesture is released: a second
+   * report of the same release does nothing.
+   */
+  const releaseGesture = (g: Gesture, client: Point) => {
+    if (gestureRef.current !== g) return;
     if (g.mode === 'ink' || g.mode === 'erase') {
       endInk(g);
       return;
@@ -1270,7 +1363,7 @@ export function SlideViewer({
     cancelGesture();
     const box = g.box.getBoundingClientRect();
     const size = framePixels(box, g.frame);
-    const point = toImagePoint(e.clientX, e.clientY, box, g.frame);
+    const point = toImagePoint(client.x, client.y, box, g.frame);
     const moved = Math.abs(point.x - g.start.x) * size.width >= MIN_DRAG_PX || Math.abs(point.y - g.start.y) * size.height >= MIN_DRAG_PX;
     if (g.mode === 'draw') {
       setDraft(null);
@@ -1298,8 +1391,8 @@ export function SlideViewer({
         if (g.mode === 'move' && g.wasSelected && item.type === 'text' && itemSelectionRef.current?.ids.length === 1) setEditing({ slide: g.slide, id: item.id });
         return;
       }
-      const dx = (e.clientX - g.startClient.x) / size.width;
-      const dy = (e.clientY - g.startClient.y) / size.height;
+      const dx = (client.x - g.startClient.x) / size.width;
+      const dy = (client.y - g.startClient.y) / size.height;
       if (g.mode === 'move') {
         // Every moved item in one write (one undo step for the group), by one common delta (the group stops at an edge as one).
         const moves = moveItems(g.items ?? [item], dx, dy);
@@ -1327,36 +1420,104 @@ export function SlideViewer({
     setSelection({ slide: g.slide, rect, phase: 'menu', placement });
   };
 
-  const onPointerCancel = (e: ReactPointerEvent<HTMLDivElement>) => {
+  /**
+   * The scroller lost the capture of the gesture's pointer without a release (the release itself comes first and
+   * leaves nothing registered): the gesture ends — unless the touch events still show its contact on the glass, which
+   * then end it themselves. Only the scroller's own capture counts: taking the capture from the element a touch landed
+   * on (its implicit capture) sends that element a lostpointercapture, which bubbles up to here.
+   */
+  const onLostPointerCapture = (e: ReactPointerEvent<HTMLDivElement>) => {
     const g = gestureRef.current;
-    if (!g || e.pointerId !== g.pointerId) return;
-    if (g.mode === 'ink' && !keepsCancelledStroke(g.reach ?? 0)) {
-      // Taken before it went anywhere (Chrome made an S Pen fling a scroll): no stray dot is saved.
-      cancelGesture();
-      return;
-    }
-    if (g.mode === 'ink' || g.mode === 'erase') {
-      // The browser took the pointer (a palm, a scroll): what was written or erased so far stays.
-      endInk(g);
-      return;
-    }
-    dropGesture();
+    if (!g || e.pointerId !== g.pointerId || e.target !== e.currentTarget) return;
+    if (g.touchId !== undefined && liveTouchesRef.current.has(g.touchId)) return;
+    inkDebug.log(`lostcapture ${g.pointerType} → ${g.mode} ended`);
+    abortGesture();
   };
 
-  // Touch: once a selection started, the finger must not scroll the viewer (and a long press must not open the
-  // image's context menu). Under 펜 / 지우개 (palm rejection, DESIGN §29) a stylus never scrolls (iOS sends the Apple
-  // Pencil as touches of touchType 'stylus') and no touch does while a stroke is being written — a palm resting on
-  // the slide included; fingers otherwise scroll and pinch. A stylus's touchstart on a control (the Q&A badge, a
-  // marker, a memo card, a menu) is left alone: preventing it would swallow the tap (gesture.ts blocksInkTouch).
-  // Needs non-passive listeners; registered only where touch is possible.
+  // The end of a gesture is taken wherever it shows (DESIGN §29: a gesture that outlives its contact makes the slides
+  // ignore the pen and every finger): pointerup and pointercancel on the window, in the capture phase — the pointer
+  // may be released anywhere, and nothing between it and the scroller can keep the event away; a move of the mouse
+  // with no button held or a hover of the pen (the release went unseen: gesture.ts releasedUnseen); and the page
+  // being hidden. Beside these: lost capture (above), the gesture's own touch ending and a touch event that no longer
+  // lists it (the touch listeners below), the next press (onPointerDown), a tool change and a slide that left the
+  // document (the effects below). Each ends only the registered gesture, so a second report does nothing.
+  const releaseRef = useLatest(releaseGesture);
+  const abortRef = useLatest(abortGesture);
+  useEffect(() => {
+    const onUp = (e: PointerEvent) => {
+      const g = gestureRef.current;
+      if (!g || e.pointerId !== g.pointerId) return;
+      inkDebug.log(`pu ${e.pointerType} id${e.pointerId} → ${g.mode}${g.active ? '' : ' (click)'}`);
+      releaseRef.current(g, { x: e.clientX, y: e.clientY });
+    };
+    const onCancel = (e: PointerEvent) => {
+      const g = gestureRef.current;
+      if (!g || e.pointerId !== g.pointerId) {
+        inkDebug.log(`pc ${e.pointerType} id${e.pointerId}`);
+        return;
+      }
+      // The browser took the pointer (a palm, a scroll): what was written or erased so far stays, however short.
+      inkDebug.log(`pc ${e.pointerType} id${e.pointerId} → ${g.mode === 'ink' || g.mode === 'erase' ? `${g.mode} kept` : `${g.mode} dropped`}`);
+      abortRef.current();
+    };
+    const onMove = (e: PointerEvent) => {
+      const g = gestureRef.current;
+      if (!g) return;
+      // Not while the gesture's own touch (of a pen: any stylus) is on the glass: the Pencil's hover comes apart from
+      // its contact, and a last hover move after the press would end the stroke as a dot (the touch events end that
+      // gesture).
+      const down = (g.touchId !== undefined && liveTouchesRef.current.has(g.touchId)) || (g.pointerType === 'pen' && stylusDownRef.current);
+      if (!releasedUnseen(g, e, down)) return;
+      inkDebug.log(`stale gesture finished (${g.mode} id${g.pointerId}, ${e.pointerType === 'pen' ? 'the pen hovers' : 'no button held'})`);
+      releaseRef.current(g, g.lastClient);
+    };
+    const onHidden = () => {
+      if (document.visibilityState !== 'hidden' || !gestureRef.current) return;
+      inkDebug.log('stale gesture finished (the page was hidden)');
+      abortRef.current();
+    };
+    window.addEventListener('pointerup', onUp, true);
+    window.addEventListener('pointercancel', onCancel, true);
+    window.addEventListener('pointermove', onMove, true);
+    window.addEventListener('pagehide', onHidden);
+    document.addEventListener('visibilitychange', onHidden);
+    return () => {
+      window.removeEventListener('pointerup', onUp, true);
+      window.removeEventListener('pointercancel', onCancel, true);
+      window.removeEventListener('pointermove', onMove, true);
+      window.removeEventListener('pagehide', onHidden);
+      document.removeEventListener('visibilitychange', onHidden);
+    };
+  }, [releaseRef, abortRef]);
+
+  // Touch (non-passive listeners, registered only where touch is possible).
+  //
+  // Under 펜 / 지우개 without 손가락으로도 쓰기 (palm rejection, DESIGN §29) the browser does nothing of its own with a
+  // touch over the slides (`touch-action: none` there, and every touchstart / touchmove that is not on a control is
+  // prevented): a palm that starts a native scroll takes the pen's touches for as long as that scroll tracks. The
+  // viewer handles the fingers itself (lib/touchPan.ts): one finger past PAN_SLOP_PX scrolls the slides, which glide
+  // on a little after it lifts; two pinch; a finger of the hand that holds the pen (PalmGuard: it landed during a
+  // stroke or right after the pen last touched the slides — not while it merely hovers —, was down when the pen
+  // landed, or is a large contact that has not scrolled yet) does nothing until it lifts; and when the pen lands
+  // while fingers scroll or pinch, the slides go back to where those fingers found them — they were the palm.
+  //
+  // With the other tools a finger scrolls natively and long-presses for a region; once its gesture is live it must not
+  // scroll (and a long press must not open the image's menu). A stylus never scrolls the slides, with any tool (iOS
+  // sends the Apple Pencil as touches of touchType 'stylus'): it is a mouse there. Its touchstart on a control (the
+  // Q&A badge, a marker, a memo card, a menu) is left alone: preventing it would swallow the tap (gesture.ts
+  // blocksTouch). While a stroke's contact is on the glass no touch scrolls, a palm put down meanwhile included.
   //
   // Two fingers pinch: the slides zoom around their midpoint and pan with it (the page itself never zooms over the
   // slides: `.viewer-scroll` touch-action) — where fingers do not draw: with no tool, 범위 선택 (what one finger began
   // there is dropped), 펜 and 지우개; not with the shape tools or 손가락으로도 쓰기. Never while a pen or the mouse is
   // at work, and a pen landing ends it. Ctrl+wheel (a trackpad pinch in Chrome, Edge and Firefox) and Safari's gesture
   // events (a trackpad pinch there and in the desktop app on macOS) zoom the same way around the pointer.
-  const inkToolRef = useLatest(layerShown && isInkTool(tool));
-  const pinchToolRef = useLatest(!layerShown || tool === 'select' || tool === 'marquee' || (isInkTool(tool) && !fingerInk));
+  //
+  // The touch events also say whether the contact of the registered gesture is still on the glass: its touch ending
+  // releases it, and a touch event that no longer lists it ends it (gesture.ts contactGone) — a release that went to
+  // a node that had left the document, or never came, must not leave a gesture that ignores every later press.
+  const penModeRef = useLatest(layerShown && isInkTool(tool) && !fingerInk);
+  const pinchToolRef = useLatest(!layerShown || tool === 'select' || tool === 'marquee');
   useEffect(() => {
     const scroller = scrollerRef.current;
     if (!scroller) return;
@@ -1364,23 +1525,201 @@ export function SlideViewer({
     // touchstart says what landed.
     const styluses = new Set<number>();
     let downType = '';
-    const onDown = (e: PointerEvent) => {
-      downType = e.pointerType;
-    };
+    /** The browser says what every touch is (iOS): a list without a stylus then means the pen is off the glass. */
+    let typed = false;
+    const guard = new PalmGuard();
+    const live = liveTouchesRef.current;
     const isStylus = (t: Touch) => (t as Touch & { touchType?: string }).touchType === 'stylus' || styluses.has(t.identifier);
     const pointOf = (t: Touch): Point => ({ x: t.clientX, y: t.clientY });
+    const radiusOf = (t: Touch): number => Math.max(t.radiusX || 0, t.radiusY || 0);
+    const within = (target: EventTarget | null): boolean => target instanceof Node && scroller.contains(target);
     let touchCount = 0;
+    let penMode = penModeRef.current;
+    let pan: Pan | null = null;
+    /**
+     * Where the slides were when the fingers that scroll or pinch now (펜 / 지우개) began to move them, and when those
+     * last really moved (`stir`); where the two fingers of the pinch last counted as moving.
+     */
+    let origin: TouchOrigin | null = null;
+    let movedAt = Number.NEGATIVE_INFINITY;
+    let pinchRest: [Point, Point] | null = null;
 
-    /** Starts, moves or ends the pinch by a touch event; true while one is on (the event is the pinch's, cancelable). */
-    const pinch = (e: TouchEvent): boolean => {
-      if (e.type === 'touchstart' && downType === 'pen') for (const t of Array.from(e.changedTouches)) styluses.add(t.identifier);
-      if (e.type === 'touchstart') downType = '';
-      if (e.type === 'touchend' || e.type === 'touchcancel') for (const t of Array.from(e.changedTouches)) styluses.delete(t.identifier);
-      const touches = Array.from(e.touches);
-      touchCount = touches.length;
-      if (touchCount === 0) styluses.clear();
+    /** The slides glide on after a pan (lib/touchPan.ts) until they are slow or at an end, or anything else scrolls them. */
+    const glide = (v: Point) => {
+      stopInertia();
+      if (!startsInertia(v)) return;
+      const from = { x: scroller.scrollLeft, y: scroller.scrollTop };
+      const began = performance.now();
+      // An axis that did not take its position is at an end of the scroll: it is left alone from then on.
+      const blocked = { x: false, y: false };
+      const step = () => {
+        const elapsed = performance.now() - began;
+        const by = inertiaTravel(v, elapsed);
+        // The slides follow the finger: they scroll against its direction.
+        const left = from.x - by.x;
+        const top = from.y - by.y;
+        if (!blocked.x) {
+          scroller.scrollLeft = left;
+          blocked.x = Math.abs(scroller.scrollLeft - left) > 1;
+        }
+        if (!blocked.y) {
+          scroller.scrollTop = top;
+          blocked.y = Math.abs(scroller.scrollTop - top) > 1;
+        }
+        inertiaFrame.current = glideOver(v, elapsed, blocked) ? 0 : requestAnimationFrame(step);
+      };
+      inertiaFrame.current = requestAnimationFrame(step);
+    };
+
+    /**
+     * Fingers really move the slides now (called before the move is applied). After a rest of PALM_UNDO_MS a new
+     * stretch begins: a pen that lands undoes that stretch only, not what a finger scrolled before it came to rest.
+     */
+    const stir = () => {
+      const now = performance.now();
+      if (!origin || !undoneByPen(movedAt, now)) origin = { left: scroller.scrollLeft, top: scroller.scrollTop, zoom: shownZoomRef.current };
+      movedAt = now;
+    };
+
+    const panMove = (p: Pan, t: Touch, at: number) => {
+      const now = pointOf(t);
+      if (!p.began) {
+        // Nothing moves until the finger does (a resting hand jitters; a tap is not a scroll).
+        if (!movedBeyond(p.from, now, PAN_SLOP_PX)) return;
+        p.began = true;
+        p.rest = now;
+        p.want = { x: scroller.scrollLeft, y: scroller.scrollTop };
+        // It scrolls: its pad flattening on the way does not make it the palm.
+        guard.began(p.id);
+        stir();
+        inkDebug.log('pan start');
+      } else {
+        // The slides follow every move, but the tiny ones of a finger at rest do not count as scrolling just now.
+        if (movedBeyond(p.rest, now, PAN_REST_PX)) {
+          p.rest = now;
+          stir();
+        }
+        p.want.x -= now.x - p.last.x;
+        p.want.y -= now.y - p.last.y;
+        scroller.scrollLeft = p.want.x;
+        scroller.scrollTop = p.want.y;
+        // At an end of the scroll the finger goes on alone; when it comes back the slides follow at once.
+        if (Math.abs(scroller.scrollLeft - p.want.x) > 1) p.want.x = scroller.scrollLeft;
+        if (Math.abs(scroller.scrollTop - p.want.y) > 1) p.want.y = scroller.scrollTop;
+      }
+      p.last = now;
+      p.samples.push({ t: at, x: now.x, y: now.y });
+      while (p.samples.length > 2 && at - p.samples[0].t > PAN_VELOCITY_MS * 2) p.samples.shift();
+    };
+
+    /** The pan ends where it is; lifted at `releasedAt` (a touch event's timeStamp), the slides glide on. */
+    const endPan = (releasedAt: number | null) => {
+      const p = pan;
+      pan = null;
+      if (!p?.began) return;
+      const v = releasedAt === null ? null : panVelocity(p.samples, releasedAt);
+      const glides = v !== null && startsInertia(v);
+      if (inkDebug.on) inkDebug.log(glides ? `pan end → glide ${Math.round(Math.hypot(v.x, v.y) * 1000)}px/s` : 'pan end');
+      if (glides) glide(v);
+    };
+
+    /** What the fingers are doing ends where it is (the tool changed; the pen landed long after they last moved). */
+    const endTouches = () => {
+      pan = null;
+      origin = null;
+      endPinch();
+    };
+
+    /**
+     * The fingers that scroll or pinch were the palm (the pen landed as they moved, the system took them back): the
+     * gesture ends and the slides are where they were when those fingers began to move them.
+     */
+    const revertTouches = (why: string) => {
+      const o = origin;
+      const moved = pan?.began === true || pinchRef.current?.began === true;
+      const what = pinchRef.current ? 'pinch' : 'pan';
+      pan = null;
+      origin = null;
+      cancelAnimationFrame(pinchFrame.current);
+      pinchFrame.current = 0;
+      pinchRef.current = null;
+      if (o) {
+        if (shownZoomRef.current !== o.zoom) zoomAt(o.zoom, null, { x: 0, y: 0 });
+        scroller.scrollLeft = o.left;
+        scroller.scrollTop = o.top;
+      }
+      commitZoom();
+      if (moved) inkDebug.log(`${what} revert (${why})`);
+    };
+
+    /** 펜 / 지우개: the fingers that are not the palm scroll (one) or pinch (two). */
+    const penTouch = (e: TouchEvent, touches: Touch[]) => {
+      const fingers = touches.filter((t) => guard.role(t.identifier) === 'pan');
+      // A finger of the gesture that the system took back (touchcancel: iPadOS found it was the palm) — the slides go
+      // back. One that lifted, grew into a palm before it moved anything or is simply no longer listed just ends what
+      // it was doing: what another finger scrolled on purpose stays.
+      const cancelled = e.type === 'touchcancel';
+      const p = pinchRef.current;
+      if (p) {
+        const a = fingers.find((t) => t.identifier === p.ids[0]);
+        const b = fingers.find((t) => t.identifier === p.ids[1]);
+        if (a && b) {
+          if (e.type === 'touchmove') {
+            p.a = pointOf(a);
+            p.b = pointOf(b);
+            if (p.began || pinchBegan(p.from[0], p.from[1], p.a, p.b)) {
+              // They pinch (the step below shows it): no palm by their size any more, and — unless they only rest —
+              // the slides were moved just now.
+              guard.began(p.ids[0]);
+              guard.began(p.ids[1]);
+              if (!pinchRest || movedBeyond(pinchRest[0], p.a, PAN_REST_PX) || movedBeyond(pinchRest[1], p.b, PAN_REST_PX)) {
+                pinchRest = [p.a, p.b];
+                stir();
+              }
+            }
+            pinchFrame.current ||= requestAnimationFrame(pinchStep);
+          }
+        } else if (cancelled) {
+          revertTouches('cancelled');
+        } else {
+          // A finger lifted: the zoom stays.
+          endPinch();
+          inkDebug.log('pinch end');
+        }
+      }
+      if (pan) {
+        const id = pan.id;
+        const t = fingers.find((f) => f.identifier === id);
+        if (!t) {
+          if (cancelled) revertTouches('cancelled');
+          else endPan(e.type === 'touchend' ? e.timeStamp : null);
+        } else if (fingers.length > 1) {
+          // A second finger: the two pinch (below).
+          endPan(null);
+        } else if (e.type === 'touchmove') {
+          panMove(pan, t, e.timeStamp);
+        }
+      }
+      if (pan || pinchRef.current) return;
+      if (fingers.length === 0) {
+        origin = null;
+        return;
+      }
+      if (fingers.length === 1) {
+        const from = pointOf(fingers[0]);
+        pan = { id: fingers[0].identifier, from, last: from, began: false, rest: from, want: { x: 0, y: 0 }, samples: [] };
+      } else if (fingers.length === 2) {
+        const a = pointOf(fingers[0]);
+        const b = pointOf(fingers[1]);
+        pinchRest = null;
+        pinchRef.current = { ids: [fingers[0].identifier, fingers[1].identifier], from: [a, b], a, b, zoom: shownZoomRef.current, began: false, anchor: null };
+      }
+    };
+
+    /** The other tools: starts, moves or ends the pinch by a touch event; true while one is on (the event is the pinch's, cancelable). */
+    const pinch = (e: TouchEvent, touches: Touch[]): boolean => {
       const pen = touches.some(isStylus);
-      const fingers = touches.filter((t) => !isStylus(t) && t.target instanceof Node && scroller.contains(t.target));
+      const fingers = touches.filter((t) => !isStylus(t) && within(t.target));
       const p = pinchRef.current;
       if (p) {
         const a = fingers.find((t) => t.identifier === p.ids[0]);
@@ -1407,21 +1746,129 @@ export function SlideViewer({
       pinchRef.current = { ids: [fingers[0].identifier, fingers[1].identifier], from: [a, b], a, b, zoom: shownZoomRef.current, began: false, anchor: null };
       return true;
     };
+
+    /**
+     * The contact of the registered gesture, by the touch events: its touch is found once (contactFor), released when
+     * that touch lifts and no pointerup did it, and ended when the touches on the glass no longer list it.
+     */
+    const followContact = (e: TouchEvent, touches: Touch[], changed: Touch[]) => {
+      const g = gestureRef.current;
+      if (!g || g.pointerType === 'mouse') return;
+      const contacts: Contact[] = touches.map((t) => ({ id: t.identifier, x: t.clientX, y: t.clientY, stylus: isStylus(t) }));
+      if (g.touchId === undefined && (e.type === 'touchstart' || e.type === 'touchmove')) {
+        g.touchId = contactFor({ pointerType: g.pointerType, at: g.lastClient }, contacts);
+      }
+      if (!contactGone(g, contacts, typed)) return;
+      const id = g.touchId;
+      const lifted = e.type === 'touchend' ? changed.find((t) => (id === undefined ? isStylus(t) : t.identifier === id)) : undefined;
+      if (lifted) {
+        inkDebug.log(`te → ${g.mode} released (no pointerup)`);
+        releaseRef.current(g, pointOf(lifted));
+      } else {
+        inkDebug.log(`stale gesture finished (${g.mode} id${g.pointerId}, its touch is gone)`);
+        abortRef.current();
+      }
+    };
+
+    // The pen's own events (on the window, in the capture phase: before the press is handled): its contact and its
+    // release say the hand that holds it is at the slides, and its landing ends what fingers were doing. Its hover
+    // says only that it is off the glass — unless the touches still show it there (iPadOS sends the hover apart from
+    // the contact, a last one may come late) — and nothing about fingers: the pen is held over the slide all the while
+    // one writes, and a finger that lands then must still scroll.
+    const onPointer = (e: PointerEvent) => {
+      const inside = within(e.target);
+      if (e.type === 'pointerdown') {
+        downType = e.pointerType;
+        if (inside) stopInertia();
+        else if (inkDebug.on) inkDebug.log(`pd ${e.pointerType} id${e.pointerId} → outside the slides`);
+      }
+      if (e.pointerType !== 'pen') return;
+      if (e.type === 'pointermove' && e.buttons === 0 && !(e.pressure > 0)) {
+        if (!stylusDownRef.current) guard.penLifted();
+        // Worth a line only where it could do harm: while the pen is down or a gesture is registered.
+        if (stylusDownRef.current || gestureRef.current) inkDebug.move('hover while down');
+        return;
+      }
+      const contact = inside && (e.type === 'pointerdown' || e.type === 'pointermove');
+      const landed = guard.pen(performance.now(), contact);
+      if (!landed && !(contact && e.type === 'pointerdown')) return;
+      stopInertia();
+      // Under 펜 / 지우개 the fingers were the palm: what they scrolled or pinched as the hand settled down is undone
+      // (fingers that have rested since they scrolled meant it: the slides stay). Elsewhere a pinch stays where it is.
+      if (penModeRef.current && undoneByPen(movedAt, performance.now())) revertTouches('the pen landed');
+      else endTouches();
+    };
+
     const onTouch = (e: TouchEvent) => {
-      if (pinch(e)) {
+      const now = performance.now();
+      const start = e.type === 'touchstart';
+      const over = e.type === 'touchend' || e.type === 'touchcancel';
+      const touches = Array.from(e.touches);
+      const changed = Array.from(e.changedTouches);
+      if (start && downType === 'pen') for (const t of changed) styluses.add(t.identifier);
+      if (start) downType = '';
+      touchCount = touches.length;
+      typed ||= changed.some((t) => 'touchType' in t);
+      live.clear();
+      for (const t of touches) live.add(t.identifier);
+      const stylusDown = touches.some(isStylus);
+      stylusDownRef.current = stylusDown;
+      // No stylus among the touches: the pen is up, whatever became of its pointerup (before the fingers are told apart).
+      if (typed && !stylusDown) guard.penLifted();
+
+      // Which fingers are the palm: told when they land, and again as they move (a contact that grows before the
+      // finger has scrolled or pinched).
+      if (start) {
+        stopInertia();
+        for (const t of changed) {
+          const seen = guard.role(t.identifier) !== undefined;
+          const kind = isStylus(t) ? 'stylus' : !within(t.target) ? 'elsewhere' : onInkControl(t.target) ? 'control' : seen ? '' : guard.start(t.identifier, now, radiusOf(t));
+          if (inkDebug.on && kind) inkDebug.log(`ts ${touches.length} (stylus ${touches.filter(isStylus).length}) r=${Math.round(radiusOf(t))} → ${kind}`);
+        }
+      } else if (over) {
+        for (const t of changed) guard.end(t.identifier);
+        if (inkDebug.on) inkDebug.log(`${e.type === 'touchend' ? 'te' : 'tc'} → ${touches.length} left`);
+      } else {
+        for (const t of changed) {
+          if (guard.role(t.identifier) === 'pan' && guard.move(t.identifier, radiusOf(t)) === 'palm') inkDebug.log(`tm r=${Math.round(radiusOf(t))} → palm`);
+        }
+        inkDebug.move('tm');
+      }
+      guard.keep(live);
+      followContact(e, touches, changed);
+      if (over) for (const t of changed) styluses.delete(t.identifier);
+      if (touchCount === 0) styluses.clear();
+
+      if (penModeRef.current !== penMode) {
+        // The tool changed under the fingers: what they were doing ends where it is.
+        penMode = penModeRef.current;
+        endTouches();
+      }
+      if (penMode) {
+        penTouch(e, touches);
+      } else if (pinch(e, touches)) {
         e.preventDefault();
         return;
       }
-      if (!e.cancelable || (e.type !== 'touchstart' && e.type !== 'touchmove')) return;
+      if (!e.cancelable || over) return;
       const g = gestureRef.current;
-      const block = blocksInkTouch({
+      const stylus = changed.some(isStylus);
+      const block = blocksTouch({
         type: e.type,
-        stroke: g?.mode === 'ink' || g?.mode === 'erase',
-        stylus: inkToolRef.current && Array.from(e.changedTouches).some((t) => (t as Touch & { touchType?: string }).touchType === 'stylus'),
+        penMode,
+        stylus,
         control: onInkControl(e.target),
-        active: g?.active === true,
+        contact: g?.active === true && g.touchId !== undefined && live.has(g.touchId),
+        stroke: g?.mode === 'ink' || g?.mode === 'erase',
       });
-      if (block) e.preventDefault();
+      if (!block) return;
+      e.preventDefault();
+      // A prevented touchstart moves no focus: a text box or a memo being typed in is left like after a click
+      // elsewhere (not by the palm).
+      const typing = document.activeElement;
+      if (start && (stylus || changed.some((t) => guard.role(t.identifier) === 'pan')) && typing instanceof HTMLElement && isTypingTarget(typing) && scroller.contains(typing) && !(e.target instanceof Node && typing.contains(e.target))) {
+        typing.blur();
+      }
     };
 
     // The wheel's zoom before it is rounded and snapped to 맞춤 (lib/zoom.ts wheelZoom), carried from step to step
@@ -1429,6 +1876,7 @@ export function SlideViewer({
     let wheelRaw = 0;
     let wheelShown = Number.NaN;
     const onWheel = (e: WheelEvent) => {
+      stopInertia();
       if (!e.ctrlKey) return;
       e.preventDefault();
       // Not during a stroke or a drag (the live stroke is measured at its press), nor a pinch.
@@ -1467,28 +1915,54 @@ export function SlideViewer({
     };
 
     const onContextMenu = (e: Event) => {
-      // …nor a pen's barrel button or long press under 펜 / 지우개.
-      const pen = inkToolRef.current && ((e as PointerEvent).pointerType || lastPointerRef.current) === 'pen';
+      // …nor a pen's barrel button or long press, with any tool: a stylus is a mouse that opens no image menu.
+      const pen = ((e as PointerEvent).pointerType || lastPointerRef.current) === 'pen';
       if (gestureRef.current?.touch || (selectionRef.current && selectionRef.current.phase === 'drag') || pen) e.preventDefault();
     };
     const touch = typeof window !== 'undefined' && ('ontouchstart' in window || navigator.maxTouchPoints > 0);
+    const pointerEvents = ['pointerdown', 'pointermove', 'pointerup', 'pointercancel'] as const;
     const touchEvents = ['touchstart', 'touchmove', 'touchend', 'touchcancel'] as const;
     const gestureEvents = ['gesturestart', 'gesturechange', 'gestureend'];
     if (touch) {
-      scroller.addEventListener('pointerdown', onDown, true);
+      for (const type of pointerEvents) window.addEventListener(type, onPointer, true);
       for (const type of touchEvents) scroller.addEventListener(type, onTouch, { passive: false });
+      // A key may scroll the slides: the glide does not fight it.
+      window.addEventListener('keydown', stopInertia);
     }
     scroller.addEventListener('wheel', onWheel, { passive: false });
     for (const type of gestureEvents) scroller.addEventListener(type, onGesture, { passive: false });
     scroller.addEventListener('contextmenu', onContextMenu);
     return () => {
-      scroller.removeEventListener('pointerdown', onDown, true);
+      for (const type of pointerEvents) window.removeEventListener(type, onPointer, true);
       for (const type of touchEvents) scroller.removeEventListener(type, onTouch);
+      window.removeEventListener('keydown', stopInertia);
       scroller.removeEventListener('wheel', onWheel);
       for (const type of gestureEvents) scroller.removeEventListener(type, onGesture);
       scroller.removeEventListener('contextmenu', onContextMenu);
+      live.clear();
+      stylusDownRef.current = false;
     };
-  }, [inkToolRef, pinchToolRef, dropGesture, zoomAnchorAt, zoomAt, commitZoom, pinchStep, endPinch]);
+  }, [penModeRef, pinchToolRef, dropGesture, zoomAnchorAt, zoomAt, commitZoom, pinchStep, endPinch, stopInertia, releaseRef, abortRef]);
+
+  // A tool change (the layer hidden, 손가락으로도 쓰기 switched) ends what the old tool was doing — a stroke keeps what was
+  // written — and a glide: no gesture is left registered for a pointer the new tool knows nothing of.
+  useEffect(() => {
+    if (gestureRef.current) inkDebug.log(`stale gesture finished (${gestureRef.current.mode}, the tool changed)`);
+    abortRef.current();
+    stopInertia();
+  }, [tool, layerShown, fingerInk, abortRef, stopInertia]);
+
+  // The slide of the gesture left the document (the filter changed, the deck was swapped): nothing releases it there.
+  useEffect(() => {
+    const g = gestureRef.current;
+    if (!g || g.box.isConnected) return;
+    inkDebug.log(`stale gesture finished (${g.mode}, its slide is gone)`);
+    abortRef.current();
+  });
+
+  // The debug overlay of the tablet input (lib/inkDebug.ts): only with ?inkdebug=1.
+  const viewerRef = useRef<HTMLDivElement>(null);
+  useEffect(() => (viewerRef.current ? inkDebug.attach(viewerRef.current) : undefined), []);
 
   // Esc closes the memo sheet (first; its memo stays selected), else cancels a selection (being drawn or waiting in
   // its menu), the annotation tool (back to the default 선택·첨부 state) and the item selection.
@@ -1556,6 +2030,7 @@ export function SlideViewer({
       const cy = br.top + (r.y + r.h / 2) * br.height;
       const cx = br.left + (r.x + r.w / 2) * br.width;
       const wide = scroller.scrollWidth > scroller.clientWidth + 1;
+      stopInertia();
       scroller.scrollTo({
         top: scroller.scrollTop + cy - (sr.top + scroller.clientHeight / 2),
         left: wide ? scroller.scrollLeft + cx - (sr.left + scroller.clientWidth / 2) : scroller.scrollLeft,
@@ -1565,7 +2040,7 @@ export function SlideViewer({
       window.clearTimeout(flashTimer.current);
       flashTimer.current = window.setTimeout(() => setFlash(null), FLASH_MS);
     },
-    [pageCount, shownRef],
+    [pageCount, shownRef, stopInertia],
   );
 
   /** A memo of the 메모 tab: bring its slide in view, select and expand it. */
@@ -1602,11 +2077,12 @@ export function SlideViewer({
     const anchor = anchorRef.current;
     const el = anchor ? slideEls.current[anchor.index] : null;
     if (!scroller || !anchor || !el) return;
+    stopInertia();
     const sr = scroller.getBoundingClientRect();
     const er = el.getBoundingClientRect();
     const delta = er.top + anchor.frac * er.height - (sr.top + scroller.clientHeight / 2);
     if (Math.abs(delta) > 1) scroller.scrollTop += delta;
-  }, []);
+  }, [stopInertia]);
 
   // Restore the last viewed slide of this doc on mount and report the initial focus.
   useLayoutEffect(() => {
@@ -1880,7 +2356,7 @@ export function SlideViewer({
 
   return (
     <LayerContext.Provider value={env}>
-      <div className={viewerCls}>
+      <div className={viewerCls} ref={viewerRef}>
         <div className="viewer-toolbar" ref={toolbarRef}>
           <form
             className="page-jump"
@@ -1976,8 +2452,7 @@ export function SlideViewer({
           onScroll={scheduleFocus}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
-          onPointerCancel={onPointerCancel}
+          onLostPointerCapture={onLostPointerCapture}
           tabIndex={0}
           aria-label={m.slides.label}
         >

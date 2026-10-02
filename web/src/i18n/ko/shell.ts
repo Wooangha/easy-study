@@ -222,6 +222,9 @@ export const shell = {
   splitPane: {
     label: '패널 크기 조절',
     title: '드래그해서 크기 조절 · 더블클릭하면 기본값',
+    /** The button on the divider that folds the chat pane away, and brings it back. */
+    collapse: '채팅 접기',
+    expand: '채팅 펼치기',
   },
 
   /** The library (LibraryView.tsx and organize/parts.tsx). */

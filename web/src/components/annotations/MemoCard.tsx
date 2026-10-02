@@ -63,7 +63,8 @@ export function MemoCard({ slide, item, selected, editing, mode, group = false, 
     if (commit && d.moved && dragAt) actions.update(slide, item.id, { at: dragAt });
   };
   const onHeaderPointerDown = (e: ReactPointerEvent<HTMLElement>) => {
-    if (!inline || group || !e.isPrimary || (e.pointerType === 'mouse' && e.button !== 0)) return;
+    // A pen even when it is not the primary pointer: iPadOS makes only the first touch primary, a palm's (DESIGN §29).
+    if (!inline || group || (!e.isPrimary && e.pointerType !== 'pen') || (e.pointerType === 'mouse' && e.button !== 0)) return;
     const target = e.target as Element;
     // A control inside the header (⋯, ▾) keeps its click; the collapsed pill is itself a button and does drag.
     const control = target.closest('button, input, select, textarea, a');

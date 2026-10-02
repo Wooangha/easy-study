@@ -114,7 +114,7 @@ describe('viewer texts', () => {
   });
 
   test('Korean by default, unchanged', () => {
-    assert.equal(toolHint('select'), 'j/k · ↑/↓ · 빈 곳을 끌면 영역 첨부');
+    assert.equal(toolHint('select'), 'j/k · ↑/↓ · 빈 곳을 끌면 영역 첨부 (손가락은 길게 눌러 끌기)');
     assert.equal(toolHint('rect'), '사각형: 빈 곳에서 끌기 · 필기는 클릭해 옮기기 · Esc');
     assert.equal(toolHint('memo'), '메모: 빈 곳에서 클릭 · 필기는 클릭해 옮기기 · Esc');
     assert.equal(noTextLabel(), '(첨부만 보냄)');
@@ -131,7 +131,7 @@ describe('viewer texts', () => {
 
   test('English: the toolbar, its hint and menu button, the filter count and the replay badge', () => {
     setLang('en');
-    assert.equal(toolHint('select'), 'j/k · ↑/↓ · drag on an empty area to attach it');
+    assert.equal(toolHint('select'), 'j/k · ↑/↓ · drag on an empty area to attach it (a finger: press and hold, then drag)');
     assert.equal(toolHint('rect'), 'Rectangle: drag on an empty area · click an annotation to move it · Esc');
     assert.equal(toolHint('text'), 'Text: click on an empty area · click an annotation to move it · Esc');
     const html = toolbar();

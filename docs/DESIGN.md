@@ -2757,6 +2757,32 @@ inkOutline with sharp), so the tutor sees what the student wrote (see the review
   add-only write drops only those strokes (and their undo entries), not the slide's history.
 - Dark mode: the black ink swatch has a visible edge.
 
+### On the iPad (after the first device test)
+
+The first test on an iPad Pro (Safari, Apple Pencil, plain http): strokes stopped for 8–16 s at a time, finger touches died
+with them, a short dash after a stroke vanished, dragging a region did nothing. What changed:
+- **Pen mode is the viewer's own** (펜 / 지우개, 손가락으로도 쓰기 off): `touch-action: none` on the scroller and slide boxes and
+  every touch not on a control prevented — no native pan can swallow the Pencil. Fingers are handled in the touch
+  listeners: one finger pans after 8 px with inertia (lib/touchPan.ts), two fingers pinch (lib/zoom.ts). Palm rules
+  (`PalmGuard`, pure): a finger is ignored when it lands while the pen is down or within 400 ms of a pen contact event
+  (hover moves do not count), was down when the pen landed, or lands with a contact radius ≥ 40 px; a pen landing during a
+  pan / pinch that moved within the last second restores the scroll and zoom it changed. In this mode annotation items and
+  the slide image are not pointer targets (a press always lands on the stable slide box).
+- **No stale gesture**: an ink / erase gesture ends by whichever comes first — the next press (finishes the old stroke,
+  starts the new one), pointerup / pointercancel on window (capture phase), lostpointercapture, the writing touch ending
+  or missing from `event.touches`, a button-less move after the contact is gone, a tool change, the page hiding. Touches
+  are blocked only while the writing contact is really down. pointercancel always keeps what was drawn (the 12 px drop
+  rule is gone).
+- **The stylus is a mouse in the other tools**: precise slop, drags start at once (a drag on empty area with no tool is a
+  region for 첨부), it never scrolls the slides; fingers scroll and long-press as before. No image drag / callout on a long
+  press. Memo cards take a non-primary pen too.
+- **The divider cannot freeze the panes**: `is-dragging` only after the slop, ended by every way a press can end; its touch
+  grab area reaches 6 px into the slides at most. **채팅 접기 / 펼치기**: a chevron button on the divider collapses the chat
+  pane (kept mounted, `chatCollapsed` in localStorage); attaching, asking, opening notes or a recording opens it again.
+- **`?inkdebug=1`** (sessionStorage; `?inkdebug=0` off): a small input log at the viewer's bottom left — presses and what
+  was decided, move counts, releases / cancels, touch roles with their radius, pan / pinch / revert, stale-gesture
+  endings, `stall Nms` (frames more than 250 ms apart), `commit Nms`. For screen recordings from a device.
+
 ### Tests
 
 tests/ink.test.ts (encoding, rect, simplification, splitting, outline, hit testing); server validation / caps / patch

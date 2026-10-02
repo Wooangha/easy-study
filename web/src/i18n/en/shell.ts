@@ -208,6 +208,8 @@ export const shell = {
   splitPane: {
     label: 'Resize panels',
     title: 'Drag to resize · Double-click to reset',
+    collapse: 'Collapse chat',
+    expand: 'Expand chat',
   },
 
   library: {

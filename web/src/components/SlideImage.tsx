@@ -31,6 +31,9 @@ export function SlideImage({ docId, slide, src, srcSet, sizes, alt, draggable, o
   const common = {
     alt,
     draggable,
+    // Not draggable: a long press with a finger or a stylus must not lift the image either (iPadOS starts its own
+    // drag from one; styles.css adds -webkit-user-drag and -webkit-touch-callout for the slides).
+    onDragStart: draggable === false ? (e: { preventDefault: () => void }) => e.preventDefault() : undefined,
     loading: 'lazy',
     decoding: 'async',
     onLoad: onLoad ? (e: { currentTarget: HTMLImageElement }) => onLoad(e.currentTarget) : undefined,

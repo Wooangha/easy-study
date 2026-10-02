@@ -6,6 +6,8 @@ export const storageKeys = {
   /** Slides' share of the split pane (SplitPane.tsx): side by side, and stacked on narrow screens. */
   split: 'split',
   splitStacked: 'splitStacked',
+  /** The chat pane of the split pane is folded away (either layout). */
+  chatCollapsed: 'chatCollapsed',
   lastDoc: 'lastDoc',
   zoom: 'zoom',
   providerChoice: 'providerChoice',

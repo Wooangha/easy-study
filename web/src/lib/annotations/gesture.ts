@@ -5,9 +5,10 @@
 // touches (DESIGN §29), and the plan of a press — resize a handle, select / move the item under it with ANY tool
 // active (Shift: add it to / take it out of the selection), re-drag a text highlight with its own tool, draw with the
 // active tool on empty area, drag a marquee with 범위 선택, write or erase under 펜 / 지우개 (by the kind of pointer:
-// a finger scrolls), or (no tool: the default 선택·첨부 state) start the region gesture; and which pointer / touch
-// events of 펜 / 지우개 start, block or keep a stroke. No DOM (the viewer measures memo cards for the marquee and passes
-// their boxes in).
+// a finger scrolls), or (no tool: the default 선택·첨부 state) start the region gesture — a stylus counts as a mouse
+// there, only a finger is imprecise and long-presses; and which pointer / touch events start a gesture, replace one
+// whose contact is gone (a release that never arrived must not block the next press) or are kept from the browser.
+// No DOM (the viewer measures memo cards for the marquee and passes their boxes in).
 import { inkDistance, inkMaxRadius, inkPointsOf, inkTouches } from '../../../../shared/ink.ts';
 import type { AnnotationItem, RegionRect, TextHighlightItem } from '../../../../shared/types.ts';
 import type { Point } from '../attachments.ts';
@@ -242,8 +243,15 @@ export function unionIds(base: readonly string[], more: readonly string[]): stri
 }
 
 // ---------------------------------------------------------------------------
-// The pointer and touch events of 펜 / 지우개 (DESIGN §29)
+// The pointer and touch events of a gesture (DESIGN §29)
 // ---------------------------------------------------------------------------
+
+/**
+ * A finger: imprecise (TOUCH_HIT_SLOP_PX), it scrolls the slides by dragging — so a region needs a long press and an
+ * unselected item is selected before it is moved — and draws at once under a tool. A stylus (Apple Pencil, S Pen) is
+ * a mouse with a tip: precise, its drags start right away and it never scrolls the slides.
+ */
+export const fingerPointer = (pointerType: string): boolean => pointerType === 'touch';
 
 /**
  * Whether a pointerdown may start a gesture on the slides: the primary pointer, or any pen — iPadOS Safari makes only
@@ -253,6 +261,112 @@ export function unionIds(base: readonly string[], more: readonly string[]): stri
 export function acceptsPress(e: { isPrimary: boolean; pointerType: string; button: number }): boolean {
   if (!e.isPrimary && e.pointerType !== 'pen') return false;
   return e.pointerType !== 'mouse' || e.button === 0;
+}
+
+/** What the viewer knows of the gesture a press finds registered. */
+export interface HeldGesture {
+  pointerId: number;
+  pointerType: string;
+  /** A 펜 stroke or an eraser drag (what it drew is kept when it ends unseen). */
+  stroke: boolean;
+  /** Live (a drag past its threshold, a long press that fired); a stroke always is. */
+  active: boolean;
+}
+
+/**
+ * What a pointerdown does about the gesture already registered:
+ * - 'start': there is none.
+ * - 'finish': a stroke whose contact is gone — the release never arrived — keeps what it drew; the press goes on.
+ * - 'drop': a gesture that is over, or that the hand started before the pen, goes with what it drew; the press goes on.
+ * - 'cancel': a second finger on a finger's press that is not live yet (two fingers pinch): it goes, the press too.
+ * - 'ignore': the press is not for the slides (a palm or a second finger during a gesture); the gesture stays.
+ *
+ * A pointer that goes down is not down already, and there is one pen and one mouse: a press of the gesture's own
+ * pointer, of a pen or of a mouse always means the old gesture's contact has ended, whatever became of its pointerup
+ * (iPadOS gives every contact of the Pencil a new pointerId). A gesture never outlives the next press, so one lost
+ * release cannot make the slides ignore the pen. A finger is the exception: a palm lands during a stroke, a second
+ * finger during a drag — only the first finger of a new sequence (isPrimary) says the old finger is gone.
+ */
+export type PressOver = 'start' | 'finish' | 'drop' | 'cancel' | 'ignore';
+
+export function pressOver(current: HeldGesture | null, e: { pointerId: number; pointerType: string; isPrimary: boolean }): PressOver {
+  if (!current) return 'start';
+  const over = current.stroke ? 'finish' : 'drop';
+  if (e.pointerId === current.pointerId) return over;
+  if (!fingerPointer(e.pointerType)) {
+    // What a finger or a palm began before the pen (a stroke under 손가락으로도 쓰기 too) is not the student's.
+    return e.pointerType === 'pen' && fingerPointer(current.pointerType) ? 'drop' : over;
+  }
+  if (!fingerPointer(current.pointerType)) return 'ignore';
+  if (e.isPrimary) return over;
+  return current.active ? 'ignore' : 'cancel';
+}
+
+/**
+ * Whether a pointermove shows that a gesture's contact ended without its pointerup: the mouse that made it moves with
+ * no button held, or the pen hovers (no button, no pressure — a pen is one device, whatever its pointerId) while a
+ * pen's gesture is registered. A finger does not hover.
+ *
+ * Not while the touch events still show the gesture's own contact on the glass (`down`), nor by a move sent before
+ * the press (`downAt` / `timeStamp`): iPadOS sends the Pencil's hover apart from its contact (another pointerId,
+ * another queue), so a last hover move can arrive after the pointerdown of the stroke it preceded — the stroke would
+ * end as a dot and the rest of it be ignored. The touch ending, or the next press, ends such a gesture.
+ */
+export function releasedUnseen(
+  g: { pointerId: number; pointerType: string; downAt?: number },
+  e: { pointerId: number; pointerType: string; buttons: number; pressure: number; timeStamp?: number },
+  down = false,
+): boolean {
+  if (down || e.pointerType !== g.pointerType || e.buttons !== 0) return false;
+  if (g.downAt !== undefined && e.timeStamp !== undefined && e.timeStamp <= g.downAt) return false;
+  if (e.pointerType === 'mouse') return e.pointerId === g.pointerId;
+  return e.pointerType === 'pen' && !(e.pressure > 0);
+}
+
+/** A touch on the glass as the touch events list it. */
+export interface Contact {
+  /** Touch.identifier. */
+  id: number;
+  x: number;
+  y: number;
+  /** A stylus (iOS `touchType === 'stylus'`; elsewhere the pointerdown before its touchstart said so). */
+  stylus: boolean;
+}
+
+/** A gesture's touch is looked for this close (CSS px) to where its pointer is. */
+export const CONTACT_MATCH_PX = 48;
+
+/**
+ * The touch that makes a gesture begun by a pointer at `at` (client px): of a pen the stylus touch (the nearest of
+ * them, wherever), of a finger the nearest finger within `slop`. A pen whose touch is not marked as a stylus is not
+ * guessed among the fingers — the palm lies right next to it, and its lifting would end the stroke. Undefined when
+ * none fits: the gesture then ends by its pointer events alone.
+ */
+export function contactFor(g: { pointerType: string; at: Point }, touches: readonly Contact[], slop = CONTACT_MATCH_PX): number | undefined {
+  const pen = g.pointerType === 'pen';
+  let best: Contact | undefined;
+  let bestD = pen ? Infinity : slop;
+  for (const t of touches) {
+    if (t.stylus !== pen) continue;
+    const d = Math.hypot(t.x - g.at.x, t.y - g.at.y);
+    if (d <= bestD) {
+      best = t;
+      bestD = d;
+    }
+  }
+  return best?.id;
+}
+
+/**
+ * Whether the touches on the glass show that a gesture's contact is gone (its touchend went to a node that had left
+ * the document, or its pointerup was never sent): its own touch is not among them; or, for a pen's gesture whose touch
+ * was never seen, no stylus is — where the browser marks every touch with its kind (`typed`, iOS). The mouse has no
+ * touch: its gestures end by pointer events.
+ */
+export function contactGone(g: { pointerType: string; touchId?: number }, touches: readonly Contact[], typed: boolean): boolean {
+  if (g.pointerType === 'mouse') return false;
+  if (g.touchId !== undefined) return !touches.some((t) => t.id === g.touchId);
+  return g.pointerType === 'pen' && typed && !touches.some((t) => t.stylus);
 }
 
 /**
@@ -268,38 +382,38 @@ export function onInkControl(target: unknown): boolean {
   return typeof el?.closest === 'function' && el.closest(INK_TOUCH_CONTROLS) !== null;
 }
 
-export interface InkTouch {
+export interface ViewerTouch {
   type: 'touchstart' | 'touchmove' | string;
-  /** A 펜 stroke or an eraser drag is being made. */
-  stroke: boolean;
-  /** 펜 / 지우개 is active and the touch is a stylus (iOS `touchType === 'stylus'`). */
+  /** 펜 / 지우개 without 손가락으로도 쓰기: the viewer scrolls and zooms the slides itself (lib/touchPan.ts). */
+  penMode: boolean;
+  /** One of the event's touches is a stylus. */
   stylus: boolean;
   /** The touch is on a control (onInkControl). */
   control: boolean;
-  /** A gesture is live (a selection being dragged, a move): its finger must not scroll. */
-  active: boolean;
+  /**
+   * The contact of a live gesture (a stroke, an eraser drag, a selection or an item being dragged) is on the glass
+   * right now: among the event's touches. Never the gesture object alone — one whose release was lost would stop
+   * every finger for good.
+   */
+  contact: boolean;
+  /** That gesture writes or erases. */
+  stroke: boolean;
 }
 
 /**
- * Whether the viewer's non-passive touch listener prevents a touch's default (palm rejection, DESIGN §29): always
- * during a stroke (a palm put down meanwhile must not scroll); a stylus otherwise — but not its touchstart on a
- * control, which would swallow the tap (the Q&A badge, a marker, a memo card's buttons and textarea, a menu); and a
- * touchmove of a live gesture.
+ * Whether the viewer's non-passive touch listener prevents a touch's default (DESIGN §29): under 펜 / 지우개 everything
+ * that is not on a control — the browser must do nothing of its own with a palm (no scroll that takes the pen's
+ * touches, no double-tap zoom); a touch on a control keeps its tap. While a stroke's contact is down, every touch,
+ * on a control too. A stylus in every tool (it never scrolls the slides) — but not its touchstart on a control, which
+ * would swallow the tap (the Q&A badge, a marker, a memo card's buttons and textarea, a menu). And the touchmove of a
+ * live gesture whose contact is down: its finger must not scroll.
  */
-export function blocksInkTouch(t: InkTouch): boolean {
-  if (t.stroke) return true;
+export function blocksTouch(t: ViewerTouch): boolean {
+  if (t.stroke && t.contact) return true;
+  if (t.penMode && !t.control) return true;
   if (t.stylus && !(t.type === 'touchstart' && t.control)) return true;
-  return t.type === 'touchmove' && t.active;
+  return t.type === 'touchmove' && t.contact;
 }
-
-/**
- * A 펜 stroke the browser cancels (pointercancel) before it got this far from its start, in CSS px, was not meant to
- * be written: Chrome on Android turns an S Pen fling into a scroll. A stroke that got farther keeps what was drawn.
- */
-export const INK_CANCEL_SLOP_PX = 12;
-
-/** Whether a cancelled stroke that reached `reachPx` from its start (the farthest sample) is kept. */
-export const keepsCancelledStroke = (reachPx: number): boolean => reachPx >= INK_CANCEL_SLOP_PX;
 
 /** What the DOM says was pressed: a selection handle, a question marker, or anything else (the items are hit-tested). */
 export type PressTarget = { kind: 'handle'; handle: Handle } | { kind: 'marker' } | { kind: 'other' };
@@ -312,11 +426,11 @@ export interface PressInput {
   item: AnnotationItem | null;
   /** The item is part of the selection already. */
   selected: boolean;
-  /** A finger or a pen (not a mouse / trackpad). */
+  /** A finger (fingerPointer); a stylus is a mouse here. Overridden by `pointerType` when that is given. */
   touch: boolean;
   /** Shift held: an item is added to / taken out of the selection, a marquee adds to it. */
   shift?: boolean;
-  /** PointerEvent.pointerType ('mouse' | 'pen' | 'touch'); absent: 'touch' when `touch`, else 'mouse'. */
+  /** PointerEvent.pointerType ('mouse' | 'pen' | 'touch'); absent: a finger when `touch`, else the mouse. */
   pointerType?: string;
   /** PointerEvent.buttons: on a pen, the eraser end (32) or the barrel button (2) erases under 펜. */
   buttons?: number;
@@ -334,13 +448,13 @@ export type PressPlan =
   | { kind: 'select'; item: AnnotationItem; move: boolean }
   /** Shift+click: add the item to the selection, or take it out. Nothing is moved. */
   | { kind: 'toggle'; item: AnnotationItem }
-  /** Draw with the tool on empty area; `immediate` = the gesture is live from the press (a click tool, or touch). */
+  /** Draw with the tool on empty area; `immediate` = the gesture is live from the press (a click tool, or a finger). */
   | { kind: 'draw'; tool: DrawingTool; immediate: boolean }
   /** 범위 선택 on empty area: a drag selects what it crosses (`add`: on top of the selection); `immediate` on touch. */
   | { kind: 'marquee'; add: boolean; immediate: boolean }
   /** 텍스트 형광 pressed on a text highlight: a drag re-fits that item's words (a click selects it); `immediate` on touch. */
   | { kind: 'redraw'; item: TextHighlightItem; immediate: boolean }
-  /** No tool, empty area: the region gesture (mouse: a drag; touch: a long press then a drag). */
+  /** No tool, empty area: the region gesture (mouse or stylus: a drag; a finger: a long press then a drag). */
   | { kind: 'region' }
   /** 펜: a stroke is written from the press (over existing items too). */
   | { kind: 'ink' }
@@ -358,28 +472,29 @@ export const canResize = (item: AnnotationItem): boolean => item.type !== 'memo'
  * their own; the one exception is a text highlight under its own tool, which is re-dragged (it has no handles —
  * dragging over words is how its extent changes); drawing happens only on empty area; without a tool the empty area
  * is the region (첨부) gesture. Under 펜 / 지우개 (DESIGN §29) the kind of pointer decides, over items too: a stylus or
- * the mouse writes / erases (a pen's eraser end or barrel button erases under 펜), a finger does nothing — the browser
- * scrolls and zooms, and a palm resting on the slide writes nothing — unless 손가락으로도 쓰기 is on.
+ * the mouse writes / erases (a pen's eraser end or barrel button erases under 펜), a finger does nothing — the viewer
+ * scrolls and zooms, and a palm resting on the slide writes nothing — unless 손가락으로도 쓰기 is on. Under every other
+ * tool a stylus is a mouse (fingerPointer): its drag moves an item, draws or selects a region right away.
  */
 export function pressPlan({ tool, target, item, selected, touch, shift = false, pointerType, buttons = 0, fingerInk = false }: PressInput): PressPlan {
   if (target.kind === 'marker') return { kind: 'ignore' };
   if (target.kind === 'handle') {
     return item && canResize(item) ? { kind: 'resize', item, handle: target.handle } : { kind: 'ignore' };
   }
+  const finger = pointerType === undefined ? touch : fingerPointer(pointerType);
   if (isInkTool(tool)) {
-    const pointer = pointerType ?? (touch ? 'touch' : 'mouse');
-    if (pointer === 'touch' && !fingerInk) return { kind: 'ignore' };
-    if (tool === 'eraser' || (pointer === 'pen' && (buttons & PEN_ERASE_BUTTONS) !== 0)) return { kind: 'erase' };
+    if (finger && !fingerInk) return { kind: 'ignore' };
+    if (tool === 'eraser' || (pointerType === 'pen' && (buttons & PEN_ERASE_BUTTONS) !== 0)) return { kind: 'erase' };
     return { kind: 'ink' };
   }
   if (item) {
     if (shift) return { kind: 'toggle', item };
-    if (item.type === 'textHighlight' && tool === 'textHighlight') return { kind: 'redraw', item, immediate: touch };
-    // A text highlight is never moved (re-drag it with 텍스트 형광); on touch an unselected item is selected first so a finger can still scroll.
-    const move = item.type !== 'textHighlight' && !(touch && !selected);
+    if (item.type === 'textHighlight' && tool === 'textHighlight') return { kind: 'redraw', item, immediate: finger };
+    // A text highlight is never moved (re-drag it with 텍스트 형광); a finger selects an unselected item first, so it can still scroll.
+    const move = item.type !== 'textHighlight' && !(finger && !selected);
     return { kind: 'select', item, move };
   }
-  if (tool === 'marquee') return { kind: 'marquee', add: shift, immediate: touch };
-  if (tool !== 'select') return { kind: 'draw', tool, immediate: touch || CLICK_TOOLS.has(tool) };
+  if (tool === 'marquee') return { kind: 'marquee', add: shift, immediate: finger };
+  if (tool !== 'select') return { kind: 'draw', tool, immediate: finger || CLICK_TOOLS.has(tool) };
   return { kind: 'region' };
 }
