@@ -2793,7 +2793,9 @@ with them, a short dash after a stroke vanished, dragging a region did nothing. 
   endings, `stall Nms` (frames more than 250 ms apart), `commit Nms`; a status line rewritten in place (clock, fps, hover /
   pen / touch moves per second, touches down, focus) and what arrives at the window (`w:` lines). For screen recordings
   from a device; a server started with EASY_STUDY_INK_DEBUG=1 also prints the lines in its log (POST /api/debug/ink,
-  absent otherwise).
+  absent otherwise). While nothing moves an `idle` line every 5 s (fps, touches down, focus); a button above the panel,
+  "방금 먹통이었음", writes a `MARK` line — pressed after a dead period, it tells the period from a pause (nothing
+  arrives in either).
 
 ### Tests
 

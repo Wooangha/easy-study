@@ -7050,6 +7050,18 @@ details[open] > summary::before {
   pointer-events: none;
 }
 
+.ink-debug-mark {
+  position: fixed;
+  z-index: 90;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: rgb(15 18 25 / 0.78);
+  color: #ffd9a8;
+  font: 12px/1.25 system-ui, sans-serif;
+  touch-action: manipulation;
+}
+
 .annot-unsaved {
   position: absolute;
   right: 8px;

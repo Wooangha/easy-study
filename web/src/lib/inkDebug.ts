@@ -80,6 +80,10 @@ export class InkDebugLines {
 
 const ms = (value: number): string => `${value < 10 ? value.toFixed(1) : Math.round(value)}ms`;
 
+/** While nothing moves, an "idle" line this often (ms). */
+const IDLE_LINE_MS = 5000;
+const MARK_LABEL = '방금 먹통이었음';
+
 /** How many log lines are kept for the server (when it listens: EASY_STUDY_INK_DEBUG=1) between two sends. */
 const SHIP_MAX_LINES = 400;
 
@@ -91,6 +95,8 @@ const SHIP_MAX_LINES = 400;
  * at the window (every press, release and cancel of any pointer, touch starts and ends, mouse buttons, Safari's
  * gesture events, focus and visibility changes, selection, context menu, drag): what the viewer never saw is there.
  * With a server started with EASY_STUDY_INK_DEBUG=1 the lines are also sent to it once a second (its log shows them).
+ * Above the panel a button, "방금 먹통이었음", that writes a MARK line: pressed after a dead period, it tells the period
+ * from a pause.
  */
 class InkDebugPanel {
   /** Whether the overlay is shown: callers guard what is costly to format with it. */
@@ -115,14 +121,30 @@ class InkDebugPanel {
     el.className = 'ink-debug';
     el.setAttribute('aria-hidden', 'true');
     document.body.appendChild(el);
+    // A mark for the log, pressed right after the input was dead for a while: a dead period and a pause look the
+    // same in the log (nothing arrives in either), the mark says which one the lines before it were.
+    const mark = document.createElement('button');
+    mark.type = 'button';
+    mark.className = 'ink-debug-mark';
+    mark.textContent = MARK_LABEL;
+    let markTimer = 0;
+    mark.addEventListener('click', () => {
+      this.log('MARK: the input was dead just now');
+      mark.textContent = '기록됨 ✓';
+      window.clearTimeout(markTimer);
+      markTimer = window.setTimeout(() => (mark.textContent = MARK_LABEL), 1500);
+    });
+    document.body.appendChild(mark);
     this.el = el;
     this.on = true;
     this.lines = new InkDebugLines(performance.now());
-    // Fixed over the viewer's bottom left corner (measured now and then: the divider moves it).
+    // Fixed over the viewer's bottom left corner (measured now and then: the divider moves it), the mark above it.
     const place = () => {
       const box = host.getBoundingClientRect();
-      el.style.left = `${Math.round(box.left + 8)}px`;
-      el.style.bottom = `${Math.round(Math.max(0, window.innerHeight - box.bottom) + 8)}px`;
+      const bottom = Math.round(Math.max(0, window.innerHeight - box.bottom) + 8);
+      el.style.left = mark.style.left = `${Math.round(box.left + 8)}px`;
+      el.style.bottom = `${bottom}px`;
+      mark.style.bottom = `${bottom + el.offsetHeight + 6}px`;
     };
     place();
     let last = performance.now();
@@ -198,6 +220,7 @@ class InkDebugPanel {
       this.log(`w:selectionchange "${String(document.getSelection() ?? '').slice(0, 12)}"`);
     });
 
+    let idleSince = performance.now();
     const tick = window.setInterval(() => {
       const now = performance.now();
       if (hovering && now - hoverAt > 400) {
@@ -209,10 +232,19 @@ class InkDebugPanel {
       this.status =
         `alive ${new Date().toTimeString().slice(3, 8)} · ${c.frames * 4}fps · hover ${c.hover * 4}/s · pen ${c.pm * 4}/s · touch ${c.tm * 4}/s · ` +
         `${this.touches} down${this.penDown ? ' · PEN DOWN' : ''}${hovering ? ' · hovering' : ''} · focus ${name(active)}`;
-      // A second's summary for the server, only when something moved.
-      if ((c.hover || c.pm || c.tm) && this.outbox.length < SHIP_MAX_LINES) this.outbox.push(`      ~ hover ${c.hover} pen ${c.pm} touch ${c.tm} frames ${c.frames} (250ms)`);
+      // A summary for the server when something moved; while nothing does, a line now and then (the page is alive,
+      // what it believes of the focus and the touches): a silent stretch of the log is a pause or a dead period.
+      if (c.hover || c.pm || c.tm) {
+        idleSince = now;
+        if (this.outbox.length < SHIP_MAX_LINES) this.outbox.push(`      ~ hover ${c.hover} pen ${c.pm} touch ${c.tm} frames ${c.frames} (250ms)`);
+      } else if (now - idleSince >= IDLE_LINE_MS && document.visibilityState === 'visible') {
+        idleSince = now;
+        this.log(`idle · ${c.frames * 4}fps · ${this.touches} down${this.penDown ? ' · PEN DOWN' : ''} · focus ${name(active)}${document.hasFocus() ? '' : ' · window not focused'}`);
+      }
       this.counts = { frames: 0, hover: 0, pm: 0, tm: 0 };
       this.render();
+      // The panel grew or shrank: the mark stays above it.
+      place();
     }, 250);
     const shipper = window.setInterval(() => this.send(), 1000);
 
@@ -223,7 +255,9 @@ class InkDebugPanel {
       window.clearInterval(shipper);
       document.removeEventListener('visibilitychange', onVisible);
       for (const [target, type, handler] of listeners) target.removeEventListener(type, handler, options);
+      window.clearTimeout(markTimer);
       el.remove();
+      mark.remove();
       if (this.el === el) {
         this.el = null;
         this.on = false;

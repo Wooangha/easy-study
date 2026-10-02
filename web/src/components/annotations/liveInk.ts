@@ -161,8 +161,11 @@ export class LiveInk {
   }
 
   remove(): void {
-    this.ink.remove();
-    this.tail.remove();
+    for (const canvas of [this.ink, this.tail]) {
+      canvas.remove();
+      // Safari keeps a dropped canvas's pixels until it is collected (a stroke makes two): given back at once.
+      canvas.width = canvas.height = 0;
+    }
   }
 
   private x(i: number): number {
