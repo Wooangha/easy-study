@@ -54,6 +54,8 @@ export const viewer = {
     labels: {
       select: 'Select & attach',
       marquee: 'Box select',
+      pen: 'Pen',
+      eraser: 'Eraser',
       highlight: 'Highlighter',
       textHighlight: 'Text highlight',
       rect: 'Rectangle',
@@ -64,6 +66,8 @@ export const viewer = {
     titles: {
       select: 'Select & attach: click an annotation to move or delete it, or drag on an empty area to attach that region to your question',
       marquee: 'Box select: drag on an empty area to select several annotations at once · Shift+click to add or remove (press again or Esc to turn off)',
+      pen: 'Pen: write with an Apple Pencil, an S Pen or the mouse — fingers scroll and zoom (press again or Esc to turn off)',
+      eraser: 'Eraser: erases the pen strokes it passes over (press again or Esc to turn off)',
       highlight: 'Highlighter: drag over a line of text to highlight along it (press again or Esc to turn off)',
       textHighlight: 'Text highlight: drag over text to highlight whole words; drag over a highlight again to change its range (press again or Esc to turn off)',
       rect: 'Rectangle: drag to draw (press again or Esc to turn off)',
@@ -73,12 +77,24 @@ export const viewer = {
     },
     hintSelect: 'j/k · ↑/↓ · drag on an empty area to attach it',
     hintMarquee: 'Box select: drag on an empty area to select several · Shift+click to add or remove · Esc',
+    hintPen: (finger) => (finger ? 'Pen: write with a pen, a finger or the mouse · Esc' : 'Pen: write with an Apple Pencil or the mouse · fingers scroll'),
+    hintEraser: 'Eraser: erases the pen strokes it passes over',
     hintDraw: (label, click) => `${label}: ${click ? 'click' : 'drag'} on an empty area · click an annotation to move it · Esc`,
     group: 'Annotation tools',
     hiddenTitle: 'Annotations are hidden (show them from the ⋯ annotations menu)',
     colorGroup: 'Color for new annotations',
     colorTitle: (color) => `Color for new annotations: ${color}`,
     compactTitle: (tool, color) => `Annotation tools: ${tool} · ${color}`,
+    inkColorGroup: 'Pen color',
+    inkColorTitle: (color) => `Pen color: ${color}`,
+    inkWidthGroup: 'Pen width',
+    inkWidths: ['Thin', 'Medium', 'Thick'],
+    inkWidthTitle: (width) => `Pen width: ${width}`,
+    fingerInk: 'Write with fingers too',
+    fingerInkTitle: (on) =>
+      on
+        ? 'Write with fingers too: on — a finger writes like the pen (off: fingers scroll and zoom)'
+        : 'Write with fingers too: off — only a pen or the mouse writes, fingers scroll and zoom (turn it on without a stylus)',
   },
   layerMenu: {
     label: 'Annotations menu',
@@ -104,6 +120,8 @@ export const viewer = {
     green: 'Green',
     pink: 'Pink',
     blue: 'Blue',
+    black: 'Black',
+    red: 'Red',
   },
 
   itemMenu: {
@@ -214,6 +232,7 @@ export const viewer = {
     conflictReloaded: 'The annotations changed elsewhere, so they were reloaded',
     tooManyItems: (max) => `This slide can't take more annotations (up to ${max})`,
     tooManyHidden: 'Too many hidden question markers',
+    tooMuchOnSlide: 'There is too much on this slide',
     saveFailed: (reason) => `Couldn't save the annotations: ${reason}`,
   },
 } satisfies typeof ko;

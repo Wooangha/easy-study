@@ -74,6 +74,12 @@ const toolbar = () =>
       onReplayOn: () => {},
       replaying: true,
       compact: false,
+      inkColor: 'black',
+      onInkColor: () => {},
+      inkWidth: 0.005,
+      onInkWidth: () => {},
+      fingerInk: false,
+      onFingerInk: () => {},
     }),
   );
 

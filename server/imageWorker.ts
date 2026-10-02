@@ -14,8 +14,9 @@
 //       2. optionally the derived files of server/assets.ts that are still missing: view renditions (lossy
 //          WebP), thumbnails (WebP) and inline JPEGs for every slide, and inline JPEGs for every contact sheet;
 //   - AttachmentJob (runAttachmentWorker, DESIGN §21): one attachment image in attachments/<id>.jpg|png, either a
-//     region of a slide (cropped from slides/NNN.png, with the text of the PDF inside the region) or an image the
-//     student uploaded (EXIF orientation applied, metadata dropped), encoded like the inline JPEGs;
+//     region of a slide (cropped from slides/NNN.png with the student's 펜 strokes drawn in (§29), and the text of the
+//     PDF inside the region) or an image the student uploaded (EXIF orientation applied, metadata dropped), encoded
+//     like the inline JPEGs;
 //   - MatchJob (runMatchWorker, DESIGN §28): a lecture's deck and a new version of its PDF → which new slide each old
 //     slide became (server/slideMatch.ts), from both PDFs rendered small, their text and word boxes. Writes nothing.
 //
@@ -31,6 +32,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type sharpModule from 'sharp';
 import type { OutputInfo, OverlayOptions, Sharp as SharpPipeline } from 'sharp';
+import { INK_POINT_CHARS, INK_PTS_RE, decodeInkPoints, inkOutline } from '../shared/ink.ts';
+import { MAX_INK_POINTS, MAX_INK_STROKES, MAX_INK_WIDTH, MIN_INK_WIDTH } from '../shared/types.ts';
 import type { RegionRect, SlideTextLayout } from '../shared/types.ts';
 import {
   ATTACHMENTS_DIR,
@@ -106,10 +109,22 @@ export interface TextJob {
   pageCount: number;
 }
 
+/** A 펜 stroke drawn into a region crop (DESIGN §29): the InkItem's geometry and its ink. */
+export interface RegionInk {
+  rect: RegionRect;
+  /** InkItem.width (a fraction of the image height). */
+  width: number;
+  /** InkItem.pts (shared/ink.ts). */
+  pts: string;
+  /** `#rrggbb`. */
+  color: string;
+}
+
 /**
  * Job of runAttachmentWorker(): a region of a slide the student selected (DESIGN §21) → attachments/<id>.jpg|png,
- * cropped from the full-resolution slides/<slideFile> (padded, clamped, at least 16 px a side: regionCropBox), plus
- * the text of source.pdf's page `slide` inside the region ('' when there is none or the PDF cannot be read).
+ * cropped from the full-resolution slides/<slideFile> (padded, clamped, at least 16 px a side: regionCropBox) with
+ * the slide's 펜 strokes that meet it drawn in, plus the text of source.pdf's page `slide` inside the region ('' when
+ * there is none or the PDF cannot be read).
  */
 export interface RegionJob {
   kind: 'region';
@@ -123,6 +138,8 @@ export interface RegionJob {
   slideFile: string;
   /** Normalised to the slide image (0..1, origin top-left). */
   rect: RegionRect;
+  /** The 펜 strokes to draw into the crop, in z-order (≤ MAX_INK_STROKES; DESIGN §29). */
+  ink?: RegionInk[];
 }
 
 /**
@@ -877,7 +894,26 @@ async function decodeOnce(sharp: Sharp, pipeline: SharpPipeline): Promise<() => 
   return () => sharp(data, { raw: { width: info.width, height: info.height, channels: info.channels } });
 }
 
-/** A selected region of a slide → attachments/<id>.jpg|png + the text of the PDF inside it (DESIGN §21). */
+/**
+ * The 펜 strokes of a region as an SVG of the crop `box` (DESIGN §29): each stroke's filled outline (inkOutline) in
+ * pixels of the whole `width` × `height` slide image, the viewBox showing the crop only. null when nothing is drawn.
+ */
+function inkOverlay(ink: readonly RegionInk[], box: { left: number; top: number; width: number; height: number }, width: number, height: number): Buffer | null {
+  let paths = '';
+  for (const stroke of ink) {
+    const d = inkOutline(decodeInkPoints(stroke.pts, stroke.rect), stroke.width, width, height);
+    if (d) paths += `<path d="${d}" fill="${stroke.color}"/>`;
+  }
+  if (!paths) return null;
+  return Buffer.from(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${box.width}" height="${box.height}" viewBox="${box.left} ${box.top} ${box.width} ${box.height}">${paths}</svg>`,
+  );
+}
+
+/**
+ * A selected region of a slide → attachments/<id>.jpg|png (with the student's 펜 strokes drawn in) + the text of the
+ * PDF inside it (DESIGN §21, §29).
+ */
 async function runRegionJob(job: RegionJob, send: (message: ChildMessage) => Promise<void>): Promise<void> {
   const sharp = (await import('sharp')).default;
   sharp.cache(false);
@@ -885,7 +921,11 @@ async function runRegionJob(job: RegionJob, send: (message: ChildMessage) => Pro
   const { width = 0, height = 0 } = await sharp(source).metadata();
   if (width < 1 || height < 1) throw new Error(`the slide image ${job.slideFile} has no size`);
   const box = regionCropBox(job.rect, width, height);
-  const input = await decodeOnce(sharp, sharp(source).extract(box));
+  let crop = sharp(source).extract(box);
+  const overlay = job.ink ? inkOverlay(job.ink, box, width, height) : null;
+  // sharp composites after the extract (and the flatten): the result is opaque, its alpha channel goes.
+  if (overlay) crop = crop.composite([{ input: overlay, left: 0, top: 0 }]).removeAlpha();
+  const input = await decodeOnce(sharp, crop);
   const image = await encodeAttachment(sharp, input);
 
   // The text layer inside the selection itself (not the padding). The image is what matters: no text on failure.
@@ -1086,6 +1126,27 @@ export function uploadRefusal(header: UploadHeader, type: UploadImageType): { re
   return null;
 }
 
+const isFiniteNumber = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n);
+
+function isValidRegionInk(value: unknown): value is RegionInk {
+  const stroke = value as Partial<RegionInk> | null;
+  if (typeof stroke !== 'object' || stroke === null) return false;
+  const rect = stroke.rect as Partial<RegionRect> | undefined;
+  return (
+    typeof rect === 'object' &&
+    rect !== null &&
+    [rect.x, rect.y, rect.w, rect.h].every(isFiniteNumber) &&
+    isFiniteNumber(stroke.width) &&
+    stroke.width >= MIN_INK_WIDTH &&
+    stroke.width <= MAX_INK_WIDTH &&
+    typeof stroke.pts === 'string' &&
+    stroke.pts.length <= MAX_INK_POINTS * INK_POINT_CHARS &&
+    INK_PTS_RE.test(stroke.pts) &&
+    typeof stroke.color === 'string' &&
+    /^#[0-9a-f]{6}$/i.test(stroke.color)
+  );
+}
+
 function isValidAttachmentJob(value: unknown): value is AttachmentJob {
   const job = value as { [K in keyof RegionJob | keyof UploadJob]?: unknown } | null;
   if (typeof job !== 'object' || job === null) return false;
@@ -1105,7 +1166,8 @@ function isValidAttachmentJob(value: unknown): value is AttachmentJob {
     job.slideFile.endsWith('.png') &&
     typeof rect === 'object' &&
     rect !== null &&
-    [rect.x, rect.y, rect.w, rect.h].every((n) => typeof n === 'number' && Number.isFinite(n))
+    [rect.x, rect.y, rect.w, rect.h].every(isFiniteNumber) &&
+    (job.ink === undefined || (Array.isArray(job.ink) && job.ink.length <= MAX_INK_STROKES && job.ink.every(isValidRegionInk)))
   );
 }
 

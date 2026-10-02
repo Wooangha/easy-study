@@ -1,12 +1,13 @@
 // The annotation layer of one slide (DESIGN §25), inside the slide box over the image: an SVG for the highlights and
-// shapes (a 0..1000 viewBox stretched over the image, so the stored 0..1 geometry maps directly), HTML for the
+// shapes (a 0..1000 viewBox stretched over the image, so the stored 0..1 geometry maps directly) and the 펜 strokes
+// (§29: each a filled path in a nested <svg> whose viewBox has the image's aspect, so a stroke is not stretched), HTML for the
 // text boxes (their font scales with the slide: a size stored as a fraction of the slide height × the layer's
 // rendered height, `--slide-h`), the memo cards (UI-sized), the selection handles, the draft being drawn (or the
 // marquee of 범위 선택), and the question markers (the asked-about regions under the items, their labels and the items'
 // dots over them, a memo's dot on its card). The layer itself takes no pointer events; its interactive children
 // do and carry `data-annot`, so the viewer's scroller knows what was pressed.
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react';
-import type { AnnotationItem, RegionRect, SlideAnnotations, TextItem } from '../../../../shared/types.ts';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react';
+import type { AnnotationItem, InkItem, RegionRect, SlideAnnotations, TextItem } from '../../../../shared/types.ts';
 import {
   ALL_HANDLES,
   bandHandles,
@@ -15,6 +16,7 @@ import {
   type AnnotationTool,
   type Handle,
 } from '../../lib/annotations/geometry.ts';
+import { imageAspectOf, inkPathOf } from '../../lib/annotations/ink.ts';
 import type { QuestionMarker } from '../../lib/annotations/markers.ts';
 import { textBoxVars } from '../../lib/annotations/text.ts';
 import { percentStyle, type Frame, type Point } from '../../lib/attachments.ts';
@@ -85,6 +87,8 @@ export function AnnotationLayer({ slide, frame, aspect, doc, markers, selectedId
     else if (item.type === 'memo') memos.push(item);
     else shapes.push(item);
   }
+  // 펜 strokes are drawn in a box with the image's aspect: K tall, inkW wide.
+  const inkW = Math.round(K * imageAspectOf(aspect, frame) * 10) / 10;
   // Handles belong to a single selection; a group is moved by its body.
   const single = selectedIds && selectedIds.length === 1 ? (items.find((it) => it.id === selectedIds[0]) ?? null) : null;
   const handles = single && single.type !== 'memo' && single.type !== 'textHighlight' ? handlesOf(single, drag) : null;
@@ -119,6 +123,8 @@ export function AnnotationLayer({ slide, frame, aspect, doc, markers, selectedId
                 <ellipse key={item.id} className={`${cls} kind-ellipse`} data-annot="item" data-id={item.id} cx={n(r.x + r.w / 2)} cy={n(r.y + r.h / 2)} rx={n(r.w / 2)} ry={n(r.h / 2)} />
               );
             }
+            case 'ink':
+              return <InkStroke key={item.id} item={item} rect={rectOf(item)} w={inkW} selected={isSelected(item.id)} />;
             default:
               return null;
           }
@@ -162,6 +168,23 @@ export function AnnotationLayer({ slide, frame, aspect, doc, markers, selectedId
     </div>
   );
 }
+
+/**
+ * A 펜 stroke: its filled outline in a nested <svg> over the whole image whose viewBox (`w` × K) has the image's aspect
+ * (the layer's SVG is stretched to the image; this undoes it), through `rect` (a move / resize preview). The outline is
+ * computed again only when the item, the rect or the image's aspect changes. Selected, its rect is drawn dashed.
+ */
+const InkStroke = memo(function InkStroke({ item, rect, w, selected }: { item: InkItem; rect: RegionRect; w: number; selected: boolean }) {
+  const d = useMemo(() => inkPathOf(item, rect, w, K), [item, rect, w]);
+  return (
+    <>
+      <svg x={0} y={0} width={K} height={K} viewBox={`0 0 ${w} ${K}`} preserveAspectRatio="none" overflow="visible">
+        <path className={`annot-shape kind-ink is-${item.color}`} data-annot="item" data-id={item.id} d={d} />
+      </svg>
+      {selected && <rect className="annot-ink-box" x={n(rect.x)} y={n(rect.y)} width={n(rect.w)} height={n(rect.h)} />}
+    </>
+  );
+});
 
 function DraftShape({ draft }: { draft: Draft }) {
   const r = draft.rect;

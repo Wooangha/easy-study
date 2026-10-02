@@ -67,6 +67,8 @@ export const versions = {
     oldPage: (n: number) => `예전 p.${n}`,
     thumbAlt: (n: number) => `예전 슬라이드 ${n}`,
     loadFailed: (error: string) => `빠진 슬라이드를 불러오지 못했어요: ${error}`,
+    /** A slide's 펜 strokes, as one row. */
+    inkStrokes: (n: number) => `손글씨 ${n}획`,
   },
 
   /** A question whose slide a new version dropped (ChatMessage.removedFrom): its p.N chip. */

@@ -15,10 +15,14 @@ import {
   ANNOTATION_ID_RE,
   ATTACHMENT_ID_RE,
   DOC_ID_RE,
+  INK_COLORS,
   MAX_ANNOTATION_ITEMS,
   MAX_ANNOTATION_OPS,
   MAX_ANNOTATION_TEXT_CHARS,
   MAX_HIDDEN_MARKERS,
+  MAX_INK_POINTS,
+  MAX_INK_STROKES,
+  MAX_INK_WIDTH,
   MAX_MEMO_LINKS,
   MAX_MEMO_SUMMARY_CHARS,
   MAX_MEMO_TAGS,
@@ -27,6 +31,7 @@ import {
   MAX_TEXT_HIGHLIGHT_RECTS,
   MAX_TEXT_SIZE_PT,
   MESSAGE_ID_RE,
+  MIN_INK_WIDTH,
   MIN_TEXT_SIZE_PT,
   RECORDING_ID_RE,
   SESSION_ID_RE,
@@ -50,6 +55,7 @@ import type {
   SlideAnnotations,
   TextFont,
 } from '../shared/types.ts';
+import { INK_POINT_CHARS, INK_PTS_RE } from '../shared/ink.ts';
 import { HttpError } from './config.ts';
 import { smsg } from './i18n.ts';
 import { MAX_MEMO_CHARS, MAX_TUTOR_MEMOS, truncateText } from './context.ts';
@@ -94,6 +100,8 @@ const PATCHABLE_FIELDS: Readonly<Record<AnnotationItem['type'], readonly string[
   textHighlight: ['color', 'rects', 'chars', 'engine', 'text'],
   text: ['color', 'rect', 'text', 'size', 'font', 'bold'],
   memo: ['color', 'at', 'text', 'tags', 'collapsed', 'tutor', 'links', 'size'],
+  // A stroke's points never change after it is drawn: moving or resizing it is an update of `rect` (DESIGN §29).
+  ink: ['color', 'rect', 'width'],
 };
 const ITEM_TYPES: ReadonlySet<string> = new Set(Object.keys(PATCHABLE_FIELDS));
 
@@ -335,6 +343,21 @@ function optionalBoolean(raw: unknown, what: string, context: unknown): boolean 
   return normalizeBoolean(raw, false, what, context);
 }
 
+/** A 펜 width (a fraction of the image height): capped to MIN_INK_WIDTH … MAX_INK_WIDTH, 4 significant digits. */
+function normalizeInkWidth(raw: unknown, context: unknown): number {
+  if (!isFiniteNumber(raw)) throw bad(texts().inkWidthInvalid, context);
+  return Number(Math.min(MAX_INK_WIDTH, Math.max(MIN_INK_WIDTH, raw)).toPrecision(4));
+}
+
+/** InkItem.pts: 1 … MAX_INK_POINTS points of INK_POINT_CHARS base64url characters (shared/ink.ts); never changed. */
+function normalizeInkPoints(raw: unknown, context: unknown): string {
+  if (typeof raw !== 'string') throw bad(texts().inkPointsInvalid, context);
+  // The length first: a pathological string is never run through the pattern.
+  if (raw.length > MAX_INK_POINTS * INK_POINT_CHARS) throw bad(texts().inkTooManyPoints(MAX_INK_POINTS), context);
+  if (!INK_PTS_RE.test(raw)) throw bad(texts().inkPointsInvalid, context);
+  return raw;
+}
+
 /** The optional fields of a type as stored: absent ones are left out of the item (old files stay as they are). */
 function defined<T extends Record<string, unknown>>(fields: T): { [K in keyof T]?: NonNullable<T[K]> } {
   const out: Record<string, unknown> = {};
@@ -352,8 +375,10 @@ export function normalizeItem(raw: unknown, pageCount: number, now: string): Ann
   if (!isObject(raw)) throw bad(texts().itemInvalid, raw);
   const id = raw.id;
   if (typeof id !== 'string' || !ANNOTATION_ID_RE.test(id)) throw bad(texts().idInvalid, raw);
+  // 펜 strokes take the dark inks, everything else the highlighter tints (DESIGN §29).
+  const colors = raw.type === 'ink' ? INK_COLORS : ANNOTATION_COLORS;
   const color = raw.color;
-  if (typeof color !== 'string' || !ANNOTATION_COLORS.includes(color as AnnotationColor)) throw bad(texts().colorInvalid, raw);
+  if (typeof color !== 'string' || !colors.includes(color as AnnotationColor)) throw bad(texts().colorInvalid, raw);
   const base = {
     id,
     color: color as AnnotationColor,
@@ -403,6 +428,14 @@ export function normalizeItem(raw: unknown, pageCount: number, now: string): Ann
         links: normalizeLinks(raw.links, pageCount, raw),
         ...defined({ size: normalizeSize(raw.size, raw) }),
       };
+    case 'ink':
+      return {
+        ...base,
+        type: 'ink',
+        rect: normalizeRect(raw.rect, raw),
+        width: normalizeInkWidth(raw.width, raw),
+        pts: normalizeInkPoints(raw.pts, raw),
+      };
     default:
       throw bad(texts().unknownType, raw);
   }
@@ -445,8 +478,16 @@ export function annotationBytes(doc: SlideAnnotations): number {
   return Buffer.byteLength(JSON.stringify(doc));
 }
 
+/** The item caps of a slide (raw entries or stored items): 펜 strokes are counted apart from the other items (DESIGN §29). */
+function checkItemCounts(items: readonly unknown[]): void {
+  let strokes = 0;
+  for (const item of items) if (isObject(item) && item.type === 'ink') strokes++;
+  if (items.length - strokes > MAX_ANNOTATION_ITEMS) throw new HttpError(400, texts().tooManyItems(MAX_ANNOTATION_ITEMS));
+  if (strokes > MAX_INK_STROKES) throw new HttpError(400, texts().tooManyStrokes(MAX_INK_STROKES));
+}
+
 function checkCaps(items: AnnotationItem[], hiddenMarkers: MarkerKey[], doc: SlideAnnotations): void {
-  if (items.length > MAX_ANNOTATION_ITEMS) throw new HttpError(400, texts().tooManyItems(MAX_ANNOTATION_ITEMS));
+  checkItemCounts(items);
   if (hiddenMarkers.length > MAX_HIDDEN_MARKERS) throw new HttpError(400, texts().tooManyHiddenMarkers(MAX_HIDDEN_MARKERS));
   if (annotationBytes(doc) > MAX_SLIDE_ANNOTATION_BYTES) throw new HttpError(400, texts().tooLarge);
 }
@@ -608,7 +649,8 @@ async function liveFor(docId: string, wanted: boolean): Promise<RecordedAt | nul
 
 async function buildPut(docId: string, current: SlideAnnotations, body: Record<string, unknown>, pageCount: number, now: string): Promise<WriteOutcome> {
   if (!Array.isArray(body.items)) throw new HttpError(400, texts().itemsRequired);
-  if (body.items.length > MAX_ANNOTATION_ITEMS) throw new HttpError(400, texts().tooManyItems(MAX_ANNOTATION_ITEMS));
+  // Before anything is normalised (checkCaps counts the result again).
+  checkItemCounts(body.items);
   const before = new Map(current.items.map((item) => [item.id, item]));
   const live = await liveFor(
     docId,

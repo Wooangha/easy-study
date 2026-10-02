@@ -60,6 +60,8 @@ export const viewer = {
     labels: {
       select: '선택·첨부',
       marquee: '범위 선택',
+      pen: '펜',
+      eraser: '지우개',
       highlight: '형광펜',
       textHighlight: '텍스트 형광',
       rect: '사각형',
@@ -70,6 +72,8 @@ export const viewer = {
     titles: {
       select: '선택·첨부: 필기를 클릭해 옮기거나 지우고, 빈 곳을 끌면 그 영역을 질문에 첨부해요',
       marquee: '범위 선택: 빈 곳에서 끌어 여러 필기를 한꺼번에 골라요 · Shift+클릭으로 더하고 빼요 (다시 누르거나 Esc로 끔)',
+      pen: '펜: Apple Pencil·S Pen·마우스로 써요 — 손가락은 스크롤·확대 (다시 누르거나 Esc로 끔)',
+      eraser: '지우개: 지나간 펜 획을 지워요 (다시 누르거나 Esc로 끔)',
       highlight: '형광펜: 글줄 위에서 끌면 그 줄에 맞춰 칠해요 (다시 누르거나 Esc로 끔)',
       textHighlight: '텍스트 형광: 글자 위에서 끌면 단어에 맞춰 칠하고, 칠한 글 위를 다시 끌면 범위가 바뀌어요 (다시 누르거나 Esc로 끔)',
       rect: '사각형: 끌어서 그려요 (다시 누르거나 Esc로 끔)',
@@ -80,6 +84,9 @@ export const viewer = {
     /** The toolbar's one-line hint (toolHint). */
     hintSelect: 'j/k · ↑/↓ · 빈 곳을 끌면 영역 첨부',
     hintMarquee: '범위 선택: 빈 곳에서 끌어 여러 개 고르기 · Shift+클릭 더하기·빼기 · Esc',
+    /** 펜's hint: `finger` = 손가락으로도 쓰기 is on. */
+    hintPen: (finger: boolean): string => (finger ? '펜: 펜·손가락·마우스로 쓰기 · Esc' : '펜: Apple Pencil·마우스로 쓰기 · 손가락은 스크롤'),
+    hintEraser: '지우개: 지나간 펜 획을 지워요',
     /** A drawing tool's hint: `label` is the tool's name, `click` whether it draws with a click (text, memo). */
     hintDraw: (label: string, click: boolean) => `${label}: 빈 곳에서 ${click ? '클릭' : '끌기'} · 필기는 클릭해 옮기기 · Esc`,
     group: '필기 도구',
@@ -88,6 +95,15 @@ export const viewer = {
     colorTitle: (color: string) => `새 필기의 색: ${color}`,
     /** The folded tools' button (a narrow pane). */
     compactTitle: (tool: string, color: string) => `필기 도구: ${tool} · ${color}`,
+    /** Under 펜: the ink colors, the widths (shared/types.ts INK_WIDTHS, in that order), 손가락으로도 쓰기. */
+    inkColorGroup: '펜 색',
+    inkColorTitle: (color: string) => `펜 색: ${color}`,
+    inkWidthGroup: '펜 굵기',
+    inkWidths: ['가늘게', '보통', '굵게'],
+    inkWidthTitle: (width: string) => `펜 굵기: ${width}`,
+    fingerInk: '손가락으로도 쓰기',
+    fingerInkTitle: (on: boolean): string =>
+      on ? '손가락으로도 쓰기: 켜짐 — 손가락도 펜처럼 써요 (끄면 손가락은 스크롤·확대)' : '손가락으로도 쓰기: 꺼짐 — 펜·마우스만 쓰고 손가락은 스크롤·확대 (스타일러스가 없으면 켜세요)',
   },
   /** The ⋯ 필기 menu (AnnotationTools). */
   layerMenu: {
@@ -110,12 +126,14 @@ export const viewer = {
     replaying: '그때 필기 재생 중',
     replayingTitle: '녹음 탭의 재생 위치까지 쓴 필기만 보여요 (⋯ 필기 메뉴에서 끌 수 있어요)',
   },
-  /** The four annotation colors (shared/types.ts ANNOTATION_COLORS). */
+  /** The four annotation colors (shared/types.ts ANNOTATION_COLORS) and the 펜's inks (INK_COLORS). */
   colorNames: {
     yellow: '노랑',
     green: '초록',
     pink: '분홍',
     blue: '파랑',
+    black: '검정',
+    red: '빨강',
   },
 
   /** The floating menu of the selected item(s) (ItemMenu). */
@@ -246,6 +264,8 @@ export const viewer = {
     conflictReloaded: '다른 곳에서 필기가 바뀌어서 다시 불러왔어요',
     tooManyItems: (max: number) => `이 슬라이드에는 필기를 더 넣을 수 없어요 (최대 ${max}개)`,
     tooManyHidden: '숨긴 질문 표시가 너무 많아요',
+    /** A write that would pass MAX_INK_STROKES or MAX_SLIDE_ANNOTATION_BYTES (DESIGN §29). */
+    tooMuchOnSlide: '이 슬라이드에 필기가 너무 많아요',
     saveFailed: (reason: string) => `필기를 저장하지 못했어요: ${reason}`,
   },
 };

@@ -432,13 +432,13 @@ export function attachmentsIntro(count: number): string {
 }
 
 /** The kinds of 필기 a region attachment can be made from (Attachment.annotation.type, DESIGN §25). */
-export type AttachedAnnotationType = 'highlight' | 'textHighlight' | 'rect' | 'ellipse' | 'text' | 'memo';
+export type AttachedAnnotationType = 'highlight' | 'textHighlight' | 'rect' | 'ellipse' | 'text' | 'memo' | 'ink';
 
 /**
  * Label of the k-th attachment (1-based), used in the "[…]" line right before its image and as the image part's
  * label: a region of a slide the student selected — or, for a region made from a 필기 (DESIGN §25), the part of the
- * slide where the student stuck a note / put a text box / highlighted / marked —, or an image of their own (with its
- * file name, if any).
+ * slide where the student stuck a note / put a text box / highlighted / marked, or their handwriting (§29) —, or an
+ * image of their own (with its file name, if any).
  */
 export function attachmentLabel(
   index: number,
@@ -457,6 +457,8 @@ export function attachmentLabel(
       case 'rect':
       case 'ellipse':
         return `Attachment ${index}: the part of slide ${slide} the student marked`;
+      case 'ink':
+        return `Attachment ${index}: the student's handwriting on slide ${slide}`;
       default:
         return `Attachment ${index}: the region of slide ${slide} the student selected`;
     }

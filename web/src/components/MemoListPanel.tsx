@@ -1,6 +1,7 @@
 // The 메모 tab (DESIGN §25): every memo of the lecture from the annotation summary (no per-slide loads), searched
 // over text and tags, filtered by tag or to the focused slide. A row opens the memo on its slide; its ⋯ deletes it.
-// Below them, collapsed, 빠진 슬라이드 (DESIGN §28): the 필기 of slides a new version of the PDF dropped, read-only.
+// Below them, collapsed, 빠진 슬라이드 (DESIGN §28): the 필기 of slides a new version of the PDF dropped, read-only (a
+// slide's 펜 strokes as one row, "손글씨 N획", DESIGN §29).
 import { useEffect, useMemo, useState } from 'react';
 import { Mic, RefreshCw, StickyNote, TriangleAlert } from 'lucide-react';
 import type { MemoSummary, RemovedSlide } from '../../../shared/types.ts';
@@ -12,7 +13,7 @@ import { confirmDialog } from '../lib/confirm.ts';
 import { formatTime } from '../lib/format.ts';
 import { formatClock } from '../lib/recording/timeline.ts';
 import { toast } from '../lib/toast.ts';
-import { removedItemText } from '../lib/versionPlan.ts';
+import { removedRows } from '../lib/versionPlan.ts';
 import { EyeIcon } from './annotations/icons.tsx';
 import { PopoverMenu } from './organize/PopoverMenu.tsx';
 
@@ -236,14 +237,14 @@ function RemovedSlides({ docId }: { docId: string }) {
   }
   const slides = state.slides.filter((s) => s.items.length > 0);
   if (slides.length === 0) return null;
-  const count = slides.reduce((n, s) => n + s.items.length, 0);
-  const kinds = msg().chat.attachments.kinds;
+  const rows = slides.map((s) => ({ slide: s, rows: removedRows(s.items) }));
+  const count = rows.reduce((n, r) => n + r.rows.length, 0);
   return (
     <details className="removed-slides">
       <summary title={m.title}>
         {m.heading} <span className="memo-tag-count">{count}</span>
       </summary>
-      {slides.map((s) => (
+      {rows.map(({ slide: s, rows: items }) => (
         <section key={`${s.rev}:${s.slide}`} className="removed-slide">
           <div className="removed-slide-head">
             {s.thumb && (
@@ -254,10 +255,10 @@ function RemovedSlides({ docId }: { docId: string }) {
             <span className="slide-chip is-static">{m.oldPage(s.slide)}</span>
           </div>
           <ul className="removed-items">
-            {s.items.map((item) => (
-              <li key={item.id} className={`removed-item is-${item.color}`}>
+            {items.map((row) => (
+              <li key={row.key} className={`removed-item${row.ink ? ' kind-ink' : ''} is-${row.color}`}>
                 <span className="memo-row-bar" aria-hidden />
-                <span className="removed-item-text">{removedItemText(item) ?? kinds[item.type]}</span>
+                <span className="removed-item-text">{row.text}</span>
               </li>
             ))}
           </ul>

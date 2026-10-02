@@ -1,18 +1,32 @@
 // The annotation store (DESIGN §25, lib/annotations/store.ts) with a fake API, EventSource and timers: optimistic
 // ops, one PATCH in flight per slide (ops meanwhile go out next), ops events applied in rev order, a rev gap → refetch,
 // the 409 rebase then the second-409 replace, the network retry and the "저장 안 됨" mark, undo / redo through the
-// store, the loading window, the own-client echo. Run: node --test web/tests/*.test.ts
+// store, the loading window, the own-client echo, the caps that 펜 strokes fill (DESIGN §29). Run: node --test web/tests/*.test.ts
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { MAX_ANNOTATION_OPS, type AnnotationEvent, type AnnotationOp, type AnnotationSummary, type RectItem, type SlideAnnotations } from '../../shared/types.ts';
+import {
+  MAX_ANNOTATION_ITEMS,
+  MAX_ANNOTATION_OPS,
+  MAX_INK_POINTS,
+  MAX_INK_STROKES,
+  MAX_SLIDE_ANNOTATION_BYTES,
+  type AnnotationEvent,
+  type AnnotationOp,
+  type AnnotationSummary,
+  type InkItem,
+  type RectItem,
+  type SlideAnnotations,
+} from '../../shared/types.ts';
 import { ApiError } from '../src/api.ts';
-import { applyOps, emptySlideAnnotations } from '../src/lib/annotations/geometry.ts';
+import { annotationBytes, applyOps, emptySlideAnnotations } from '../src/lib/annotations/geometry.ts';
 import {
   conflictReloaded,
   DocAnnotations,
   KEEP_RADIUS,
   NETWORK_RETRY_MS,
   parseAnnotationEvent,
+  tooManyItems,
+  tooMuchOnSlide,
   type StoreDeps,
 } from '../src/lib/annotations/store.ts';
 import type { EventSourceLike, Timers } from '../src/lib/recording/events.ts';
@@ -446,6 +460,61 @@ describe('DocAnnotations: undo / redo, the window, the lifetime', () => {
     assert.equal(t.es().closed, false);
     t.timers.advance(1);
     assert.equal(t.es().closed, true);
+  });
+});
+
+describe('DocAnnotations: the caps of 펜 strokes (DESIGN §29)', () => {
+  const id = (i: number) => `an-${i.toString(16).padStart(12, '0')}`;
+  /** A stroke of `points` points (5 characters each). */
+  const ink = (itemId: string, points = 1): InkItem => ({
+    id: itemId,
+    type: 'ink',
+    color: 'black',
+    createdAt: NOW,
+    updatedAt: NOW,
+    rect: { x: 0.1, y: 0.1, w: 0.2, h: 0.1 },
+    width: 0.005,
+    pts: 'AAAAA'.repeat(points),
+  });
+
+  test('strokes are counted apart: a slide full of other items still takes a stroke, but not another item', async () => {
+    const rects = Array.from({ length: MAX_ANNOTATION_ITEMS }, (_, i) => rect(id(i)));
+    const t = setup({ slides: { 3: doc(3, 1, rects) } });
+    await store_loaded(t, 3);
+    assert.equal(t.store.mutate(3, [{ op: 'add', item: ink(id(1000)) }]), true);
+    assert.equal(t.store.mutate(3, [{ op: 'add', item: rect(id(1001)) }]), false);
+    assert.deepEqual(t.toasts, [tooManyItems()]);
+    t.unsubscribe();
+  });
+
+  test('MAX_INK_STROKES strokes take no more (a toast, nothing sent); another item still fits', async () => {
+    const strokes = Array.from({ length: MAX_INK_STROKES }, (_, i) => ink(id(i)));
+    const t = setup({ slides: { 3: doc(3, 1, strokes) } });
+    await store_loaded(t, 3);
+    assert.equal(t.store.mutate(3, [{ op: 'add', item: ink(id(MAX_INK_STROKES)) }]), false);
+    assert.deepEqual(t.toasts, ['이 슬라이드에 필기가 너무 많아요']);
+    assert.equal(t.patches.length, 0);
+    assert.equal(t.slide(3)?.items.length, MAX_INK_STROKES);
+    assert.equal(t.store.mutate(3, [{ op: 'add', item: rect(id(MAX_INK_STROKES + 1)) }]), true);
+    t.unsubscribe();
+  });
+
+  test('a write that would pass MAX_SLIDE_ANNOTATION_BYTES is refused before it is sent; a remove still goes', async () => {
+    // As many of the longest strokes as fit: one more would pass the cap.
+    const big = (i: number) => ink(id(i), MAX_INK_POINTS);
+    const one = annotationBytes(doc(3, 1, [big(0)]));
+    const per = annotationBytes(doc(3, 1, [big(0), big(1)])) - one;
+    const n = Math.floor((MAX_SLIDE_ANNOTATION_BYTES - (one - per)) / per);
+    const strokes = Array.from({ length: n }, (_, i) => big(i));
+    assert.ok(annotationBytes(doc(3, 1, strokes)) <= MAX_SLIDE_ANNOTATION_BYTES);
+    const t = setup({ slides: { 3: doc(3, 1, strokes) } });
+    await store_loaded(t, 3);
+    assert.equal(t.store.mutate(3, [{ op: 'add', item: big(n) }]), false);
+    assert.deepEqual(t.toasts, [tooMuchOnSlide()]);
+    assert.equal(t.patches.length, 0);
+    assert.equal(t.store.mutate(3, [{ op: 'remove', id: id(0) }]), true);
+    assert.equal(t.store.mutate(3, [{ op: 'add', item: big(n) }]), true, 'room again');
+    t.unsubscribe();
   });
 });
 

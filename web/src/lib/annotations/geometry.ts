@@ -1,21 +1,25 @@
 // Slide annotations (DESIGN §25), the pure part: the ops reducer the server applies too (applyOps), what a drag
-// becomes (a 형광펜 band snapped to a text line, a rectangle, a text box, a memo anchor), an item's bounds (for
-// 📎 첨부 and question markers), moving / resizing, the recording stamp and the replay predicate. No DOM, no React.
-// Every geometry is normalised 0..1 to the slide image (RegionRect of §21), rounded to 4 decimals.
+// becomes (a 형광펜 band snapped to a text line, a rectangle, a text box, a memo anchor, a 펜 stroke of §29), an item's
+// bounds (for 📎 첨부 and question markers), moving / resizing, the slide's caps, the recording stamp and the replay
+// predicate. No DOM, no React. Every geometry is normalised 0..1 to the slide image (RegionRect of §21), rounded to 4
+// decimals.
 import {
   ANNOTATION_COLORS,
   HIGHLIGHT_BAND_H,
   MAX_ANNOTATION_ITEMS,
   MAX_ANNOTATION_TEXT_CHARS,
   MAX_HIDDEN_MARKERS,
+  MAX_INK_STROKES,
   MAX_MEMO_LINKS,
   MAX_MEMO_TAGS,
+  MAX_SLIDE_ANNOTATION_BYTES,
   MAX_TAG_CHARS,
   type AnnotationColor,
   type AnnotationItem,
   type AnnotationOp,
   type EllipseItem,
   type HighlightItem,
+  type InkItem,
   type MarkerKey,
   type MemoItem,
   type MemoLink,
@@ -31,14 +35,18 @@ import { roundRect, type Point } from '../attachments.ts';
 
 /**
  * 'select' is the default state (no tool: a drag on empty area attaches that region; a click selects an item);
- * 'marquee' is the 범위 선택 tool (a drag on empty area selects every item it crosses); the rest draw.
+ * 'marquee' is the 범위 선택 tool (a drag on empty area selects every item it crosses); 'pen' writes and 'eraser'
+ * removes 펜 strokes (DESIGN §29: a stylus or the mouse, a finger only with 손가락으로도 쓰기); the rest draw.
  */
-export type AnnotationTool = 'select' | 'marquee' | 'highlight' | 'textHighlight' | 'rect' | 'ellipse' | 'text' | 'memo';
+export type AnnotationTool = 'select' | 'marquee' | 'pen' | 'eraser' | 'highlight' | 'textHighlight' | 'rect' | 'ellipse' | 'text' | 'memo';
 
-export const ANNOTATION_TOOLS: readonly AnnotationTool[] = ['select', 'marquee', 'highlight', 'textHighlight', 'rect', 'ellipse', 'text', 'memo'];
+export const ANNOTATION_TOOLS: readonly AnnotationTool[] = ['select', 'marquee', 'pen', 'eraser', 'highlight', 'textHighlight', 'rect', 'ellipse', 'text', 'memo'];
 
-/** The tools that make an item from a drag / click (not the default state, not 범위 선택). */
-export type DrawingTool = Exclude<AnnotationTool, 'select' | 'marquee'>;
+/** The tools that make an item from a drag / click (not the default state, not 범위 선택, not 펜 / 지우개). */
+export type DrawingTool = Exclude<AnnotationTool, 'select' | 'marquee' | 'pen' | 'eraser'>;
+
+/** 펜 and 지우개: a press of a stylus or the mouse writes / erases (over existing items too); a finger scrolls. */
+export const isInkTool = (tool: AnnotationTool): tool is 'pen' | 'eraser' => tool === 'pen' || tool === 'eraser';
 
 /** Tools that place something with a click (no drag needed). */
 export const CLICK_TOOLS: ReadonlySet<AnnotationTool> = new Set(['text', 'memo']);
@@ -95,6 +103,8 @@ export const PATCHABLE_FIELDS: Record<AnnotationItem['type'], readonly string[]>
   ellipse: ['color', 'rect', 'updatedAt'],
   text: ['color', 'rect', 'text', 'size', 'font', 'bold', 'updatedAt'],
   memo: ['color', 'at', 'text', 'tags', 'collapsed', 'tutor', 'links', 'size', 'updatedAt'],
+  // A stroke's points are relative to its rect: moving / resizing it is a new rect, `pts` is never patched.
+  ink: ['color', 'rect', 'width', 'updatedAt'],
 };
 
 export const sameMarkerKey = (a: MarkerKey, b: MarkerKey): boolean =>
@@ -190,18 +200,38 @@ export function rebaseOps(doc: SlideAnnotations, ops: readonly AnnotationOp[]): 
   return out;
 }
 
-/** How many items `ops` add on top of `doc` (the MAX_ANNOTATION_ITEMS check before an optimistic add). */
+/**
+ * How many items other than 펜 strokes `doc` holds once `ops` are applied (the MAX_ANNOTATION_ITEMS check before an
+ * optimistic add; strokes are counted apart, against MAX_INK_STROKES).
+ */
 export function itemsAfter(doc: SlideAnnotations, ops: readonly AnnotationOp[]): number {
-  let n = doc.items.length;
+  const strokes = new Set(doc.items.filter((it) => it.type === 'ink').map((it) => it.id));
+  let n = doc.items.length - strokes.size;
   for (const op of ops) {
-    if (op.op === 'add') n++;
-    else if (op.op === 'remove') n--;
+    if (op.op === 'add') {
+      if (op.item.type === 'ink') strokes.add(op.item.id);
+      else n++;
+    } else if (op.op === 'remove' && !strokes.has(op.id)) {
+      n--;
+    }
   }
   return n;
 }
 
 export const canAddItems = (doc: SlideAnnotations, ops: readonly AnnotationOp[]): boolean =>
   itemsAfter(doc, ops) <= MAX_ANNOTATION_ITEMS;
+
+/** The 펜 strokes of a slide document. */
+export const inkStrokes = (doc: SlideAnnotations): number => doc.items.reduce((n, it) => (it.type === 'ink' ? n + 1 : n), 0);
+
+/** The UTF-8 bytes of a slide document as JSON (the server's MAX_SLIDE_ANNOTATION_BYTES cap). */
+export const annotationBytes = (doc: SlideAnnotations): number => new TextEncoder().encode(JSON.stringify(doc)).length;
+
+/**
+ * Whether a slide document stays within the server's caps that 펜 strokes fill (DESIGN §29): MAX_INK_STROKES strokes
+ * and MAX_SLIDE_ANNOTATION_BYTES — checked before an optimistic write, so pending strokes are not lost to a 400.
+ */
+export const fitsSlide = (doc: SlideAnnotations): boolean => inkStrokes(doc) <= MAX_INK_STROKES && annotationBytes(doc) <= MAX_SLIDE_ANNOTATION_BYTES;
 
 export const canHideMarker = (doc: SlideAnnotations): boolean => doc.hiddenMarkers.length < MAX_HIDDEN_MARKERS;
 
@@ -476,6 +506,15 @@ export const newShape = (seed: ItemSeed, type: 'rect' | 'ellipse', rect: RegionR
   type === 'rect' ? { ...base(seed), type: 'rect', rect } : { ...base(seed), type: 'ellipse', rect };
 
 export const newTextBox = (seed: ItemSeed, rect: RegionRect, text = ''): TextItem => ({ ...base(seed), type: 'text', rect, text });
+
+/** A 펜 stroke (one piece of shared/ink.ts inkPieces: its rect and encoded points) of nominal `width`. */
+export const newInk = (seed: ItemSeed, piece: { rect: RegionRect; pts: string }, width: number): InkItem => ({
+  ...base(seed),
+  type: 'ink',
+  rect: piece.rect,
+  width,
+  pts: piece.pts,
+});
 
 export const newTextHighlight = (
   seed: ItemSeed,

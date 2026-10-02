@@ -1,5 +1,6 @@
 // A new version of a lecture PDF (DESIGN §28) in the annotation store and the attachments: the slide files follow
-// their slides (new numbers and padding, revs above every old one, memo links, 텍스트 형광 on changed slides), the
+// their slides (new numbers and padding, revs above every old one, memo links, 텍스트 형광 on changed slides, 펜 strokes
+// of §29 untouched), the
 // 빠진 슬라이드 archive with its thumbnails (and its routes), the undo that restores it, idempotency and the resume of a
 // half-done remap, memo links of other lectures, the swapping gate, the drain, the `deck` event, the counts of the
 // plan, and region attachments moved to their slide (removedFrom, nearest kept slide, undo, the sweep leaving the
@@ -109,6 +110,8 @@ const memoItem = (text: string, links: MemoLink[] = []): Record<string, unknown>
   tutor: true,
   links,
 });
+/** A 펜 stroke (DESIGN §29) of two points. */
+const inkItem = (): Record<string, unknown> => ({ id: id(), type: 'ink', color: 'red', createdAt: CREATED, rect: RECT, width: 0.005, pts: 'AAAAg_-_-A' });
 const textHighlight = (): Record<string, unknown> => ({ id: id(), type: 'textHighlight', color: 'green', createdAt: CREATED, rects: [RECT], chars: [0, 5], engine: 'pdfium-3', text: 'hello' });
 const key = (n: number): MarkerKey => ({ sessionId: `20261001-1000${String(n).padStart(2, '0')}-abcd`, messageId: `msg-${n}`, attachmentId: `att-${String(n).padStart(16, '0')}` });
 
@@ -406,6 +409,28 @@ describe('remapDocAnnotations: the deck mark decides', () => {
     // An undo restoring deck 0 does not apply either.
     await remapDocAnnotations(DOC, deckMap(3, [3, 1, null], 3, [], 0));
     assert.deepEqual(await snapshot(dir), before);
+  });
+
+  test('펜 strokes follow their slides untouched, like rects; a dropped slide\'s are archived, counted, listed, and come back with the undo', async () => {
+    const DOC = 'ink-deck-ddd123';
+    await makeDoc(DOC, 3);
+    const kept = (await put(DOC, 1, [inkItem(), rectItem(), inkItem()])).items;
+    const dropped = (await put(DOC, 2, [inkItem(), inkItem()])).items;
+    await flushAnnotationIndex(DOC);
+    assert.deepEqual(await removedSlideCounts(DOC, [2]), { items: 2, memos: 0 });
+
+    await writeMeta(DOC, 3, 1);
+    await remapDocAnnotations(DOC, APPLY, { oldThumb: () => path.join(tmpRoot, 'missing.webp') });
+    assert.deepEqual((await readSlideAnnotations(DOC, 2)).items, kept, 'slide 1 → 2: rect, width, points and stamps as they were');
+    assert.deepEqual(idsOf(await readSlideAnnotations(DOC, 1)), []);
+    const removed = await listRemovedSlides(DOC);
+    assert.deepEqual(removed.map((slide) => [slide.rev, slide.slide, slide.items]), [[0, 2, dropped]]);
+
+    await writeMeta(DOC, 3, 2);
+    await remapDocAnnotations(DOC, UNDO);
+    assert.deepEqual((await readSlideAnnotations(DOC, 1)).items, kept);
+    assert.deepEqual((await readSlideAnnotations(DOC, 2)).items, dropped);
+    assert.deepEqual(await listRemovedSlides(DOC), []);
   });
 
   test('a dropped slide with only hidden markers is archived (not listed) and its undo puts them back', async () => {

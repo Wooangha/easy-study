@@ -1580,11 +1580,11 @@ slide-region attachment was asked (hover: the question's first line; click: jump
 item has a **📎 첨부** button (a chip in the composer, sent with the next question — the user preferred "첨부" over "이걸로 질문하기",
 and nothing is attached automatically); the tutor reads the memos of the slides in view ("학생의 메모", per-memo 👁 and a global
 switch); a layer toggle, "표시 있는 슬라이드만" / tag filters and a per-lecture memo list; per-slide files under the lecture folder,
-live between devices; "그때 필기 재생" in playback. Not now: freehand pen, PDF export, exam mode, tablets beyond basic touch.
+live between devices; "그때 필기 재생" in playback. Not now: PDF export, exam mode. (The pen and the eraser came in 0.6.9: §29.)
 
 Contracts (shared/types.ts, additive, doc-commented): AnnotationColor, ANNOTATION_COLORS, ANNOTATION_ID_RE, RecordedAt, AnnotationBase,
 HighlightItem, TextHighlightItem, RectItem, EllipseItem, TextItem, MemoLink, MemoItem, AnnotationItem, MarkerKey, SlideAnnotations,
-MAX_ANNOTATION_ITEMS (200), MAX_ANNOTATION_TEXT_CHARS (2000), MAX_SLIDE_ANNOTATION_BYTES (256 KB), MAX_MEMO_TAGS (10), MAX_TAG_CHARS (30),
+MAX_ANNOTATION_ITEMS (200), MAX_ANNOTATION_TEXT_CHARS (2000), MAX_SLIDE_ANNOTATION_BYTES (256 KB; 1 MiB since §29), MAX_MEMO_TAGS (10), MAX_TAG_CHARS (30),
 MAX_MEMO_LINKS (8), MAX_TEXT_HIGHLIGHT_RECTS (200), MAX_ANNOTATION_OPS (100), MAX_HIDDEN_MARKERS (500), HIGHLIGHT_BAND_H (0.028),
 MESSAGE_ID_RE, ANNOTATION_CLIENT_HEADER, ANNOTATION_CLIENT_ID_RE, PutSlideAnnotationsRequest, Patchable, AnnotationOp,
 PatchSlideAnnotationsRequest, SlideAnnotationsConflict, MemoSummary, MAX_MEMO_SUMMARY_CHARS (400), AnnotationSummary,
@@ -1626,7 +1626,7 @@ server/internal-types.ts: StudentMemo, `BuildTurnInput.studentMemos`, `BuildTurn
   so assets.ts `inlinePathFor` is unaffected. Backups = copying the folder. Notes (STUDY_NOTES.md) and the digest do not include
   annotations (decided: no).
 - **Limits and sizes.** ≤ 200 items and ≤ 500 hidden markers per slide, texts ≤ 2000 chars, ≤ 10 tags × 30 chars, ≤ 8 links, ≤ 200
-  rects per text highlight, ≤ 100 ops per PATCH (the client splits a bigger group action into several PATCHes, in order), and `MAX_SLIDE_ANNOTATION_BYTES` = 256 KB for the JSON of the stored slide document
+  rects per text highlight, ≤ 100 ops per PATCH (the client splits a bigger group action into several PATCHes, in order), and `MAX_SLIDE_ANNOTATION_BYTES` = 256 KB (1 MiB since §29) for the JSON of the stored slide document
   after a write (→ 400 '이 슬라이드의 필기가 너무 많아요 (일부를 지워 주세요)'). The byte cap is the effective one (200 items × 2000 chars
   would be ~400 KB of text alone): it keeps every slide doc, every PATCH response and a client's ≤ 24 held slides small, and the router's
   `express.json({ limit: '2mb' })` is ample for any legal PUT.
@@ -1924,7 +1924,7 @@ layout (404 pending) the tool falls back to a plain band and toasts '이 슬라�
 중이에요 — 잠시 뒤 다시 해 보세요' (a `pending: false` answer is remembered per slide: no more asking, no more toasts). Layouts
 (`useTextLayout` + layoutCache.ts): fetched only for the slide under an active highlight tool, on pointerdown; LRU of 4 per document,
 dropped with the store. Delete: select → Delete/Backspace (when not typing) or the item menu's 🗑 삭제 (a memo with text asks
-`confirmDialog({ title: '메모를 지울까요?' })`); no eraser tool.
+`confirmDialog({ title: '메모를 지울까요?' })`); no eraser tool (§29's 지우개 erases 펜 strokes only).
 
 **Item menu (ItemMenu.tsx, rendered in `.slide` outside `.slide-box` like `RegionMenu`; 0.6.2: it places itself).** The menu
 measures, in a layout effect (and again when its items' elements, the slide box — zoom — or the menu itself change size, through
@@ -2035,7 +2035,7 @@ cursor: crosshair }` (items keep their pointer events); `.viewer-hint` takes the
 client id header), `annotationEventsUrl(docId, client)`, `getTextLayout`, `listAnnotationTags`, `annotationErrorMessage`; `createRegion`
 typed with `annotationId`. Keys: `annotColor`, `annotLayer`, `questionMarkers`, `memosToTutor`, `replayAnnotations`.
 
-**Memory.** Per client: the summary (KBs), ≤ 24 slide docs (each ≤ 256 KB, typically < 5 KB), ≤ 4 layouts, one global history of ≤ 50
+**Memory.** Per client: the summary (KBs), ≤ 24 slide docs (each ≤ 1 MiB since §29, typically < 5 KB without handwriting), ≤ 4 layouts, one global history of ≤ 50
 entries. `SlideItem` stays memoised; its new props (`annotations`, `markers`, `selectedId`, `draft`, `tool`, `replay`) are scoped to
 that slide (the `selection?.slide === n ? … : null` pattern) so only the touched slide re-renders; the SVG per slide has a few dozen
 elements; nothing is kept for slides far away.
@@ -2721,7 +2721,8 @@ inkOutline with sharp), so the tutor sees what the student wrote. Versions (§28
 - 지우개: a drag removes every stroke it touches (inkTouches along each move, the touched strokes fade at once); on release
   one `remove` mutation (one undo step). Only strokes are erased.
 - Toolbar: under 펜 the color dots are the ink colors (`inkColor`, default black) and three width chips (`inkWidth`)
-  follow; compact mode keeps 펜 / 지우개 reachable in the popover.
+  follow, then 손가락으로도 쓰기 (also under 지우개); compact mode has the same in the popover. Pen and eraser set
+  `.viewer.is-ink-tool` (not `.is-annot-tool`, whose `touch-action: none` would stop fingers from scrolling).
 - The store refuses a mutation that would make the slide doc exceed MAX_SLIDE_ANNOTATION_BYTES (toast) instead of losing
   pending strokes on the server's 400; the ink count is checked against MAX_INK_STROKES.
 - The 빠진 슬라이드 list (§28) shows a slide's strokes as one row "손글씨 N획".

@@ -13,6 +13,7 @@ import {
 } from 'react';
 import { Paperclip, Pin, X } from 'lucide-react';
 import { createPortal } from 'react-dom';
+import { inkPieces } from '../../../shared/ink.ts';
 import type { AnnotationItem, AnnotationOp, DocMeta, MarkerKey, MemoItem, NotesResponse, Patchable, RegionRect, SlideAnnotations } from '../../../shared/types.ts';
 import { viewSrcSet, viewUrl } from '../api.ts';
 import { useAnnotations } from '../hooks/useAnnotations.ts';
@@ -21,11 +22,13 @@ import { useLatest } from '../hooks/useLatest.ts';
 import { useTextLayout } from '../hooks/useTextLayout.ts';
 import { msg, useLang } from '../i18n/index.ts';
 import {
+  isInkTool,
   itemBounds,
   memoAt,
   moveItems,
   newAnnotationId,
   newHighlight,
+  newInk,
   newMemo,
   newShape,
   newTextBox,
@@ -40,9 +43,18 @@ import {
   type Handle,
   unionRects,
 } from '../lib/annotations/geometry.ts';
-import { hitTestItems, marqueeSelect, outlineOnly, pressPlan, slopFor, toggleId, unionIds, type PressTarget } from '../lib/annotations/gesture.ts';
+import { eraserHits, hitTestItems, marqueeSelect, outlineOnly, pressPlan, slopFor, toggleId, unionIds, type PressTarget } from '../lib/annotations/gesture.ts';
+import { inkSamples } from '../lib/annotations/ink.ts';
 import { deriveMarkers, questionsOnItem, type QuestionMarker } from '../lib/annotations/markers.ts';
-import { useAnnotColor, useAnnotLayer, useQuestionMarkers, useReplayAnnotations } from '../lib/annotations/settings.ts';
+import {
+  useAnnotColor,
+  useAnnotLayer,
+  useFingerInk,
+  useInkColor,
+  useInkWidth,
+  useQuestionMarkers,
+  useReplayAnnotations,
+} from '../lib/annotations/settings.ts';
 import { reanchorTextHighlight, textHighlightFromDrag } from '../lib/annotations/textSelect.ts';
 import {
   DRAG_THRESHOLD_PX,
@@ -77,6 +89,7 @@ import { AnnotationTools, NO_FILTER, toolHint, useMediaQuery, type SlideFilter }
 import { LayerContext, type LayerActions, type LayerEnv } from './annotations/context.ts';
 import { ChatIcon } from './annotations/icons.tsx';
 import { ItemMenu } from './annotations/ItemMenu.tsx';
+import { LiveInk } from './annotations/liveInk.ts';
 import { MemoCard } from './annotations/MemoCard.tsx';
 import { DeckBanner } from './DeckBanner.tsx';
 import { SlideImage } from './SlideImage.tsx';
@@ -116,12 +129,15 @@ interface ItemSelection {
  * A pointer pressed on a slide (lib/annotations/gesture.ts pressPlan): on an item it selects and moves it (every
  * selected item, when it is part of a group), on a handle it resizes, on empty area it draws with the active tool
  * (DESIGN §25), drags a marquee with 범위 선택, or, without a tool, becomes a region selection (§21). A text highlight
- * under 텍스트 형광 is re-dragged: a draw that replaces that item's words.
+ * under 텍스트 형광 is re-dragged: a draw that replaces that item's words. Under 펜 / 지우개 (§29) a stylus or the mouse
+ * writes a stroke or erases strokes, over items too.
  */
 interface Gesture {
   pointerId: number;
   /** Touch or pen: a long press starts the selection (a drag right away scrolls). */
   touch: boolean;
+  /** PointerEvent.pointerType: 'mouse' | 'pen' | 'touch' (a pen replaces a gesture a finger or a palm started). */
+  pointerType: string;
   slide: number;
   box: HTMLElement;
   frame: Frame;
@@ -130,7 +146,7 @@ interface Gesture {
   startClient: Point;
   active: boolean;
   timer: number;
-  mode: 'region' | 'draw' | 'move' | 'resize' | 'marquee';
+  mode: 'region' | 'draw' | 'move' | 'resize' | 'marquee' | 'ink' | 'erase';
   tool: AnnotationTool;
   /** move / resize: the item and its geometry at the press; draw (텍스트 형광): the text highlight being re-dragged. */
   itemId?: string;
@@ -143,6 +159,11 @@ interface Gesture {
   base?: readonly string[];
   /** marquee: the memo cards as drawn (memoBoxesOf), by id. */
   memoBoxes?: Record<string, RegionRect>;
+  /** ink: the stroke being written, drawn imperatively over the image (no React state per point). */
+  live?: LiveInk;
+  /** erase: the strokes touched so far (faded at once, removed on release), and where the eraser was last. */
+  erased?: Set<string>;
+  last?: Point;
 }
 
 /** Actions of the floating menu (stable: SlideItem is memoized). */
@@ -181,6 +202,11 @@ function memoBoxesOf(box: HTMLElement): Record<string, RegionRect> {
     out[el.dataset.id!] = { x: (r.left - layer.left) / layer.width, y: (r.top - layer.top) / layer.height, w: r.width / layer.width, h: r.height / layer.height };
   }
   return out;
+}
+
+/** Fades the strokes a drag of the eraser touched (or shows them again), at once: the layer is not re-rendered for it. */
+function fadeStrokes(box: HTMLElement, ids: Iterable<string>, on: boolean): void {
+  for (const id of ids) box.querySelector(`.annot-layer [data-annot="item"][data-id="${id}"]`)?.classList.toggle('is-erasing', on);
 }
 
 /** The index in `list` (ascending slides) of `slide`, or of the nearest slide shown. */
@@ -323,6 +349,12 @@ export function SlideViewer({
   const toolRef = useLatest(tool);
   const [color, setColor] = useAnnotColor();
   const colorRef = useLatest(color);
+  const [inkColor, setInkColor] = useInkColor();
+  const inkColorRef = useLatest(inkColor);
+  const [inkWidth, setInkWidth] = useInkWidth();
+  const inkWidthRef = useLatest(inkWidth);
+  const [fingerInk, setFingerInk] = useFingerInk();
+  const fingerInkRef = useLatest(fingerInk);
   const [layerShown, setLayerShown] = useAnnotLayer();
   const [markersShown, setMarkersShown] = useQuestionMarkers();
   const [replayOn, setReplayOn] = useReplayAnnotations();
@@ -479,9 +511,17 @@ export function SlideViewer({
   const onOpenDocRef = useLatest(onOpenDoc);
   const onOpenNotesRef = useLatest(onOpenNotes);
 
+  /** The pointer of the last press on the slides (a pen's barrel button opens no context menu under 펜 / 지우개). */
+  const lastPointerRef = useRef('mouse');
+
+  /** Ends the gesture; a stroke being written is dropped and strokes the eraser faded show again (Esc, unmount). */
   const cancelGesture = useCallback(() => {
     const g = gestureRef.current;
-    if (g) window.clearTimeout(g.timer);
+    if (g) {
+      window.clearTimeout(g.timer);
+      g.live?.remove();
+      if (g.erased) fadeStrokes(g.box, g.erased, false);
+    }
     gestureRef.current = null;
     cancelAnimationFrame(dragFrame.current);
     dragFrame.current = 0;
@@ -716,15 +756,68 @@ export function SlideViewer({
     [colorRef, doc.id, ensureLayout, mutate, selectItem, compactMemos],
   );
 
+  /**
+   * 지우개: the strokes the eraser's path from where it was to each sample touches (only strokes, only those drawn now)
+   * fade at once; the release removes them (endInk).
+   */
+  const eraseAlong = (g: Gesture, samples: readonly PointerEvent[]) => {
+    const rect = g.box.getBoundingClientRect();
+    const size = framePixels(rect, g.frame);
+    const box = { w: size.width, h: size.height };
+    const items = itemsOf(g.slide);
+    const erased = (g.erased ??= new Set());
+    const visible = (it: AnnotationItem) => replayVisible(it, replayRef.current);
+    const hit: string[] = [];
+    for (const sample of samples) {
+      const p = toImagePoint(sample.clientX, sample.clientY, rect, g.frame);
+      for (const id of eraserHits(items, g.last ?? p, p, box, { skip: erased, visible })) {
+        erased.add(id);
+        hit.push(id);
+      }
+      g.last = p;
+    }
+    if (hit.length > 0) fadeStrokes(g.box, hit, true);
+  };
+
+  /**
+   * The end of a 펜 / 지우개 drag (a release, or a cancel: what was drawn stays): the stroke becomes items — one `add`
+   * per piece (inkPieces: a tap is a dot), one undo step, nothing selected, no menu — or the touched strokes go in one
+   * `remove` write. The live overlay goes a frame later, once the layer draws the stored stroke.
+   */
+  const endInk = (g: Gesture) => {
+    const { live, erased } = g;
+    g.live = undefined;
+    g.erased = undefined;
+    cancelGesture();
+    if (live) {
+      const createdAt = new Date().toISOString();
+      const recordedAt = recordedAtFor(recorder.getSnapshot(), recorder.clock(), doc.id);
+      const ops: AnnotationOp[] = inkPieces(live.points, live.width, live.aspect).map((piece) => ({
+        op: 'add',
+        item: newInk({ id: newAnnotationId(), color: live.color, createdAt, recordedAt }, piece, live.width),
+      }));
+      if (ops.length > 0) mutate(g.slide, ops);
+      requestAnimationFrame(() => live.remove());
+    }
+    if (erased && erased.size > 0 && !mutate(g.slide, [...erased].map((id) => ({ op: 'remove', id })))) fadeStrokes(g.box, erased, false);
+  };
+
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     const target = e.target instanceof Element ? e.target : null;
     if (!target || target.closest('.region-menu, .annot-pop, .link-picker, .popover-menu')) return;
+    lastPointerRef.current = e.pointerType;
     // Pressing anywhere else dismisses a finished selection's menu.
     if (selectionRef.current?.phase === 'menu') setSelection(null);
-    if (gestureRef.current) {
-      // A second finger (pinch zoom): not a selection.
-      if (!gestureRef.current.active) cancelGesture();
-      return;
+    const current = gestureRef.current;
+    if (current) {
+      // A pen replaces what a finger or a palm started before it (a hand resting on the slide must not block the pen;
+      // a stroke a finger began is dropped). Any other second pointer (a pinch zoom) is not a selection.
+      if (e.pointerType === 'pen' && current.pointerType === 'touch') {
+        cancelGesture();
+      } else {
+        if (!current.active) cancelGesture();
+        return;
+      }
     }
     if (!e.isPrimary || (e.pointerType === 'mouse' && e.button !== 0)) return;
     const annot = target.closest<HTMLElement>('.annot-layer [data-annot]');
@@ -762,11 +855,22 @@ export function SlideViewer({
             })
           : null;
     const wasSelected = item !== null && (selectedIds?.includes(item.id) ?? false);
-    const plan = pressPlan({ tool: activeTool, target: pressed, item, selected: wasSelected, touch, shift: e.shiftKey });
+    const plan = pressPlan({
+      tool: activeTool,
+      target: pressed,
+      item,
+      selected: wasSelected,
+      touch,
+      shift: e.shiftKey,
+      pointerType: e.pointerType,
+      buttons: e.buttons,
+      fingerInk: fingerInkRef.current,
+    });
     if (plan.kind === 'ignore') return;
     const g: Gesture = {
       pointerId: e.pointerId,
       touch,
+      pointerType: e.pointerType,
       slide,
       box,
       frame,
@@ -838,6 +942,26 @@ export function SlideViewer({
         capture(e);
         if (plan.immediate) g.active = true;
         return;
+      case 'ink':
+        // 펜: a stroke from the press, drawn live over the image; the release makes it items (endInk).
+        g.mode = 'ink';
+        g.active = true;
+        g.live = new LiveInk(box, frame, e.pointerType, inkColorRef.current, inkWidthRef.current);
+        g.live.add(inkSamples(e.nativeEvent));
+        g.live.draw();
+        gestureRef.current = g;
+        if (itemSelectionRef.current) setItemSelection(null);
+        capture(e);
+        return;
+      case 'erase':
+        // 지우개 (or a pen's eraser end / barrel button): what the drag passes over fades, the release removes it.
+        g.mode = 'erase';
+        g.active = true;
+        gestureRef.current = g;
+        if (itemSelectionRef.current) setItemSelection(null);
+        capture(e);
+        eraseAlong(g, [e.nativeEvent]);
+        return;
       case 'region':
         // Empty area, no tool: the region gesture (a mouse drag; touch after a long press).
         if (itemSelectionRef.current) setItemSelection(null);
@@ -877,6 +1001,21 @@ export function SlideViewer({
   const onPointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
     const g = gestureRef.current;
     if (!g || e.pointerId !== g.pointerId) return;
+    if (g.mode === 'ink' || g.mode === 'erase') {
+      // Every sample of the event (a pen moves many times per frame); the stroke is drawn once per frame.
+      e.preventDefault();
+      const samples = inkSamples(e.nativeEvent);
+      if (g.mode === 'erase') {
+        eraseAlong(g, samples);
+        return;
+      }
+      g.live?.add(samples);
+      dragFrame.current ||= requestAnimationFrame(() => {
+        dragFrame.current = 0;
+        if (gestureRef.current === g) g.live?.draw();
+      });
+      return;
+    }
     const client = { x: e.clientX, y: e.clientY };
     if (g.mode === 'draw' || g.mode === 'move' || g.mode === 'resize' || g.mode === 'marquee') {
       if (!g.active) {
@@ -942,6 +1081,10 @@ export function SlideViewer({
   const onPointerUp = (e: ReactPointerEvent<HTMLDivElement>) => {
     const g = gestureRef.current;
     if (!g || e.pointerId !== g.pointerId) return;
+    if (g.mode === 'ink' || g.mode === 'erase') {
+      endInk(g);
+      return;
+    }
     cancelGesture();
     const box = g.box.getBoundingClientRect();
     const size = framePixels(box, g.frame);
@@ -1005,6 +1148,11 @@ export function SlideViewer({
   const onPointerCancel = (e: ReactPointerEvent<HTMLDivElement>) => {
     const g = gestureRef.current;
     if (!g || e.pointerId !== g.pointerId) return;
+    if (g.mode === 'ink' || g.mode === 'erase') {
+      // The browser took the pointer (a palm, a scroll): what was written or erased so far stays.
+      endInk(g);
+      return;
+    }
     cancelGesture();
     if (selectionRef.current?.phase === 'drag') setSelection(null);
     setDraft(null);
@@ -1012,24 +1160,38 @@ export function SlideViewer({
   };
 
   // Touch: once a selection started, the finger must not scroll the viewer (and a long press must not open the
-  // image's context menu). Needs a non-passive listener; registered only where touch is possible.
+  // image's context menu). Under 펜 / 지우개 (palm rejection, DESIGN §29) a stylus never scrolls (iOS sends the Apple
+  // Pencil as touches of touchType 'stylus') and no touch does while a stroke is being written — a palm resting on
+  // the slide included; fingers otherwise scroll and zoom (`.is-ink-tool` touch-action). Needs non-passive listeners;
+  // registered only where touch is possible.
+  const inkToolRef = useLatest(layerShown && isInkTool(tool));
   useEffect(() => {
     const scroller = scrollerRef.current;
     if (!scroller) return;
-    const onTouchMove = (e: TouchEvent) => {
-      if (gestureRef.current?.active && e.cancelable) e.preventDefault();
+    const onTouch = (e: TouchEvent) => {
+      if (!e.cancelable) return;
+      const g = gestureRef.current;
+      const stroke = g?.mode === 'ink' || g?.mode === 'erase';
+      const stylus = inkToolRef.current && Array.from(e.changedTouches).some((t) => (t as Touch & { touchType?: string }).touchType === 'stylus');
+      if (stroke || stylus || (e.type === 'touchmove' && g?.active)) e.preventDefault();
     };
     const onContextMenu = (e: Event) => {
-      if (gestureRef.current?.touch || (selectionRef.current && selectionRef.current.phase === 'drag')) e.preventDefault();
+      // …nor a pen's barrel button or long press under 펜 / 지우개.
+      const pen = inkToolRef.current && ((e as PointerEvent).pointerType || lastPointerRef.current) === 'pen';
+      if (gestureRef.current?.touch || (selectionRef.current && selectionRef.current.phase === 'drag') || pen) e.preventDefault();
     };
     const touch = typeof window !== 'undefined' && ('ontouchstart' in window || navigator.maxTouchPoints > 0);
-    if (touch) scroller.addEventListener('touchmove', onTouchMove, { passive: false });
+    if (touch) {
+      scroller.addEventListener('touchstart', onTouch, { passive: false });
+      scroller.addEventListener('touchmove', onTouch, { passive: false });
+    }
     scroller.addEventListener('contextmenu', onContextMenu);
     return () => {
-      scroller.removeEventListener('touchmove', onTouchMove);
+      scroller.removeEventListener('touchstart', onTouch);
+      scroller.removeEventListener('touchmove', onTouch);
       scroller.removeEventListener('contextmenu', onContextMenu);
     };
-  }, []);
+  }, [inkToolRef]);
 
   // Esc closes the memo sheet (first; its memo stays selected), else cancels a selection (being drawn or waiting in
   // its menu), the annotation tool (back to the default 선택·첨부 state) and the item selection.
@@ -1042,6 +1204,12 @@ export function SlideViewer({
       e.preventDefault();
       if (sheetRef.current) {
         setSheet(null);
+        return;
+      }
+      const g = gestureRef.current;
+      if (g?.mode === 'ink' || g?.mode === 'erase') {
+        // The stroke being written is dropped (the erased strokes show again); 펜 / 지우개 stays.
+        cancelGesture();
         return;
       }
       cancelGesture();
@@ -1385,10 +1553,12 @@ export function SlideViewer({
   }
 
   const m = msg().viewer;
+  const inkTool = layerShown && isInkTool(tool);
   const viewerCls = [
     'viewer',
     (selection?.phase === 'drag' || draft) && 'is-selecting',
-    layerShown && tool !== 'select' && 'is-annot-tool',
+    layerShown && tool !== 'select' && (inkTool ? 'is-ink-tool' : 'is-annot-tool'),
+    inkTool && fingerInk && 'is-finger-ink',
     !layerShown && 'is-annot-hidden',
   ]
     .filter(Boolean)
@@ -1437,13 +1607,19 @@ export function SlideViewer({
             onReplayOn={setReplayOn}
             replaying={replayNow !== null}
             compact={compactTools}
+            inkColor={inkColor}
+            onInkColor={setInkColor}
+            inkWidth={inkWidth}
+            onInkWidth={setInkWidth}
+            fingerInk={fingerInk}
+            onFingerInk={setFingerInk}
           />
           {/* After the tools, taking the leftover width: the buttons never move when the hint changes with the state. */}
           <span
             className="viewer-hint"
             title={m.toolbar.keyboardTitle}
           >
-            {toolHint(layerShown ? tool : 'select')}
+            {toolHint(layerShown ? tool : 'select', fingerInk)}
           </span>
           <div className="zoom-controls" role="group" aria-label={m.toolbar.zoomGroup}>
             <button

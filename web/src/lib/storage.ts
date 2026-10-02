@@ -40,6 +40,10 @@ export const storageKeys = {
   questionMarkers: 'questionMarkers',
   memosToTutor: 'memosToTutor',
   replayAnnotations: 'replayAnnotations',
+  /** 펜 (DESIGN §29): its color and width, and 손가락으로도 쓰기. */
+  inkColor: 'inkColor',
+  inkWidth: 'inkWidth',
+  fingerInk: 'fingerInk',
   /** "여기부터 p.N" markers sent for a recording (the API has no GET for them). */
   recordingMarkers: (recordingId: string) => `recordingMarkers:${recordingId}`,
   slide: (docId: string) => `slide:${docId}`,

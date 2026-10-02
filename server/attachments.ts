@@ -7,7 +7,8 @@
 //
 // A region may be made from a 필기 (DESIGN §25, CreateRegionRequest.annotationId): the item's id, type and text are
 // snapshotted into Attachment.annotation when the attachment is made (nothing is written into the annotation store),
-// so the tutor gets the note's words and the question markers can link the item to the Q&A.
+// so the tutor gets the note's words and the question markers can link the item to the Q&A. Every region crop has the
+// slide's 펜 strokes drawn in (DESIGN §29), so the tutor sees what the student wrote.
 //
 // A new version of the deck (DESIGN §28) moves region attachments to their slide's new number; one whose slide was
 // dropped goes to the nearest kept slide with `removedFrom` (remapRegionAttachments). attachments/deck.json {rev} marks
@@ -20,14 +21,14 @@
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { ANNOTATION_ID_RE, ATTACHMENT_ID_RE, MAX_ANNOTATION_TEXT_CHARS, MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES } from '../shared/types.ts';
+import { ANNOTATION_ID_RE, ATTACHMENT_ID_RE, MAX_ANNOTATION_TEXT_CHARS, MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, MAX_INK_STROKES } from '../shared/types.ts';
 import type { AnnotationItem, Attachment, AttachmentAnnotation, RegionRect, RemovedFrom } from '../shared/types.ts';
 import { readSlideAnnotations } from './annotations.ts';
-import { ATTACHMENTS_DIR, ATTACHMENT_IMAGE_EXTS } from './assets.ts';
+import { ATTACHMENTS_DIR, ATTACHMENT_IMAGE_EXTS, REGION_PADDING } from './assets.ts';
 import { HttpError } from './config.ts';
 import { smsg } from './i18n.ts';
 import { isImageWorkerStopped, runAttachmentWorker } from './imageWorker.ts';
-import type { AttachmentJob, AttachmentWorkerResult, AttachmentWorkerRun, UploadImageType } from './imageWorker.ts';
+import type { AttachmentJob, AttachmentWorkerResult, AttachmentWorkerRun, RegionInk, UploadImageType } from './imageWorker.ts';
 import type { DeckMap } from './internal-types.ts';
 import {
   checkDeckRev,
@@ -58,7 +59,9 @@ const MAX_NAME_CHARS = 120;
 const RECT_EPSILON = 1e-6;
 
 /** Item types a region can be made from (Attachment.annotation.type). */
-const ANNOTATION_TYPES: ReadonlySet<string> = new Set<AnnotationItem['type']>(['highlight', 'textHighlight', 'rect', 'ellipse', 'text', 'memo']);
+const ANNOTATION_TYPES: ReadonlySet<string> = new Set<AnnotationItem['type']>(['highlight', 'textHighlight', 'rect', 'ellipse', 'text', 'memo', 'ink']);
+/** The ink of each 펜 color as a region crop draws it: the web's --ink-* tokens of the light theme (DESIGN §29). */
+const INK_HEX: Readonly<Record<string, string>> = { black: '#1c2230', blue: '#1f4fbf', red: '#c62828', green: '#1b7a3d' };
 /** The texts of this module's errors, in the request's language (DESIGN §27). */
 const texts = () => smsg().library.attachments;
 /** Decimals a stored rect keeps (the client sends 4; clamping must not add floating-point noise). */
@@ -400,8 +403,8 @@ export function parseRegionRequest(body: unknown, pageCount: number): { slide: n
  * The snapshot of a 필기 a region is made from (DESIGN §25): its id and type, and the memo's / text box's text or
  * the highlighted words when it has any. 400 when the slide has no such item.
  */
-async function annotationSnapshot(docId: string, slide: number, annotationId: string): Promise<AttachmentAnnotation> {
-  const item = (await readSlideAnnotations(docId, slide)).items.find((candidate) => candidate.id === annotationId);
+function annotationSnapshot(items: readonly AnnotationItem[], annotationId: string): AttachmentAnnotation {
+  const item = items.find((candidate) => candidate.id === annotationId);
   if (!item) throw new HttpError(400, texts().annotationNotFound);
   const annotation: AttachmentAnnotation = { id: item.id, type: item.type };
   const text = item.type === 'memo' || item.type === 'text' || item.type === 'textHighlight' ? item.text.trim() : '';
@@ -410,10 +413,31 @@ async function annotationSnapshot(docId: string, slide: number, annotationId: st
 }
 
 /**
- * POST /api/docs/:docId/regions: crops the region (padded) from the full-resolution slide and reads the PDF's
- * text inside it, in the image worker. 404 unknown document, 409 not converted (yet) or its deck being swapped
- * (DESIGN §28), 409 deckChanged when `deckRev` (the request's DECK_REV_HEADER) is not the lecture's deck, 400 bad
- * slide / rect, or an `annotationId` that names no 필기 of the slide (its snapshot is taken before the image is made).
+ * The 펜 strokes of a slide that meet a region's crop (its rect padded by REGION_PADDING, like regionCropBox), as the
+ * image worker draws them into it (DESIGN §29): their geometry and ink, in z-order, at most MAX_INK_STROKES (the
+ * topmost).
+ */
+export function regionInk(items: readonly AnnotationItem[], rect: RegionRect): RegionInk[] {
+  const left = rect.x - REGION_PADDING;
+  const top = rect.y - REGION_PADDING;
+  const right = rect.x + rect.w + REGION_PADDING;
+  const bottom = rect.y + rect.h + REGION_PADDING;
+  const ink: RegionInk[] = [];
+  for (const item of items) {
+    if (item.type !== 'ink') continue;
+    const { x, y, w, h } = item.rect;
+    if (x > right || x + w < left || y > bottom || y + h < top) continue;
+    ink.push({ rect: item.rect, width: item.width, pts: item.pts, color: INK_HEX[item.color] ?? INK_HEX.black });
+  }
+  return ink.slice(-MAX_INK_STROKES);
+}
+
+/**
+ * POST /api/docs/:docId/regions: crops the region (padded) from the full-resolution slide, with the slide's 펜
+ * strokes drawn in, and reads the PDF's text inside it, in the image worker. 404 unknown document, 409 not converted
+ * (yet) or its deck being swapped (DESIGN §28), 409 deckChanged when `deckRev` (the request's DECK_REV_HEADER) is not
+ * the lecture's deck, 400 bad slide / rect, or an `annotationId` that names no 필기 of the slide (its snapshot is
+ * taken before the image is made).
  */
 export async function createRegionAttachment(docId: string, body: unknown, now: Date = new Date(), deckRev?: number): Promise<Attachment> {
   if (isDocSwapping(docId)) throw swappingError();
@@ -422,10 +446,21 @@ export async function createRegionAttachment(docId: string, body: unknown, now: 
   if (doc.status !== 'ready') throw notReadyError(doc);
   checkDeckRev(doc, deckRev);
   const { slide, rect, annotationId } = parseRegionRequest(body, doc.pageCount);
-  const annotation = annotationId ? await annotationSnapshot(docId, slide, annotationId) : null;
+  // The slide's 필기: the item the region is made from, and the strokes drawn into the crop.
+  const { items } = await readSlideAnnotations(docId, slide);
+  const annotation = annotationId ? annotationSnapshot(items, annotationId) : null;
+  const ink = regionInk(items, rect);
   await ensureAttachmentsDir(docId);
   const id = newAttachmentId();
-  const job: AttachmentJob = { kind: 'region', docDir: docPaths(docId).dir, id, slide, slideFile: slideFileName(slide, doc.pageCount), rect };
+  const job: AttachmentJob = {
+    kind: 'region',
+    docDir: docPaths(docId).dir,
+    id,
+    slide,
+    slideFile: slideFileName(slide, doc.pageCount),
+    rect,
+    ...(ink.length > 0 ? { ink } : {}),
+  };
   const failure = texts().cropFailed(slide);
   const result = await runJob(docId, job, failure);
   if (!result.ok) throw new HttpError(500, failure);

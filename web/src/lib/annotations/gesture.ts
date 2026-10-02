@@ -1,13 +1,16 @@
 // What a press on a slide does (DESIGN §25), the pure part: hit-testing the slide's items under the pointer (the
 // smallest wins, so a small highlight inside a big rectangle stays reachable; a few pixels of slack for thin bands
 // and outlines; an unselected outline shape counts on its ring only in EVERY state, so its inside passes through to
-// what is under it), the items a marquee crosses, and the plan of a press — resize a handle, select / move the item
-// under it with ANY tool active (Shift: add it to / take it out of the selection), re-drag a text highlight with its
-// own tool, draw with the active tool on empty area, drag a marquee with 범위 선택, or (no tool: the default 선택·첨부
-// state) start the region gesture. No DOM (the viewer measures memo cards for the marquee and passes their boxes in).
+// what is under it; a 펜 stroke near its centre line only), the items a marquee crosses, the strokes an eraser move
+// touches (DESIGN §29), and the plan of a press — resize a handle, select / move the item under it with ANY tool
+// active (Shift: add it to / take it out of the selection), re-drag a text highlight with its own tool, draw with the
+// active tool on empty area, drag a marquee with 범위 선택, write or erase under 펜 / 지우개 (by the kind of pointer:
+// a finger scrolls), or (no tool: the default 선택·첨부 state) start the region gesture. No DOM (the viewer measures
+// memo cards for the marquee and passes their boxes in).
+import { inkDistance, inkMaxRadius, inkPointsOf, inkTouches } from '../../../../shared/ink.ts';
 import type { AnnotationItem, RegionRect, TextHighlightItem } from '../../../../shared/types.ts';
 import type { Point } from '../attachments.ts';
-import { CLICK_TOOLS, itemBounds, type AnnotationTool, type DrawingTool, type Handle } from './geometry.ts';
+import { CLICK_TOOLS, isInkTool, itemBounds, type AnnotationTool, type DrawingTool, type Handle } from './geometry.ts';
 
 /** A press this close to an item (in pixels of the rendered slide) counts as on it: thin bands and 3 px outlines. */
 export const HIT_SLOP_PX = 4;
@@ -22,13 +25,22 @@ export interface Slop {
   y: number;
   /** Half the width of an outline's ring: the slack plus half the stroke, either side of the shape's edge. */
   ring: { x: number; y: number };
+  /** The slack in px, and the rendered image in px: a 펜 stroke is hit by its distance in px (inkDistance). */
+  px: number;
+  box: { w: number; h: number };
 }
 
 export const slopFor = (size: { width: number; height: number }, touch: boolean): Slop => {
   const px = touch ? TOUCH_HIT_SLOP_PX : HIT_SLOP_PX;
   const ring = px + SHAPE_STROKE_PX / 2;
   const frac = (v: number, extent: number) => (extent > 0 ? v / extent : 0);
-  return { x: frac(px, size.width), y: frac(px, size.height), ring: { x: frac(ring, size.width), y: frac(ring, size.height) } };
+  return {
+    x: frac(px, size.width),
+    y: frac(px, size.height),
+    ring: { x: frac(ring, size.width), y: frac(ring, size.height) },
+    px,
+    box: { w: size.width, h: size.height },
+  };
 };
 
 type Pad = { x: number; y: number };
@@ -52,12 +64,19 @@ const onRing = (inside: (r: RegionRect, p: Point, s: Pad) => boolean, r: RegionR
 /**
  * Whether `p` is on the item (memos are HTML cards with their own pointer handling and are never hit here). With
  * `outline` a rect / ellipse counts on its ring only — the inside of a box drawn around a paragraph is empty slide
- * for the tool in hand (see `outlineOnly`).
+ * for the tool in hand (see `outlineOnly`). A 펜 stroke counts near its centre line only (the slack plus its widest
+ * half width, in px of the rendered image), never in its bounding box: handwriting does not block what is under it.
  */
 export function itemHit(item: AnnotationItem, p: Point, slop: Slop, outline = false): boolean {
   switch (item.type) {
     case 'memo':
       return false;
+    case 'ink':
+      // The rect is padded by the widest half width already: a cheap first test before the points are measured.
+      return (
+        inRect(item.rect, p, slop) &&
+        inkDistance(inkPointsOf(item), p.x, p.y, slop.box.w, slop.box.h) <= slop.px + inkMaxRadius(item.width, slop.box.h)
+      );
     case 'textHighlight':
       return item.rects.some((r) => inRect(r, p, slop));
     case 'ellipse':
@@ -69,10 +88,11 @@ export function itemHit(item: AnnotationItem, p: Point, slop: Slop, outline = fa
   }
 }
 
-/** How much of the image an item covers (the ranking of overlapping hits). */
+/** How much of the image an item covers (the ranking of overlapping hits; a 펜 stroke covers almost nothing). */
 export function itemArea(item: AnnotationItem): number {
   switch (item.type) {
     case 'memo':
+    case 'ink':
       return 0;
     case 'textHighlight':
       return item.rects.reduce((sum, r) => sum + r.w * r.h, 0);
@@ -155,6 +175,51 @@ export function marqueeSelect(items: readonly AnnotationItem[], rect: RegionRect
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// 지우개 (DESIGN §29): the strokes an eraser move touches
+// ---------------------------------------------------------------------------
+
+/** How far from its path the eraser reaches, in px of the rendered slide. */
+export const ERASER_RADIUS_PX = 8;
+
+export interface EraseOptions {
+  /** In px of `box` (default ERASER_RADIUS_PX). */
+  radius?: number;
+  /** Strokes erased already in this drag. */
+  skip?: ReadonlySet<string>;
+  /** Leaves out what is not drawn right now (그때 필기 재생). */
+  visible?: (item: AnnotationItem) => boolean;
+}
+
+/**
+ * The ids of the 펜 strokes (only strokes are erased) the eraser's move from `a` to `b` (image coordinates; a == b for
+ * a tap) comes within `radius` px of, in z-order — `box` = the rendered image in px. A stroke whose rect is out of
+ * reach is not measured.
+ */
+export function eraserHits(
+  items: readonly AnnotationItem[],
+  a: Point,
+  b: Point,
+  box: { w: number; h: number },
+  { radius = ERASER_RADIUS_PX, skip, visible }: EraseOptions = {},
+): string[] {
+  if (!(box.w > 0) || !(box.h > 0)) return [];
+  const rx = radius / box.w;
+  const ry = radius / box.h;
+  const x0 = Math.min(a.x, b.x) - rx;
+  const x1 = Math.max(a.x, b.x) + rx;
+  const y0 = Math.min(a.y, b.y) - ry;
+  const y1 = Math.max(a.y, b.y) + ry;
+  const out: string[] = [];
+  for (const item of items) {
+    if (item.type !== 'ink' || skip?.has(item.id) || (visible && !visible(item))) continue;
+    const r = item.rect;
+    if (r.x > x1 || r.x + r.w < x0 || r.y > y1 || r.y + r.h < y0) continue;
+    if (inkTouches(inkPointsOf(item), item.width, a, b, box.w, box.h, radius)) out.push(item.id);
+  }
+  return out;
+}
+
 /** `ids` with `id` added (absent) or removed (present) — Shift+click. */
 export function toggleId(ids: readonly string[], id: string): string[] {
   return ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id];
@@ -182,6 +247,12 @@ export interface PressInput {
   touch: boolean;
   /** Shift held: an item is added to / taken out of the selection, a marquee adds to it. */
   shift?: boolean;
+  /** PointerEvent.pointerType ('mouse' | 'pen' | 'touch'); absent: 'touch' when `touch`, else 'mouse'. */
+  pointerType?: string;
+  /** PointerEvent.buttons: on a pen, the eraser end (32) or the barrel button (2) erases under 펜. */
+  buttons?: number;
+  /** 손가락으로도 쓰기: under 펜 / 지우개 a finger writes / erases too (else it scrolls and zooms). */
+  fingerInk?: boolean;
 }
 
 export type PressPlan =
@@ -201,7 +272,14 @@ export type PressPlan =
   /** 텍스트 형광 pressed on a text highlight: a drag re-fits that item's words (a click selects it); `immediate` on touch. */
   | { kind: 'redraw'; item: TextHighlightItem; immediate: boolean }
   /** No tool, empty area: the region gesture (mouse: a drag; touch: a long press then a drag). */
-  | { kind: 'region' };
+  | { kind: 'region' }
+  /** 펜: a stroke is written from the press (over existing items too). */
+  | { kind: 'ink' }
+  /** 지우개 (or a pen's eraser end / barrel button under 펜): a drag removes the strokes it touches. */
+  | { kind: 'erase' };
+
+/** PointerEvent.buttons of a pen's eraser end (32) and barrel button (2). */
+const PEN_ERASE_BUTTONS = 32 | 2;
 
 export const canResize = (item: AnnotationItem): boolean => item.type !== 'memo' && item.type !== 'textHighlight';
 
@@ -210,12 +288,20 @@ export const canResize = (item: AnnotationItem): boolean => item.type !== 'memo'
  * moved or resized at once, without picking a selection tool), a handle before its item, markers are buttons of
  * their own; the one exception is a text highlight under its own tool, which is re-dragged (it has no handles —
  * dragging over words is how its extent changes); drawing happens only on empty area; without a tool the empty area
- * is the region (첨부) gesture.
+ * is the region (첨부) gesture. Under 펜 / 지우개 (DESIGN §29) the kind of pointer decides, over items too: a stylus or
+ * the mouse writes / erases (a pen's eraser end or barrel button erases under 펜), a finger does nothing — the browser
+ * scrolls and zooms, and a palm resting on the slide writes nothing — unless 손가락으로도 쓰기 is on.
  */
-export function pressPlan({ tool, target, item, selected, touch, shift = false }: PressInput): PressPlan {
+export function pressPlan({ tool, target, item, selected, touch, shift = false, pointerType, buttons = 0, fingerInk = false }: PressInput): PressPlan {
   if (target.kind === 'marker') return { kind: 'ignore' };
   if (target.kind === 'handle') {
     return item && canResize(item) ? { kind: 'resize', item, handle: target.handle } : { kind: 'ignore' };
+  }
+  if (isInkTool(tool)) {
+    const pointer = pointerType ?? (touch ? 'touch' : 'mouse');
+    if (pointer === 'touch' && !fingerInk) return { kind: 'ignore' };
+    if (tool === 'eraser' || (pointer === 'pen' && (buttons & PEN_ERASE_BUTTONS) !== 0)) return { kind: 'erase' };
+    return { kind: 'ink' };
   }
   if (item) {
     if (shift) return { kind: 'toggle', item };

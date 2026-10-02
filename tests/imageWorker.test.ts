@@ -9,6 +9,9 @@ import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { pathToFileURL } from 'node:url';
 import sharp from 'sharp';
+import { encodeInkPoints, inkRect } from '../shared/ink.ts';
+import type { InkPoint } from '../shared/ink.ts';
+import { MAX_INK_STROKES } from '../shared/types.ts';
 import {
   INLINE_MAX_BYTES,
   INLINE_MAX_EDGE,
@@ -34,7 +37,7 @@ import {
   UPLOAD_MAX_PIXELS,
   uploadRefusal,
 } from '../server/imageWorker.ts';
-import type { AttachmentJob, AttachmentWorkerResult, UploadImageType } from '../server/imageWorker.ts';
+import type { AttachmentJob, AttachmentWorkerResult, RegionInk, UploadImageType } from '../server/imageWorker.ts';
 import { pngHeaderOnly, svgBehindAvifHeader } from './imageFixtures.ts';
 import { TEXT_ENGINE, TEXT_ENGINE_FILE, layoutFileName, textFileName } from '../server/pageNames.ts';
 import { fallbackFontFiles } from '../server/pdf.ts';
@@ -407,9 +410,9 @@ describe('attachment jobs (DESIGN §21)', () => {
   let counter = 0;
   const nextId = () => `att-${(++counter).toString(16).padStart(16, '0')}`;
 
-  async function region(docDir: string, slide: number, rect: { x: number; y: number; w: number; h: number }) {
+  async function region(docDir: string, slide: number, rect: { x: number; y: number; w: number; h: number }, ink?: RegionInk[]) {
     const id = nextId();
-    const result = await runAttachmentWorker({ kind: 'region', docDir, id, slide, slideFile: `${String(slide).padStart(3, '0')}.png`, rect }).done;
+    const result = await runAttachmentWorker({ kind: 'region', docDir, id, slide, slideFile: `${String(slide).padStart(3, '0')}.png`, rect, ...(ink ? { ink } : {}) }).done;
     assert.equal(result.ok, true, JSON.stringify(result));
     const ok = result as Extract<AttachmentWorkerResult, { ok: true }>;
     const file = path.join(docDir, 'attachments', ok.file);
@@ -474,6 +477,36 @@ describe('attachment jobs (DESIGN §21)', () => {
     const expected = await sharp(path.join(sampleDir, 'slides', '004.png')).extract(box).removeAlpha().raw().toBuffer();
     const actual = await sharp(blank.file).removeAlpha().raw().toBuffer();
     assert.deepEqual(actual, expected, 'a PNG crop is lossless');
+  });
+
+  /** A 펜 stroke through `points` (image coordinates) as the server passes it to a region job. */
+  function stroke(points: InkPoint[], width: number, color: string): RegionInk {
+    const rect = inkRect(points, width, 16 / 9);
+    return { rect, width, pts: encodeInkPoints(points, rect), color };
+  }
+
+  test('a region draws the 펜 strokes it is given into the crop (DESIGN §29), clipped to it', async () => {
+    const rect = { x: 0.7, y: 0.6, w: 0.1, h: 0.1 };
+    const ink = [
+      // A line across the crop, a dot below it, and a line elsewhere on the slide (not in the crop).
+      stroke([{ x: 0.72, y: 0.65, p: 0.5 }, { x: 0.78, y: 0.65, p: 0.5 }], 0.009, '#1c2230'),
+      stroke([{ x: 0.75, y: 0.69, p: 0.5 }], 0.009, '#c62828'),
+      stroke([{ x: 0.1, y: 0.1, p: 0.5 }, { x: 0.3, y: 0.1, p: 0.5 }], 0.009, '#1f4fbf'),
+    ];
+    const written = await region(sampleDir, 4, rect, ink);
+    const box = regionCropBox(rect, 1600, 900);
+    assert.deepEqual([written.result.width, written.result.height], [box.width, box.height]);
+    const pixel = async (x: number, y: number) =>
+      [...(await sharp(written.file).removeAlpha().extract({ left: Math.round(x * 1600) - box.left, top: Math.round(y * 900) - box.top, width: 1, height: 1 }).raw().toBuffer())];
+    const near = (actual: number[], expected: number[]) => assert.ok(actual.every((v, i) => Math.abs(v - expected[i]) <= 24), `${actual} ≉ ${expected}`);
+    near(await pixel(0.75, 0.65), [0x1c, 0x22, 0x30]);
+    near(await pixel(0.72, 0.65), [0x1c, 0x22, 0x30]);
+    near(await pixel(0.75, 0.69), [0xc6, 0x28, 0x28]);
+    near(await pixel(0.75, 0.62), [255, 255, 255]);
+    near(await pixel(0.7, 0.7), [255, 255, 255]);
+    // The same region without strokes is the slide's own white.
+    const plain = await sharp((await region(sampleDir, 4, rect)).file).stats();
+    for (const channel of plain.channels.slice(0, 3)) assert.ok(channel.min > 200);
   });
 
   test('text inside the selection keeps its symbols (Symbol-font PUA remapped)', async () => {
@@ -568,6 +601,25 @@ describe('attachment jobs (DESIGN §21)', () => {
       { kind: 'region', docDir: sampleDir, id: nextId(), slide: 1, slideFile: '../001.png', rect: { x: 0, y: 0, w: 1, h: 1 } },
       { kind: 'region', docDir: sampleDir, id: nextId(), slide: 0, slideFile: '001.png', rect: { x: 0, y: 0, w: 1, h: 1 } },
       { kind: 'region', docDir: sampleDir, id: nextId(), slide: 1, slideFile: '001.png', rect: { x: 0, y: 0, w: Number.NaN, h: 1 } },
+      ...[
+        { color: 'red' },
+        { color: '#1c2230"/><image href="x' },
+        { pts: 'AAAA+' },
+        { pts: 'AAAAg'.repeat(2001) },
+        { width: 0 },
+        { width: Number.POSITIVE_INFINITY },
+        { rect: { x: 0, y: 0, w: 1 } },
+      ].map((bad) => ({ kind: 'region', docDir: sampleDir, id: nextId(), slide: 1, slideFile: '001.png', rect: { x: 0, y: 0, w: 1, h: 1 }, ink: [{ rect: { x: 0, y: 0, w: 1, h: 1 }, width: 0.005, pts: 'AAAAg', color: '#1c2230', ...bad }] })),
+      { kind: 'region', docDir: sampleDir, id: nextId(), slide: 1, slideFile: '001.png', rect: { x: 0, y: 0, w: 1, h: 1 }, ink: 'strokes' },
+      {
+        kind: 'region',
+        docDir: sampleDir,
+        id: nextId(),
+        slide: 1,
+        slideFile: '001.png',
+        rect: { x: 0, y: 0, w: 1, h: 1 },
+        ink: Array.from({ length: MAX_INK_STROKES + 1 }, () => ({ rect: { x: 0, y: 0, w: 1, h: 1 }, width: 0.005, pts: 'AAAAg', color: '#1c2230' })),
+      },
       { kind: 'upload', docDir: 'relative/dir', id: nextId(), input: path.join(tmpRoot, 'x'), type: 'png' },
       { kind: 'upload', docDir: sampleDir, id: nextId(), input: 'relative.upload', type: 'png' },
       { kind: 'upload', docDir: sampleDir, id: nextId(), input: path.join(tmpRoot, 'x') },

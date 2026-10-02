@@ -70,6 +70,11 @@
   --annot-green: #5fd68a;
   --annot-pink: #ff7fb0;
   --annot-blue: #6fb0ff;
+  /* 펜 strokes (DESIGN §29): dark, opaque inks (not the highlighter tints of the same name). */
+  --ink-black: #1c2230;
+  --ink-blue: #1f4fbf;
+  --ink-red: #c62828;
+  --ink-green: #1b7a3d;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -122,6 +127,10 @@
     --annot-green: #4dbb77;
     --annot-pink: #e86a9c;
     --annot-blue: #5a98e6;
+    --ink-black: #353d4d;
+    --ink-blue: #3d6fe0;
+    --ink-red: #e04848;
+    --ink-green: #2a9152;
   }
 }
 
@@ -175,6 +184,10 @@
   --annot-green: #4dbb77;
   --annot-pink: #e86a9c;
   --annot-blue: #5a98e6;
+  --ink-black: #353d4d;
+  --ink-blue: #3d6fe0;
+  --ink-red: #e04848;
+  --ink-green: #2a9152;
 }
 
 /* A forced theme decides the native parts too (form controls, scrollbars, the canvas). */
@@ -6186,6 +6199,28 @@ details[open] > summary::before {
   --annot-color: var(--annot-blue);
 }
 
+/* A 펜 stroke's ink (DESIGN §29) — after the rules above, which it overrides for 'blue' and 'green': a stroke on the
+   slide, the stroke being written, and the 빠진 슬라이드 row of a slide's strokes. */
+.kind-ink.is-black,
+.removed-item.kind-ink.is-black {
+  --annot-color: var(--ink-black);
+}
+
+.kind-ink.is-blue,
+.removed-item.kind-ink.is-blue {
+  --annot-color: var(--ink-blue);
+}
+
+.kind-ink.is-red,
+.removed-item.kind-ink.is-red {
+  --annot-color: var(--ink-red);
+}
+
+.kind-ink.is-green,
+.removed-item.kind-ink.is-green {
+  --annot-color: var(--ink-green);
+}
+
 /* Toolbar: the tools (inline SVG glyphs in currentColor; the names are in their tooltips), the color dots, the ⋯ 필기
    menu. The default 선택·첨부 segment is a quiet raised tab when active; a drawing tool takes the accent. */
 .annot-tools {
@@ -6307,6 +6342,28 @@ details[open] > summary::before {
   background: var(--annot-blue);
 }
 
+.annot-dot.is-ink.is-black {
+  background: var(--ink-black);
+}
+
+.annot-dot.is-ink.is-blue {
+  background: var(--ink-blue);
+}
+
+.annot-dot.is-ink.is-red {
+  background: var(--ink-red);
+}
+
+.annot-dot.is-ink.is-green {
+  background: var(--ink-green);
+}
+
+/* A dark ink dot: the active one's ring stands off it. */
+.annot-dot.is-ink.is-active {
+  border-color: var(--surface);
+  box-shadow: 0 0 0 2px var(--text);
+}
+
 .annot-dot.is-active {
   border-color: var(--text);
 }
@@ -6413,6 +6470,58 @@ details[open] > summary::before {
   border-top: 1px solid var(--border);
 }
 
+/* 펜 (DESIGN §29): the three widths as chips (a line of each width) and 손가락으로도 쓰기 (an .annot-tool toggle). */
+.annot-width-chips {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.annot-width-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  white-space: nowrap;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.annot-width-chip:hover:not(:disabled) {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.annot-width-chip.is-active {
+  border-color: var(--text);
+  color: var(--text);
+}
+
+.annot-width-chip:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.annot-width-line {
+  display: block;
+  width: 14px;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.annot-pop-ink {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
 .annot-shown-count,
 .annot-replay-badge {
   font-size: 11px;
@@ -6505,6 +6614,38 @@ details[open] > summary::before {
   fill: rgba(255, 210, 63, 0.45);
   stroke: none;
   mix-blend-mode: multiply;
+}
+
+/* A 펜 stroke (DESIGN §29): its filled outline in the ink, opaque (no multiply: dark ink on any slide); hit by the
+   viewer near its centre line (gesture.ts), so the path only shows the pointer. Selected, its rect is drawn dashed;
+   a stroke the eraser passed over fades until the release removes it. */
+.annot-shape.kind-ink {
+  fill: var(--annot-color);
+  stroke: none;
+}
+
+.annot-shape.kind-ink.is-erasing {
+  opacity: 0.25;
+}
+
+.annot-ink-box {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  stroke-dasharray: 5 4;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+
+/* The stroke being written: an overlay over the image (components/annotations/liveInk.ts). */
+.annot-ink-live {
+  position: absolute;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.annot-ink-live path {
+  fill: var(--annot-color);
 }
 
 /* The marquee of 범위 선택. */
@@ -6616,6 +6757,23 @@ details[open] > summary::before {
 .viewer.is-annot-tool .slide-box {
   touch-action: none;
   cursor: crosshair;
+}
+
+/* 펜 / 지우개 (DESIGN §29, palm rejection): a stylus or the mouse writes, also over items; fingers keep scrolling and
+   pinch-zooming (no double-tap zoom) — a stylus is kept from scrolling by the viewer's touch listener. With
+   손가락으로도 쓰기, fingers write too. */
+.viewer.is-ink-tool .slide-box {
+  touch-action: pan-x pan-y pinch-zoom;
+  cursor: crosshair;
+}
+
+.viewer.is-ink-tool .annot-shape,
+.viewer.is-ink-tool .annot-text {
+  cursor: crosshair;
+}
+
+.viewer.is-ink-tool.is-finger-ink .slide-box {
+  touch-action: none;
 }
 
 .annot-unsaved {

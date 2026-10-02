@@ -1,9 +1,10 @@
-// Per-device annotation settings (DESIGN §25, AnnotationDeviceSettings): the color of new items, the layer
-// toggle (필기 보기/숨기기), 질문 표시 보기, "학생의 메모를 튜터에게 보이기" (the only one the server sees, as
-// SendMessageRequest.memos) and 그때 필기 재생. Tiny shared stores like hooks/useNeighbors.ts, so the viewer's 필기
-// menu, the 녹음 tab and 설정 › 공부 show the same value. Persisted under storage.ts keys of the same names.
+// Per-device annotation settings (DESIGN §25, AnnotationDeviceSettings): the color of new items, the 펜's color and
+// width and 손가락으로도 쓰기 (§29), the layer toggle (필기 보기/숨기기), 질문 표시 보기, "학생의 메모를 튜터에게
+// 보이기" (the only one the server sees, as SendMessageRequest.memos) and 그때 필기 재생. Tiny shared stores like
+// hooks/useNeighbors.ts, so the viewer's 필기 menu, the 녹음 tab and 설정 › 공부 show the same value. Persisted under
+// storage.ts keys of the same names.
 import { useSyncExternalStore } from 'react';
-import { ANNOTATION_COLORS, type AnnotationColor } from '../../../../shared/types.ts';
+import { ANNOTATION_COLORS, INK_COLORS, INK_WIDTHS, type AnnotationColor } from '../../../../shared/types.ts';
 import { isBoolean, readStorage, storageKeys, writeStorage } from '../storage.ts';
 
 interface Store<T> {
@@ -38,8 +39,13 @@ function createStore<T>(key: string, fallback: T, validate: (v: unknown) => v is
 }
 
 const isColor = (v: unknown): v is AnnotationColor => (ANNOTATION_COLORS as readonly unknown[]).includes(v);
+const isInkColor = (v: unknown): v is AnnotationColor => (INK_COLORS as readonly unknown[]).includes(v);
+const isInkWidth = (v: unknown): v is number => (INK_WIDTHS as readonly unknown[]).includes(v);
 
 const annotColor = createStore<AnnotationColor>(storageKeys.annotColor, 'yellow', isColor);
+const inkColor = createStore<AnnotationColor>(storageKeys.inkColor, 'black', isInkColor);
+const inkWidth = createStore<number>(storageKeys.inkWidth, INK_WIDTHS[1], isInkWidth);
+const fingerInk = createStore<boolean>(storageKeys.fingerInk, false, isBoolean);
 const annotLayer = createStore<boolean>(storageKeys.annotLayer, true, isBoolean);
 const questionMarkers = createStore<boolean>(storageKeys.questionMarkers, true, isBoolean);
 const memosToTutor = createStore<boolean>(storageKeys.memosToTutor, true, isBoolean);
@@ -47,6 +53,12 @@ const replayAnnotations = createStore<boolean>(storageKeys.replayAnnotations, fa
 
 export const getAnnotColor = annotColor.get;
 export const setAnnotColor = annotColor.set;
+export const getInkColor = inkColor.get;
+export const setInkColor = inkColor.set;
+export const getInkWidth = inkWidth.get;
+export const setInkWidth = inkWidth.set;
+export const getFingerInk = fingerInk.get;
+export const setFingerInk = fingerInk.set;
 export const getAnnotLayer = annotLayer.get;
 export const setAnnotLayer = annotLayer.set;
 export const getQuestionMarkers = questionMarkers.get;
@@ -57,6 +69,9 @@ export const getReplayAnnotations = replayAnnotations.get;
 export const setReplayAnnotations = replayAnnotations.set;
 export const subscribeAnnotationSettings = {
   annotColor: annotColor.subscribe,
+  inkColor: inkColor.subscribe,
+  inkWidth: inkWidth.subscribe,
+  fingerInk: fingerInk.subscribe,
   annotLayer: annotLayer.subscribe,
   questionMarkers: questionMarkers.subscribe,
   memosToTutor: memosToTutor.subscribe,
@@ -70,6 +85,11 @@ function useStore<T>(store: Store<T>) {
 
 /** Color of new items (the toolbar's dots). */
 export const useAnnotColor = () => useStore(annotColor);
+/** 펜: the color (INK_COLORS, the toolbar's dots under 펜) and the width (INK_WIDTHS) of new strokes. */
+export const useInkColor = () => useStore(inkColor);
+export const useInkWidth = () => useStore(inkWidth);
+/** 손가락으로도 쓰기: under 펜 / 지우개 a finger writes / erases too (off: it scrolls and zooms). */
+export const useFingerInk = () => useStore(fingerInk);
 /** 필기 보기/숨기기: hidden → the layers unmount and the tools are disabled. */
 export const useAnnotLayer = () => useStore(annotLayer);
 /** 슬라이드에 질문 표시 보기. */

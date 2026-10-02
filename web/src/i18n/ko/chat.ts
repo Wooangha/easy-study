@@ -229,6 +229,7 @@ export const chat = {
       text: '텍스트',
       rect: '사각형',
       ellipse: '동그라미',
+      ink: '손글씨',
     },
     /** …and in the longer description; `where` = onSlide(n) or someSlide. */
     kindTitles: {
@@ -238,6 +239,7 @@ export const chat = {
       text: (where: string) => `${where}에 쓴 텍스트 상자`,
       rect: (where: string) => `${where}에 사각형으로 표시한 부분`,
       ellipse: (where: string) => `${where}에 동그라미로 표시한 부분`,
+      ink: (where: string) => `${where}에 펜으로 쓴 손글씨`,
     },
     onSlide: (n: number) => `슬라이드 ${n}`,
     someSlide: '슬라이드',

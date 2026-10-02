@@ -5,8 +5,8 @@ English · [한국어](README.md)
 Study lecture PDFs slide by slide with an LLM tutor. The slides scroll on the left; the chat on the right knows **which
 slide you are looking at**. It uses the **Claude Code** (Claude subscription) or **Codex** (ChatGPT subscription) CLI you
 are already signed in to, or the Claude / OpenAI API with a key. Record a lecture and it is transcribed on your computer,
-split by slide, and the tutor knows what the professor said. Highlight, draw and leave memos on slides; the tutor reads
-the memos too.
+split by slide, and the tutor knows what the professor said. Highlight, draw, write with a pen and leave memos on slides;
+the tutor reads the memos too.
 
 The app is in Korean and English: **Settings › Display › Language** (Use system setting · 한국어 · English). The language
 also sets the tutor's answers, digests, note headings and the default lecture language of new recordings. The desktop
@@ -38,6 +38,12 @@ matched to the old ones (same, changed, new, removed); after **Switch to the new
 question markers, chats and notes, the recordings' slide alignment and the digest follow their slides. Annotations and
 memos of removed slides are kept in the **Memos** tab › **Removed slides**, and their questions move to the nearest
 slide. A banner above the slides steps through the changed slides and offers **Undo** (the last switch only).
+
+To write on a slide, pick the **Pen** tool: an Apple Pencil (iPad Safari or the home-screen app over remote access), an
+S Pen or the mouse writes, also over other annotations, while fingers keep scrolling and zooming (a resting palm writes
+nothing; on a phone without a stylus, turn on **Write with fingers too**). The width follows the pen pressure; the inks
+are black, blue, red and green in three widths. Strokes are selected, moved, resized, recolored and attached like other
+annotations, and the **Eraser** removes the strokes it passes over (a pen's eraser end or side button erases too).
 
 LLMs: sign in to `claude` (Claude Code) or `codex` once in a terminal, or set `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`.
 

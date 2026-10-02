@@ -231,6 +231,7 @@ export const chat = {
       text: 'text',
       rect: 'rectangle',
       ellipse: 'circle',
+      ink: 'handwriting',
     },
     kindTitles: {
       memo: (where) => `Memo on ${where}`,
@@ -239,6 +240,7 @@ export const chat = {
       text: (where) => `Text box on ${where}`,
       rect: (where) => `Area marked with a rectangle on ${where}`,
       ellipse: (where) => `Area marked with a circle on ${where}`,
+      ink: (where) => `Handwriting on ${where}`,
     },
     onSlide: (n) => `slide ${n}`,
     someSlide: 'the slide',

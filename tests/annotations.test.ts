@@ -1,5 +1,5 @@
 // The slide annotation store (server/annotations.ts, DESIGN §25): the validation table (whitelists per item type,
-// caps, the byte cap), the rev / 409 with `current`, every PATCH op, `recordedAt` (format, round3, the live-recording
+// 펜 strokes of §29, caps, the byte cap), the rev / 409 with `current`, every PATCH op, `recordedAt` (format, round3, the live-recording
 // fallback), the index (update, coalescing, rebuild, the failed-rebuild cache), the library-wide tags, the SSE hub
 // (ops of a PATCH, the document after a PUT, summary / qa, the writer's own client id) and memosForTutor. No HTTP here.
 import assert from 'node:assert/strict';
@@ -7,8 +7,21 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, afterEach, before, describe, test } from 'node:test';
-import { MAX_ANNOTATION_ITEMS, MAX_HIDDEN_MARKERS, MAX_MEMO_TAGS, MAX_SLIDE_ANNOTATION_BYTES, MAX_TEXT_SIZE_PT, MIN_TEXT_SIZE_PT, SLIDE_PT_HEIGHT } from '../shared/types.ts';
-import type { AnnotationEvent, AnnotationItem, AnnotationOp, MarkerKey, MemoItem, SlideAnnotations } from '../shared/types.ts';
+import { encodeInkPoints } from '../shared/ink.ts';
+import {
+  MAX_ANNOTATION_ITEMS,
+  MAX_HIDDEN_MARKERS,
+  MAX_INK_POINTS,
+  MAX_INK_STROKES,
+  MAX_INK_WIDTH,
+  MAX_MEMO_TAGS,
+  MAX_SLIDE_ANNOTATION_BYTES,
+  MAX_TEXT_SIZE_PT,
+  MIN_INK_WIDTH,
+  MIN_TEXT_SIZE_PT,
+  SLIDE_PT_HEIGHT,
+} from '../shared/types.ts';
+import type { AnnotationEvent, AnnotationItem, AnnotationOp, InkItem, MarkerKey, MemoItem, SlideAnnotations } from '../shared/types.ts';
 import {
   annotationBytes,
   annotationSubscribers,
@@ -79,6 +92,17 @@ const memoItem = (extra: Record<string, unknown> = {}): Record<string, unknown> 
   collapsed: false,
   tutor: true,
   links: [],
+  ...extra,
+});
+/** A 펜 stroke of `points` points (each the rect's top-left corner at no pressure: 'AAAAg'). */
+const inkItem = (extra: Record<string, unknown> = {}, points = 3): Record<string, unknown> => ({
+  id: id(),
+  type: 'ink',
+  color: 'black',
+  createdAt: '2026-09-29T10:00:00.000Z',
+  rect: RECT,
+  width: 0.005,
+  pts: 'AAAAg'.repeat(points),
   ...extra,
 });
 const key = (n: number): MarkerKey => ({ sessionId: `20260929-1000${String(n).padStart(2, '0')}-abcd`, messageId: `msg-${n}`, attachmentId: `att-${String(n).padStart(16, '0')}` });
@@ -167,7 +191,12 @@ describe('reading', () => {
 
 describe('validation (400 with a snippet)', () => {
   const DOC = 'valid-deck-bbb222';
-  before(() => makeDoc(DOC));
+  /** The caps test's slides. */
+  const CAPS_DOC = 'caps-deck-bbb333';
+  before(async () => {
+    await makeDoc(DOC);
+    await makeDoc(CAPS_DOC);
+  });
 
   const cases: Array<[string, unknown, RegExp]> = [
     ['unknown type', { ...rectItem(), type: 'star' }, /알 수 없는 필기 종류/],
@@ -199,6 +228,16 @@ describe('validation (400 with a snippet)', () => {
     ['text highlight with too many rects', { ...rectItem(), type: 'textHighlight', rects: Array.from({ length: 201 }, () => RECT), chars: [0, 3], engine: 'pdfium-3', text: 'abc' }, /최대 200줄/],
     ['text highlight with a reversed char range', { ...rectItem(), type: 'textHighlight', rects: [RECT], chars: [3, 3], engine: 'pdfium-3', text: 'abc' }, /chars/],
     ['text highlight without an engine', { ...rectItem(), type: 'textHighlight', rects: [RECT], chars: [0, 3], engine: '', text: 'abc' }, /engine/],
+    ['a shape in an ink color', rectItem({ color: 'black' }), /필기 색/],
+    ['ink in a highlighter color', inkItem({ color: 'yellow' }), /필기 색/],
+    ['ink without a rect', inkItem({ rect: undefined }), /위치\(rect/],
+    ['ink with a width that is not a number', inkItem({ width: '0.005' }), /펜 굵기\(width\)/],
+    ['ink without a width', inkItem({ width: undefined }), /펜 굵기\(width\)/],
+    ['ink without points', inkItem({ pts: '' }), /펜 획의 점\(pts\)/],
+    ['ink with points that are not a string', inkItem({ pts: [1, 2] }), /펜 획의 점\(pts\)/],
+    ['ink with a character outside base64url', inkItem({ pts: 'AAAA+' }), /펜 획의 점\(pts\)/],
+    ['ink with a cut-off point', inkItem({ pts: 'AAAAgAA' }), /펜 획의 점\(pts\)/],
+    ['ink with too many points', inkItem({}, MAX_INK_POINTS + 1), /펜 획이 너무 깁니다 \(최대 2000점\)/],
     ['not an object', 'rect', /필기 항목/],
   ];
   for (const [name, item, pattern] of cases) {
@@ -226,13 +265,69 @@ describe('validation (400 with a snippet)', () => {
     assert.equal((await readSlideAnnotations(DOC, 1)).rev, 0, 'nothing was written');
   });
 
-  test('the byte cap: a document whose JSON would exceed 256 KB is refused', async () => {
-    const items = Array.from({ length: 150 }, () => memoItem({ text: '가'.repeat(2000) }));
+  test('the byte cap: a document whose JSON would exceed 1 MiB is refused', async () => {
+    // 110 strokes of MAX_INK_POINTS points: 1.1 MB of points alone.
+    const items = Array.from({ length: 110 }, () => inkItem({}, MAX_INK_POINTS));
     const err = await expectHttp(putSlideAnnotations(DOC, 2, { baseRev: 0, items, hiddenMarkers: [] }), 400);
     assert.equal(err.message, ANNOTATIONS_TOO_LARGE);
     const ok = await putSlideAnnotations(DOC, 2, { baseRev: 0, items: items.slice(0, 20), hiddenMarkers: [] });
     assert.ok(annotationBytes(ok) < MAX_SLIDE_ANNOTATION_BYTES);
-    await expectHttp(patch(DOC, 2, 1, items.slice(20, 150).map(add).slice(0, 100)), 400, /너무 많아요/);
+    await expectHttp(patch(DOC, 2, 1, items.slice(20).map(add)), 400, /너무 많아요/);
+    // Text counts as well: 200 memos of 2000 characters (6 KB each).
+    const memos = Array.from({ length: MAX_ANNOTATION_ITEMS }, () => memoItem({ text: '가'.repeat(2000) }));
+    await expectHttp(putSlideAnnotations(DOC, 2, { baseRev: 1, items: memos, hiddenMarkers: [] }), 400, /너무 많아요/);
+    assert.equal((await readSlideAnnotations(DOC, 2)).rev, 1);
+  });
+
+  test('caps: 펜 strokes are counted apart (MAX_INK_STROKES) from the other items (MAX_ANNOTATION_ITEMS)', async () => {
+    const strokes = Array.from({ length: MAX_INK_STROKES }, () => inkItem({}, 1));
+    const shapes = Array.from({ length: MAX_ANNOTATION_ITEMS }, () => rectItem());
+    const full = await putSlideAnnotations(CAPS_DOC, 1, { baseRev: 0, items: [...shapes, ...strokes], hiddenMarkers: [] });
+    assert.equal(full.items.length, MAX_ANNOTATION_ITEMS + MAX_INK_STROKES);
+    await expectHttp(patch(CAPS_DOC, 1, full.rev, [add(inkItem())]), 400, /펜 획은 슬라이드마다 최대 3000개/);
+    await expectHttp(patch(CAPS_DOC, 1, full.rev, [add(rectItem())]), 400, /필기는 슬라이드마다 최대 200개/);
+    // A shape removed makes no room for a stroke (and the other way round); PUT counts before anything is normalised.
+    const fewerShapes = await patch(CAPS_DOC, 1, full.rev, [{ op: 'remove', id: shapes[0].id }]);
+    await expectHttp(patch(CAPS_DOC, 1, fewerShapes.rev, [add(inkItem())]), 400, /펜 획은/);
+    const fewerStrokes = await patch(CAPS_DOC, 1, fewerShapes.rev, [{ op: 'remove', id: strokes[0].id }, add(rectItem())]);
+    await expectHttp(patch(CAPS_DOC, 1, fewerStrokes.rev, [add(rectItem())]), 400, /최대 200개/);
+    await expectHttp(putSlideAnnotations(CAPS_DOC, 2, { baseRev: 0, items: [...strokes, inkItem()], hiddenMarkers: [] }), 400, /펜 획은 슬라이드마다 최대 3000개/);
+    await expectHttp(putSlideAnnotations(CAPS_DOC, 2, { baseRev: 0, items: [...shapes, rectItem()], hiddenMarkers: [] }), 400, /최대 200개/);
+    assert.equal((await readSlideAnnotations(CAPS_DOC, 2)).rev, 0, 'nothing was written');
+  });
+
+  test('펜 strokes (DESIGN §29): rect normalised, width capped and kept to 4 significant digits, points as sent; updates of color / rect / width only', async () => {
+    const pts = encodeInkPoints(
+      [
+        { x: 0.1, y: 0.2, p: 0.5 },
+        { x: 0.25, y: 0.3, p: 1 },
+        { x: 0.4, y: 0.25, p: 0 },
+      ],
+      RECT,
+    );
+    const doc = await patch(DOC, 5, 0, [
+      add(inkItem({ pts, width: 0.0051234567, rect: { x: 0.1, y: 0.2, w: 0.30004, h: 0.1 }, extra: true })),
+      add(inkItem({ color: 'red', width: 1 })),
+      add(inkItem({ color: 'green', width: 0 })),
+      add(inkItem({ color: 'blue', width: 0.009 })),
+    ]);
+    const [stroke, wide, thin, blue] = doc.items as InkItem[];
+    assert.deepEqual(
+      { ...stroke, updatedAt: '' },
+      { id: stroke.id, type: 'ink', color: 'black', createdAt: '2026-09-29T10:00:00.000Z', updatedAt: '', rect: { x: 0.1, y: 0.2, w: 0.3, h: 0.1 }, width: 0.005123, pts },
+    );
+    assert.deepEqual([wide.width, thin.width, blue.width], [MAX_INK_WIDTH, MIN_INK_WIDTH, 0.009]);
+    assert.deepEqual([wide.color, thin.color, blue.color], ['red', 'green', 'blue']);
+
+    // Moving / resizing is an update of rect; the points stay as they are.
+    const updated = await patch(DOC, 5, doc.rev, [{ op: 'update', id: stroke.id, patch: { color: 'blue', rect: { x: 0.5, y: 0.5, w: 0.6, h: 0.2 }, width: 0.003 } }]);
+    const moved = updated.items[0] as InkItem;
+    assert.deepEqual([moved.color, moved.rect, moved.width, moved.pts], ['blue', { x: 0.5, y: 0.5, w: 0.5, h: 0.2 }, 0.003, pts]);
+    await expectHttp(patch(DOC, 5, updated.rev, [{ op: 'update', id: stroke.id, patch: { pts: 'AAAAg' } }]), 400, /이 필기에 없는 항목입니다: pts/);
+    await expectHttp(patch(DOC, 5, updated.rev, [{ op: 'update', id: stroke.id, patch: { text: 'x' } }]), 400, /이 필기에 없는 항목입니다: text/);
+    await expectHttp(patch(DOC, 5, updated.rev, [{ op: 'update', id: stroke.id, patch: { color: 'yellow' } }]), 400, /필기 색/);
+    await expectHttp(patch(DOC, 5, updated.rev, [{ op: 'update', id: stroke.id, patch: { width: null } }]), 400, /펜 굵기/);
+    assert.deepEqual(await readSlideAnnotations(DOC, 5), updated, 'the stored document is what was written');
   });
 
   test('normalisation: coordinates clamped and rounded, tags cleaned, defaults, client stamps replaced, unknown fields dropped', async () => {

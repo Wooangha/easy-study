@@ -1,5 +1,5 @@
 // Slide annotations over HTTP (DESIGN §25): the routes and their headers, the 409 body with `current`, the 400 table
-// over HTTP, the SSE stream (ops-carrying `slide` frames, `slide-reset` after a PUT, the writer's own client id not
+// over HTTP, a slide of 펜 strokes up to the byte cap through the JSON body limit (§29), the SSE stream (ops-carrying `slide` frames, `slide-reset` after a PUT, the writer's own client id not
 // echoed, pings, `qa` once after a turn and on a session's deletion, the stream's end when the document is deleted),
 // `memos` on POST …/messages, and GET …/text-layout/:slide (200 with ETag, 404 pending true / false, 409 while the
 // document is not ready; a pending layout is written by the backfill). Fake providers; the PDF worker is the real one.
@@ -8,7 +8,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
-import { ANNOTATION_CLIENT_HEADER } from '../shared/types.ts';
+import { ANNOTATION_CLIENT_HEADER, MAX_INK_POINTS, MAX_SLIDE_ANNOTATION_BYTES } from '../shared/types.ts';
 import type {
   AnnotationEvent,
   AnnotationItem,
@@ -172,6 +172,8 @@ let counter = 0;
 const id = () => `an-${(++counter).toString(16).padStart(12, '0')}`;
 const RECT = { x: 0.1, y: 0.2, w: 0.3, h: 0.1 };
 const rectItem = (extra: Record<string, unknown> = {}) => ({ id: id(), type: 'rect', color: 'blue', createdAt: '2026-09-29T10:00:00.000Z', rect: RECT, ...extra });
+/** A 펜 stroke of MAX_INK_POINTS points (10 KB of `pts`). */
+const longStroke = () => ({ id: id(), type: 'ink', color: 'blue', createdAt: '2026-09-29T10:00:00.000Z', rect: RECT, width: 0.005, pts: 'AAAAg'.repeat(MAX_INK_POINTS) });
 const memoItem = (extra: Record<string, unknown> = {}) => ({
   id: id(),
   type: 'memo',
@@ -283,6 +285,25 @@ describe('annotations over HTTP', () => {
     await expectError(await api(`/docs/no-such-deck-000000/annotations/1`), 404, /문서/);
     await expectError(await api(`/docs/no-such-deck-000000/annotations/events`), 404, /문서/);
     await expectError(await api(`/docs/${PROCESSING}/annotations/1`), 404, /슬라이드/);
+  });
+
+  test('펜 strokes up to the byte cap go through PUT and PATCH (the 2 MB JSON body limit is ample); past it is 400, not 413', async () => {
+    // 100 long strokes: ~1.02 MB, just under MAX_SLIDE_ANNOTATION_BYTES.
+    const strokes = Array.from({ length: 100 }, longStroke);
+    const put = await send('PUT', `/docs/${DOC}/annotations/3`, { baseRev: 0, items: strokes, hiddenMarkers: [] });
+    assert.equal(put.status, 200);
+    const stored = await json<SlideAnnotations>(put);
+    assert.equal(stored.items.length, 100);
+    const bytes = Buffer.byteLength(JSON.stringify(stored));
+    assert.ok(bytes > 1_000_000 && bytes <= MAX_SLIDE_ANNOTATION_BYTES, String(bytes));
+    assert.deepEqual(await json<SlideAnnotations>(await api(`/docs/${DOC}/annotations/3`)), stored);
+
+    await expectError(await send('PATCH', `/docs/${DOC}/annotations/3`, { baseRev: 1, ops: Array.from({ length: 5 }, () => ({ op: 'add', item: longStroke() })) }), 400, /너무 많아요/);
+    await expectError(await send('PUT', `/docs/${DOC}/annotations/3`, { baseRev: 1, items: [...strokes, ...Array.from({ length: 5 }, longStroke)], hiddenMarkers: [] }), 400, /너무 많아요/);
+    const removed = await send('PATCH', `/docs/${DOC}/annotations/3`, { baseRev: 1, ops: [{ op: 'remove', id: strokes[0].id }, { op: 'add', item: longStroke() }] });
+    assert.equal(removed.status, 200);
+    const cleared = await send('PUT', `/docs/${DOC}/annotations/3`, { baseRev: 2, items: [], hiddenMarkers: [] });
+    assert.equal(cleared.status, 200);
   });
 
   test('SSE: ops of a PATCH, the document after a PUT, nothing back to the writer, pings, summary nudges', async () => {

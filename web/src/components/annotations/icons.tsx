@@ -6,11 +6,14 @@
 import {
   Baseline,
   Circle,
+  Eraser,
   Eye,
   EyeOff,
+  Hand,
   Highlighter,
   MessageCircle,
   MousePointer2,
+  PenLine,
   Square,
   SquareDashedMousePointer,
   StickyNote,
@@ -33,12 +36,14 @@ export function ChatIcon({ className = 'chat-icon' }: { className?: string }) {
 }
 
 /**
- * The glyph of each tool: the pointer of 선택·첨부, a dashed box with a pointer for 범위 선택, a marker for 형광펜, an
- * underlined A for 텍스트 형광, the shapes, T, a sticky note.
+ * The glyph of each tool: the pointer of 선택·첨부, a dashed box with a pointer for 범위 선택, a pen and an eraser for
+ * 펜 / 지우개, a marker for 형광펜, an underlined A for 텍스트 형광, the shapes, T, a sticky note.
  */
 const TOOL_ICONS: Record<AnnotationTool, LucideIcon> = {
   select: MousePointer2,
   marquee: SquareDashedMousePointer,
+  pen: PenLine,
+  eraser: Eraser,
   highlight: Highlighter,
   textHighlight: Baseline,
   rect: Square,
@@ -46,6 +51,11 @@ const TOOL_ICONS: Record<AnnotationTool, LucideIcon> = {
   text: Type,
   memo: StickyNote,
 };
+
+/** A hand: 손가락으로도 쓰기 (under 펜 / 지우개). */
+export function FingerIcon({ className = 'tool-icon' }: { className?: string }) {
+  return <Hand className={className} size={SIZE} />;
+}
 
 /** The glyph of a tool button. */
 export function ToolIcon({ tool, className = 'tool-icon' }: { tool: AnnotationTool; className?: string }) {

@@ -1,5 +1,6 @@
-// The floating menu of the selected annotation item(s) (DESIGN §25), like the region menu: the four colors, the text
-// look of a text box (size in points with a slider, the font, bold) or the text size of a memo — inline on a wide
+// The floating menu of the selected annotation item(s) (DESIGN §25), like the region menu: the four colors (the ink
+// colors and the three widths for 펜 strokes, §29; no colors for strokes mixed with other items, which take other
+// colors), the text look of a text box (size in points with a slider, the font, bold) or the text size of a memo — inline on a wide
 // pane, in a small popover on a narrow one —, 첨부 (a chip in the composer, sent with the next question — nothing
 // is sent now), 삭제, for a memo the eye of 튜터에게 보이기 and 접기/펴기 (on a narrow pane / touch, where the card
 // is always a pill, 펴기 opens the bottom sheet instead), and how many questions were asked with the item. With
@@ -13,6 +14,7 @@ import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type 
 import { Paperclip, Trash, X } from 'lucide-react';
 import {
   ANNOTATION_COLORS,
+  INK_COLORS,
   MAX_TEXT_SIZE_PT,
   MIN_TEXT_SIZE_PT,
   TEXT_FONTS,
@@ -26,6 +28,7 @@ import { useLatest } from '../../hooks/useLatest.ts';
 import { msg } from '../../i18n/index.ts';
 import { menuMaxWidth, placeItemMenu, unionPx, type MenuSide, type PxRect } from '../../lib/annotations/menu.ts';
 import { clampPt, memoSizePt, ptToSize, sizeToPt, textSizeOf, type MemoShown } from '../../lib/annotations/text.ts';
+import { InkWidthChips } from './AnnotationTools.tsx';
 import { useLayerEnv } from './context.ts';
 import { Floating } from './Floating.tsx';
 import { ChatIcon, EyeIcon } from './icons.tsx';
@@ -127,6 +130,11 @@ export function ItemMenu({ slide, items, questions }: ItemMenuProps) {
     ? { left: `${placed.left}px`, top: `${placed.top}px`, maxWidth: `${placed.maxWidth}px` }
     : { left: 0, top: 0, visibility: 'hidden' };
   const commonColor = items.every((it) => it.color === items[0].color) ? items[0].color : null;
+  // 펜 strokes take the ink colors, everything else the highlighter tints: a mix gets no colors.
+  const strokes = items.filter((it) => it.type === 'ink');
+  const allInk = strokes.length === items.length;
+  const palette = allInk ? INK_COLORS : strokes.length === 0 ? ANNOTATION_COLORS : [];
+  const commonWidth = allInk && strokes.every((it) => it.width === strokes[0].width) ? strokes[0].width : null;
   const update = (patch: Patchable<AnnotationItem>) => (single ? actions.update(slide, single.id, patch) : actions.updateMany(slide, ids, patch));
   const many = items.length > 1;
   const m = msg().viewer.itemMenu;
@@ -143,19 +151,22 @@ export function ItemMenu({ slide, items, questions }: ItemMenuProps) {
       onPointerDown={(e) => e.stopPropagation()}
     >
       {many && <span className="annot-menu-count">{m.count(items.length)}</span>}
-      <span className="annot-color-dots" role="group" aria-label={m.colors}>
-        {ANNOTATION_COLORS.map((color) => (
-          <button
-            key={color}
-            type="button"
-            className={`annot-dot is-${color}${commonColor === color ? ' is-active' : ''}`}
-            aria-pressed={commonColor === color}
-            aria-label={colorNames[color]}
-            title={many ? m.colorAllTitle(colorNames[color]) : colorNames[color]}
-            onClick={() => update({ color })}
-          />
-        ))}
-      </span>
+      {palette.length > 0 && (
+        <span className="annot-color-dots" role="group" aria-label={m.colors}>
+          {palette.map((color) => (
+            <button
+              key={color}
+              type="button"
+              className={`annot-dot${allInk ? ' is-ink' : ''} is-${color}${commonColor === color ? ' is-active' : ''}`}
+              aria-pressed={commonColor === color}
+              aria-label={colorNames[color]}
+              title={many ? m.colorAllTitle(colorNames[color]) : colorNames[color]}
+              onClick={() => update({ color })}
+            />
+          ))}
+        </span>
+      )}
+      {allInk && <InkWidthChips value={commonWidth} onChange={(width) => update({ width })} />}
       {textBox && <TextStyleControls item={textBox} compact={compact} onChange={(patch) => actions.update(slide, textBox.id, patch)} />}
       {memo && <MemoSizeControls item={memo} compact={compact} shown={compact ? { sheet: true } : { slideH }} onChange={(patch) => actions.update(slide, memo.id, patch)} />}
       <button

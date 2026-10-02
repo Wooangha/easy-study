@@ -1,6 +1,6 @@
 // Regions made from a 필기 (DESIGN §25 "📎 첨부"): POST …/regions with `annotationId` snapshots the item into
-// Attachment.annotation (id, type, text), the turn labels it for the tutor and adds the note's words after the
-// selection text, the saved user message and the notes carry the snapshot, and the memos of the focus window reach
+// Attachment.annotation (id, type, text), every region crop has the slide's 펜 strokes drawn in (§29), the turn labels
+// it for the tutor and adds the note's words after the selection text, the saved user message and the notes carry the snapshot, and the memos of the focus window reach
 // the tutor unless `memos: false` or the memo's 👁 is off — checked on what the real Claude Code adapter writes to the
 // fake CLI's stdin (tests/fixtures/fake-claude.mjs). The image worker is the real one.
 import assert from 'node:assert/strict';
@@ -9,7 +9,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import sharp from 'sharp';
-import type { Attachment, NotesResponse, ProviderInfo, Session, SlideAnnotations, StreamEvent } from '../shared/types.ts';
+import { encodeInkPoints, inkRect } from '../shared/ink.ts';
+import { MAX_INK_STROKES } from '../shared/types.ts';
+import type { AnnotationItem, Attachment, InkItem, NotesResponse, ProviderInfo, Session, SlideAnnotations, StreamEvent } from '../shared/types.ts';
+import { regionCropBox } from '../server/assets.ts';
+import { regionInk } from '../server/attachments.ts';
 import { defaultChatDeps } from '../server/chat.ts';
 import type { ChatDeps } from '../server/chat.ts';
 import { repoRoot } from '../server/config.ts';
@@ -91,6 +95,36 @@ function parseSse(raw: string): Array<{ event: string; data: StreamEvent }> {
 
 let counter = 0;
 const id = () => `an-${(++counter).toString(16).padStart(12, '0')}`;
+
+/** A stored 펜 stroke through `points` (image coordinates) on a 16:9 slide. */
+function inkItem(points: Array<{ x: number; y: number }>, width: number, color: InkItem['color'] = 'black'): InkItem {
+  const samples = points.map((point) => ({ ...point, p: 0.5 }));
+  const rect = inkRect(samples, width, 16 / 9);
+  return { id: id(), type: 'ink', color, createdAt: '2026-10-02T10:00:00.000Z', updatedAt: '2026-10-02T10:00:00.000Z', rect, width, pts: encodeInkPoints(samples, rect) };
+}
+
+describe('regionInk: the strokes a region crop draws (DESIGN §29)', () => {
+  test('strokes that meet the rect padded like the crop, in z-order, with their ink; nothing else', () => {
+    const inside = inkItem([{ x: 0.3, y: 0.3 }, { x: 0.4, y: 0.35 }], 0.005);
+    const inPadding = inkItem([{ x: 0.515, y: 0.45 }], 0.002, 'red');
+    const outside = inkItem([{ x: 0.8, y: 0.8 }, { x: 0.9, y: 0.9 }], 0.005, 'blue');
+    const green = inkItem([{ x: 0.1, y: 0.3 }, { x: 0.9, y: 0.3 }], 0.009, 'green');
+    const shape: AnnotationItem = { id: id(), type: 'rect', color: 'blue', createdAt: '2026-10-02T10:00:00.000Z', updatedAt: '2026-10-02T10:00:00.000Z', rect: { x: 0.3, y: 0.3, w: 0.1, h: 0.1 } };
+    const ink = regionInk([shape, inside, outside, inPadding, green], { x: 0.25, y: 0.25, w: 0.25, h: 0.25 });
+    assert.deepEqual(ink, [
+      { rect: inside.rect, width: 0.005, pts: inside.pts, color: '#1c2230' },
+      { rect: inPadding.rect, width: 0.002, pts: inPadding.pts, color: '#c62828' },
+      { rect: green.rect, width: 0.009, pts: green.pts, color: '#1b7a3d' },
+    ]);
+    assert.equal(regionInk([outside], { x: 0.1, y: 0.1, w: 0.1, h: 0.1 }).length, 0);
+    assert.equal(regionInk([outside], { x: 0.1, y: 0.1, w: 0.7, h: 0.7 })[0]?.color, '#1f4fbf');
+    // A file with more strokes than a slide may have (written by hand): the topmost MAX_INK_STROKES.
+    const many = Array.from({ length: MAX_INK_STROKES + 2 }, () => inside);
+    const capped = regionInk([outside, ...many], { x: 0, y: 0, w: 1, h: 1 });
+    assert.equal(capped.length, MAX_INK_STROKES);
+    assert.equal(capped[0].color, '#1c2230');
+  });
+});
 
 describe('regions made from a 필기 (fake Claude Code CLI)', () => {
   let server: RunningServer;
@@ -211,5 +245,36 @@ describe('regions made from a 필기 (fake Claude Code CLI)', () => {
     assert.ok(text.includes("The student's note there:\n박스 글"));
     assert.ok(text.includes('[Attachment 2: the part of slide 2 the student highlighted]'));
     assert.ok(text.includes('The highlighted words:\nFIRST set'));
+  });
+
+  test('handwriting (DESIGN §29): every region crop over a stroke has it drawn in; a region of the stroke is labelled as handwriting', async () => {
+    // Slide 4 (320 x 180, background rgb(160, 120, 200)): a thick black line across the middle.
+    const line = inkItem([{ x: 0.3, y: 0.5 }, { x: 0.7, y: 0.5 }], 0.05);
+    const res = await send('PUT', `/docs/${DOC}/annotations/4`, { baseRev: 0, items: [line], hiddenMarkers: [] });
+    assert.equal(res.status, 200, await res.clone().text());
+
+    /** The crop's pixel at a point of the slide (image coordinates). */
+    const pixelAt = async (attachment: Attachment, x: number, y: number) => {
+      const box = regionCropBox(attachment.rect!, 320, 180);
+      const file = path.join(docPaths(DOC).dir, 'attachments', (await fs.readdir(path.join(docPaths(DOC).dir, 'attachments'))).find((name) => name.startsWith(`${attachment.id}.`) && !name.endsWith('.json'))!);
+      return [...(await sharp(file).removeAlpha().extract({ left: Math.round(x * 320) - box.left, top: Math.round(y * 180) - box.top, width: 1, height: 1 }).raw().toBuffer())];
+    };
+    const near = (actual: number[], expected: number[]) => assert.ok(actual.every((v, i) => Math.abs(v - expected[i]) <= 24), `${actual} ≉ ${expected}`);
+
+    const fromStroke = await json<Attachment>(await send('POST', `/docs/${DOC}/regions`, { slide: 4, rect: line.rect, annotationId: line.id }));
+    assert.deepEqual(fromStroke.annotation, { id: line.id, type: 'ink' }, 'a stroke has no text');
+    near(await pixelAt(fromStroke, 0.5, 0.5), [0x1c, 0x22, 0x30]);
+    near(await pixelAt(fromStroke, 0.5, 0.45), [160, 120, 200]);
+
+    const selected = await json<Attachment>(await send('POST', `/docs/${DOC}/regions`, { slide: 4, rect: { x: 0.6, y: 0.4, w: 0.3, h: 0.2 } }));
+    assert.equal(selected.annotation, undefined);
+    near(await pixelAt(selected, 0.65, 0.5), [0x1c, 0x22, 0x30]);
+    near(await pixelAt(selected, 0.8, 0.5), [160, 120, 200]);
+    const elsewhere = await json<Attachment>(await send('POST', `/docs/${DOC}/regions`, { slide: 4, rect: { x: 0, y: 0, w: 0.2, h: 0.2 } }));
+    near(await pixelAt(elsewhere, 0.1, 0.1), [160, 120, 200]);
+
+    await ask({ slide: 4, attachments: [fromStroke.id] });
+    const text = await recordedText();
+    assert.ok(text.includes("[Attachment 1: the student's handwriting on slide 4]"), text);
   });
 });

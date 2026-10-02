@@ -1,15 +1,16 @@
 // The annotation toolbar (DESIGN §25) in the viewer's toolbar: the default state 선택·첨부 (no drawing tool: a drag
 // on empty area attaches that region to the next question, a click on an item selects it), 범위 선택 (a drag on
-// empty area selects every item it crosses; Shift+click adds / removes one) and the drawing tools
+// empty area selects every item it crosses; Shift+click adds / removes one), 펜 and 지우개 (§29) and the drawing tools
 // (형광펜 · 텍스트 형광 · 사각형 · 동그라미 · 텍스트 · 메모 — clicking the active one turns it off again), the four
-// colors, and the ⋯ 필기 menu (필기 보기/숨기기, 표시 있는 슬라이드만, a tag filter, 질문 표시 보기, 그때 필기 재생). On a
-// narrow pane the tools and colors fold into one button showing the active tool and color, so the toolbar keeps one row.
+// colors (under 펜: the ink colors and the three widths), 손가락으로도 쓰기 under 펜 / 지우개, and the ⋯ 필기 menu
+// (필기 보기/숨기기, 표시 있는 슬라이드만, a tag filter, 질문 표시 보기, 그때 필기 재생). On a narrow pane the tools and
+// colors fold into one button showing the active tool and color, so the toolbar keeps one row.
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { Ellipsis, Mic } from 'lucide-react';
-import { ANNOTATION_COLORS, type AnnotationColor } from '../../../../shared/types.ts';
+import { ANNOTATION_COLORS, INK_COLORS, INK_WIDTHS, type AnnotationColor } from '../../../../shared/types.ts';
 import { msg } from '../../i18n/index.ts';
-import { ANNOTATION_TOOLS, CLICK_TOOLS, type AnnotationTool } from '../../lib/annotations/geometry.ts';
-import { ToolIcon } from './icons.tsx';
+import { ANNOTATION_TOOLS, CLICK_TOOLS, isInkTool, type AnnotationTool } from '../../lib/annotations/geometry.ts';
+import { FingerIcon, ToolIcon } from './icons.tsx';
 
 export interface SlideFilter {
   /** 표시 있는 슬라이드만. */
@@ -21,11 +22,40 @@ export interface SlideFilter {
 export const NO_FILTER: SlideFilter = { onlyAnnotated: false, tag: null };
 
 /** The one-line hint of the viewer's toolbar for the state (hidden on narrow panes; the titles say the same). */
-export function toolHint(tool: AnnotationTool): string {
+export function toolHint(tool: AnnotationTool, fingerInk = false): string {
   const m = msg().viewer.tools;
   if (tool === 'select') return m.hintSelect;
   if (tool === 'marquee') return m.hintMarquee;
+  if (tool === 'pen') return m.hintPen(fingerInk);
+  if (tool === 'eraser') return m.hintEraser;
   return m.hintDraw(m.labels[tool], CLICK_TOOLS.has(tool));
+}
+
+/**
+ * The three 펜 widths (INK_WIDTHS: 가늘게 · 보통 · 굵게) as chips, each showing a line of its width; with `labels`
+ * (the folded popover) their names too. The toolbar's and the item menu's.
+ */
+export function InkWidthChips({ value, onChange, disabled = false, labels = false }: { value: number | null; onChange: (width: number) => void; disabled?: boolean; labels?: boolean }) {
+  const m = msg().viewer.tools;
+  return (
+    <span className="annot-width-chips" role="group" aria-label={m.inkWidthGroup}>
+      {INK_WIDTHS.map((w, i) => (
+        <button
+          key={w}
+          type="button"
+          className={`annot-width-chip${w === value ? ' is-active' : ''}`}
+          aria-pressed={w === value}
+          aria-label={m.inkWidths[i]}
+          title={m.inkWidthTitle(m.inkWidths[i])}
+          disabled={disabled}
+          onClick={() => onChange(w)}
+        >
+          <span className="annot-width-line" style={{ height: `${Math.max(1, Math.round(w * 560))}px` }} aria-hidden />
+          {labels && <span className="annot-tool-label">{m.inkWidths[i]}</span>}
+        </button>
+      ))}
+    </span>
+  );
 }
 
 interface AnnotationToolsProps {
@@ -52,12 +82,22 @@ interface AnnotationToolsProps {
   replaying: boolean;
   /** Fold the tools into one button (a narrow pane). */
   compact: boolean;
+  /** 펜 (DESIGN §29): the color (INK_COLORS) and width (INK_WIDTHS) of new strokes, and 손가락으로도 쓰기. */
+  inkColor: AnnotationColor;
+  onInkColor: (color: AnnotationColor) => void;
+  inkWidth: number;
+  onInkWidth: (width: number) => void;
+  fingerInk: boolean;
+  onFingerInk: (on: boolean) => void;
 }
 
 export function AnnotationTools(props: AnnotationToolsProps) {
   const { tool, onTool, color, onColor, layerShown, onLayerShown, markersShown, onMarkersShown, filter, onFilter, tags, shownCount, pageCount } = props;
-  const { replayAvailable, replayOn, onReplayOn, replaying, compact } = props;
+  const { replayAvailable, replayOn, onReplayOn, replaying, compact, inkColor, onInkColor, inkWidth, onInkWidth, fingerInk, onFingerInk } = props;
   const disabled = !layerShown;
+  // Under 펜 the dots are the ink colors and the widths follow; 손가락으로도 쓰기 under 펜 and 지우개.
+  const pen = tool === 'pen';
+  const shownColor = pen ? inkColor : color;
   const m = msg().viewer;
   const labels = m.tools.labels;
   const colorNames = m.colorNames;
@@ -86,20 +126,43 @@ export function AnnotationTools(props: AnnotationToolsProps) {
   );
 
   const dots = (
-    <span className="annot-color-dots" role="group" aria-label={m.tools.colorGroup}>
-      {ANNOTATION_COLORS.map((c) => (
+    <span className="annot-color-dots" role="group" aria-label={pen ? m.tools.inkColorGroup : m.tools.colorGroup}>
+      {(pen ? INK_COLORS : ANNOTATION_COLORS).map((c) => (
         <button
           key={c}
           type="button"
-          className={`annot-dot is-${c}${c === color ? ' is-active' : ''}`}
-          aria-pressed={c === color}
+          className={`annot-dot${pen ? ' is-ink' : ''} is-${c}${c === shownColor ? ' is-active' : ''}`}
+          aria-pressed={c === shownColor}
           disabled={disabled}
-          onClick={() => onColor(c)}
+          onClick={() => (pen ? onInkColor(c) : onColor(c))}
           aria-label={colorNames[c]}
-          title={m.tools.colorTitle(colorNames[c])}
+          title={pen ? m.tools.inkColorTitle(colorNames[c]) : m.tools.colorTitle(colorNames[c])}
         />
       ))}
     </span>
+  );
+
+  const finger = (vertical: boolean) => (
+    <button
+      type="button"
+      className={`annot-tool annot-finger${fingerInk ? ' is-active' : ''}`}
+      aria-pressed={fingerInk}
+      aria-label={m.tools.fingerInk}
+      disabled={disabled}
+      onClick={() => onFingerInk(!fingerInk)}
+      title={m.tools.fingerInkTitle(fingerInk)}
+    >
+      <span className="annot-tool-icon" aria-hidden>
+        <FingerIcon />
+      </span>
+      {vertical && <span className="annot-tool-label">{m.tools.fingerInk}</span>}
+    </button>
+  );
+  const inkOptions = (vertical: boolean) => (
+    <>
+      {pen && <InkWidthChips value={inkWidth} onChange={onInkWidth} disabled={disabled} />}
+      {isInkTool(tool) && finger(vertical)}
+    </>
   );
 
   const filterOn = filter.onlyAnnotated || filter.tag !== null;
@@ -115,18 +178,20 @@ export function AnnotationTools(props: AnnotationToolsProps) {
               <span className="annot-tool-icon" aria-hidden>
                 <ToolIcon tool={tool} />
               </span>
-              <span className={`annot-dot is-${color} is-mini`} aria-hidden />
+              <span className={`annot-dot${pen ? ' is-ink' : ''} is-${shownColor} is-mini`} aria-hidden />
             </>
           }
-          title={m.tools.compactTitle(labels[tool], colorNames[color])}
+          title={m.tools.compactTitle(labels[tool], colorNames[shownColor])}
         >
           {tools(true)}
-          <div className="annot-pop-dots">{dots}</div>
+          {tool !== 'eraser' && <div className="annot-pop-dots">{dots}</div>}
+          {isInkTool(tool) && <div className="annot-pop-ink">{inkOptions(true)}</div>}
         </ToolPopover>
       ) : (
         <>
           {tools(false)}
-          {dots}
+          {tool !== 'eraser' && dots}
+          {inkOptions(false)}
         </>
       )}
       <ToolPopover

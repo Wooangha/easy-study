@@ -3,7 +3,8 @@
 // which swaps of a lecture this tab has caught up with, and the order in which a swap is handled (DeckSwaps: the
 // positions, the DocMeta — fetched until it shows the new deck —, the annotation store, what is held of the lecture).
 // Pure, no DOM: App passes what each step does.
-import type { AnnotationItem, DeckChange, DocMeta, VersionPlan } from '../../../shared/types.ts';
+import type { AnnotationColor, AnnotationItem, DeckChange, DocMeta, VersionPlan } from '../../../shared/types.ts';
+import { msg } from '../i18n/index.ts';
 
 export interface PlanView {
   counts: { same: number; changed: number; added: number; removed: number };
@@ -129,6 +130,20 @@ export function removedItemText(item: AnnotationItem): string | null {
     .map((l) => l.trim())
     .find(Boolean);
   return line ?? null;
+}
+
+/**
+ * The rows of a removed slide's 필기 in 빠진 슬라이드: one per item (its text, else its kind), and the slide's 펜 strokes
+ * as one last row, "손글씨 N획" (DESIGN §29).
+ */
+export function removedRows(items: readonly AnnotationItem[]): Array<{ key: string; color: AnnotationColor; ink: boolean; text: string }> {
+  const kinds = msg().chat.attachments.kinds;
+  const strokes = items.filter((it) => it.type === 'ink');
+  const rows = items
+    .filter((it) => it.type !== 'ink')
+    .map((item) => ({ key: item.id, color: item.color, ink: false, text: removedItemText(item) ?? kinds[item.type] }));
+  if (strokes.length > 0) rows.push({ key: 'ink', color: strokes[0].color, ink: true, text: msg().versions.removed.inkStrokes(strokes.length) });
+  return rows;
 }
 
 /**

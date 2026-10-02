@@ -61,6 +61,7 @@ export const versions = {
     oldPage: (n: number) => `Old p.${n}`,
     thumbAlt: (n: number) => `Old slide ${n}`,
     loadFailed: (error: string) => `Could not load the removed slides: ${error}`,
+    inkStrokes: (n: number) => `Handwriting, ${plural(n, 'stroke', 'strokes')}`,
   },
 
   messageChip: (slide: number, old: number) => `p.${slide} (removed p.${old})`,

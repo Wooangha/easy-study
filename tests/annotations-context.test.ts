@@ -196,13 +196,14 @@ describe('attachments made from a 필기 (context.ts, prompts.ts)', () => {
     ...(annotation ? { annotation } : {}),
   });
 
-  test('labels per kind of 필기; a plain region keeps its label', () => {
+  test('labels per kind of 필기 (handwriting too, DESIGN §29); a plain region keeps its label', () => {
     assert.equal(attachmentLabel(1, { kind: 'region', slide: 12, annotation: { type: 'memo' } }), 'Attachment 1: the part of slide 12 where the student stuck a note');
     assert.equal(attachmentLabel(2, { kind: 'region', slide: 3, annotation: { type: 'text' } }), 'Attachment 2: the part of slide 3 where the student put a text box');
     assert.equal(attachmentLabel(3, { kind: 'region', slide: 3, annotation: { type: 'highlight' } }), 'Attachment 3: the part of slide 3 the student highlighted');
     assert.equal(attachmentLabel(3, { kind: 'region', slide: 3, annotation: { type: 'textHighlight' } }), 'Attachment 3: the part of slide 3 the student highlighted');
     assert.equal(attachmentLabel(4, { kind: 'region', slide: 3, annotation: { type: 'rect' } }), 'Attachment 4: the part of slide 3 the student marked');
     assert.equal(attachmentLabel(4, { kind: 'region', slide: 3, annotation: { type: 'ellipse' } }), 'Attachment 4: the part of slide 3 the student marked');
+    assert.equal(attachmentLabel(4, { kind: 'region', slide: 7, annotation: { type: 'ink' } }), "Attachment 4: the student's handwriting on slide 7");
     assert.equal(attachmentLabel(5, { kind: 'region', slide: 12 }), 'Attachment 5: the region of slide 12 the student selected');
     assert.equal(attachmentLabel(6, { kind: 'image', name: 'a.jpg', annotation: { type: 'memo' } }), 'Attachment 6: an image from the student (a.jpg)');
   });
@@ -212,6 +213,7 @@ describe('attachments made from a 필기 (context.ts, prompts.ts)', () => {
     assert.equal(annotationTextBlock('text', '박스'), "The student's note there:\n박스");
     assert.equal(annotationTextBlock('textHighlight', 'FIRST set'), 'The highlighted words:\nFIRST set');
     assert.equal(annotationTextBlock('rect', 'x'), '');
+    assert.equal(annotationTextBlock('ink', 'x'), '');
     assert.equal(annotationTextBlock('memo', ''), '');
 
     const out = turn({

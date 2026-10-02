@@ -54,15 +54,22 @@ const memo = (id: string, x: number, y: number): MemoItem => ({
 /** A 1000 × 600 px slide: 4 px of mouse slack = 0.004 across, 0.0067 down; the outline ring is 5.5 px either side. */
 const SIZE = { width: 1000, height: 600 };
 const slop = slopFor(SIZE, false);
-const none = { x: 0, y: 0, ring: { x: 0, y: 0 } };
+const none = { x: 0, y: 0, ring: { x: 0, y: 0 }, px: 0, box: { w: 1000, h: 600 } };
 
 describe('slopFor', () => {
   test('a few pixels of the rendered slide per axis, the ring half the stroke wider; more for a finger; nothing for a zero-size box', () => {
     const ring = HIT_SLOP_PX + SHAPE_STROKE_PX / 2;
-    assert.deepEqual(slop, { x: HIT_SLOP_PX / 1000, y: HIT_SLOP_PX / 600, ring: { x: ring / 1000, y: ring / 600 } });
+    const box = { w: 1000, h: 600 };
+    assert.deepEqual(slop, { x: HIT_SLOP_PX / 1000, y: HIT_SLOP_PX / 600, ring: { x: ring / 1000, y: ring / 600 }, px: HIT_SLOP_PX, box });
     const touchRing = TOUCH_HIT_SLOP_PX + SHAPE_STROKE_PX / 2;
-    assert.deepEqual(slopFor(SIZE, true), { x: TOUCH_HIT_SLOP_PX / 1000, y: TOUCH_HIT_SLOP_PX / 600, ring: { x: touchRing / 1000, y: touchRing / 600 } });
-    assert.deepEqual(slopFor({ width: 0, height: 0 }, false), none);
+    assert.deepEqual(slopFor(SIZE, true), {
+      x: TOUCH_HIT_SLOP_PX / 1000,
+      y: TOUCH_HIT_SLOP_PX / 600,
+      ring: { x: touchRing / 1000, y: touchRing / 600 },
+      px: TOUCH_HIT_SLOP_PX,
+      box,
+    });
+    assert.deepEqual(slopFor({ width: 0, height: 0 }, false), { x: 0, y: 0, ring: { x: 0, y: 0 }, px: HIT_SLOP_PX, box: { w: 0, h: 0 } });
   });
 });
 

@@ -38,7 +38,7 @@ import {
 import { msg } from '../../i18n/index.ts';
 import { RecordingEventsClient, type ConnectionState, type EventSourceLike, type Timers } from '../recording/events.ts';
 import { toast as showToast, type ToastKind } from '../toast.ts';
-import { applyOps, canHideMarker, emptySlideAnnotations, itemsAfter, newClientId, rebaseOps } from './geometry.ts';
+import { applyOps, canHideMarker, emptySlideAnnotations, fitsSlide, itemsAfter, newClientId, rebaseOps } from './geometry.ts';
 import { emptyHistory, entryItemId, opsApply, popRedo, popUndo, pruneSlide, recordEntry, type History } from './history.ts';
 import { dropTextLayouts } from './layoutCache.ts';
 
@@ -111,6 +111,7 @@ export const MAX_LOAD_RADIUS = 12;
 export const conflictReloaded = (): string => msg().viewer.store.conflictReloaded;
 export const tooManyItems = (): string => msg().viewer.store.tooManyItems(MAX_ANNOTATION_ITEMS);
 export const tooManyHidden = (): string => msg().viewer.store.tooManyHidden;
+export const tooMuchOnSlide = (): string => msg().viewer.store.tooMuchOnSlide;
 
 const EVENT_NAMES = ['slide', 'slide-reset', 'summary', 'qa', 'deck', 'ping', 'message'] as const;
 
@@ -381,8 +382,10 @@ export class DocAnnotations {
 
   /**
    * Apply ops to a slide (optimistically) and send them. False when they change nothing or would pass a cap (a toast
-   * says so). A slide not loaded yet starts from an empty document: the write's 409 (when a file exists) rebases onto
-   * the server's document.
+   * says so): MAX_ANNOTATION_ITEMS items other than 펜 strokes, and — for what adds or changes items — the strokes and
+   * the document's size (DESIGN §29: refused here, before the pending strokes would be lost to the server's 400). A
+   * slide not loaded yet starts from an empty document: the write's 409 (when a file exists) rebases onto the
+   * server's document.
    */
   mutate(slide: number, ops: readonly AnnotationOp[], options: { undoable?: boolean } = {}): boolean {
     if (this.disposed || this.swapped || ops.length === 0) return false;
@@ -397,6 +400,10 @@ export class DocAnnotations {
     }
     const next = applyOps(doc, ops);
     if (next === doc) return false;
+    if (ops.some((op) => op.op === 'add' || op.op === 'update') && !fitsSlide(next)) {
+      this.deps.toast(tooMuchOnSlide(), 'error');
+      return false;
+    }
     const history = options.undoable === false ? this.snapshot.history : recordEntry(this.snapshot.history, slide, doc, ops, this.deps.now());
     const slides = new Map(this.snapshot.slides);
     slides.set(slide, next);
