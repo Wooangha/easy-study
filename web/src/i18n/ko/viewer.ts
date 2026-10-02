@@ -8,11 +8,12 @@ export const viewer = {
     keyboardTitle:
       '키보드: j/k 또는 ↑/↓ 로 슬라이드 이동 · 도구 없이 빈 곳을 끌면 그 영역을 질문에 첨부해요 · 필기는 어느 도구에서든 클릭해서 옮기거나 지워요 (Shift+클릭으로 여러 개, 범위 선택 도구로 끌어서 여러 개) · ⌘Z/Ctrl+Z 되돌리기',
     zoomGroup: '확대/축소',
-    zoomOut: '축소',
+    /** The − / ＋ buttons step through the levels; a pinch or Ctrl+wheel zooms the slides continuously (lib/zoom.ts). */
+    zoomOut: '축소 (두 손가락을 오므리거나 Ctrl+휠로도)',
     zoomFitTitle: '너비에 맞춤',
     /** The zoom button at 100 %. */
     zoomFit: '맞춤',
-    zoomIn: '확대',
+    zoomIn: '확대 (두 손가락을 벌리거나 Ctrl+휠로도)',
   },
   /** The scrolling slide list (SlideViewer). */
   slides: {

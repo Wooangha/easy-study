@@ -47,9 +47,9 @@ describe('ink points', () => {
   test('the rect is padded by the widest half width, never empty, inside the image, on the 4-decimal grid', () => {
     const dot = inkRect([{ x: 0.5, y: 0.5, p: 1 }], 0.005, ASPECT);
     assert.ok(dot.w > 0 && dot.h > 0);
-    // Half width at full pressure: 0.005 * 1.5 / 2 of the height; the x padding divided by the aspect.
-    assert.ok(Math.abs(dot.h - 0.0075) < 2e-4, JSON.stringify(dot));
-    assert.ok(Math.abs(dot.w - 0.0075 / ASPECT) < 2e-4, JSON.stringify(dot));
+    // Half width at full pressure: 0.005 * 1.3 / 2 of the height each way; the x padding divided by the aspect.
+    assert.ok(Math.abs(dot.h - 0.0065) < 2e-4, JSON.stringify(dot));
+    assert.ok(Math.abs(dot.w - 0.0065 / ASPECT) < 2e-4, JSON.stringify(dot));
     const flat = inkRect(line(10, [0.1, 0.3], [0.6, 0.3]), 0.001, ASPECT);
     assert.ok(flat.h >= 0.001);
     const corner = inkRect([{ x: 0, y: 0, p: 1 }], 0.05, ASPECT);
@@ -92,8 +92,8 @@ describe('ink outline and hit testing', () => {
     const halfWidth = (path: string) => Math.abs(Number(/^M[\d.\-]+ ([\d.\-]+)/.exec(path)![1]) - 500);
     const light = halfWidth(inkOutline(line(20, [0.1, 0.5], [0.5, 0.5], 0), 0.01, 1000, 1000));
     const heavy = halfWidth(inkOutline(line(20, [0.1, 0.5], [0.5, 0.5], 1), 0.01, 1000, 1000));
-    assert.equal(light, 2.5);
-    assert.equal(heavy, 7.5);
+    assert.equal(light, 3.5);
+    assert.equal(heavy, 6.5);
   });
 
   test('a tap whose samples ramp up the pressure is one round dot of the widest size', () => {
@@ -105,8 +105,8 @@ describe('ink outline and hit testing', () => {
     const d = inkOutline(tap, 0.009, 1600, 900);
     assert.match(d, /^M[\d.\-]+ [\d.\-]+a[\d.]+ [\d.]+ 0 1 0 [\d.]+ 0a[\d.]+ [\d.]+ 0 1 0 -[\d.]+ 0Z$/);
     const r = Number(/a([\d.]+) /.exec(d)![1]);
-    // The widest sample: 0.009 × 900 / 2 × (0.5 + 0.86).
-    assert.ok(Math.abs(r - (0.009 * 900 * 1.36) / 2) < 0.2, String(r));
+    // The widest sample: 0.009 × 900 / 2 × (0.7 + 0.6 × 0.86).
+    assert.ok(Math.abs(r - (0.009 * 900 * 1.216) / 2) < 0.2, String(r));
   });
 
   test('a sharp turn gets a round tip (a disc wound like the ribbon); a gentle curve does not', () => {

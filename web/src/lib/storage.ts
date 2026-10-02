@@ -3,7 +3,9 @@
 const PREFIX = 'easy-study:';
 
 export const storageKeys = {
+  /** Slides' share of the split pane (SplitPane.tsx): side by side, and stacked on narrow screens. */
   split: 'split',
+  splitStacked: 'splitStacked',
   lastDoc: 'lastDoc',
   zoom: 'zoom',
   providerChoice: 'providerChoice',

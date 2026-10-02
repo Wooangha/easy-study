@@ -355,13 +355,18 @@ session's when there is no answer; a session whose LLM changed (§5 "LLM switch"
   for new sessions, link to open `notes.md`.
 - **Empty state / library**: big drop zone ("PDF를 끌어다 놓거나 클릭해서 업로드") + list of docs.
   While a doc is processing show a progress bar (`progress / pageCount`, poll `GET /api/docs/:id` every 800 ms).
-- **Split view** with a draggable divider (default 58% / 42%, persisted in localStorage).
+- **Split view** with a draggable divider (default 58% / 42%, persisted in localStorage). Since 0.6.9 (§29): on
+  coarse pointers the divider has a 25 px grab area and a small grip; the stacked layout (≤ 800 px, `.split.is-stacked` from
+  matchMedia) has a horizontal divider too, with its own ratio (`splitStacked`, default 0.46, 0.2–0.8).
 - **Slide viewer (left)**: vertical scroll of all slides (`<img loading="lazy">`, box reserved with
   `aspect-ratio`), slide number label, badge with the number of saved Q&As for that slide (click → Notes tab
   filtered to that slide). **Focused slide = the slide intersecting the vertical center of the scroll
   container** (fallback: the most visible one); computed on scroll with rAF throttling; outlined.
   Keyboard (when focus is not in a text field): `j`/`↓`/`PageDown` next slide, `k`/`↑`/`PageUp` previous
-  (smooth-scroll the target slide to the center). Zoom: fit width (default) with −/＋ buttons.
+  (smooth-scroll the target slide to the center). Zoom: fit width (default) with −/＋ buttons. Since 0.6.9
+  (§29) the zoom is continuous (0.5–4; lib/zoom.ts): a two-finger pinch on the slides or Ctrl+wheel / a trackpad pinch
+  zooms the slides around the fingers / pointer (no page zoom over the slides: `touch-action: pan-x pan-y`), −/＋ step to
+  the next level, the middle button shows the percent.
   Remember the scroll position (slide number) per doc in localStorage.
 - **Chat (right)**, tabs **채팅 | 노트**:
   - Chat header: current slide `p.7 / 42`, 📌 pin toggle (when pinned, the question target stays on the
@@ -2680,10 +2685,11 @@ applies to strokes like to other 필기.
   rect), pressure as 6 bits (32 = no pressure: mouse, finger). Moving or resizing a stroke is an `update` of `rect`
   (the points scale with it); `pts` is never patched. `width` = the nominal width as a fraction of the image height
   (INK_WIDTHS 0.003 · 0.005 · 0.009 in the UI = 가늘게 · 보통 · 굵게; the server accepts MIN_INK_WIDTH … MAX_INK_WIDTH);
-  the drawn half width is width / 2 × (0.5 + pressure).
+  the drawn half width is width / 2 × (0.7 + 0.6 × pressure) — a gentle range: handwriting presses anywhere from 0.1 to
+  0.7 and a wider one looks blotchy.
 - Limits: ≤ MAX_INK_POINTS 2000 points per stroke (a longer one is stored as several, inkPieces), ≤ MAX_INK_STROKES 3000
   strokes per slide counted apart from the other items (MAX_ANNOTATION_ITEMS 200 now counts the rest),
-  MAX_SLIDE_ANNOTATION_BYTES raised to 1 MiB. A stroke after simplification (RDP, 0.35 px of a 1000 px tall image, the
+  MAX_SLIDE_ANNOTATION_BYTES raised to 1 MiB. A stroke after simplification (RDP, 0.25 px of a 1000 px tall image, the
   pressure as a third axis) is typically 20–150 points ≈ 0.3–1 KB stored.
 - shared/ink.ts (no dependency; used by the web and the image worker): encode / decode, inkRect, simplifyInk, inkPieces,
   inkOutline (the filled ribbon as an SVG path in px of a w × h box: filled in every 2 px, smoothed once, drawn through
@@ -2705,11 +2711,16 @@ inkOutline with sharp), so the tutor sees what the student wrote (see the review
   the mouse writes — also over existing 필기 (no select / move under the pen); a finger does nothing (the browser scrolls
   and pinch-zooms) unless 손가락으로도 쓰기 (`fingerInk`, per device, in the pen popover) is on. A stylus's eraser end or
   barrel button (buttons & 32 / & 2) erases.
-- Live stroke: samples from getCoalescedEvents() (fallback: the event), pressure only from a pen with pressure > 0,
-  drawn imperatively into an overlay <svg> over the image frame (inkOutline per animation frame; no React state per
-  point); on pointerup the stroke becomes one `add` (inkPieces; one undo step per stroke; no selection, no menu) and the
-  overlay goes on the next frame. pointercancel keeps what was drawn.
-- Palm rejection: under 펜 / 지우개 `.slide-box { touch-action: pan-x pan-y pinch-zoom }` (fingers scroll and zoom, no
+- Live stroke (components/annotations/liveInk.ts): samples from getCoalescedEvents() (fallback: the event), pressure only
+  from a pen with pressure > 0, eased from sample to sample (raw pressure flickers); drawn imperatively inside the pointer
+  event — no React state per point, no frame of delay — on two canvases over the visible part of the image (a zoomed
+  slide is far bigger than the screen; ≤ 6 M backing pixels each): `ink` gets every finished piece once (a curve through
+  the samples' midpoints, as wide as the pen pressed: the cost of a frame does not grow with the stroke), `tail` the last
+  half piece and up to 3 predicted samples (getPredictedEvents), cleared and redrawn per event, so the line stays under
+  the pen's tip. On pointerup the stroke becomes one `add` (inkPieces; one undo step per stroke; no selection, no menu)
+  and the canvases go on the next frame. pointercancel keeps what was drawn.
+- Palm rejection: under 펜 / 지우개 `.slide-box { touch-action: pan-x pan-y }` (fingers scroll, and pinch the slides with the
+  viewer's own zoom — a pinch never starts during a stroke and a pen landing ends it; no
   double-tap zoom); a non-passive touchstart / touchmove listener prevents the default for a stylus touch (iOS
   `touchType === 'stylus'`) and while a stroke is being drawn; a finger or palm already down does not block the pen.
   With `fingerInk` on: `touch-action: none` and fingers write.

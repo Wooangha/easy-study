@@ -69,9 +69,12 @@ export function inkPointsOf(item: Pick<InkItem, 'rect' | 'pts'>): InkPoint[] {
   return points;
 }
 
-/** The width factor of a pressure: 0.5 … 1.5 times the nominal width, 1 at NO_PRESSURE. */
+/**
+ * The width factor of a pressure: 0.7 … 1.3 times the nominal width, 1 at NO_PRESSURE. A gentle range: handwriting
+ * presses anywhere from 0.1 to 0.7, and a wider range makes notes look blotchy.
+ */
 export function inkPressureScale(p: number): number {
-  return 0.5 + clamp01(p);
+  return 0.7 + 0.6 * clamp01(p);
 }
 
 /** The stroke's radius in px at full pressure, for a box `h` px tall. */
@@ -113,7 +116,7 @@ export function inkRect(points: readonly InkPoint[], width: number, aspect: numb
  * Drops points the stroke does not need (Ramer–Douglas–Peucker in px of a box INK_SIMPLIFY_HEIGHT tall, the pressure
  * counted as a third axis), keeping the ends. `tolerance` in px.
  */
-export function simplifyInk(points: readonly InkPoint[], aspect: number, tolerance = 0.35): InkPoint[] {
+export function simplifyInk(points: readonly InkPoint[], aspect: number, tolerance = 0.25): InkPoint[] {
   if (points.length <= 2) return points.slice();
   const h = INK_SIMPLIFY_HEIGHT;
   const w = h * (aspect > 0 ? aspect : 1);

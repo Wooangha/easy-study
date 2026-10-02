@@ -100,6 +100,7 @@ import { recorder } from '../lib/recording/recorder.ts';
 import { isNumber, readStorage, rememberSlide, storageKeys, writeStorage } from '../lib/storage.ts';
 import { toast } from '../lib/toast.ts';
 import { bannerShown, changeBadges } from '../lib/versionPlan.ts';
+import { anchorIn, anchorScroll, boxIndexAt, pinchBegan, pinchScale, snapZoom, stepZoom, storedZoom, touchDistance, touchMidpoint, wheelZoom, zoomPercent } from '../lib/zoom.ts';
 import { AnnotationLayer, type Draft, type DragPreview } from './annotations/AnnotationLayer.tsx';
 import { AnnotationTools, foldTools, NO_FILTER, toolHint, useMediaQuery, type SlideFilter, type ToolsFold } from './annotations/AnnotationTools.tsx';
 import { LayerContext, type LayerActions, type LayerEnv } from './annotations/context.ts';
@@ -184,6 +185,26 @@ interface Gesture {
   last?: Point;
 }
 
+/** The point of a slide a zoom keeps in place (lib/zoom.ts): the slide's element and where the point lies in it (fractions). */
+interface ZoomAnchor {
+  el: HTMLElement;
+  frac: Point;
+}
+
+/** A two-finger pinch on the slides: it zooms them around the fingers' midpoint, and pans as the midpoint moves. */
+interface Pinch {
+  /** The two fingers (Touch.identifier), where they landed and where they are now (client px). */
+  ids: readonly [number, number];
+  from: readonly [Point, Point];
+  a: Point;
+  b: Point;
+  /** The zoom when they landed. */
+  zoom: number;
+  /** They moved past the slop (lib/zoom.ts pinchBegan): what was under their midpoint then stays under it. */
+  began: boolean;
+  anchor: ZoomAnchor | null;
+}
+
 /** Actions of the floating menu (stable: SlideItem is memoized). */
 interface MenuActions {
   attach: () => void;
@@ -192,6 +213,8 @@ interface MenuActions {
 }
 
 const FLASH_MS = 2200;
+/** A zoom by the wheel is committed (state, storage, the slide images' size) this long after its last step. */
+const ZOOM_COMMIT_MS = 200;
 /** Rough width of the floating menu, to keep it inside the slide (at least: a wider menu — a longer language — is measured). */
 const MENU_WIDTH_PX = 250;
 /** A layout that takes longer than this to arrive does not hold a highlight back (a plain band is drawn). */
@@ -298,9 +321,6 @@ interface SlideViewerProps {
   ref?: Ref<SlideViewerHandle>;
 }
 
-/** Zoom factors relative to "fit width" (1). */
-const ZOOM_LEVELS = [0.5, 0.67, 0.8, 1, 1.25, 1.5, 2, 3];
-
 export function isTypingTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
   return target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName);
@@ -356,10 +376,7 @@ export function SlideViewer({
     clamp(Math.round(readStorage(storageKeys.slide(doc.id), 1, isNumber)), 1, Math.max(1, pageCount)),
   );
   const focusedRef = useRef(focused);
-  const [zoom, setZoom] = useState(() => {
-    const z = readStorage(storageKeys.zoom, 1, isNumber);
-    return ZOOM_LEVELS.includes(z) ? z : 1;
-  });
+  const [zoom, setZoom] = useState(() => storedZoom(readStorage(storageKeys.zoom, 1, isNumber)));
   const onFocusChangeRef = useLatest(onFocusChange);
   /** Where the center line sits inside the focused slide (0..1) — restored after resize / zoom. */
   const anchorRef = useRef<{ index: number; frac: number } | null>(null);
@@ -518,6 +535,122 @@ export function SlideViewer({
     },
     [pageCount, shownRef],
   );
+
+  // ---- Zoom (lib/zoom.ts) --------------------------------------------------------------------------
+  // The − / ＋ buttons step through the levels; a two-finger pinch, Ctrl+wheel and a trackpad pinch zoom continuously.
+  // Every change goes through zoomAt: the zoom is put on the track at once (`--zoom`, `--track-w`: no render per
+  // frame) and the scroller is scrolled so that the point of the slide under the fingers / the pointer / the viewer's
+  // center stays there. commitZoom then hands the value to the state — the track already shows it, so nothing moves.
+  /** The zoom the track shows: the state's, or one being pinched that the state does not have yet. */
+  const shownZoomRef = useRef(zoom);
+  /** A zoom is on the track that is not committed yet (the track is not measured into the state meanwhile). */
+  const zoomLiveRef = useRef(false);
+  const zoomTimer = useRef(0);
+  const zoomLabelRef = useRef<HTMLButtonElement>(null);
+
+  // The browser picks a WebP rendition (srcset) from the width a slide really has on screen: the viewer's
+  // width times the zoom, which is the track's width. The same width (`--track-w`) gives the layers their rendered
+  // slide height, which sizes typed text (a text size is a fraction of the slide height).
+  const measureTrack = useCallback(() => {
+    const track = trackRef.current;
+    if (!track) return;
+    const width = track.getBoundingClientRect().width;
+    setTrackWidth(Math.round(width));
+    const next = slideSizes(width);
+    if (next) setSizes(next);
+  }, []);
+
+  /** The slide under a client point (or the next one below a gap), and where the point lies in it. */
+  const zoomAnchorAt = useCallback(
+    (at: Point): ZoomAnchor | null => {
+      const els = slideEls.current;
+      const el = els[boxIndexAt(shownRef.current.length, (i) => els[i]?.getBoundingClientRect().bottom ?? null, at.y)];
+      return el ? { el, frac: anchorIn(el.getBoundingClientRect(), at) } : null;
+    },
+    [shownRef],
+  );
+
+  /** Shows a zoom at once, with the anchored point of its slide under the client point `at`. */
+  const zoomAt = useCallback(
+    (next: number, anchor: ZoomAnchor | null, at: Point) => {
+      const scroller = scrollerRef.current;
+      const track = trackRef.current;
+      if (!scroller || !track) return;
+      const z = snapZoom(next);
+      if (z !== shownZoomRef.current) {
+        shownZoomRef.current = z;
+        zoomLiveRef.current = true;
+        track.style.setProperty('--zoom', String(z));
+        track.style.setProperty('--track-w', String(Math.round(track.getBoundingClientRect().width)));
+        if (zoomLabelRef.current) zoomLabelRef.current.textContent = z === 1 ? msg().viewer.toolbar.zoomFit : zoomPercent(z);
+      }
+      if (anchor?.el.isConnected) {
+        // Measured at the new size. Under half a pixel is left alone (Safari scrolls by whole pixels).
+        const by = anchorScroll(anchor.el.getBoundingClientRect(), anchor.frac, at);
+        if (Math.abs(by.x) >= 0.5) scroller.scrollLeft += by.x;
+        if (Math.abs(by.y) >= 0.5) scroller.scrollTop += by.y;
+      }
+      // At once (not on the next frame): the focus anchor is right when a resize of the scroller (a scrollbar
+      // coming or going with the zoom) re-anchors by it.
+      computeFocus();
+    },
+    [computeFocus],
+  );
+
+  /** The zoom shown becomes the state (and is stored): when a pinch ends, a moment after the last wheel step. */
+  const commitZoom = useCallback(() => {
+    window.clearTimeout(zoomTimer.current);
+    if (!zoomLiveRef.current) return;
+    zoomLiveRef.current = false;
+    measureTrack();
+    setZoom(shownZoomRef.current);
+  }, [measureTrack]);
+  // Unmounted before the wheel's zoom was committed: it is stored all the same.
+  useEffect(
+    () => () => {
+      window.clearTimeout(zoomTimer.current);
+      if (zoomLiveRef.current) writeStorage(storageKeys.zoom, shownZoomRef.current);
+    },
+    [],
+  );
+
+  /** The zoom buttons: the point at the viewer's center stays there. */
+  const zoomTo = (next: number) => {
+    const scroller = scrollerRef.current;
+    if (!scroller) return;
+    const box = scroller.getBoundingClientRect();
+    const at = { x: box.left + scroller.clientWidth / 2, y: box.top + scroller.clientHeight / 2 };
+    zoomAt(next, zoomAnchorAt(at), at);
+    commitZoom();
+  };
+
+  const pinchRef = useRef<Pinch | null>(null);
+  const pinchFrame = useRef(0);
+  /** One step of a pinch, once per frame: the zoom by the fingers' distance, its anchor under their midpoint. */
+  const pinchStep = useCallback(() => {
+    pinchFrame.current = 0;
+    const p = pinchRef.current;
+    if (!p) return;
+    const mid = touchMidpoint(p.a, p.b);
+    if (!p.began) {
+      // Nothing moves until the fingers do (two contacts of a resting hand jitter by a few px).
+      if (!pinchBegan(p.from[0], p.from[1], p.a, p.b)) return;
+      p.began = true;
+      p.anchor = zoomAnchorAt(mid);
+    }
+    zoomAt(p.zoom * pinchScale(touchDistance(p.from[0], p.from[1]), touchDistance(p.a, p.b)), p.anchor, mid);
+  }, [zoomAt, zoomAnchorAt]);
+  /** Ends a pinch where it is (a finger lifted, a pen landed, the browser took the touches) and commits its zoom. */
+  const endPinch = useCallback(() => {
+    if (!pinchRef.current) return;
+    if (pinchFrame.current) {
+      cancelAnimationFrame(pinchFrame.current);
+      pinchStep();
+    }
+    pinchRef.current = null;
+    commitZoom();
+  }, [pinchStep, commitZoom]);
+  useEffect(() => () => cancelAnimationFrame(pinchFrame.current), []);
 
   // ---- Region selection (DESIGN §21) -------------------------------------------------------------
   // The default state (no drawing tool). Mouse: press on empty area and drag (≥ 6 px; a plain click keeps its
@@ -835,6 +968,7 @@ export function SlideViewer({
     g.erased = undefined;
     cancelGesture();
     if (live) {
+      live.end();
       const createdAt = new Date().toISOString();
       const recordedAt = recordedAtFor(recorder.getSnapshot(), recorder.clock(), doc.id);
       const ops: AnnotationOp[] = inkPieces(live.points, live.width, live.aspect).map((piece) => ({
@@ -848,6 +982,8 @@ export function SlideViewer({
   };
 
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    // A pen landing while two fingers pinch: the zoom stays where it is, the pen writes.
+    if (e.pointerType === 'pen') endPinch();
     const target = e.target instanceof Element ? e.target : null;
     if (!target || target.closest('.region-menu, .annot-pop, .link-picker, .popover-menu')) return;
     lastPointerRef.current = e.pointerType;
@@ -996,8 +1132,7 @@ export function SlideViewer({
         g.active = true;
         g.reach = 0;
         g.live = new LiveInk(box, frame, e.pointerType, inkColorRef.current, inkWidthRef.current);
-        g.live.add(inkSamples(e.nativeEvent));
-        g.live.draw();
+        g.live.push(e.nativeEvent);
         gestureRef.current = g;
         if (itemSelectionRef.current) setItemSelection(null);
         capture(e);
@@ -1051,21 +1186,16 @@ export function SlideViewer({
     const g = gestureRef.current;
     if (!g || e.pointerId !== g.pointerId) return;
     if (g.mode === 'ink' || g.mode === 'erase') {
-      // Every sample of the event (a pen moves many times per frame); the stroke is drawn once per frame.
+      // Every sample of the event (a pen moves many times per frame); the stroke is drawn at once, inside the event
+      // (pointer events arrive once per frame), with the browser's predicted samples: the line stays under the tip.
       e.preventDefault();
-      const samples = inkSamples(e.nativeEvent);
       if (g.mode === 'erase') {
-        eraseAlong(g, samples);
+        eraseAlong(g, inkSamples(e.nativeEvent));
         return;
       }
-      g.live?.add(samples);
-      for (const sample of samples) {
+      for (const sample of g.live?.push(e.nativeEvent) ?? []) {
         g.reach = Math.max(g.reach ?? 0, Math.hypot(sample.clientX - g.startClient.x, sample.clientY - g.startClient.y));
       }
-      dragFrame.current ||= requestAnimationFrame(() => {
-        dragFrame.current = 0;
-        if (gestureRef.current === g) g.live?.draw();
-      });
       return;
     }
     const client = { x: e.clientX, y: e.clientY };
@@ -1216,15 +1346,73 @@ export function SlideViewer({
   // Touch: once a selection started, the finger must not scroll the viewer (and a long press must not open the
   // image's context menu). Under 펜 / 지우개 (palm rejection, DESIGN §29) a stylus never scrolls (iOS sends the Apple
   // Pencil as touches of touchType 'stylus') and no touch does while a stroke is being written — a palm resting on
-  // the slide included; fingers otherwise scroll and zoom (`.is-ink-tool` touch-action). A stylus's touchstart on a
-  // control (the Q&A badge, a marker, a memo card, a menu) is left alone: preventing it would swallow the tap
-  // (gesture.ts blocksInkTouch). Needs non-passive listeners; registered only where touch is possible.
+  // the slide included; fingers otherwise scroll and pinch. A stylus's touchstart on a control (the Q&A badge, a
+  // marker, a memo card, a menu) is left alone: preventing it would swallow the tap (gesture.ts blocksInkTouch).
+  // Needs non-passive listeners; registered only where touch is possible.
+  //
+  // Two fingers pinch: the slides zoom around their midpoint and pan with it (the page itself never zooms over the
+  // slides: `.viewer-scroll` touch-action) — where fingers do not draw: with no tool, 범위 선택 (what one finger began
+  // there is dropped), 펜 and 지우개; not with the shape tools or 손가락으로도 쓰기. Never while a pen or the mouse is
+  // at work, and a pen landing ends it. Ctrl+wheel (a trackpad pinch in Chrome, Edge and Firefox) and Safari's gesture
+  // events (a trackpad pinch there and in the desktop app on macOS) zoom the same way around the pointer.
   const inkToolRef = useLatest(layerShown && isInkTool(tool));
+  const pinchToolRef = useLatest(!layerShown || tool === 'select' || tool === 'marquee' || (isInkTool(tool) && !fingerInk));
   useEffect(() => {
     const scroller = scrollerRef.current;
     if (!scroller) return;
+    // The touches of a stylus: iOS marks them (touchType); elsewhere (an S Pen) the pointerdown just before the
+    // touchstart says what landed.
+    const styluses = new Set<number>();
+    let downType = '';
+    const onDown = (e: PointerEvent) => {
+      downType = e.pointerType;
+    };
+    const isStylus = (t: Touch) => (t as Touch & { touchType?: string }).touchType === 'stylus' || styluses.has(t.identifier);
+    const pointOf = (t: Touch): Point => ({ x: t.clientX, y: t.clientY });
+    let touchCount = 0;
+
+    /** Starts, moves or ends the pinch by a touch event; true while one is on (the event is the pinch's, cancelable). */
+    const pinch = (e: TouchEvent): boolean => {
+      if (e.type === 'touchstart' && downType === 'pen') for (const t of Array.from(e.changedTouches)) styluses.add(t.identifier);
+      if (e.type === 'touchstart') downType = '';
+      if (e.type === 'touchend' || e.type === 'touchcancel') for (const t of Array.from(e.changedTouches)) styluses.delete(t.identifier);
+      const touches = Array.from(e.touches);
+      touchCount = touches.length;
+      if (touchCount === 0) styluses.clear();
+      const pen = touches.some(isStylus);
+      const fingers = touches.filter((t) => !isStylus(t) && t.target instanceof Node && scroller.contains(t.target));
+      const p = pinchRef.current;
+      if (p) {
+        const a = fingers.find((t) => t.identifier === p.ids[0]);
+        const b = fingers.find((t) => t.identifier === p.ids[1]);
+        // A finger lifted, a pen landed, or the browser took the touches (a scroll of its own: not cancelable).
+        if (!a || !b || pen || !e.cancelable) {
+          endPinch();
+          return false;
+        }
+        if (e.type === 'touchmove') {
+          p.a = pointOf(a);
+          p.b = pointOf(b);
+          pinchFrame.current ||= requestAnimationFrame(pinchStep);
+        }
+        return true;
+      }
+      const g = gestureRef.current;
+      if (e.type !== 'touchstart' || !e.cancelable || fingers.length !== 2 || pen || !pinchToolRef.current) return false;
+      if (g && g.pointerType !== 'touch') return false;
+      // What one finger began (a long press, a region, a marquee) is not a pinch.
+      if (g) dropGesture();
+      const a = pointOf(fingers[0]);
+      const b = pointOf(fingers[1]);
+      pinchRef.current = { ids: [fingers[0].identifier, fingers[1].identifier], from: [a, b], a, b, zoom: shownZoomRef.current, began: false, anchor: null };
+      return true;
+    };
     const onTouch = (e: TouchEvent) => {
-      if (!e.cancelable) return;
+      if (pinch(e)) {
+        e.preventDefault();
+        return;
+      }
+      if (!e.cancelable || (e.type !== 'touchstart' && e.type !== 'touchmove')) return;
       const g = gestureRef.current;
       const block = blocksInkTouch({
         type: e.type,
@@ -1235,23 +1423,72 @@ export function SlideViewer({
       });
       if (block) e.preventDefault();
     };
+
+    // The wheel's zoom before it is rounded and snapped to 맞춤 (lib/zoom.ts wheelZoom), carried from step to step
+    // for as long as nothing else changes the zoom.
+    let wheelRaw = 0;
+    let wheelShown = Number.NaN;
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      // Not during a stroke or a drag (the live stroke is measured at its press), nor a pinch.
+      if (gestureRef.current?.active || pinchRef.current) return;
+      if (shownZoomRef.current !== wheelShown) wheelRaw = shownZoomRef.current;
+      wheelRaw = wheelZoom(wheelRaw, e.deltaY, e.deltaMode);
+      const at = { x: e.clientX, y: e.clientY };
+      zoomAt(wheelRaw, zoomAnchorAt(at), at);
+      wheelShown = shownZoomRef.current;
+      window.clearTimeout(zoomTimer.current);
+      zoomTimer.current = window.setTimeout(commitZoom, ZOOM_COMMIT_MS);
+    };
+
+    // Safari's gesture events: `scale` is the factor since the gesture began. On an iPad they come on top of the
+    // touch events, which do the pinch there — only the page's own zoom is prevented.
+    let gesture: { zoom: number; anchor: ZoomAnchor | null } | null = null;
+    const onGesture = (e: Event) => {
+      e.preventDefault();
+      const { scale, clientX, clientY } = e as Event & { scale?: number; clientX?: number; clientY?: number };
+      if (touchCount > 0 || gestureRef.current?.active || pinchRef.current || typeof scale !== 'number') {
+        gesture = null;
+        return;
+      }
+      const box = scroller.getBoundingClientRect();
+      const at =
+        typeof clientX === 'number' && typeof clientY === 'number'
+          ? { x: clientX, y: clientY }
+          : { x: box.left + scroller.clientWidth / 2, y: box.top + scroller.clientHeight / 2 };
+      if (e.type === 'gesturestart') gesture = { zoom: shownZoomRef.current, anchor: zoomAnchorAt(at) };
+      if (!gesture) return;
+      zoomAt(gesture.zoom * scale, gesture.anchor, at);
+      if (e.type === 'gestureend') {
+        gesture = null;
+        commitZoom();
+      }
+    };
+
     const onContextMenu = (e: Event) => {
       // …nor a pen's barrel button or long press under 펜 / 지우개.
       const pen = inkToolRef.current && ((e as PointerEvent).pointerType || lastPointerRef.current) === 'pen';
       if (gestureRef.current?.touch || (selectionRef.current && selectionRef.current.phase === 'drag') || pen) e.preventDefault();
     };
     const touch = typeof window !== 'undefined' && ('ontouchstart' in window || navigator.maxTouchPoints > 0);
+    const touchEvents = ['touchstart', 'touchmove', 'touchend', 'touchcancel'] as const;
+    const gestureEvents = ['gesturestart', 'gesturechange', 'gestureend'];
     if (touch) {
-      scroller.addEventListener('touchstart', onTouch, { passive: false });
-      scroller.addEventListener('touchmove', onTouch, { passive: false });
+      scroller.addEventListener('pointerdown', onDown, true);
+      for (const type of touchEvents) scroller.addEventListener(type, onTouch, { passive: false });
     }
+    scroller.addEventListener('wheel', onWheel, { passive: false });
+    for (const type of gestureEvents) scroller.addEventListener(type, onGesture, { passive: false });
     scroller.addEventListener('contextmenu', onContextMenu);
     return () => {
-      scroller.removeEventListener('touchstart', onTouch);
-      scroller.removeEventListener('touchmove', onTouch);
+      scroller.removeEventListener('pointerdown', onDown, true);
+      for (const type of touchEvents) scroller.removeEventListener(type, onTouch);
+      scroller.removeEventListener('wheel', onWheel);
+      for (const type of gestureEvents) scroller.removeEventListener(type, onGesture);
       scroller.removeEventListener('contextmenu', onContextMenu);
     };
-  }, [inkToolRef]);
+  }, [inkToolRef, pinchToolRef, dropGesture, zoomAnchorAt, zoomAt, commitZoom, pinchStep, endPinch]);
 
   // Esc closes the memo sheet (first; its memo stays selected), else cancels a selection (being drawn or waiting in
   // its menu), the annotation tool (back to the default 선택·첨부 state) and the item selection.
@@ -1412,37 +1649,32 @@ export function SlideViewer({
     return () => ro.disconnect();
   }, [restoreAnchor, scheduleFocus]);
 
-  // Zoom changes every slide's height: keep the focused point in place.
+  // A zoom was committed. zoomAt already showed it and kept its anchor in place (nothing is re-anchored here, which
+  // would move what a pinch placed): the focus and the stored value follow.
   const firstZoom = useRef(true);
   useLayoutEffect(() => {
     if (firstZoom.current) {
       firstZoom.current = false;
       return;
     }
-    restoreAnchor();
+    shownZoomRef.current = zoom;
     computeFocus();
     writeStorage(storageKeys.zoom, zoom);
-  }, [zoom, restoreAnchor, computeFocus]);
+  }, [zoom, computeFocus]);
 
-  // The browser picks a WebP rendition (srcset) from the width a slide really has on screen: the viewer's
-  // width times the zoom, which is the track's width. Measured before the first paint, so no image is
-  // requested at a wrong size. The same width (`--track-w`) gives the layers their rendered slide height, which
-  // sizes typed text (a text size is a fraction of the slide height).
+  // The track's width (measureTrack), before the first paint — so no image is requested at a wrong size — and
+  // whenever it changes; not while a pinch is changing it every frame (commitZoom measures when it ends).
   useLayoutEffect(() => {
     const track = trackRef.current;
     if (!track) return;
-    const measure = () => {
-      const width = track.getBoundingClientRect().width;
-      setTrackWidth(Math.round(width));
-      const next = slideSizes(width);
-      if (next) setSizes(next);
-    };
-    measure();
+    measureTrack();
     if (typeof ResizeObserver === 'undefined') return;
-    const ro = new ResizeObserver(measure);
+    const ro = new ResizeObserver(() => {
+      if (!zoomLiveRef.current) measureTrack();
+    });
     ro.observe(track);
     return () => ro.disconnect();
-  }, []);
+  }, [measureTrack]);
 
   // Remember the position per doc, with the deck it is numbered in (a swap remaps it once, DESIGN §28).
   const deckRev = doc.deckRev ?? 0;
@@ -1560,9 +1792,6 @@ export function SlideViewer({
     };
   }, [scrollToSlide, shownRef, undoRedoRef, removeItemsRef]);
 
-  const zoomIndex = ZOOM_LEVELS.indexOf(zoom);
-  const stepZoom = (dir: 1 | -1) =>
-    setZoom((z) => ZOOM_LEVELS[clamp(ZOOM_LEVELS.indexOf(z) + dir, 0, ZOOM_LEVELS.length - 1)]);
   const [jumpValue, setJumpValue] = useState('');
 
   // Question markers (DESIGN §25): derived from the notes and the loaded slide documents.
@@ -1711,8 +1940,8 @@ export function SlideViewer({
             <button
               type="button"
               className="icon-btn"
-              onClick={() => stepZoom(-1)}
-              disabled={zoomIndex <= 0}
+              onClick={() => zoomTo(stepZoom(shownZoomRef.current, -1))}
+              disabled={stepZoom(zoom, -1) === zoom}
               title={m.toolbar.zoomOut}
             >
               −
@@ -1720,17 +1949,18 @@ export function SlideViewer({
             <button
               type="button"
               className="zoom-label"
-              onClick={() => setZoom(1)}
+              ref={zoomLabelRef}
+              onClick={() => zoomTo(1)}
               title={m.toolbar.zoomFitTitle}
               aria-pressed={zoom === 1}
             >
-              {zoom === 1 ? m.toolbar.zoomFit : `${Math.round(zoom * 100)}%`}
+              {zoom === 1 ? m.toolbar.zoomFit : zoomPercent(zoom)}
             </button>
             <button
               type="button"
               className="icon-btn"
-              onClick={() => stepZoom(1)}
-              disabled={zoomIndex >= ZOOM_LEVELS.length - 1}
+              onClick={() => zoomTo(stepZoom(shownZoomRef.current, 1))}
+              disabled={stepZoom(zoom, 1) === zoom}
               title={m.toolbar.zoomIn}
             >
               ＋

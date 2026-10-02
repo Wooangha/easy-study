@@ -10,10 +10,10 @@ export const viewer = {
     keyboardTitle:
       'Keyboard: j/k or ↑/↓ to move between slides · Without a tool, drag on an empty area to attach that region to your question · Click an annotation with any tool to move or delete it (Shift+click, or drag with the box select tool, for several) · ⌘Z/Ctrl+Z to undo',
     zoomGroup: 'Zoom',
-    zoomOut: 'Zoom out',
+    zoomOut: 'Zoom out (or pinch in, or Ctrl+wheel)',
     zoomFitTitle: 'Fit to width',
     zoomFit: 'Fit',
-    zoomIn: 'Zoom in',
+    zoomIn: 'Zoom in (or pinch out, or Ctrl+wheel)',
   },
   slides: {
     label: 'Slides (j/k or ↑/↓ to move, drag on an empty area to attach a region)',

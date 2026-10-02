@@ -804,6 +804,9 @@ details[open] > summary::before {
 }
 
 .split-divider {
+  /* Its line: thicker and in the accent color while pointed at, focused or dragged. */
+  --split-line: 1px;
+  --split-line-color: var(--border);
   flex: none;
   width: 7px;
   margin: 0 -3px;
@@ -811,6 +814,8 @@ details[open] > summary::before {
   z-index: 2;
   cursor: col-resize;
   touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
   background: transparent;
 }
 
@@ -819,21 +824,27 @@ details[open] > summary::before {
   position: absolute;
   top: 0;
   bottom: 0;
-  left: 3px;
-  width: 1px;
-  background: var(--border);
+  left: calc((7px - var(--split-line)) / 2);
+  width: var(--split-line);
+  background: var(--split-line-color);
   transition:
     background 0.12s,
     width 0.12s,
     left 0.12s;
 }
 
-.split-divider:hover::after,
-.split-divider:focus-visible::after,
-.split.is-dragging .split-divider::after {
-  left: 2px;
-  width: 3px;
-  background: var(--accent);
+.split-divider:focus-visible,
+.split.is-dragging .split-divider {
+  --split-line: 3px;
+  --split-line-color: var(--accent);
+}
+
+/* Not on a touch screen, where the hover stays after a tap. */
+@media (hover: hover) {
+  .split-divider:hover {
+    --split-line: 3px;
+    --split-line-color: var(--accent);
+  }
 }
 
 .split-divider:focus-visible {
@@ -842,11 +853,88 @@ details[open] > summary::before {
 
 .split.is-dragging {
   cursor: col-resize;
+  -webkit-user-select: none;
   user-select: none;
 }
 
 .split.is-dragging .split-pane {
   pointer-events: none;
+}
+
+/* Narrow screens (SplitPane.tsx sets the class at STACKED_QUERY): slides on top, chat below, a horizontal divider. */
+.split.is-stacked {
+  flex-direction: column;
+}
+
+.split.is-stacked .split-divider {
+  width: auto;
+  height: 7px;
+  margin: -3px 0;
+  cursor: row-resize;
+}
+
+.split.is-stacked .split-divider::after {
+  top: calc((7px - var(--split-line)) / 2);
+  bottom: auto;
+  left: 0;
+  right: 0;
+  width: auto;
+  height: var(--split-line);
+  transition:
+    background 0.12s,
+    height 0.12s,
+    top 0.12s;
+}
+
+.split.is-stacked.is-dragging {
+  cursor: row-resize;
+}
+
+/* The grip: a short bar in the middle of the divider, on touch screens only (a mouse sees the thin line). */
+.split-grip {
+  display: none;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 5px;
+  height: 44px;
+  transform: translate(-50%, -50%);
+  border-radius: 3px;
+  background: var(--muted);
+  box-shadow: 0 0 0 1px var(--surface);
+  transition: background 0.12s;
+}
+
+.split.is-stacked .split-grip {
+  width: 44px;
+  height: 5px;
+}
+
+.split-divider:focus-visible .split-grip,
+.split.is-dragging .split-grip {
+  background: var(--accent);
+}
+
+/*
+ * A finger or a pencil cannot hit 7 px: there the divider is grabbed 25 px wide, over the edges of the panes (the
+ * layout stays), and shows its grip.
+ */
+@media (pointer: coarse) {
+  .split-divider::before {
+    content: '';
+    position: absolute;
+    inset: 0 -9px;
+    touch-action: none;
+  }
+
+  /* More of it over the slides than over the tabs of the lower pane, which stay tappable. */
+  .split.is-stacked .split-divider::before {
+    inset: -12px 0 -6px;
+  }
+
+  .split-grip {
+    display: block;
+  }
 }
 
 /* ---------------------------------------------------------------- slide viewer */
@@ -943,6 +1031,9 @@ details[open] > summary::before {
   padding: 0 18px;
   /* Lets the track size its padding from the viewer (cqh/cqw) so every slide can reach the center. */
   container-type: size;
+  /* Fingers scroll the slides; two fingers pinch them, which the viewer does itself (SlideViewer: the slides zoom,
+     not the page — and no double-tap zoom). */
+  touch-action: pan-x pan-y;
 }
 
 /* Focusable so that the keyboard (↑↓, PageUp/Down, Home/End) goes to the slides after clicking them;
@@ -6055,24 +6146,8 @@ details[open] > summary::before {
 
 /* ---------------------------------------------------------------- responsive */
 
+/* 800 px is also where the split pane stacks (STACKED_QUERY of web/src/lib/splitPane.ts; `.split.is-stacked`). */
 @media (max-width: 800px) {
-  .split {
-    flex-direction: column;
-  }
-
-  .split-left {
-    flex: 0 0 46%;
-  }
-
-  .split-divider {
-    display: none;
-  }
-
-  .split-right {
-    flex: 1 1 0;
-    border-top: 1px solid var(--border);
-  }
-
   .viewer-hint,
   .provider-picker-label {
     display: none;
@@ -6664,15 +6739,10 @@ details[open] > summary::before {
   pointer-events: none;
 }
 
-/* The stroke being written: an overlay over the image (components/annotations/liveInk.ts). */
+/* The stroke being written: two canvases over the visible part of the image (components/annotations/liveInk.ts). */
 .annot-ink-live {
   position: absolute;
-  overflow: visible;
   pointer-events: none;
-}
-
-.annot-ink-live path {
-  fill: var(--annot-color);
 }
 
 /* The marquee of 범위 선택. */
@@ -6787,10 +6857,10 @@ details[open] > summary::before {
 }
 
 /* 펜 / 지우개 (DESIGN §29, palm rejection): a stylus or the mouse writes, also over items; fingers keep scrolling and
-   pinch-zooming (no double-tap zoom) — a stylus is kept from scrolling by the viewer's touch listener. With
-   손가락으로도 쓰기, fingers write too. */
+   pinching the slides (the viewer's own zoom: no page zoom, no double-tap zoom) — a stylus is kept from scrolling by
+   the viewer's touch listener. With 손가락으로도 쓰기, fingers write too. */
 .viewer.is-ink-tool .slide-box {
-  touch-action: pan-x pan-y pinch-zoom;
+  touch-action: pan-x pan-y;
   cursor: crosshair;
 }
 
