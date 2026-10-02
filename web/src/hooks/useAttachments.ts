@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react';
 import { MAX_ATTACHMENT_BYTES, type AnnotationItem, type Attachment, type RegionRect } from '../../../shared/types.ts';
 import * as api from '../api.ts';
 import { msg } from '../i18n/index.ts';
-import { itemBounds } from '../lib/annotations/geometry.ts';
+import { itemBounds, unionRects } from '../lib/annotations/geometry.ts';
 import {
   annotationAttachPlan,
   attachErrorMessage,
@@ -21,6 +21,7 @@ import {
   isUploading,
   limitMessage,
   MAX_ATTACHMENT_MB,
+  regionRequest,
   SUPPORTED_IMAGE_FORMATS,
   type Chip,
   type ChipAction,
@@ -28,6 +29,14 @@ import {
 } from '../lib/attachments.ts';
 import { toast } from '../lib/toast.ts';
 import { useLatest } from './useLatest.ts';
+
+/**
+ * How a region is cropped (DESIGN §29): `ink` false = without the student's 펜 strokes (the viewer's 필기 layer is
+ * hidden or a replay is running: the crop shows what the student sees). A region made from a stroke has them anyway.
+ */
+export interface RegionOptions {
+  ink?: boolean;
+}
 
 export interface AttachmentsApi {
   docId: string | null;
@@ -38,17 +47,18 @@ export interface AttachmentsApi {
   /** Upload images (non-images and files that are too large are refused with a toast). */
   addFiles: (files: readonly File[], options?: { pasted?: boolean }) => void;
   /** Crop a region of a slide; resolves with the attachment, or null when it failed (a toast says why). */
-  addRegion: (slide: number, rect: RegionRect) => Promise<Attachment | null>;
+  addRegion: (slide: number, rect: RegionRect, options?: RegionOptions) => Promise<Attachment | null>;
   /**
    * 📎 첨부 of an annotation item (DESIGN §25): a region attachment of the item's bounds that carries the item
    * (`Attachment.annotation`), as a chip like any region — sent with the next question, nothing now.
    */
-  addAnnotation: (slide: number, item: AnnotationItem) => Promise<Attachment | null>;
+  addAnnotation: (slide: number, item: AnnotationItem, options?: RegionOptions) => Promise<Attachment | null>;
   /**
    * 📎 첨부 of several selected items at once: the free slots are counted once (`annotationAttachPlan`) — one toast
-   * for the items that did not fit, one for those attached already — and a chip is made for each of the rest.
+   * for the items that did not fit, one for those attached already — and a chip is made for each of the rest (every
+   * selected 펜 stroke in one, DESIGN §29).
    */
-  addAnnotations: (slide: number, items: readonly AnnotationItem[]) => Promise<Array<Attachment | null>>;
+  addAnnotations: (slide: number, items: readonly AnnotationItem[], options?: RegionOptions) => Promise<Array<Attachment | null>>;
   /** Remove a chip (and the unused attachment on the server). */
   remove: (key: string) => void;
   /** Takes the ready chips out of the composer for sending (see restore). */
@@ -190,16 +200,21 @@ export function useAttachments(docId: string | null): AttachmentsApi {
     [docIdRef, dispatch],
   );
 
+  /**
+   * A region chip: a plain region, or one made from `item` standing for `members` (its ids; the item alone by
+   * default — several 펜 strokes share one region).
+   */
   const addRegionOf = useCallback(
-    async (slide: number, rect: RegionRect, item: AnnotationItem | null): Promise<Attachment | null> => {
+    async (slide: number, rect: RegionRect, item: AnnotationItem | null, options: RegionOptions & { members?: readonly string[] } = {}): Promise<Attachment | null> => {
       const forDoc = docIdRef.current;
       if (!forDoc) return null;
       if (freeSlots(current()) === 0) {
         toast(limitMessage(1), 'error');
         return null;
       }
+      const members = item ? (options.members ?? [item.id]) : [];
       // The same item twice would be two chips of one region: the first one stands.
-      if (item && current().some((c) => chipOfItem(c, item.id))) {
+      if (members.some((id) => current().some((c) => chipOfItem(c, id)))) {
         toast(msg().chat.attachments.alreadyAttached, 'info', 2500);
         return null;
       }
@@ -216,10 +231,11 @@ export function useAttachments(docId: string | null): AttachmentsApi {
           rect,
           status: 'uploading',
           progress: 0,
+          ...(item ? { items: members } : {}),
         },
       });
       const promise = api
-        .createRegion(forDoc, { slide, rect, ...(item ? { annotationId: item.id } : {}) })
+        .createRegion(forDoc, regionRequest(slide, rect, item, options.ink))
         .then((attachment) => {
           if (discardLate(forDoc, key, attachment)) return null;
           dispatch({ type: 'ready', key, attachment });
@@ -242,20 +258,30 @@ export function useAttachments(docId: string | null): AttachmentsApi {
     [docIdRef, dispatch],
   );
 
-  const addRegion = useCallback((slide: number, rect: RegionRect) => addRegionOf(slide, rect, null), [addRegionOf]);
+  const addRegion = useCallback((slide: number, rect: RegionRect, options?: RegionOptions) => addRegionOf(slide, rect, null, options), [addRegionOf]);
 
-  const addAnnotation = useCallback((slide: number, item: AnnotationItem) => addRegionOf(slide, itemBounds(item), item), [addRegionOf]);
+  const addAnnotation = useCallback(
+    (slide: number, item: AnnotationItem, options?: RegionOptions) => addRegionOf(slide, itemBounds(item), item, options),
+    [addRegionOf],
+  );
 
   const addAnnotations = useCallback(
-    (slide: number, items: readonly AnnotationItem[]): Promise<Array<Attachment | null>> => {
+    (slide: number, items: readonly AnnotationItem[], options: RegionOptions = {}): Promise<Array<Attachment | null>> => {
       const { take, refused, attached } = annotationAttachPlan(current(), items);
       if (refused > 0) toast(limitMessage(refused), 'error');
       else if (attached > 0) {
         const m = msg().chat.attachments;
         toast(attached === items.length ? m.alreadyAttached : m.someAlreadyAttached(attached), 'info', 2500);
       }
-      // Each one passes addRegionOf's own checks (the plan left room for all of them, none is attached yet).
-      return Promise.all(take.map((item) => addRegionOf(slide, itemBounds(item), item)));
+      // Each one passes addRegionOf's own checks (the plan left room for all of them, none is attached yet); the
+      // selected 펜 strokes are one region, the union of their bounds.
+      return Promise.all(
+        take.map(({ item, members }) =>
+          members.length === 1
+            ? addRegionOf(slide, itemBounds(item), item, options)
+            : addRegionOf(slide, unionRects(members.map(itemBounds)), item, { ...options, members: members.map((m) => m.id) }),
+        ),
+      );
     },
     [addRegionOf],
   );

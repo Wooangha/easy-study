@@ -17,6 +17,7 @@ import { inkPieces } from '../../../shared/ink.ts';
 import type { AnnotationItem, AnnotationOp, DocMeta, MarkerKey, MemoItem, NotesResponse, Patchable, RegionRect, SlideAnnotations } from '../../../shared/types.ts';
 import { viewSrcSet, viewUrl } from '../api.ts';
 import { useAnnotations } from '../hooks/useAnnotations.ts';
+import type { RegionOptions } from '../hooks/useAttachments.ts';
 import { useLoginEpoch } from '../hooks/useAuth.ts';
 import { useLatest } from '../hooks/useLatest.ts';
 import { useTextLayout } from '../hooks/useTextLayout.ts';
@@ -43,7 +44,22 @@ import {
   type Handle,
   unionRects,
 } from '../lib/annotations/geometry.ts';
-import { eraserHits, hitTestItems, marqueeSelect, outlineOnly, pressPlan, slopFor, toggleId, unionIds, type PressTarget } from '../lib/annotations/gesture.ts';
+import {
+  acceptsPress,
+  blocksInkTouch,
+  eraserHits,
+  hitTestItems,
+  keepsCancelledStroke,
+  marqueeSelect,
+  onInkControl,
+  outlineOnly,
+  pressPlan,
+  slopFor,
+  toggleId,
+  unionIds,
+  type PressTarget,
+} from '../lib/annotations/gesture.ts';
+import { canRedoIn, canUndoIn } from '../lib/annotations/history.ts';
 import { inkSamples } from '../lib/annotations/ink.ts';
 import { deriveMarkers, questionsOnItem, type QuestionMarker } from '../lib/annotations/markers.ts';
 import {
@@ -85,7 +101,7 @@ import { isNumber, readStorage, rememberSlide, storageKeys, writeStorage } from 
 import { toast } from '../lib/toast.ts';
 import { bannerShown, changeBadges } from '../lib/versionPlan.ts';
 import { AnnotationLayer, type Draft, type DragPreview } from './annotations/AnnotationLayer.tsx';
-import { AnnotationTools, NO_FILTER, toolHint, useMediaQuery, type SlideFilter } from './annotations/AnnotationTools.tsx';
+import { AnnotationTools, foldTools, NO_FILTER, toolHint, useMediaQuery, type SlideFilter, type ToolsFold } from './annotations/AnnotationTools.tsx';
 import { LayerContext, type LayerActions, type LayerEnv } from './annotations/context.ts';
 import { ChatIcon } from './annotations/icons.tsx';
 import { ItemMenu } from './annotations/ItemMenu.tsx';
@@ -161,6 +177,8 @@ interface Gesture {
   memoBoxes?: Record<string, RegionRect>;
   /** ink: the stroke being written, drawn imperatively over the image (no React state per point). */
   live?: LiveInk;
+  /** ink: how far (CSS px) its farthest sample is from the press — a cancel before INK_CANCEL_SLOP_PX drops it. */
+  reach?: number;
   /** erase: the strokes touched so far (faded at once, removed on release), and where the eraser was last. */
   erased?: Set<string>;
   last?: Point;
@@ -178,7 +196,10 @@ const FLASH_MS = 2200;
 const MENU_WIDTH_PX = 250;
 /** A layout that takes longer than this to arrive does not hold a highlight back (a plain band is drawn). */
 const LAYOUT_WAIT_MS = 1500;
-/** Below this viewer width the annotation tools fold into one button. */
+/**
+ * Below this viewer width the annotation tools fold into one button and memos are pills (above it the tools fold when
+ * the toolbar has no room for them: foldTools).
+ */
 const COMPACT_TOOLS_PX = 640;
 
 /** Where the slide image is drawn in its box (a page shaped unlike page 1 is letterboxed). */
@@ -247,16 +268,19 @@ interface SlideViewerProps {
   onFocusChange: (slide: number) => void;
   /** Badge click → open the Notes tab filtered to that slide. */
   onOpenNotes: (slide: number) => void;
-  /** "첨부" on a selected region: attach it to the next question. */
-  onAttachRegion: (slide: number, rect: RegionRect) => void;
+  /**
+   * "첨부" on a selected region: attach it to the next question. `options.ink` false: the crop without the 펜 strokes
+   * (DESIGN §29: the 필기 layer hidden or a replay running — the region is what the student sees); likewise below.
+   */
+  onAttachRegion: (slide: number, rect: RegionRect, options?: RegionOptions) => void;
   /** "이 부분 설명해줘": attach the region and ask about it right away. */
-  onAskRegion: (slide: number, rect: RegionRect) => void;
+  onAskRegion: (slide: number, rect: RegionRect, options?: RegionOptions) => void;
   /** Why a question cannot be sent right now (이 부분 설명해줘 is then disabled), or null. */
   askDisabledReason: string | null;
   /** 첨부 of an annotation item (DESIGN §25): a chip for the next question. */
-  onAttachItem?: (slide: number, item: AnnotationItem) => void;
-  /** 첨부 of several selected items at once (the free slots counted once, one toast). */
-  onAttachItems?: (slide: number, items: AnnotationItem[]) => void;
+  onAttachItem?: (slide: number, item: AnnotationItem, options?: RegionOptions) => void;
+  /** 첨부 of several selected items at once (the free slots counted once, one toast; the 펜 strokes in one region). */
+  onAttachItems?: (slide: number, items: AnnotationItem[], options?: RegionOptions) => void;
   /** A question marker was clicked: show that Q&A. */
   onOpenQa?: (sessionId: string, messageId: string) => void;
   /** A memo's recording chip (the mic icon): play that moment in the 녹음 tab. */
@@ -363,6 +387,8 @@ export function SlideViewer({
   // 그때 필기 재생: the moment given by the app, else the player's own playhead (only the viewer re-renders with it).
   const replayNow = replayOn && playhead && playhead.docId === doc.id ? (replay ?? { rid: playhead.rid, t: playhead.t }) : null;
   const replayRef = useLatest(replayNow);
+  /** A region crop shows the 펜 strokes only while they are shown here (DESIGN §29: not with the layer hidden or a replay). */
+  const inkInCropsRef = useLatest<RegionOptions>({ ink: layerShown && replayNow === null });
   const [filter, setFilterState] = useState<SlideFilter>(NO_FILTER);
   const [itemSelection, setItemSelectionState] = useState<ItemSelection | null>(null);
   const itemSelectionRef = useRef<ItemSelection | null>(null);
@@ -381,8 +407,11 @@ export function SlideViewer({
   const [viewerWidth, setViewerWidth] = useState(1000);
   const shortScreen = useMediaQuery('(max-height: 640px)');
   const coarse = useMediaQuery('(pointer: coarse)');
-  const compactTools = viewerWidth < COMPACT_TOOLS_PX || shortScreen;
-  const compactMemos = compactTools || coarse;
+  const narrow = viewerWidth < COMPACT_TOOLS_PX || shortScreen;
+  // Wider, the tools fold when the toolbar has no room for them (measured below: under 펜 it holds more).
+  const [toolsFold, setToolsFold] = useState<ToolsFold>({ fold: false, need: 0 });
+  const compactTools = narrow || toolsFold.fold;
+  const compactMemos = narrow || coarse;
   const { ensure: loadLayout, peek: peekLayout } = useTextLayout(doc.id);
   const summary = snapshot.summary;
 
@@ -528,6 +557,18 @@ export function SlideViewer({
   }, []);
   useEffect(() => cancelGesture, [cancelGesture]);
 
+  /**
+   * Ends the gesture with what it drew on the slides — a region being dragged, a shape's or a marquee's dashed preview,
+   * a move / resize preview — when the browser takes the pointer (pointercancel) or a pen replaces what a finger or a
+   * palm started.
+   */
+  const dropGesture = useCallback(() => {
+    cancelGesture();
+    if (selectionRef.current?.phase === 'drag') setSelection(null);
+    setDraft(null);
+    setDragPreview(null);
+  }, [cancelGesture, setSelection]);
+
   const beginSelection = useCallback(
     (g: Gesture) => {
       g.active = true;
@@ -584,8 +625,10 @@ export function SlideViewer({
   /** Select these items (in z-order; nothing when none of them exists). The item menu places itself from their boxes. */
   const selectItems = useCallback(
     (slide: number, ids: readonly string[]) => {
-      const known = itemsOf(slide);
-      const order = known.filter((it) => ids.includes(it.id)).map((it) => it.id);
+      const wanted = new Set(ids);
+      const order = itemsOf(slide)
+        .filter((it) => wanted.has(it.id))
+        .map((it) => it.id);
       if (order.length === 0) {
         setItemSelection(null);
         return;
@@ -619,7 +662,8 @@ export function SlideViewer({
   /** Delete items together (one write, one undo step); a memo with text asks first (once for the group). */
   const removeItems = useCallback(
     async (slide: number, ids: readonly string[]) => {
-      const items = itemsOf(slide).filter((it) => ids.includes(it.id));
+      const wanted = new Set(ids);
+      const items = itemsOf(slide).filter((it) => wanted.has(it.id));
       if (items.length === 0) return;
       const memos = items.filter((it): it is MemoItem => it.type === 'memo' && it.text.trim() !== '');
       if (memos.length > 0) {
@@ -664,13 +708,14 @@ export function SlideViewer({
       removeMany: (slide, ids) => void removeItems(slide, ids),
       attach: (slide, id) => {
         const item = itemOf(slide, id);
-        if (item) onAttachItemRef.current?.(slide, item);
+        if (item) onAttachItemRef.current?.(slide, item, inkInCropsRef.current);
       },
       attachMany: (slide, ids) => {
-        const items = itemsOf(slide).filter((it) => ids.includes(it.id));
+        const wanted = new Set(ids);
+        const items = itemsOf(slide).filter((it) => wanted.has(it.id));
         if (items.length === 0) return;
-        if (onAttachItemsRef.current) onAttachItemsRef.current(slide, items);
-        else for (const item of items) onAttachItemRef.current?.(slide, item);
+        if (onAttachItemsRef.current) onAttachItemsRef.current(slide, items, inkInCropsRef.current);
+        else for (const item of items) onAttachItemRef.current?.(slide, item, inkInCropsRef.current);
       },
       hideMarkers: (slide, keys: MarkerKey[]) => void mutate(slide, keys.map((key) => ({ op: 'hideMarker', key }))),
       openQa: (sessionId, messageId) => onOpenQaRef.current?.(sessionId, messageId),
@@ -683,7 +728,7 @@ export function SlideViewer({
         setSheet({ slide, id });
       },
     }),
-    [selectItem, toggleSelect, mutate, removeItems, itemOf, itemsOf, onAttachItemRef, onAttachItemsRef, onOpenQaRef, onOpenNotesRef, scrollToSlide, onOpenDocRef, onPlayRecordingRef],
+    [selectItem, toggleSelect, mutate, removeItems, itemOf, itemsOf, onAttachItemRef, onAttachItemsRef, inkInCropsRef, onOpenQaRef, onOpenNotesRef, scrollToSlide, onOpenDocRef, onPlayRecordingRef],
   );
 
   const env = useMemo<LayerEnv>(
@@ -811,15 +856,17 @@ export function SlideViewer({
     const current = gestureRef.current;
     if (current) {
       // A pen replaces what a finger or a palm started before it (a hand resting on the slide must not block the pen;
-      // a stroke a finger began is dropped). Any other second pointer (a pinch zoom) is not a selection.
+      // a stroke a finger began is dropped, and what it drew goes). Any other second pointer (a pinch zoom) is not a
+      // selection.
       if (e.pointerType === 'pen' && current.pointerType === 'touch') {
-        cancelGesture();
+        dropGesture();
       } else {
         if (!current.active) cancelGesture();
         return;
       }
     }
-    if (!e.isPrimary || (e.pointerType === 'mouse' && e.button !== 0)) return;
+    // A pen even when it is not the primary pointer: iPadOS makes only the first touch primary, a palm's.
+    if (!acceptsPress(e)) return;
     const annot = target.closest<HTMLElement>('.annot-layer [data-annot]');
     if (!annot && target.closest('button, a, input, select, textarea')) return;
     const box = target.closest<HTMLElement>('.slide-box');
@@ -897,7 +944,8 @@ export function SlideViewer({
         // when it belongs to a group selection, moves every selected item with it.
         if (!wasSelected) selectItem(slide, plan.item.id);
         if (!plan.move) return;
-        const group = wasSelected && selectedIds && selectedIds.length > 1 ? itemsOf(slide).filter((it) => selectedIds.includes(it.id) && it.type !== 'textHighlight') : [plan.item];
+        const inGroup = wasSelected && selectedIds && selectedIds.length > 1 ? new Set(selectedIds) : null;
+        const group = inGroup ? itemsOf(slide).filter((it) => inGroup.has(it.id) && it.type !== 'textHighlight') : [plan.item];
         g.mode = 'move';
         g.itemId = plan.item.id;
         g.item = plan.item;
@@ -946,6 +994,7 @@ export function SlideViewer({
         // 펜: a stroke from the press, drawn live over the image; the release makes it items (endInk).
         g.mode = 'ink';
         g.active = true;
+        g.reach = 0;
         g.live = new LiveInk(box, frame, e.pointerType, inkColorRef.current, inkWidthRef.current);
         g.live.add(inkSamples(e.nativeEvent));
         g.live.draw();
@@ -1010,6 +1059,9 @@ export function SlideViewer({
         return;
       }
       g.live?.add(samples);
+      for (const sample of samples) {
+        g.reach = Math.max(g.reach ?? 0, Math.hypot(sample.clientX - g.startClient.x, sample.clientY - g.startClient.y));
+      }
       dragFrame.current ||= requestAnimationFrame(() => {
         dragFrame.current = 0;
         if (gestureRef.current === g) g.live?.draw();
@@ -1148,22 +1200,25 @@ export function SlideViewer({
   const onPointerCancel = (e: ReactPointerEvent<HTMLDivElement>) => {
     const g = gestureRef.current;
     if (!g || e.pointerId !== g.pointerId) return;
+    if (g.mode === 'ink' && !keepsCancelledStroke(g.reach ?? 0)) {
+      // Taken before it went anywhere (Chrome made an S Pen fling a scroll): no stray dot is saved.
+      cancelGesture();
+      return;
+    }
     if (g.mode === 'ink' || g.mode === 'erase') {
       // The browser took the pointer (a palm, a scroll): what was written or erased so far stays.
       endInk(g);
       return;
     }
-    cancelGesture();
-    if (selectionRef.current?.phase === 'drag') setSelection(null);
-    setDraft(null);
-    setDragPreview(null);
+    dropGesture();
   };
 
   // Touch: once a selection started, the finger must not scroll the viewer (and a long press must not open the
   // image's context menu). Under 펜 / 지우개 (palm rejection, DESIGN §29) a stylus never scrolls (iOS sends the Apple
   // Pencil as touches of touchType 'stylus') and no touch does while a stroke is being written — a palm resting on
-  // the slide included; fingers otherwise scroll and zoom (`.is-ink-tool` touch-action). Needs non-passive listeners;
-  // registered only where touch is possible.
+  // the slide included; fingers otherwise scroll and zoom (`.is-ink-tool` touch-action). A stylus's touchstart on a
+  // control (the Q&A badge, a marker, a memo card, a menu) is left alone: preventing it would swallow the tap
+  // (gesture.ts blocksInkTouch). Needs non-passive listeners; registered only where touch is possible.
   const inkToolRef = useLatest(layerShown && isInkTool(tool));
   useEffect(() => {
     const scroller = scrollerRef.current;
@@ -1171,9 +1226,14 @@ export function SlideViewer({
     const onTouch = (e: TouchEvent) => {
       if (!e.cancelable) return;
       const g = gestureRef.current;
-      const stroke = g?.mode === 'ink' || g?.mode === 'erase';
-      const stylus = inkToolRef.current && Array.from(e.changedTouches).some((t) => (t as Touch & { touchType?: string }).touchType === 'stylus');
-      if (stroke || stylus || (e.type === 'touchmove' && g?.active)) e.preventDefault();
+      const block = blocksInkTouch({
+        type: e.type,
+        stroke: g?.mode === 'ink' || g?.mode === 'erase',
+        stylus: inkToolRef.current && Array.from(e.changedTouches).some((t) => (t as Touch & { touchType?: string }).touchType === 'stylus'),
+        control: onInkControl(e.target),
+        active: g?.active === true,
+      });
+      if (block) e.preventDefault();
     };
     const onContextMenu = (e: Event) => {
       // …nor a pen's barrel button or long press under 펜 / 지우개.
@@ -1229,17 +1289,17 @@ export function SlideViewer({
         const s = selectionRef.current;
         if (!s) return;
         setSelection(null);
-        onAttachRegionRef.current(s.slide, s.rect);
+        onAttachRegionRef.current(s.slide, s.rect, inkInCropsRef.current);
       },
       ask: () => {
         const s = selectionRef.current;
         if (!s) return;
         setSelection(null);
-        onAskRegionRef.current(s.slide, s.rect);
+        onAskRegionRef.current(s.slide, s.rect, inkInCropsRef.current);
       },
       cancel: () => setSelection(null),
     }),
-    [setSelection, onAttachRegionRef, onAskRegionRef],
+    [setSelection, onAttachRegionRef, onAskRegionRef, inkInCropsRef],
   );
 
   // ---- Showing a region (an attachment was opened) -----------------------------------------------
@@ -1419,6 +1479,13 @@ export function SlideViewer({
   );
   const undoRedoRef = useLatest(undoRedo);
   const removeItemsRef = useLatest(removeItems);
+  // 되돌리기 / 다시 실행 of the toolbar under 펜 / 지우개 (a tablet has no ⌘Z): enabled by the store's history.
+  const canUndo = canUndoIn(snapshot.history);
+  const canRedo = canRedoIn(snapshot.history);
+  const toolsHistory = useMemo(
+    () => ({ canUndo, canRedo, onUndo: () => undoRedoRef.current('undo'), onRedo: () => undoRedoRef.current('redo') }),
+    [canUndo, canRedo, undoRedoRef],
+  );
 
   // Keyboard navigation (ignored while typing). j/k work anywhere else. The scroll keys belong to what the
   // student last clicked: in the chat, 정리본 or notes pane they scroll that pane natively instead of
@@ -1505,12 +1572,30 @@ export function SlideViewer({
     () => deriveMarkers(notes, (s) => snapshot.slides.get(s), markersShown && layerShown),
     [notes, snapshot.slides, markersShown, layerShown, lang],
   );
+  // The tools fold when the wide toolbar does not fit (AnnotationTools foldTools): measured before the paint, after
+  // what it holds changed (the tool, the badges, the language: the wide toolbar is then tried again) and when the
+  // viewer is resized. Below COMPACT_TOOLS_PX they are folded anyway (nothing is measured).
+  const toolbarRef = useRef<HTMLDivElement>(null);
+  const toolsKey = `${layerShown ? tool : 'hidden'}|${filtering ? shown.length : ''}|${replayNow !== null}|${lang}|${pageCount}`;
+  const measuredKeyRef = useRef(toolsKey);
+  useLayoutEffect(() => {
+    const el = toolbarRef.current;
+    if (!el || narrow) return;
+    const changed = measuredKeyRef.current !== toolsKey;
+    measuredKeyRef.current = toolsKey;
+    const box = el.getBoundingClientRect();
+    const last = el.lastElementChild?.getBoundingClientRect();
+    const padding = Number.parseFloat(getComputedStyle(el).paddingRight) || 0;
+    const overflow = last ? last.right - (box.right - padding) : 0;
+    setToolsFold((state) => foldTools(changed && state.fold ? { fold: true, need: 0 } : state, { width: box.width, overflow }));
+  }, [toolsKey, compactTools, narrow, viewerWidth]);
+
   // Selected items that vanished (deleted elsewhere, undone) leave the selection; none left → no menu.
   const selectedIdsKey = itemSelection ? itemSelection.ids.join(',') : '';
   useEffect(() => {
     if (!itemSelection) return;
-    const items = snapshot.slides.get(itemSelection.slide)?.items ?? [];
-    const left = itemSelection.ids.filter((id) => items.some((it) => it.id === id));
+    const ids = new Set((snapshot.slides.get(itemSelection.slide)?.items ?? []).map((it) => it.id));
+    const left = itemSelection.ids.filter((id) => ids.has(id));
     if (left.length !== itemSelection.ids.length) setItemSelection(left.length > 0 ? { slide: itemSelection.slide, ids: left } : null);
     // Keyed by the ids and the slide documents.
   }, [selectedIdsKey, snapshot.slides, setItemSelection]);
@@ -1567,7 +1652,7 @@ export function SlideViewer({
   return (
     <LayerContext.Provider value={env}>
       <div className={viewerCls}>
-        <div className="viewer-toolbar">
+        <div className="viewer-toolbar" ref={toolbarRef}>
           <form
             className="page-jump"
             onSubmit={(e) => {
@@ -1613,6 +1698,7 @@ export function SlideViewer({
             onInkWidth={setInkWidth}
             fingerInk={fingerInk}
             onFingerInk={setFingerInk}
+            history={toolsHistory}
           />
           {/* After the tools, taking the leftover width: the buttons never move when the hint changes with the state. */}
           <span
@@ -1794,7 +1880,8 @@ const SlideItem = memo(function SlideItem({
   const frame = imageFrame(aspect, imageAspect);
   const setRef = useCallback((el: HTMLDivElement | null) => register(index, el), [register, index]);
   const cls = ['slide', focused && 'is-focused', pinned && 'is-pinned'].filter(Boolean).join(' ');
-  const selectedItems = selectedIds && annotations ? annotations.items.filter((it) => selectedIds.includes(it.id)) : [];
+  const selectedSet = useMemo(() => (selectedIds ? new Set(selectedIds) : null), [selectedIds]);
+  const selectedItems = selectedSet && annotations ? annotations.items.filter((it) => selectedSet.has(it.id)) : [];
   const questions = selectedItems.length === 1 ? questionsOnItem(markers ?? undefined, selectedItems[0].id) : 0;
   return (
     <div ref={setRef} className={cls} data-slide={slide} aria-current={focused ? 'true' : undefined}>

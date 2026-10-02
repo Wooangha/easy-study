@@ -76,6 +76,7 @@ export const library = {
     regionInvalid: 'The selected region (rect: x, y, w, h) is invalid',
     regionOutside: 'The selected region must be inside the slide (0–1) and have an area',
     annotationNotFound: "That annotation wasn't found",
+    inkNotBoolean: 'ink must be true or false',
     cropFailed: (slide) => `Couldn't cut out the selected region of slide ${slide}`,
     imageEmpty: 'The image is empty',
     imageOnly: 'Only image files can be attached (Content-Type: image/*)',

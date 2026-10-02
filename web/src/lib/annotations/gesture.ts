@@ -5,8 +5,9 @@
 // touches (DESIGN §29), and the plan of a press — resize a handle, select / move the item under it with ANY tool
 // active (Shift: add it to / take it out of the selection), re-drag a text highlight with its own tool, draw with the
 // active tool on empty area, drag a marquee with 범위 선택, write or erase under 펜 / 지우개 (by the kind of pointer:
-// a finger scrolls), or (no tool: the default 선택·첨부 state) start the region gesture. No DOM (the viewer measures
-// memo cards for the marquee and passes their boxes in).
+// a finger scrolls), or (no tool: the default 선택·첨부 state) start the region gesture; and which pointer / touch
+// events of 펜 / 지우개 start, block or keep a stroke. No DOM (the viewer measures memo cards for the marquee and passes
+// their boxes in).
 import { inkDistance, inkMaxRadius, inkPointsOf, inkTouches } from '../../../../shared/ink.ts';
 import type { AnnotationItem, RegionRect, TextHighlightItem } from '../../../../shared/types.ts';
 import type { Point } from '../attachments.ts';
@@ -225,12 +226,80 @@ export function toggleId(ids: readonly string[], id: string): string[] {
   return ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id];
 }
 
-/** `base` plus `more` (Shift+drag adds to the selection), without duplicates, in the order first seen. */
+/**
+ * `base` plus `more` (Shift+drag adds to the selection), without duplicates, in the order first seen. A Set keeps it
+ * linear: a marquee over thousands of 펜 strokes runs this every frame.
+ */
 export function unionIds(base: readonly string[], more: readonly string[]): string[] {
   const out = [...base];
-  for (const id of more) if (!out.includes(id)) out.push(id);
+  const seen = new Set(base);
+  for (const id of more) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
   return out;
 }
+
+// ---------------------------------------------------------------------------
+// The pointer and touch events of 펜 / 지우개 (DESIGN §29)
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether a pointerdown may start a gesture on the slides: the primary pointer, or any pen — iPadOS Safari makes only
+ * the first touch of a sequence primary, so an Apple Pencil put down after a palm or a finger is not (the pen
+ * replaces what the hand started, the viewer's pointerdown) —, and of a mouse only the main button.
+ */
+export function acceptsPress(e: { isPrimary: boolean; pointerType: string; button: number }): boolean {
+  if (!e.isPrimary && e.pointerType !== 'pen') return false;
+  return e.pointerType !== 'mouse' || e.button === 0;
+}
+
+/**
+ * What a stylus pressing on these does not write on (the viewer's touch listener leaves its touchstart alone so the
+ * tap reaches the control): buttons, links, fields, memo cards, question markers and the floating menus.
+ */
+export const INK_TOUCH_CONTROLS =
+  'button, a, input, textarea, select, [contenteditable]:not([contenteditable="false"]), [data-annot="memo"], [data-annot="marker"], .memo-card, .tag-input, .region-menu, .annot-pop, .link-picker, .popover-menu';
+
+/** Whether a touch event's target is (inside) one of INK_TOUCH_CONTROLS. No DOM types: a duck-typed `closest`. */
+export function onInkControl(target: unknown): boolean {
+  const el = target as { closest?: (selector: string) => unknown } | null;
+  return typeof el?.closest === 'function' && el.closest(INK_TOUCH_CONTROLS) !== null;
+}
+
+export interface InkTouch {
+  type: 'touchstart' | 'touchmove' | string;
+  /** A 펜 stroke or an eraser drag is being made. */
+  stroke: boolean;
+  /** 펜 / 지우개 is active and the touch is a stylus (iOS `touchType === 'stylus'`). */
+  stylus: boolean;
+  /** The touch is on a control (onInkControl). */
+  control: boolean;
+  /** A gesture is live (a selection being dragged, a move): its finger must not scroll. */
+  active: boolean;
+}
+
+/**
+ * Whether the viewer's non-passive touch listener prevents a touch's default (palm rejection, DESIGN §29): always
+ * during a stroke (a palm put down meanwhile must not scroll); a stylus otherwise — but not its touchstart on a
+ * control, which would swallow the tap (the Q&A badge, a marker, a memo card's buttons and textarea, a menu); and a
+ * touchmove of a live gesture.
+ */
+export function blocksInkTouch(t: InkTouch): boolean {
+  if (t.stroke) return true;
+  if (t.stylus && !(t.type === 'touchstart' && t.control)) return true;
+  return t.type === 'touchmove' && t.active;
+}
+
+/**
+ * A 펜 stroke the browser cancels (pointercancel) before it got this far from its start, in CSS px, was not meant to
+ * be written: Chrome on Android turns an S Pen fling into a scroll. A stroke that got farther keeps what was drawn.
+ */
+export const INK_CANCEL_SLOP_PX = 12;
+
+/** Whether a cancelled stroke that reached `reachPx` from its start (the farthest sample) is kept. */
+export const keepsCancelledStroke = (reachPx: number): boolean => reachPx >= INK_CANCEL_SLOP_PX;
 
 /** What the DOM says was pressed: a selection handle, a question marker, or anything else (the items are hit-tested). */
 export type PressTarget = { kind: 'handle'; handle: Handle } | { kind: 'marker' } | { kind: 'other' };

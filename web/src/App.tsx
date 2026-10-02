@@ -20,7 +20,7 @@ import { Toaster } from './components/Toaster.tsx';
 import { TopBar } from './components/TopBar.tsx';
 import { UpdateBanner } from './components/UpdateBanner.tsx';
 import { useAnnotations } from './hooks/useAnnotations.ts';
-import { useAttachments } from './hooks/useAttachments.ts';
+import { useAttachments, type RegionOptions } from './hooks/useAttachments.ts';
 import { useCourses } from './hooks/useCourses.ts';
 import { useDigest } from './hooks/useDigest.ts';
 import { isPdfFile, useDocs } from './hooks/useDocs.ts';
@@ -249,26 +249,27 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
     () => (readyDocId ? { docId: readyDocId, open: openAttachment } : null),
     [readyDocId, openAttachment],
   );
+  // `options.ink`: the viewer says whether its 펜 strokes are shown (DESIGN §29: a crop without them when hidden).
   const attachRegion = useCallback(
-    (slide: number, rect: RegionRect) => {
+    (slide: number, rect: RegionRect, options?: RegionOptions) => {
       setTab('chat');
-      void addRegion(slide, rect);
+      void addRegion(slide, rect, options);
     },
     [addRegion],
   );
   /** 첨부 of an annotation item (DESIGN §25): a chip in the composer, sent with the next question. */
   const attachItem = useCallback(
-    (slide: number, item: AnnotationItem) => {
+    (slide: number, item: AnnotationItem, options?: RegionOptions) => {
       setTab('chat');
-      void addAnnotation(slide, item);
+      void addAnnotation(slide, item, options);
     },
     [addAnnotation],
   );
-  /** 첨부 of a group selection: the chat tab once, the free slots counted once. */
+  /** 첨부 of a group selection: the chat tab once, the free slots counted once (the 펜 strokes in one region). */
   const attachItems = useCallback(
-    (slide: number, items: AnnotationItem[]) => {
+    (slide: number, items: AnnotationItem[], options?: RegionOptions) => {
       setTab('chat');
-      void addAnnotations(slide, items);
+      void addAnnotations(slide, items, options);
     },
     [addAnnotations],
   );
@@ -782,9 +783,9 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
   const askDisabledReason = study.running ? m.askAfterAnswer : !study.session && !choice ? (providerProblem ?? m.noLlm) : null;
   const askDisabledRef = useLatest(askDisabledReason);
   const askRegion = useCallback(
-    async (slide: number, rect: RegionRect) => {
+    async (slide: number, rect: RegionRect, options?: RegionOptions) => {
       setTab('chat');
-      const created = await addRegion(slide, rect);
+      const created = await addRegion(slide, rect, options);
       if (!created) return;
       await settleAttachments(); // images still uploading go along
       const blocked = askDisabledRef.current;
@@ -796,7 +797,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
     },
     [addRegion, settleAttachments, askDisabledRef, sendQuestion],
   );
-  const onAskRegion = useCallback((slide: number, rect: RegionRect) => void askRegion(slide, rect), [askRegion]);
+  const onAskRegion = useCallback((slide: number, rect: RegionRect, options?: RegionOptions) => void askRegion(slide, rect, options), [askRegion]);
 
   const notesCount = (notesState.notes?.slides ?? []).reduce((n, s) => n + s.entries.length, 0);
 

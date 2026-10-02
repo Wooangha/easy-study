@@ -104,6 +104,12 @@ export const viewer = {
     fingerInk: '손가락으로도 쓰기',
     fingerInkTitle: (on: boolean): string =>
       on ? '손가락으로도 쓰기: 켜짐 — 손가락도 펜처럼 써요 (끄면 손가락은 스크롤·확대)' : '손가락으로도 쓰기: 꺼짐 — 펜·마우스만 쓰고 손가락은 스크롤·확대 (스타일러스가 없으면 켜세요)',
+    /** 되돌리기 / 다시 실행 under 펜 / 지우개 (a tablet has no ⌘Z). */
+    historyGroup: '되돌리기·다시 실행',
+    undo: '되돌리기',
+    undoTitle: '되돌리기: 마지막 필기를 취소해요 (⌘Z/Ctrl+Z)',
+    redo: '다시 실행',
+    redoTitle: '다시 실행: 되돌린 필기를 다시 해요 (⌘⇧Z/Ctrl+Y)',
   },
   /** The ⋯ 필기 menu (AnnotationTools). */
   layerMenu: {
@@ -145,7 +151,7 @@ export const viewer = {
     colorAllTitle: (color: string) => `선택한 필기 모두 ${color}`,
     attach: '첨부',
     attachTitle: '이 필기를 질문에 첨부해요 (입력창 위에 표시돼요)',
-    attachManyTitle: '선택한 필기를 하나씩 질문에 첨부해요 (입력창 위에 표시돼요)',
+    attachManyTitle: '선택한 필기를 하나씩 질문에 첨부해요 — 펜 획은 모두 한 장으로 (입력창 위에 표시돼요)',
     expand: '펴기',
     expandSheetTitle: '메모 펴기 (아래 시트에서 편집)',
     expandTitle: '메모 펴기',

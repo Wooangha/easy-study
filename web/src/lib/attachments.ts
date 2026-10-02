@@ -5,6 +5,7 @@ import {
   MAX_ATTACHMENT_BYTES,
   MAX_ATTACHMENTS,
   type Attachment,
+  type CreateRegionRequest,
   type RegionRect,
 } from '../../../shared/types.ts';
 import { msg } from '../i18n/index.ts';
@@ -415,6 +416,11 @@ export interface Chip {
   /** Object URL of the picked / pasted file, shown until the server's copy exists. */
   localUrl?: string;
   attachment?: Attachment;
+  /**
+   * The annotation items a 📎 of 필기 stands for (DESIGN §25): its item — or every selected 펜 stroke, which share one
+   * region made from the first of them (§29) — so that each of them counts as attached already.
+   */
+  items?: readonly string[];
 }
 
 export interface ChipState {
@@ -480,18 +486,60 @@ export function chipsReducer(state: ChipState, action: ChipAction): ChipState {
 
 export const freeSlots = (items: readonly Chip[]) => Math.max(0, MAX_ATTACHMENTS - items.length);
 
-/** Whether a chip is the 📎 첨부 of this annotation item (its region carries the item, or the chip's key does while it uploads). */
-export const chipOfItem = (chip: Chip, itemId: string): boolean => chip.attachment?.annotation?.id === itemId || chip.key.endsWith(`:${itemId}`);
+/**
+ * Whether a chip is the 📎 첨부 of this annotation item: it stands for the item (Chip.items: one region of several 펜
+ * strokes stands for all of them), its region carries the item, or the chip's key does while it uploads.
+ */
+export const chipOfItem = (chip: Chip, itemId: string): boolean =>
+  chip.items?.includes(itemId) === true || chip.attachment?.annotation?.id === itemId || chip.key.endsWith(`:${itemId}`);
+
+/** One chip of a 📎 of 필기: a region made from `item` (Attachment.annotation) standing for `members` (`item` first). */
+export interface AttachUnit<T> {
+  item: T;
+  members: T[];
+}
 
 /**
- * 📎 첨부 of several selected items at once (DESIGN §25, a group selection): the items to attach — those not in
- * the composer already, as many as there are free slots —, how many were refused for lack of room and how many
+ * 📎 첨부 of several selected items at once (DESIGN §25, a group selection): the chips to make — the items not in the
+ * composer already, every 펜 stroke among them together as ONE region (§29: made from the first stroke, the union of
+ * their bounds, one slot; handwriting cut into one crop per stroke would fill the slots with slivers), the other items
+ * one each, in z-order, as many as there are free slots —, how many items were refused for lack of room and how many
  * were skipped as attached already; one toast for each count, not one per item.
  */
-export function annotationAttachPlan<T extends { id: string }>(chips: readonly Chip[], items: readonly T[]): { take: T[]; refused: number; attached: number } {
+export function annotationAttachPlan<T extends { id: string; type?: string }>(
+  chips: readonly Chip[],
+  items: readonly T[],
+): { take: AttachUnit<T>[]; refused: number; attached: number } {
   const fresh = items.filter((item) => !chips.some((c) => chipOfItem(c, item.id)));
-  const take = fresh.slice(0, freeSlots(chips));
-  return { take, refused: fresh.length - take.length, attached: items.length - fresh.length };
+  const units: AttachUnit<T>[] = [];
+  let strokes: AttachUnit<T> | null = null;
+  for (const item of fresh) {
+    if (item.type !== 'ink') units.push({ item, members: [item] });
+    else if (strokes) strokes.members.push(item);
+    else units.push((strokes = { item, members: [item] }));
+  }
+  const take = units.slice(0, freeSlots(chips));
+  const taken = take.reduce((n, unit) => n + unit.members.length, 0);
+  return { take, refused: fresh.length - taken, attached: items.length - fresh.length };
+}
+
+/**
+ * The body of POST …/regions (DESIGN §21): the slide and rect, the 필기 it is made from, and `ink: false` when the
+ * student's 펜 strokes are not to be drawn into the crop (§29: the 필기 layer hidden, a replay running — the crop is
+ * then the clean slide). A region made from a stroke always has them (omitted = true).
+ */
+export function regionRequest(
+  slide: number,
+  rect: RegionRect,
+  item: { id: string; type: string } | null,
+  ink = true,
+): CreateRegionRequest {
+  return {
+    slide,
+    rect,
+    ...(item ? { annotationId: item.id } : {}),
+    ...(ink || item?.type === 'ink' ? {} : { ink: false }),
+  };
 }
 
 export const isUploading = (items: readonly Chip[]) => items.some((c) => c.status === 'uploading');

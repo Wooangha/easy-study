@@ -1,6 +1,6 @@
 // Regions made from a 필기 (DESIGN §25 "📎 첨부"): POST …/regions with `annotationId` snapshots the item into
-// Attachment.annotation (id, type, text), every region crop has the slide's 펜 strokes drawn in (§29), the turn labels
-// it for the tutor and adds the note's words after the selection text, the saved user message and the notes carry the snapshot, and the memos of the focus window reach
+// Attachment.annotation (id, type, text), a region crop has the slide's 펜 strokes drawn in and is marked `inked` (§29)
+// unless the request's `ink` is false (필기 hidden; a region of a stroke always has them), the turn labels it for the tutor and adds the note's words after the selection text, the saved user message and the notes carry the snapshot, and the memos of the focus window reach
 // the tutor unless `memos: false` or the memo's 👁 is off — checked on what the real Claude Code adapter writes to the
 // fake CLI's stdin (tests/fixtures/fake-claude.mjs). The image worker is the real one.
 import assert from 'node:assert/strict';
@@ -13,7 +13,7 @@ import { encodeInkPoints, inkRect } from '../shared/ink.ts';
 import { MAX_INK_STROKES } from '../shared/types.ts';
 import type { AnnotationItem, Attachment, InkItem, NotesResponse, ProviderInfo, Session, SlideAnnotations, StreamEvent } from '../shared/types.ts';
 import { regionCropBox } from '../server/assets.ts';
-import { regionInk } from '../server/attachments.ts';
+import { readAttachment, regionInk } from '../server/attachments.ts';
 import { defaultChatDeps } from '../server/chat.ts';
 import type { ChatDeps } from '../server/chat.ts';
 import { repoRoot } from '../server/config.ts';
@@ -25,6 +25,8 @@ import { smsg } from '../server/i18n.ts';
 
 /** 400 of POST …/regions for an annotation the slide does not have (Korean: the tests send no language). */
 const ANNOTATION_NOT_FOUND = smsg('ko').library.attachments.annotationNotFound;
+/** 400 of POST …/regions for an `ink` that is not a boolean. */
+const INK_NOT_BOOLEAN = smsg('ko').library.attachments.inkNotBoolean;
 
 const PAGES = 4;
 const DOC = 'note-deck-aaa111';
@@ -247,7 +249,7 @@ describe('regions made from a 필기 (fake Claude Code CLI)', () => {
     assert.ok(text.includes('The highlighted words:\nFIRST set'));
   });
 
-  test('handwriting (DESIGN §29): every region crop over a stroke has it drawn in; a region of the stroke is labelled as handwriting', async () => {
+  test('handwriting (DESIGN §29): a region crop over a stroke has it drawn in and is `inked` unless 필기 is hidden (`ink: false`) — a region of the stroke always —; the labels say so', async () => {
     // Slide 4 (320 x 180, background rgb(160, 120, 200)): a thick black line across the middle.
     const line = inkItem([{ x: 0.3, y: 0.5 }, { x: 0.7, y: 0.5 }], 0.05);
     const res = await send('PUT', `/docs/${DOC}/annotations/4`, { baseRev: 0, items: [line], hiddenMarkers: [] });
@@ -265,16 +267,53 @@ describe('regions made from a 필기 (fake Claude Code CLI)', () => {
     assert.deepEqual(fromStroke.annotation, { id: line.id, type: 'ink' }, 'a stroke has no text');
     near(await pixelAt(fromStroke, 0.5, 0.5), [0x1c, 0x22, 0x30]);
     near(await pixelAt(fromStroke, 0.5, 0.45), [160, 120, 200]);
+    assert.equal(fromStroke.inked, true);
 
-    const selected = await json<Attachment>(await send('POST', `/docs/${DOC}/regions`, { slide: 4, rect: { x: 0.6, y: 0.4, w: 0.3, h: 0.2 } }));
+    const region = { x: 0.6, y: 0.4, w: 0.3, h: 0.2 };
+    const selected = await json<Attachment>(await send('POST', `/docs/${DOC}/regions`, { slide: 4, rect: region }));
     assert.equal(selected.annotation, undefined);
     near(await pixelAt(selected, 0.65, 0.5), [0x1c, 0x22, 0x30]);
     near(await pixelAt(selected, 0.8, 0.5), [160, 120, 200]);
+    assert.equal(selected.inked, true);
+    const shown = await json<Attachment>(await send('POST', `/docs/${DOC}/regions`, { slide: 4, rect: region, ink: true }));
+    near(await pixelAt(shown, 0.65, 0.5), [0x1c, 0x22, 0x30]);
+    assert.equal(shown.inked, true);
     const elsewhere = await json<Attachment>(await send('POST', `/docs/${DOC}/regions`, { slide: 4, rect: { x: 0, y: 0, w: 0.2, h: 0.2 } }));
     near(await pixelAt(elsewhere, 0.1, 0.1), [160, 120, 200]);
+    assert.equal(elsewhere.inked, undefined, 'no stroke meets it: nothing drawn');
 
-    await ask({ slide: 4, attachments: [fromStroke.id] });
+    // 필기 hidden: the clean slide, not inked — but a region of the stroke still shows it.
+    const hidden = await json<Attachment>(await send('POST', `/docs/${DOC}/regions`, { slide: 4, rect: region, ink: false }));
+    near(await pixelAt(hidden, 0.65, 0.5), [160, 120, 200]);
+    assert.equal(hidden.inked, undefined);
+    const hiddenStroke = await json<Attachment>(await send('POST', `/docs/${DOC}/regions`, { slide: 4, rect: line.rect, annotationId: line.id, ink: false }));
+    near(await pixelAt(hiddenStroke, 0.5, 0.5), [0x1c, 0x22, 0x30]);
+    assert.equal(hiddenStroke.inked, true);
+    for (const ink of ['false', 0, null]) {
+      const bad = await send('POST', `/docs/${DOC}/regions`, { slide: 4, rect: region, ink });
+      assert.equal(bad.status, 400, JSON.stringify(ink));
+      assert.equal((await json<{ error: string }>(bad)).error, INK_NOT_BOOLEAN);
+    }
+
+    // Stored with the flag and read back with it (normalizeAttachment); anything but true is dropped.
+    const metaFile = (attachment: Attachment) => path.join(docPaths(DOC).dir, 'attachments', `${attachment.id}.json`);
+    assert.equal((JSON.parse(await fs.readFile(metaFile(selected), 'utf8')) as Attachment).inked, true);
+    assert.equal((await readAttachment(DOC, selected.id))?.inked, true);
+    assert.equal((await readAttachment(DOC, hidden.id))?.inked, undefined);
+    await fs.writeFile(metaFile(elsewhere), JSON.stringify({ ...elsewhere, inked: 'yes' }));
+    assert.equal((await readAttachment(DOC, elsewhere.id))?.inked, undefined);
+    await fs.writeFile(metaFile(elsewhere), JSON.stringify({ ...elsewhere, kind: 'image', inked: true }));
+    assert.equal((await readAttachment(DOC, elsewhere.id))?.inked, undefined, 'an image is never inked');
+
+    const done = await ask({ slide: 4, attachments: [fromStroke.id, selected.id, hidden.id] });
     const text = await recordedText();
     assert.ok(text.includes("[Attachment 1: the student's handwriting on slide 4]"), text);
+    assert.ok(text.includes("[Attachment 2: the region of slide 4 the student selected, with the student's own pen strokes drawn over it]"), text);
+    assert.ok(text.includes('[Attachment 3: the region of slide 4 the student selected]'), text);
+    // The user message's copies keep the flag, and so does the saved session.
+    const user = (done.session as Session).messages.at(-2)!;
+    assert.deepEqual(user.attachments?.map((attachment) => attachment.inked), [true, true, undefined]);
+    const saved = await json<Session>(await api(`/docs/${DOC}/sessions/${sessionId}`));
+    assert.deepEqual(saved.messages.at(-2)?.attachments?.map((attachment) => attachment.inked), [true, true, undefined]);
   });
 });

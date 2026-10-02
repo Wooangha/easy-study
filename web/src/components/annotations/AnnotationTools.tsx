@@ -2,15 +2,16 @@
 // on empty area attaches that region to the next question, a click on an item selects it), 범위 선택 (a drag on
 // empty area selects every item it crosses; Shift+click adds / removes one), 펜 and 지우개 (§29) and the drawing tools
 // (형광펜 · 텍스트 형광 · 사각형 · 동그라미 · 텍스트 · 메모 — clicking the active one turns it off again), the four
-// colors (under 펜: the ink colors and the three widths), 손가락으로도 쓰기 under 펜 / 지우개, and the ⋯ 필기 menu
-// (필기 보기/숨기기, 표시 있는 슬라이드만, a tag filter, 질문 표시 보기, 그때 필기 재생). On a narrow pane the tools and
-// colors fold into one button showing the active tool and color, so the toolbar keeps one row.
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
+// colors (under 펜: the ink colors and the three widths), 손가락으로도 쓰기 and 되돌리기 / 다시 실행 under 펜 / 지우개
+// (a tablet has no ⌘Z), and the ⋯ 필기 menu (필기 보기/숨기기, 표시 있는 슬라이드만, a tag filter, 질문 표시 보기, 그때
+// 필기 재생). When the toolbar has no room for them (measured: foldTools) the tools and colors fold into one button
+// showing the active tool and color, so the toolbar keeps one row.
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { Ellipsis, Mic } from 'lucide-react';
 import { ANNOTATION_COLORS, INK_COLORS, INK_WIDTHS, type AnnotationColor } from '../../../../shared/types.ts';
 import { msg } from '../../i18n/index.ts';
 import { ANNOTATION_TOOLS, CLICK_TOOLS, isInkTool, type AnnotationTool } from '../../lib/annotations/geometry.ts';
-import { FingerIcon, ToolIcon } from './icons.tsx';
+import { FingerIcon, ToolIcon, UndoIcon } from './icons.tsx';
 
 export interface SlideFilter {
   /** 표시 있는 슬라이드만. */
@@ -58,6 +59,39 @@ export function InkWidthChips({ value, onChange, disabled = false, labels = fals
   );
 }
 
+/**
+ * Whether the toolbar's tools are folded into one button (measured from the real toolbar, DESIGN §29: under 펜 it
+ * holds more than under the other tools, in another language other words): `need` = the width the wide toolbar
+ * needed when it last did not fit, 0 when unknown.
+ */
+export interface ToolsFold {
+  fold: boolean;
+  need: number;
+}
+
+/** The wide toolbar comes back only with this much more room than it needed (no flapping at the edge). */
+export const TOOLS_FOLD_SLACK_PX = 24;
+
+/**
+ * The next fold from a measurement of the toolbar: its `width`, and how far its last item ends past its content box
+ * (`overflow`; of the wide toolbar when `state.fold` is false). Wide: it folds when its items do not fit, remembering
+ * the width they needed. Folded: it tries the wide toolbar again once the toolbar is TOOLS_FOLD_SLACK_PX wider than
+ * that — or right away when what it holds changed (`need` 0) — and folds again at the next measurement if it still
+ * does not fit (measured in a layout effect: nothing is painted in between).
+ */
+export function foldTools(state: ToolsFold, measured: { width: number; overflow: number }): ToolsFold {
+  if (!state.fold) return measured.overflow > 0.5 ? { fold: true, need: Math.ceil(measured.width + measured.overflow) } : state;
+  return measured.width >= state.need + TOOLS_FOLD_SLACK_PX ? { fold: false, need: state.need } : state;
+}
+
+/** 되돌리기 / 다시 실행 (the viewer's undo / redo of the annotation history): shown under 펜 / 지우개. */
+export interface ToolsHistory {
+  canUndo: boolean;
+  canRedo: boolean;
+  onUndo: () => void;
+  onRedo: () => void;
+}
+
 interface AnnotationToolsProps {
   tool: AnnotationTool;
   onTool: (tool: AnnotationTool) => void;
@@ -89,11 +123,13 @@ interface AnnotationToolsProps {
   onInkWidth: (width: number) => void;
   fingerInk: boolean;
   onFingerInk: (on: boolean) => void;
+  /** 되돌리기 / 다시 실행 under 펜 / 지우개 (none without it). */
+  history?: ToolsHistory;
 }
 
 export function AnnotationTools(props: AnnotationToolsProps) {
   const { tool, onTool, color, onColor, layerShown, onLayerShown, markersShown, onMarkersShown, filter, onFilter, tags, shownCount, pageCount } = props;
-  const { replayAvailable, replayOn, onReplayOn, replaying, compact, inkColor, onInkColor, inkWidth, onInkWidth, fingerInk, onFingerInk } = props;
+  const { replayAvailable, replayOn, onReplayOn, replaying, compact, inkColor, onInkColor, inkWidth, onInkWidth, fingerInk, onFingerInk, history } = props;
   const disabled = !layerShown;
   // Under 펜 the dots are the ink colors and the widths follow; 손가락으로도 쓰기 under 펜 and 지우개.
   const pen = tool === 'pen';
@@ -158,10 +194,35 @@ export function AnnotationTools(props: AnnotationToolsProps) {
       {vertical && <span className="annot-tool-label">{m.tools.fingerInk}</span>}
     </button>
   );
+  // A tablet has no keyboard for ⌘Z: under 펜 / 지우개 the last strokes are undone (and redone) here.
+  const undoButton = (redo: boolean, vertical: boolean) => {
+    const label = redo ? m.tools.redo : m.tools.undo;
+    return (
+      <button
+        type="button"
+        className="annot-tool annot-undo"
+        aria-label={label}
+        disabled={disabled || !(redo ? history?.canRedo : history?.canUndo)}
+        onClick={redo ? history?.onRedo : history?.onUndo}
+        title={redo ? m.tools.redoTitle : m.tools.undoTitle}
+      >
+        <span className="annot-tool-icon" aria-hidden>
+          <UndoIcon redo={redo} />
+        </span>
+        {vertical && <span className="annot-tool-label">{label}</span>}
+      </button>
+    );
+  };
   const inkOptions = (vertical: boolean) => (
     <>
       {pen && <InkWidthChips value={inkWidth} onChange={onInkWidth} disabled={disabled} />}
       {isInkTool(tool) && finger(vertical)}
+      {isInkTool(tool) && history && (
+        <span className={vertical ? 'annot-history is-vertical' : 'annot-history'} role="group" aria-label={m.tools.historyGroup}>
+          {undoButton(false, vertical)}
+          {undoButton(true, vertical)}
+        </span>
+      )}
     </>
   );
 
@@ -265,11 +326,24 @@ export function AnnotationTools(props: AnnotationToolsProps) {
   );
 }
 
-/** A button with a small panel under it (checkboxes, a select, a tool list); Esc or a press outside closes it. */
+/**
+ * A button with a small panel under it (checkboxes, a select, a tool list); Esc or a press outside closes it. The
+ * panel is moved left as far as it would pass the toolbar's right edge (the toolbar clips what overflows it).
+ */
 function ToolPopover({ className, label, title, button, children }: { className: string; label: string; title?: string; button: ReactNode; children: ReactNode }) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLSpanElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
   const id = useId();
+  useLayoutEffect(() => {
+    const pop = popRef.current;
+    if (!open || !pop) return;
+    pop.style.left = '';
+    const bound = pop.closest('.viewer-toolbar')?.getBoundingClientRect();
+    const r = pop.getBoundingClientRect();
+    const over = bound ? r.right - bound.right : 0;
+    if (bound && over > 0) pop.style.left = `${-Math.max(0, Math.min(over, r.left - bound.left))}px`;
+  }, [open]);
   useEffect(() => {
     if (!open) return;
     const onDown = (e: PointerEvent) => {
@@ -304,7 +378,7 @@ function ToolPopover({ className, label, title, button, children }: { className:
         {button}
       </button>
       {open && (
-        <div id={id} className="annot-pop" role="group" aria-label={label}>
+        <div ref={popRef} id={id} className="annot-pop" role="group" aria-label={label}>
           {children}
         </div>
       )}

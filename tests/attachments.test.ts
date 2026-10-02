@@ -281,6 +281,14 @@ describe('attachments over HTTP', () => {
     // NaN and Infinity cannot be sent as JSON: checked on the parser.
     assert.throws(() => parseRegionRequest({ slide: 1, rect: { x: Number.NaN, y: 0, w: 1, h: 1 } }, 9), HttpError);
     assert.throws(() => parseRegionRequest({ slide: 1, rect: { x: 0, y: 0, w: Infinity, h: 1 } }, 9), HttpError);
+    // `ink` (draw the 펜 strokes, DESIGN §29): omitted = true, a boolean as sent, anything else 400.
+    const whole = { x: 0, y: 0, w: 1, h: 1 };
+    assert.equal(parseRegionRequest({ slide: 1, rect: whole }, 9).ink, true);
+    assert.equal(parseRegionRequest({ slide: 1, rect: whole, ink: true }, 9).ink, true);
+    assert.equal(parseRegionRequest({ slide: 1, rect: whole, ink: false }, 9).ink, false);
+    assert.equal(parseRegionRequest({ slide: 1, rect: whole, ink: false, annotationId: 'an-000000000001' }, 9).ink, false);
+    for (const ink of [null, 'false', 0, 1, {}]) assert.throws(() => parseRegionRequest({ slide: 1, rect: whole, ink }, 9), HttpError, JSON.stringify(ink));
+    await expectError(await postJson(`/docs/${docId}/regions`, { slide: 1, rect: whole, ink: 'no' }), 400, /^ink는 true\/false여야 합니다$/);
   });
 
   test('POST regions: 404 for unknown or invalid documents, 409 while the document is converted', async () => {

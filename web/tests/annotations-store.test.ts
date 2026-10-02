@@ -1,7 +1,9 @@
 // The annotation store (DESIGN §25, lib/annotations/store.ts) with a fake API, EventSource and timers: optimistic
 // ops, one PATCH in flight per slide (ops meanwhile go out next), ops events applied in rev order, a rev gap → refetch,
 // the 409 rebase then the second-409 replace, the network retry and the "저장 안 됨" mark, undo / redo through the
-// store, the loading window, the own-client echo, the caps that 펜 strokes fill (DESIGN §29). Run: node --test web/tests/*.test.ts
+// store (and what the toolbar's buttons read of it), the loading window, the own-client echo, the caps that 펜 strokes
+// fill (DESIGN §29: the room for the server's recording stamps, an add refused for a full slide), and the held item
+// objects a document from the server keeps. Run: node --test web/tests/*.test.ts
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import {
@@ -16,9 +18,11 @@ import {
   type InkItem,
   type RectItem,
   type SlideAnnotations,
+  type TextItem,
 } from '../../shared/types.ts';
 import { ApiError } from '../src/api.ts';
-import { annotationBytes, applyOps, emptySlideAnnotations } from '../src/lib/annotations/geometry.ts';
+import { annotationBytes, applyOps, emptySlideAnnotations, RECORDING_STAMP_BYTES, stampRoom } from '../src/lib/annotations/geometry.ts';
+import { canRedoIn, canUndoIn } from '../src/lib/annotations/history.ts';
 import {
   conflictReloaded,
   DocAnnotations,
@@ -452,6 +456,29 @@ describe('DocAnnotations: undo / redo, the window, the lifetime', () => {
     t.unsubscribe();
   });
 
+  test('canUndo / canRedo follow the history and every change of it reaches the subscribers (the toolbar’s 되돌리기 / 다시 실행)', async () => {
+    const t = setup({ slides: { 3: doc(3, 1) } });
+    await store_loaded(t, 3);
+    let calls = 0;
+    const off = t.store.subscribe(() => calls++);
+    const state = () => [t.store.canUndo, t.store.canRedo, canUndoIn(t.store.snapshot.history), canRedoIn(t.store.snapshot.history)];
+    assert.deepEqual(state(), [false, false, false, false]);
+    t.store.mutate(3, [{ op: 'add', item: rect(A) }]);
+    assert.deepEqual(state(), [true, false, true, false]);
+    t.last().answer.resolve(doc(3, 2, [rect(A)]));
+    await tick();
+    let before = calls;
+    t.store.undo();
+    assert.deepEqual(state(), [false, true, false, true]);
+    assert.ok(calls > before, 'told');
+    before = calls;
+    t.store.redo();
+    assert.deepEqual(state(), [true, false, true, false]);
+    assert.ok(calls > before);
+    off();
+    t.unsubscribe();
+  });
+
   test('the store lingers after its last subscriber and then closes its stream', () => {
     const t = setup();
     assert.equal(t.sources.length, 1);
@@ -524,3 +551,143 @@ async function store_loaded(t: ReturnType<typeof setup>, slide: number): Promise
   await tick();
   assert.ok(t.store.snapshot.slides.has(slide));
 }
+
+describe('DocAnnotations: a document from the server keeps the held item objects (the views cache per object)', () => {
+  const stroke = (itemId: string, x = 0.1): InkItem => ({
+    id: itemId,
+    type: 'ink',
+    color: 'black',
+    createdAt: NOW,
+    updatedAt: NOW,
+    rect: { x, y: 0.1, w: 0.2, h: 0.1 },
+    width: 0.005,
+    pts: 'AAAAAgggg_____',
+  });
+  const D = 'an-0000000000dd';
+  /** As it comes over the wire: every item a new object. */
+  const wire = (d: SlideAnnotations): SlideAnnotations => JSON.parse(JSON.stringify(d));
+
+  test('a write’s answer, a slide-reset and a 409 keep every unchanged item; a changed one (its updatedAt too) is taken', async () => {
+    const t = setup({ slides: { 3: doc(3, 1, [stroke(A), rect(B)]) } });
+    await store_loaded(t, 3);
+    const [a0, b0] = t.slide(3)!.items;
+    // A stroke written: the answer brings every item anew, the new one with the server's updatedAt.
+    t.store.mutate(3, [{ op: 'add', item: stroke(C, 0.5) }]);
+    const optimistic = t.slide(3)!.items[2];
+    t.last().answer.resolve(wire(doc(3, 2, [stroke(A), rect(B), { ...stroke(C, 0.5), updatedAt: 'server' }])));
+    await tick();
+    const [a1, b1, c1] = t.slide(3)!.items;
+    assert.equal(a1, a0, 'the stroke written before is the same object: not decoded and outlined again');
+    assert.equal(b1, b0);
+    assert.notEqual(c1, optimistic);
+    assert.equal(c1.updatedAt, 'server', 'the server’s updatedAt is kept');
+    // Another device moved A (slide-reset): A is new, the rest stays.
+    t.es().open();
+    t.es().emit('slide-reset', { type: 'slide-reset', annotations: wire(doc(3, 3, [stroke(A, 0.3), rect(B), { ...stroke(C, 0.5), updatedAt: 'server' }])) });
+    const [a2, b2, c2] = t.slide(3)!.items;
+    assert.notEqual(a2, a1);
+    assert.equal((a2 as InkItem).rect.x, 0.3);
+    assert.equal(b2, b1);
+    assert.equal(c2, c1);
+    // A 409: their document (D added) with our remove on top; the equal items keep their objects.
+    t.store.mutate(3, [{ op: 'remove', id: B }]);
+    t.last().answer.reject(conflict(wire(doc(3, 4, [stroke(A, 0.3), rect(B), { ...stroke(C, 0.5), updatedAt: 'server' }, rect(D)]))));
+    await tick();
+    const rebased = t.slide(3)!.items;
+    assert.deepEqual(rebased.map((i) => i.id), [A, C, D]);
+    assert.equal(rebased[0], a2);
+    assert.equal(rebased[1], c2);
+    // Twice in a row: theirs is taken, still with the held objects.
+    t.last().answer.reject(conflict(wire(doc(3, 5, [stroke(A, 0.3), { ...stroke(C, 0.5), updatedAt: 'server' }]))));
+    await tick();
+    assert.equal(t.slide(3)!.items[0], a2);
+    assert.equal(t.slide(3)!.items[1], c2);
+    t.unsubscribe();
+  });
+});
+
+describe('DocAnnotations: room for the server’s recording stamps, and an add refused for a full slide (DESIGN §29)', () => {
+  const S = 'an-0000000000e1';
+  const T = 'an-0000000000e2';
+  const stroke = (itemId: string, recordedAt?: InkItem['recordedAt']): InkItem => ({
+    id: itemId,
+    type: 'ink',
+    color: 'black',
+    createdAt: NOW,
+    updatedAt: NOW,
+    rect: { x: 0.1, y: 0.1, w: 0.2, h: 0.1 },
+    width: 0.005,
+    pts: 'AAAAA'.repeat(40),
+    ...(recordedAt ? { recordedAt } : {}),
+  });
+  const filler = (chars: number): TextItem => ({ id: 'an-0000000000f0', type: 'text', color: 'yellow', createdAt: NOW, updatedAt: NOW, rect: { x: 0, y: 0, w: 0.1, h: 0.1 }, text: 'x'.repeat(chars) });
+  /** Slide 3 filled so that `free` bytes are left once `adds` are applied. */
+  const filled = (free: number, adds: AnnotationOp[]): SlideAnnotations => {
+    const bare = applyOps(doc(3, 1, [filler(0)]), adds);
+    return doc(3, 1, [filler(MAX_SLIDE_ANNOTATION_BYTES - annotationBytes(bare) - free)]);
+  };
+
+  test('an add without its own recordedAt leaves room for the stamp the server adds (another device recording)', async () => {
+    const add: AnnotationOp = { op: 'add', item: stroke(S) };
+    assert.equal(stampRoom(applyOps(doc(3, 1), [add]), [add]), RECORDING_STAMP_BYTES);
+    const t = setup({ slides: { 3: filled(RECORDING_STAMP_BYTES - 10, [add]) } });
+    await store_loaded(t, 3);
+    assert.equal(t.store.mutate(3, [add]), false, 'it fits only without the stamp');
+    assert.deepEqual(t.toasts, [tooMuchOnSlide()]);
+    assert.equal(t.patches.length, 0);
+    // Stamped here (this device records): no room needed.
+    const stamped: AnnotationOp = { op: 'add', item: stroke(S, { rid: 'rec-20261002-100000-abcd', t: 12.5 }) };
+    const u = setup({ slides: { 3: filled(5, [stamped]) } });
+    await store_loaded(u, 3);
+    assert.equal(u.store.mutate(3, [stamped]), true);
+    t.unsubscribe();
+    u.unsubscribe();
+  });
+
+  test('the room counts the adds still in flight and waiting, not only the new one', async () => {
+    const first: AnnotationOp = { op: 'add', item: stroke(S) };
+    const second: AnnotationOp = { op: 'add', item: stroke(T) };
+    // Room for both strokes and one stamp, not two.
+    const t = setup({ slides: { 3: filled(RECORDING_STAMP_BYTES + 30, [first, second]) } });
+    await store_loaded(t, 3);
+    // Alone, the first one has room for its stamp (the second's bytes are free still).
+    assert.equal(t.store.mutate(3, [first]), true);
+    assert.equal(t.patches.length, 1, 'in flight');
+    assert.equal(t.store.mutate(3, [second]), false, 'the stamp of the one in flight counts too');
+    assert.deepEqual(t.toasts, [tooMuchOnSlide()]);
+    t.unsubscribe();
+  });
+
+  test('a write that only adds, refused (400) because the slide is full, drops just those items: what waits and the undo history stay', async () => {
+    const t = setup({ slides: { 3: filled(4000, []) } });
+    await store_loaded(t, 3);
+    assert.equal(t.store.mutate(3, [{ op: 'update', id: 'an-0000000000f0', patch: { color: 'blue' } }]), true);
+    t.last().answer.resolve(applyOps({ ...t.slide(3)!, rev: 2 }, []));
+    await tick();
+    const loads = t.slideLoads.length;
+    assert.equal(t.store.mutate(3, [{ op: 'add', item: stroke(S) }]), true);
+    // Waiting behind it: a recolor of that stroke and another item.
+    assert.equal(t.store.mutate(3, [{ op: 'update', id: S, patch: { color: 'red' } }]), true);
+    assert.equal(t.store.mutate(3, [{ op: 'add', item: rect(A) }]), true);
+    assert.equal(t.patches.length, 2);
+    t.last().answer.reject(new ApiError('이 슬라이드의 필기가 너무 많아요 (일부를 지워 주세요)', 400));
+    await tick();
+    assert.deepEqual(t.toasts, [tooMuchOnSlide()]);
+    assert.deepEqual(t.slide(3)!.items.map((i) => i.id), ['an-0000000000f0', A], 'the refused stroke is gone, the rest stays');
+    assert.equal(t.slide(3)!.items[0].color, 'blue');
+    assert.equal(t.patches.length, 3, 'what waited is sent');
+    assert.deepEqual(t.last().ops, [{ op: 'add', item: rect(A) }], 'without the recolor of the refused stroke');
+    assert.equal(t.last().baseRev, 2);
+    assert.equal(t.slideLoads.length, loads, 'not reloaded');
+    // The history keeps the slide's other entries: ⌘Z takes back the rect, then the recolor.
+    t.last().answer.resolve(doc(3, 3, [{ ...filler(0), ...t.slide(3)!.items[0] } as TextItem, rect(A)]));
+    await tick();
+    assert.deepEqual(t.store.undo(), { slide: 3, itemId: A });
+    assert.equal(t.slide(3)!.items.length, 1);
+    t.last().answer.resolve(doc(3, 4, [t.slide(3)!.items[0]]));
+    await tick();
+    assert.deepEqual(t.store.undo(), { slide: 3, itemId: 'an-0000000000f0' });
+    assert.equal(t.slide(3)!.items[0].color, 'yellow');
+    t.unsubscribe();
+  });
+});

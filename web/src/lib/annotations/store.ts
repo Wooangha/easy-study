@@ -8,7 +8,9 @@
 // then PATCHes them — one request in flight per slide, ops arriving meanwhile go out in the next one. A 409 (another
 // device wrote first) is rebased: the server's document plus our ops, retried once; only a second 409 replaces the
 // document and says so. A network failure keeps the local state, retries once, then shows "저장 안 됨" on the slide
-// until a later write succeeds. Undo/redo is one global stack per document (history.ts).
+// until a later write succeeds; a write that only adds, refused because the slide is full, drops just those items.
+// A document from the server keeps the held objects of the items it did not change (the views cache per object).
+// Undo/redo is one global stack per document (history.ts).
 //
 // A `deck` event (DESIGN §28: a new version of the PDF applied, or undone) makes everything held numbered in the old
 // deck: the store stops (no more writes, loads or stream) and tells the app (onDeckEvent), which replaces it
@@ -38,8 +40,8 @@ import {
 import { msg } from '../../i18n/index.ts';
 import { RecordingEventsClient, type ConnectionState, type EventSourceLike, type Timers } from '../recording/events.ts';
 import { toast as showToast, type ToastKind } from '../toast.ts';
-import { applyOps, canHideMarker, emptySlideAnnotations, fitsSlide, itemsAfter, newClientId, rebaseOps } from './geometry.ts';
-import { emptyHistory, entryItemId, opsApply, popRedo, popUndo, pruneSlide, recordEntry, type History } from './history.ts';
+import { applyOps, canHideMarker, emptySlideAnnotations, fitsSlide, itemsAfter, newClientId, rebaseOps, reuseItems, slideFull, stampRoom } from './geometry.ts';
+import { canRedoIn, canUndoIn, dropAdds, emptyHistory, entryItemId, opsApply, popRedo, popUndo, pruneSlide, recordEntry, type History } from './history.ts';
 import { dropTextLayouts } from './layoutCache.ts';
 
 export interface AnnotationSnapshot {
@@ -267,6 +269,17 @@ export class DocAnnotations {
     this.set({ slides });
   }
 
+  /**
+   * Holds a document that came from the server (with the local ops on top): the items equal to those held stay the
+   * same objects (geometry.ts reuseItems), so a write's answer does not make the views decode and outline every 펜
+   * stroke of the slide again.
+   */
+  private adopt(slide: number, doc: SlideAnnotations): SlideAnnotations {
+    const kept = reuseItems(this.snapshot.slides.get(slide), doc);
+    this.setSlide(slide, kept);
+    return kept;
+  }
+
   private setUnsaved(slide: number, failed: boolean): void {
     if (this.snapshot.unsaved.has(slide) === failed) return;
     const unsaved = new Set(this.snapshot.unsaved);
@@ -340,9 +353,7 @@ export class DocAnnotations {
     if (held && fetched.rev < held.rev) return held; // a stale answer (an event applied meanwhile)
     const w = this.writes.get(slide);
     const local = [...(w?.inflight?.ops ?? []), ...(w?.pending ?? [])];
-    const doc = local.length > 0 ? applyOps(fetched, local) : fetched;
-    this.setSlide(slide, doc);
-    return doc;
+    return this.adopt(slide, local.length > 0 ? applyOps(fetched, local) : fetched);
   }
 
   /**
@@ -383,9 +394,10 @@ export class DocAnnotations {
   /**
    * Apply ops to a slide (optimistically) and send them. False when they change nothing or would pass a cap (a toast
    * says so): MAX_ANNOTATION_ITEMS items other than 펜 strokes, and — for what adds or changes items — the strokes and
-   * the document's size (DESIGN §29: refused here, before the pending strokes would be lost to the server's 400). A
-   * slide not loaded yet starts from an empty document: the write's 409 (when a file exists) rebases onto the
-   * server's document.
+   * the document's size (DESIGN §29: refused here, before the pending strokes would be lost to the server's 400),
+   * leaving room for the recording stamp the server may add to every add not acknowledged yet (stampRoom). A slide
+   * not loaded yet starts from an empty document: the write's 409 (when a file exists) rebases onto the server's
+   * document.
    */
   mutate(slide: number, ops: readonly AnnotationOp[], options: { undoable?: boolean } = {}): boolean {
     if (this.disposed || this.swapped || ops.length === 0) return false;
@@ -400,9 +412,13 @@ export class DocAnnotations {
     }
     const next = applyOps(doc, ops);
     if (next === doc) return false;
-    if (ops.some((op) => op.op === 'add' || op.op === 'update') && !fitsSlide(next)) {
-      this.deps.toast(tooMuchOnSlide(), 'error');
-      return false;
+    if (ops.some((op) => op.op === 'add' || op.op === 'update')) {
+      const w = this.writes.get(slide);
+      const room = stampRoom(next, [...(w?.inflight?.ops ?? []), ...(w?.pending ?? []), ...ops]);
+      if (!fitsSlide(next, room)) {
+        this.deps.toast(tooMuchOnSlide(), 'error');
+        return false;
+      }
     }
     const history = options.undoable === false ? this.snapshot.history : recordEntry(this.snapshot.history, slide, doc, ops, this.deps.now());
     const slides = new Map(this.snapshot.slides);
@@ -465,7 +481,7 @@ export class DocAnnotations {
         const rebased = rebaseOps(current, ops);
         const base = applyOps(current, rebased);
         w.pending = [...rebased, ...rebaseOps(base, w.pending)];
-        this.setSlide(slide, applyOps(current, w.pending));
+        this.adopt(slide, applyOps(current, w.pending));
         this.flush(slide);
         return;
       }
@@ -473,7 +489,7 @@ export class DocAnnotations {
       w.rebased = false;
       w.pending = [];
       w.stale = false;
-      this.setSlide(slide, current);
+      this.adopt(slide, current);
       this.set({ history: pruneSlide(this.snapshot.history, slide) });
       this.deps.toast(conflictReloaded(), 'info');
       return;
@@ -493,12 +509,42 @@ export class DocAnnotations {
       }
       return;
     }
+    const held = this.snapshot.slides.get(slide);
+    if (status === 400 && ops.every((op) => op.op === 'add') && held && slideFull(held, stampRoom(held, [...ops, ...w.pending]))) {
+      // A write that only adds was refused because the slide is full (its size with the server's recording stamps, or
+      // what another device added meanwhile): only these items go — the ops after them and the undo history stay.
+      this.dropRefusedAdds(slide, ops);
+      return;
+    }
     // Refused (400: an item the server does not take, a cap; 404: the slide is gone): drop the ops, show the truth.
     w.rebased = false;
     w.pending = [];
     this.set({ history: pruneSlide(this.snapshot.history, slide) });
     this.deps.toast(msg().viewer.store.saveFailed(annotationErrorMessage(e)), 'error');
     void this.fetchSlide(slide);
+  }
+
+  /**
+   * The adds of a refused write leave the slide (and the ops waiting that touch those items, and the undo entries that
+   * only made them); a toast says the slide is full; what waits behind them is sent.
+   */
+  private dropRefusedAdds(slide: number, ops: readonly AnnotationOp[]): void {
+    const w = this.write(slide);
+    w.rebased = false;
+    const ids = new Set<string>();
+    for (const op of ops) if (op.op === 'add') ids.add(op.item.id);
+    const touches = (op: AnnotationOp) => (op.op === 'add' ? ids.has(op.item.id) : (op.op === 'update' || op.op === 'remove') && ids.has(op.id));
+    w.pending = w.pending.filter((op) => !touches(op));
+    const held = this.snapshot.slides.get(slide);
+    const slides = new Map(this.snapshot.slides);
+    if (held) slides.set(slide, applyOps(held, [...ids].map((id) => ({ op: 'remove' as const, id }))));
+    this.set({ slides, history: dropAdds(this.snapshot.history, slide, ids) });
+    this.deps.toast(tooMuchOnSlide(), 'error');
+    if (w.stale) {
+      w.stale = false;
+      void this.fetchSlide(slide);
+    }
+    this.flush(slide);
   }
 
   /** Send every slide's unsent ops (after a network failure: the page is online again, the stream reconnected). */
@@ -546,12 +592,13 @@ export class DocAnnotations {
     }
   }
 
+  /** Something to undo / redo (the snapshot's `history` changes with it, so subscribers are told). */
   get canUndo(): boolean {
-    return this.snapshot.history.undo.length > 0;
+    return canUndoIn(this.snapshot.history);
   }
 
   get canRedo(): boolean {
-    return this.snapshot.history.redo.length > 0;
+    return canRedoIn(this.snapshot.history);
   }
 
   // ---- the stream -----------------------------------------------------------------------------------------------

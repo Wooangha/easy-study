@@ -210,10 +210,15 @@ export function inkOutline(points: readonly InkPoint[], width: number, w: number
   }
   const n = xs.length;
   if (n === 0) return '';
-  if (n === 1) {
-    const r = rs[0];
-    return `M${fmt(xs[0] - r)} ${fmt(ys[0])}a${fmt(r)} ${fmt(r)} 0 1 0 ${fmt(2 * r)} 0a${fmt(r)} ${fmt(r)} 0 1 0 ${fmt(-2 * r)} 0Z`;
+  // A tap (the whole stroke inside its widest disc: a few samples while the pressure ramps up) is a dot of the widest
+  // size, not a ribbon between two discs of different sizes.
+  let widest = 0;
+  let spread = 0;
+  for (let i = 0; i < n; i++) {
+    if (rs[i] > rs[widest]) widest = i;
+    spread = Math.max(spread, Math.hypot(xs[i] - xs[0], ys[i] - ys[0]));
   }
+  if (n === 1 || spread <= rs[widest]) return circle(xs[widest], ys[widest], rs[widest], false);
   // One smoothing pass of the interior points (the ends stay where the pen was): jitter goes, corners stay sharp
   // within a few px.
   if (n >= 3) {
@@ -263,15 +268,56 @@ export function inkOutline(points: readonly InkPoint[], width: number, w: number
   const forward = Array.from({ length: n }, (_, i) => i);
   const backward = forward.slice().reverse();
   const end = n - 1;
-  return (
+  const ribbon =
     `M${fmt(lx[0])} ${fmt(ly[0])}` +
     side(lx, ly, forward) +
     // Round end: from the left edge to the right edge around the front.
     `A${fmt(rs[end])} ${fmt(rs[end])} 0 0 0 ${fmt(rx[end])} ${fmt(ry[end])}` +
     side(rx, ry, backward) +
     // Round start, around the back.
-    `A${fmt(rs[0])} ${fmt(rs[0])} 0 0 0 ${fmt(lx[0])} ${fmt(ly[0])}Z`
-  );
+    `A${fmt(rs[0])} ${fmt(rs[0])} 0 0 0 ${fmt(lx[0])} ${fmt(ly[0])}Z`;
+  // A sharp turn (a V, an N, a ㅅ written fast) loses its round tip in the ribbon: a disc at the sharpest point of each
+  // turn puts it back, wound like the ribbon so the nonzero fill does not cut a hole where they overlap.
+  const turns = sharpTurns(xs, ys);
+  if (turns.length === 0) return ribbon;
+  let area = 0;
+  const ring = [...forward.map((i) => [lx[i], ly[i]]), ...backward.map((i) => [rx[i], ry[i]])];
+  for (let k = 0; k < ring.length; k++) {
+    const [x0, y0] = ring[k];
+    const [x1, y1] = ring[(k + 1) % ring.length];
+    area += x0 * y1 - x1 * y0;
+  }
+  return ribbon + turns.map((i) => circle(xs[i], ys[i], rs[i], area > 0)).join('');
+}
+
+/** A circle subpath; `clockwise` (on screen, y down) picks its winding. */
+function circle(x: number, y: number, r: number, clockwise: boolean): string {
+  const sweep = clockwise ? 1 : 0;
+  return `M${fmt(x - r)} ${fmt(y)}a${fmt(r)} ${fmt(r)} 0 1 ${sweep} ${fmt(2 * r)} 0a${fmt(r)} ${fmt(r)} 0 1 ${sweep} ${fmt(-2 * r)} 0Z`;
+}
+
+/** Points of a centre line (every ~2 px) where it turns by more than ~100° within ±3 points: the sharpest of each turn. */
+function sharpTurns(xs: readonly number[], ys: readonly number[]): number[] {
+  const k = 3;
+  const n = xs.length;
+  const cos = new Float64Array(n).fill(1);
+  for (let i = k; i < n - k; i++) {
+    const ax = xs[i] - xs[i - k];
+    const ay = ys[i] - ys[i - k];
+    const bx = xs[i + k] - xs[i];
+    const by = ys[i + k] - ys[i];
+    const la = Math.hypot(ax, ay);
+    const lb = Math.hypot(bx, by);
+    if (la > 1e-6 && lb > 1e-6) cos[i] = (ax * bx + ay * by) / (la * lb);
+  }
+  const out: number[] = [];
+  for (let i = k; i < n - k; i++) {
+    if (cos[i] > -0.17) continue;
+    let sharpest = true;
+    for (let j = Math.max(0, i - k); j <= Math.min(n - 1, i + k); j++) if (cos[j] < cos[i] || (cos[j] === cos[i] && j < i)) sharpest = false;
+    if (sharpest) out.push(i);
+  }
+  return out;
 }
 
 /** The distance in px (box `w` × `h`) from a point (image coordinates) to a stroke's centre line. */

@@ -7,8 +7,10 @@
 //
 // A region may be made from a 필기 (DESIGN §25, CreateRegionRequest.annotationId): the item's id, type and text are
 // snapshotted into Attachment.annotation when the attachment is made (nothing is written into the annotation store),
-// so the tutor gets the note's words and the question markers can link the item to the Q&A. Every region crop has the
-// slide's 펜 strokes drawn in (DESIGN §29), so the tutor sees what the student wrote.
+// so the tutor gets the note's words and the question markers can link the item to the Q&A. A region crop has the
+// slide's 펜 strokes drawn in (DESIGN §29) unless the student hid 필기 (CreateRegionRequest.ink false; a region made from
+// a stroke always has them); one that has them is marked `inked`, so the tutor sees what the student wrote and is told
+// the strokes are theirs.
 //
 // A new version of the deck (DESIGN §28) moves region attachments to their slide's new number; one whose slide was
 // dropped goes to the nearest kept slide with `removedFrom` (remapRegionAttachments). attachments/deck.json {rev} marks
@@ -201,6 +203,7 @@ function normalizeAttachment(value: unknown, id: string): Attachment | null {
     if (annotation) attachment.annotation = annotation;
     const removedFrom = normalizeRemovedFrom(raw.removedFrom);
     if (removedFrom) attachment.removedFrom = removedFrom;
+    if (raw.inked === true) attachment.inked = true;
   } else if (typeof raw.name === 'string' && raw.name) {
     attachment.name = raw.name;
   }
@@ -374,9 +377,12 @@ async function saveAttachment(docId: string, attachment: Attachment, deckRev?: n
   }
 }
 
-/** A CreateRegionRequest, validated against the document (HttpError 400); `annotationId` when the body names a 필기. */
-export function parseRegionRequest(body: unknown, pageCount: number): { slide: number; rect: RegionRect; annotationId?: string } {
-  const request = (typeof body === 'object' && body !== null ? body : {}) as { slide?: unknown; rect?: unknown; annotationId?: unknown };
+/**
+ * A CreateRegionRequest, validated against the document (HttpError 400); `annotationId` when the body names a 필기,
+ * `ink` whether to draw the slide's 펜 strokes (omitted = true).
+ */
+export function parseRegionRequest(body: unknown, pageCount: number): { slide: number; rect: RegionRect; annotationId?: string; ink: boolean } {
+  const request = (typeof body === 'object' && body !== null ? body : {}) as { slide?: unknown; rect?: unknown; annotationId?: unknown; ink?: unknown };
   const slide = request.slide;
   if (typeof slide !== 'number' || !Number.isInteger(slide) || slide < 1 || slide > pageCount) {
     throw new HttpError(400, smsg().common.slideOutOfRange(pageCount));
@@ -393,10 +399,12 @@ export function parseRegionRequest(body: unknown, pageCount: number): { slide: n
   const y0 = round(y);
   const rect = { x: x0, y: y0, w: round(round(x + w) - x0), h: round(round(y + h) - y0) };
   if (!(rect.w > 0 && rect.h > 0)) throw new HttpError(400, texts().regionOutside);
+  if (request.ink !== undefined && typeof request.ink !== 'boolean') throw new HttpError(400, texts().inkNotBoolean);
+  const ink = request.ink !== false;
   const annotationId = request.annotationId;
-  if (annotationId === undefined || annotationId === null) return { slide, rect };
+  if (annotationId === undefined || annotationId === null) return { slide, rect, ink };
   if (typeof annotationId !== 'string' || !ANNOTATION_ID_RE.test(annotationId)) throw new HttpError(400, texts().annotationNotFound);
-  return { slide, rect, annotationId };
+  return { slide, rect, annotationId, ink };
 }
 
 /**
@@ -434,10 +442,11 @@ export function regionInk(items: readonly AnnotationItem[], rect: RegionRect): R
 
 /**
  * POST /api/docs/:docId/regions: crops the region (padded) from the full-resolution slide, with the slide's 펜
- * strokes drawn in, and reads the PDF's text inside it, in the image worker. 404 unknown document, 409 not converted
- * (yet) or its deck being swapped (DESIGN §28), 409 deckChanged when `deckRev` (the request's DECK_REV_HEADER) is not
- * the lecture's deck, 400 bad slide / rect, or an `annotationId` that names no 필기 of the slide (its snapshot is
- * taken before the image is made).
+ * strokes drawn in (not when the request's `ink` is false — the student hid 필기 —, unless the region is made from a
+ * stroke; `inked` when any was drawn), and reads the PDF's text inside it, in the image worker. 404 unknown document,
+ * 409 not converted (yet) or its deck being swapped (DESIGN §28), 409 deckChanged when `deckRev` (the request's
+ * DECK_REV_HEADER) is not the lecture's deck, 400 bad slide / rect / ink, or an `annotationId` that names no 필기 of
+ * the slide (its snapshot is taken before the image is made).
  */
 export async function createRegionAttachment(docId: string, body: unknown, now: Date = new Date(), deckRev?: number): Promise<Attachment> {
   if (isDocSwapping(docId)) throw swappingError();
@@ -445,11 +454,13 @@ export async function createRegionAttachment(docId: string, body: unknown, now: 
   if (!doc) throw new HttpError(404, smsg().common.notFound.doc);
   if (doc.status !== 'ready') throw notReadyError(doc);
   checkDeckRev(doc, deckRev);
-  const { slide, rect, annotationId } = parseRegionRequest(body, doc.pageCount);
-  // The slide's 필기: the item the region is made from, and the strokes drawn into the crop.
+  const request = parseRegionRequest(body, doc.pageCount);
+  const { slide, rect, annotationId } = request;
+  // The slide's 필기: the item the region is made from, and the strokes drawn into the crop (none while the student
+  // hides 필기, but a region of a stroke always shows it).
   const { items } = await readSlideAnnotations(docId, slide);
   const annotation = annotationId ? annotationSnapshot(items, annotationId) : null;
-  const ink = regionInk(items, rect);
+  const ink = request.ink || annotation?.type === 'ink' ? regionInk(items, rect) : [];
   await ensureAttachmentsDir(docId);
   const id = newAttachmentId();
   const job: AttachmentJob = {
@@ -475,6 +486,7 @@ export async function createRegionAttachment(docId: string, body: unknown, now: 
       height: result.height,
       text: result.text ?? '',
       ...(annotation ? { annotation } : {}),
+      ...(result.inked ? { inked: true as const } : {}),
       createdAt: now.toISOString(),
     },
     doc.deckRev ?? 0,

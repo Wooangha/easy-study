@@ -126,6 +126,21 @@ export function popRedo(history: History): { history: History; entry: HistoryEnt
   return { history: { undo: [...history.undo, entry], redo: history.redo.slice(0, -1) }, entry };
 }
 
+/** Whether there is something to undo / redo (the toolbar's 되돌리기 / 다시 실행; the snapshot's history notifies). */
+export const canUndoIn = (history: History): boolean => history.undo.length > 0;
+export const canRedoIn = (history: History): boolean => history.redo.length > 0;
+
+/**
+ * Without the entries of `slide` that only added some of `ids` (the server refused those adds: the items are gone, so
+ * the entries would undo nothing); every other entry of the slide stays.
+ */
+export function dropAdds(history: History, slide: number, ids: ReadonlySet<string>): History {
+  const keep = (e: HistoryEntry) => e.slide !== slide || !e.redo.every((op) => op.op === 'add' && ids.has(op.item.id));
+  const undo = history.undo.filter(keep);
+  const redo = history.redo.filter(keep);
+  return undo.length === history.undo.length && redo.length === history.redo.length ? history : { undo, redo };
+}
+
 /** Without the entries of `slide` (its document was replaced by another device's). */
 export function pruneSlide(history: History, slide: number): History {
   const keep = (e: HistoryEntry) => e.slide !== slide;

@@ -186,6 +186,8 @@ export type AttachmentWorkerResult =
       height: number;
       /** Region jobs: the text inside the region ('' when none). */
       text?: string;
+      /** Region jobs: at least one of `job.ink` was drawn into the crop (DESIGN §29). */
+      inked?: true;
     }
   | { ok: false; reason: UploadRefusal; message: string };
 
@@ -943,7 +945,7 @@ async function runRegionJob(job: RegionJob, send: (message: ChildMessage) => Pro
   }
 
   const file = await writeAttachment(job, image);
-  await send({ type: 'attachment', result: { ok: true, file, width: image.width, height: image.height, text } });
+  await send({ type: 'attachment', result: { ok: true, file, width: image.width, height: image.height, text, ...(overlay ? { inked: true as const } : {}) } });
   await send({ type: 'done', written: 1, failed: [] });
 }
 

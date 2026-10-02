@@ -196,7 +196,7 @@ describe('attachments made from a 필기 (context.ts, prompts.ts)', () => {
     ...(annotation ? { annotation } : {}),
   });
 
-  test('labels per kind of 필기 (handwriting too, DESIGN §29); a plain region keeps its label', () => {
+  test('labels per kind of 필기 (handwriting too, DESIGN §29); a plain region keeps its label; drawn-in strokes are named', () => {
     assert.equal(attachmentLabel(1, { kind: 'region', slide: 12, annotation: { type: 'memo' } }), 'Attachment 1: the part of slide 12 where the student stuck a note');
     assert.equal(attachmentLabel(2, { kind: 'region', slide: 3, annotation: { type: 'text' } }), 'Attachment 2: the part of slide 3 where the student put a text box');
     assert.equal(attachmentLabel(3, { kind: 'region', slide: 3, annotation: { type: 'highlight' } }), 'Attachment 3: the part of slide 3 the student highlighted');
@@ -206,6 +206,17 @@ describe('attachments made from a 필기 (context.ts, prompts.ts)', () => {
     assert.equal(attachmentLabel(4, { kind: 'region', slide: 7, annotation: { type: 'ink' } }), "Attachment 4: the student's handwriting on slide 7");
     assert.equal(attachmentLabel(5, { kind: 'region', slide: 12 }), 'Attachment 5: the region of slide 12 the student selected');
     assert.equal(attachmentLabel(6, { kind: 'image', name: 'a.jpg', annotation: { type: 'memo' } }), 'Attachment 6: an image from the student (a.jpg)');
+    // The student's 펜 strokes drawn into the crop (Attachment.inked, §29) are named as theirs — a region of a stroke
+    // says so already.
+    const strokes = ", with the student's own pen strokes drawn over it";
+    assert.equal(attachmentLabel(7, { kind: 'region', slide: 12, inked: true }), `Attachment 7: the region of slide 12 the student selected${strokes}`);
+    assert.equal(attachmentLabel(7, { kind: 'region', slide: 12, annotation: { type: 'memo' }, inked: true }), `Attachment 7: the part of slide 12 where the student stuck a note${strokes}`);
+    assert.equal(attachmentLabel(7, { kind: 'region', slide: 12, annotation: { type: 'text' }, inked: true }), `Attachment 7: the part of slide 12 where the student put a text box${strokes}`);
+    assert.equal(attachmentLabel(7, { kind: 'region', slide: 12, annotation: { type: 'textHighlight' }, inked: true }), `Attachment 7: the part of slide 12 the student highlighted${strokes}`);
+    assert.equal(attachmentLabel(7, { kind: 'region', slide: 12, annotation: { type: 'ellipse' }, inked: true }), `Attachment 7: the part of slide 12 the student marked${strokes}`);
+    assert.equal(attachmentLabel(7, { kind: 'region', slide: 7, annotation: { type: 'ink' }, inked: true }), "Attachment 7: the student's handwriting on slide 7");
+    assert.equal(attachmentLabel(7, { kind: 'region', slide: 12, inked: false }), 'Attachment 7: the region of slide 12 the student selected');
+    assert.equal(attachmentLabel(8, { kind: 'image', name: 'a.jpg', inked: true }), 'Attachment 8: an image from the student (a.jpg)');
   });
 
   test('the note text follows the selection text for memos, text boxes and text highlights; shapes add nothing', () => {

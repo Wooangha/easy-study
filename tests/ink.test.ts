@@ -96,6 +96,26 @@ describe('ink outline and hit testing', () => {
     assert.equal(heavy, 7.5);
   });
 
+  test('a tap whose samples ramp up the pressure is one round dot of the widest size', () => {
+    const tap = [
+      { x: 0.5, y: 0.5, p: 0.1 },
+      { x: 0.5003, y: 0.5005, p: 0.86 },
+      { x: 0.5006, y: 0.5008, p: 0.4 },
+    ];
+    const d = inkOutline(tap, 0.009, 1600, 900);
+    assert.match(d, /^M[\d.\-]+ [\d.\-]+a[\d.]+ [\d.]+ 0 1 0 [\d.]+ 0a[\d.]+ [\d.]+ 0 1 0 -[\d.]+ 0Z$/);
+    const r = Number(/a([\d.]+) /.exec(d)![1]);
+    // The widest sample: 0.009 × 900 / 2 × (0.5 + 0.86).
+    assert.ok(Math.abs(r - (0.009 * 900 * 1.36) / 2) < 0.2, String(r));
+  });
+
+  test('a sharp turn gets a round tip (a disc wound like the ribbon); a gentle curve does not', () => {
+    const v = [...line(20, [0.3, 0.2], [0.35, 0.5], 0.6), ...line(20, [0.35, 0.5], [0.4, 0.2], 0.6).slice(1)];
+    const subpaths = (d: string) => d.split('M').length - 1;
+    assert.equal(subpaths(inkOutline(v, 0.009, 1600, 900)), 2);
+    assert.equal(subpaths(inkOutline(line(30, [0.1, 0.5], [0.5, 0.52], 0.6), 0.009, 1600, 900)), 1);
+  });
+
   test('distance and eraser touches are measured in pixels of the image', () => {
     const stroke = line(5, [0.1, 0.5], [0.5, 0.5]);
     assert.ok(inkDistance(stroke, 0.3, 0.5, 1000, 1000) < 1e-9);

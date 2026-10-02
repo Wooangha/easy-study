@@ -75,6 +75,8 @@
   --ink-blue: #1f4fbf;
   --ink-red: #c62828;
   --ink-green: #1b7a3d;
+  /* The edge of an ink swatch (the toolbar's dot, the 손글씨 row's bar): the dark inks vanish on a dark surface. */
+  --ink-swatch-edge: rgba(0, 0, 0, 0.14);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -131,6 +133,7 @@
     --ink-blue: #3d6fe0;
     --ink-red: #e04848;
     --ink-green: #2a9152;
+    --ink-swatch-edge: rgba(255, 255, 255, 0.5);
   }
 }
 
@@ -188,6 +191,7 @@
   --ink-blue: #3d6fe0;
   --ink-red: #e04848;
   --ink-green: #2a9152;
+  --ink-swatch-edge: rgba(255, 255, 255, 0.5);
 }
 
 /* A forced theme decides the native parts too (form controls, scrollbars, the canvas). */
@@ -860,9 +864,14 @@ details[open] > summary::before {
   display: flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
   padding: 6px 12px;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
+  /* The tools fold when they do not fit (SlideViewer measures it); what still does not fit on the narrowest pane is
+     cut at the toolbar's edge instead of sliding under the chat pane. Only sideways: the popovers drop below it (and
+     move left to stay inside, AnnotationTools ToolPopover). */
+  overflow-x: clip;
 }
 
 .page-jump {
@@ -6344,6 +6353,7 @@ details[open] > summary::before {
 
 .annot-dot.is-ink.is-black {
   background: var(--ink-black);
+  box-shadow: inset 0 0 0 1px var(--ink-swatch-edge);
 }
 
 .annot-dot.is-ink.is-blue {
@@ -6358,7 +6368,7 @@ details[open] > summary::before {
   background: var(--ink-green);
 }
 
-/* A dark ink dot: the active one's ring stands off it. */
+/* A dark ink dot: the active one's ring stands off it (after the black dot's edge: the ring wins). */
 .annot-dot.is-ink.is-active {
   border-color: var(--surface);
   box-shadow: 0 0 0 2px var(--text);
@@ -6520,6 +6530,23 @@ details[open] > summary::before {
   gap: 6px;
   padding-top: 8px;
   border-top: 1px solid var(--border);
+}
+
+/* 되돌리기 / 다시 실행 under 펜 / 지우개 (a tablet has no ⌘Z): two .annot-tool buttons; with labels in the popover. */
+.annot-history {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+}
+
+.annot-history.is-vertical {
+  flex-basis: 100%;
+  gap: 6px;
+}
+
+.annot-history.is-vertical .annot-tool {
+  height: 30px;
+  padding: 0 10px;
 }
 
 .annot-shown-count,
@@ -8049,6 +8076,10 @@ details[open] > summary::before {
 
 .removed-item.is-blue {
   --annot-color: var(--annot-blue);
+}
+
+.removed-item.kind-ink.is-black .memo-row-bar {
+  box-shadow: inset 0 0 0 1px var(--ink-swatch-edge);
 }
 
 .removed-item-text {

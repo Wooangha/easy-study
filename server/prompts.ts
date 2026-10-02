@@ -438,29 +438,31 @@ export type AttachedAnnotationType = 'highlight' | 'textHighlight' | 'rect' | 'e
  * Label of the k-th attachment (1-based), used in the "[…]" line right before its image and as the image part's
  * label: a region of a slide the student selected — or, for a region made from a 필기 (DESIGN §25), the part of the
  * slide where the student stuck a note / put a text box / highlighted / marked, or their handwriting (§29) —, or an
- * image of their own (with its file name, if any).
+ * image of their own (with its file name, if any). A region with the student's 펜 strokes drawn into its crop
+ * (Attachment.inked, §29) says so, unless it is their handwriting already.
  */
 export function attachmentLabel(
   index: number,
-  attachment: { kind: 'region' | 'image'; slide?: number; name?: string; annotation?: { type: AttachedAnnotationType } },
+  attachment: { kind: 'region' | 'image'; slide?: number; name?: string; annotation?: { type: AttachedAnnotationType }; inked?: boolean },
 ): string {
   if (attachment.kind === 'region') {
     const slide = attachment.slide ?? '?';
-    switch (attachment.annotation?.type) {
+    const type = attachment.annotation?.type;
+    if (type === 'ink') return `Attachment ${index}: the student's handwriting on slide ${slide}`;
+    const strokes = attachment.inked ? ", with the student's own pen strokes drawn over it" : '';
+    switch (type) {
       case 'memo':
-        return `Attachment ${index}: the part of slide ${slide} where the student stuck a note`;
+        return `Attachment ${index}: the part of slide ${slide} where the student stuck a note${strokes}`;
       case 'text':
-        return `Attachment ${index}: the part of slide ${slide} where the student put a text box`;
+        return `Attachment ${index}: the part of slide ${slide} where the student put a text box${strokes}`;
       case 'highlight':
       case 'textHighlight':
-        return `Attachment ${index}: the part of slide ${slide} the student highlighted`;
+        return `Attachment ${index}: the part of slide ${slide} the student highlighted${strokes}`;
       case 'rect':
       case 'ellipse':
-        return `Attachment ${index}: the part of slide ${slide} the student marked`;
-      case 'ink':
-        return `Attachment ${index}: the student's handwriting on slide ${slide}`;
+        return `Attachment ${index}: the part of slide ${slide} the student marked${strokes}`;
       default:
-        return `Attachment ${index}: the region of slide ${slide} the student selected`;
+        return `Attachment ${index}: the region of slide ${slide} the student selected${strokes}`;
     }
   }
   const name = attachment.name?.replace(/\s+/g, ' ').trim();

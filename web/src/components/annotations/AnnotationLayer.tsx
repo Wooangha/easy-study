@@ -1,6 +1,7 @@
 // The annotation layer of one slide (DESIGN §25), inside the slide box over the image: an SVG for the highlights and
 // shapes (a 0..1000 viewBox stretched over the image, so the stored 0..1 geometry maps directly) and the 펜 strokes
-// (§29: each a filled path in a nested <svg> whose viewBox has the image's aspect, so a stroke is not stretched), HTML for the
+// (§29: each a filled path in a nested <svg> whose viewBox has the image's aspect, so a stroke is not stretched; the
+// selected strokes get one dashed box around them all), HTML for the
 // text boxes (their font scales with the slide: a size stored as a fraction of the slide height × the layer's
 // rendered height, `--slide-h`), the memo cards (UI-sized), the selection handles, the draft being drawn (or the
 // marquee of 범위 선택), and the question markers (the asked-about regions under the items, their labels and the items'
@@ -13,6 +14,7 @@ import {
   bandHandles,
   capText,
   replayVisible,
+  unionRects,
   type AnnotationTool,
   type Handle,
 } from '../../lib/annotations/geometry.ts';
@@ -77,15 +79,20 @@ export function AnnotationLayer({ slide, frame, aspect, doc, markers, selectedId
   );
   const shownMarkers = markers && markers.length > 0 ? markers : null;
   const rectOf = (item: AnnotationItem & { rect: RegionRect }) => drag?.[item.id]?.rect ?? item.rect;
-  const isSelected = (id: string) => selectedIds?.includes(id) ?? false;
+  // A Set: a marquee may select thousands of 펜 strokes.
+  const selected = useMemo(() => new Set(selectedIds ?? []), [selectedIds]);
+  const isSelected = (id: string) => selected.has(id);
   const shapes: AnnotationItem[] = [];
   const texts: TextItem[] = [];
   const memos: Extract<AnnotationItem, { type: 'memo' }>[] = [];
+  /** The selected strokes as drawn (a move preview included): one dashed box around them when there are several. */
+  const inkBoxes: RegionRect[] = [];
   for (const item of items) {
     if (!replayVisible(item, replay)) continue;
     if (item.type === 'text') texts.push(item);
     else if (item.type === 'memo') memos.push(item);
     else shapes.push(item);
+    if (item.type === 'ink' && selected.has(item.id)) inkBoxes.push(rectOf(item));
   }
   // 펜 strokes are drawn in a box with the image's aspect: K tall, inkW wide.
   const inkW = Math.round(K * imageAspectOf(aspect, frame) * 10) / 10;
@@ -93,6 +100,8 @@ export function AnnotationLayer({ slide, frame, aspect, doc, markers, selectedId
   const single = selectedIds && selectedIds.length === 1 ? (items.find((it) => it.id === selectedIds[0]) ?? null) : null;
   const handles = single && single.type !== 'memo' && single.type !== 'textHighlight' ? handlesOf(single, drag) : null;
   const group = (selectedIds?.length ?? 0) > 1;
+  // One stroke selected: its own box (with the handles); several: one box around all of them, not one per stroke.
+  const inkUnion = inkBoxes.length > 1 ? unionRects(inkBoxes) : null;
 
   return (
     <div className={`annot-layer tool-${tool}`} style={{ ...percentStyle(frame), '--frame-h': frame.h } as CSSProperties} data-annot-slide={slide}>
@@ -124,11 +133,12 @@ export function AnnotationLayer({ slide, frame, aspect, doc, markers, selectedId
               );
             }
             case 'ink':
-              return <InkStroke key={item.id} item={item} rect={rectOf(item)} w={inkW} selected={isSelected(item.id)} />;
+              return <InkStroke key={item.id} item={item} rect={rectOf(item)} w={inkW} boxed={inkBoxes.length === 1 && selected.has(item.id)} />;
             default:
               return null;
           }
         })}
+        {inkUnion && <rect className="annot-ink-box" x={n(inkUnion.x)} y={n(inkUnion.y)} width={n(inkUnion.w)} height={n(inkUnion.h)} />}
         {draft && draft.tool !== 'memo' && draft.tool !== 'text' && (
           <DraftShape draft={draft} />
         )}
@@ -169,22 +179,55 @@ export function AnnotationLayer({ slide, frame, aspect, doc, markers, selectedId
   );
 }
 
+interface InkStrokeProps {
+  item: InkItem;
+  /** Where it is drawn: its rect, or a move / resize preview. */
+  rect: RegionRect;
+  /** The image's width in the K-tall box. */
+  w: number;
+  /** The only selected stroke: its rect is drawn dashed. */
+  boxed: boolean;
+}
+
+const sameRect = (a: RegionRect, b: RegionRect): boolean => a === b || (a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h);
+
+/** By value: a write's answer may bring an equal stroke as a new object (and a rect as a new object every render). */
+const sameInkProps = (a: InkStrokeProps, b: InkStrokeProps): boolean =>
+  a.item.id === b.item.id &&
+  a.item.pts === b.item.pts &&
+  a.item.width === b.item.width &&
+  a.item.color === b.item.color &&
+  sameRect(a.item.rect, b.item.rect) &&
+  sameRect(a.rect, b.rect) &&
+  a.w === b.w &&
+  a.boxed === b.boxed;
+
 /**
  * A 펜 stroke: its filled outline in a nested <svg> over the whole image whose viewBox (`w` × K) has the image's aspect
- * (the layer's SVG is stretched to the image; this undoes it), through `rect` (a move / resize preview). The outline is
- * computed again only when the item, the rect or the image's aspect changes. Selected, its rect is drawn dashed.
+ * (the layer's SVG is stretched to the image; this undoes it), through `rect`. A move (the same size elsewhere) only
+ * shifts the nested <svg>; the outline is computed again only when the stroke's values, its size (a resize preview) or
+ * the image's aspect change. The only selected stroke has its rect drawn dashed.
  */
-const InkStroke = memo(function InkStroke({ item, rect, w, selected }: { item: InkItem; rect: RegionRect; w: number; selected: boolean }) {
-  const d = useMemo(() => inkPathOf(item, rect, w, K), [item, rect, w]);
+const InkStroke = memo(function InkStroke({ item, rect, w, boxed }: InkStrokeProps) {
+  const from = item.rect;
+  const moved = rect.w === from.w && rect.h === from.h;
+  const shape = moved ? from : rect;
+  // Value deps: an equal stroke as a new object (a fetch, a write's answer) keeps its outline.
+  const d = useMemo(
+    () => inkPathOf(item, shape, w, K),
+    [item.pts, item.width, from.x, from.y, from.w, from.h, shape.x, shape.y, shape.w, shape.h, w],
+  );
+  const dx = moved ? Math.round((rect.x - from.x) * K * 10) / 10 : 0;
+  const dy = moved ? Math.round((rect.y - from.y) * K * 10) / 10 : 0;
   return (
     <>
-      <svg x={0} y={0} width={K} height={K} viewBox={`0 0 ${w} ${K}`} preserveAspectRatio="none" overflow="visible">
+      <svg x={dx} y={dy} width={K} height={K} viewBox={`0 0 ${w} ${K}`} preserveAspectRatio="none" overflow="visible">
         <path className={`annot-shape kind-ink is-${item.color}`} data-annot="item" data-id={item.id} d={d} />
       </svg>
-      {selected && <rect className="annot-ink-box" x={n(rect.x)} y={n(rect.y)} width={n(rect.w)} height={n(rect.h)} />}
+      {boxed && <rect className="annot-ink-box" x={n(rect.x)} y={n(rect.y)} width={n(rect.w)} height={n(rect.h)} />}
     </>
   );
-});
+}, sameInkProps);
 
 function DraftShape({ draft }: { draft: Draft }) {
   const r = draft.rect;

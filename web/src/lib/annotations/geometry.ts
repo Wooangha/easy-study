@@ -230,8 +230,88 @@ export const annotationBytes = (doc: SlideAnnotations): number => new TextEncode
 /**
  * Whether a slide document stays within the server's caps that 펜 strokes fill (DESIGN §29): MAX_INK_STROKES strokes
  * and MAX_SLIDE_ANNOTATION_BYTES — checked before an optimistic write, so pending strokes are not lost to a 400.
+ * `room`: bytes the server may still add (stampRoom).
  */
-export const fitsSlide = (doc: SlideAnnotations): boolean => inkStrokes(doc) <= MAX_INK_STROKES && annotationBytes(doc) <= MAX_SLIDE_ANNOTATION_BYTES;
+export const fitsSlide = (doc: SlideAnnotations, room = 0): boolean =>
+  inkStrokes(doc) <= MAX_INK_STROKES && annotationBytes(doc) + room <= MAX_SLIDE_ANNOTATION_BYTES;
+
+/**
+ * What the server adds to an `add` without `recordedAt` while a recording of the lecture runs on another device
+ * (DESIGN §25 "Recording timeline"): `,"recordedAt":{"rid":"rec-YYYYMMDD-HHMMSS-xxxx","t":12345.678}` — and to a
+ * memo its recording link, `,{"kind":"recording","rid":"…","t":12345.678}`. Upper bounds, in bytes.
+ */
+export const RECORDING_STAMP_BYTES = 64;
+export const MEMO_RECORDING_LINK_BYTES = 70;
+
+/**
+ * The bytes the server may add to `doc` by stamping the adds of `ops` (those not sent or not acknowledged yet, and the
+ * new ones) that carry no `recordedAt` of their own — only for items still in `doc` (an add removed again by a later
+ * op leaves nothing). The byte guard leaves this room, so a write is not refused for the stamp.
+ */
+export function stampRoom(doc: SlideAnnotations, ops: readonly AnnotationOp[]): number {
+  let ids: Set<string> | null = null;
+  let room = 0;
+  for (const op of ops) {
+    if (op.op !== 'add' || op.item.recordedAt) continue;
+    ids ??= new Set(doc.items.map((it) => it.id));
+    if (!ids.has(op.item.id)) continue;
+    ids.delete(op.item.id); // an add sent again (a rebase) is counted once
+    room += RECORDING_STAMP_BYTES;
+    if (op.item.type === 'memo' && op.item.links.length < MAX_MEMO_LINKS) room += MEMO_RECORDING_LINK_BYTES;
+  }
+  return room;
+}
+
+/** How close to MAX_SLIDE_ANNOTATION_BYTES a slide counts as full when the server refuses an add (slideFull). */
+export const FULL_MARGIN_BYTES = 16 * 1024;
+
+/**
+ * Whether a server's 400 on a write that only adds items is the slide being full (not an item it does not take): the
+ * document as held — the refused adds included, with their stamp room — is at a cap or within FULL_MARGIN_BYTES of the
+ * byte cap (the client's guard is an estimate: the server's normalised form, its stamps, another device's items that
+ * came in with a 409 rebase).
+ */
+export function slideFull(doc: SlideAnnotations, room = 0): boolean {
+  return (
+    inkStrokes(doc) > MAX_INK_STROKES ||
+    itemsAfter(doc, []) > MAX_ANNOTATION_ITEMS ||
+    annotationBytes(doc) + room > MAX_SLIDE_ANNOTATION_BYTES - FULL_MARGIN_BYTES
+  );
+}
+
+/** Whether two items hold the same values (a 펜 stroke by its fields: comparing its points as a string is cheap). */
+export function sameItem(a: AnnotationItem, b: AnnotationItem): boolean {
+  if (a === b) return true;
+  if (a.id !== b.id || a.type !== b.type || a.color !== b.color || a.createdAt !== b.createdAt || a.updatedAt !== b.updatedAt) return false;
+  if (a.recordedAt?.rid !== b.recordedAt?.rid || a.recordedAt?.t !== b.recordedAt?.t) return false;
+  if (a.type === 'ink' && b.type === 'ink') {
+    const r = a.rect;
+    const s = b.rect;
+    return a.pts === b.pts && a.width === b.width && r.x === s.x && r.y === s.y && r.w === s.w && r.h === s.h && Object.keys(a).length === Object.keys(b).length;
+  }
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/**
+ * `next` (a document from the server: a PATCH's answer, a fetch, a 409's `current`, a slide-reset — with the local ops
+ * on top) with every item that equals the one `held` has kept as that same object. The views cache per item object (a
+ * stroke's decoded points and outline): a write's answer must not make every stroke of the slide new. An item whose
+ * values differ (its `updatedAt` too, so that stays the server's) is taken as it comes.
+ */
+export function reuseItems(held: SlideAnnotations | undefined, next: SlideAnnotations): SlideAnnotations {
+  if (!held || held === next || held.items.length === 0 || next.items.length === 0) return next;
+  const known = new Map(held.items.map((it) => [it.id, it]));
+  let reused = false;
+  const items = next.items.map((item) => {
+    const old = known.get(item.id);
+    if (old && old !== item && sameItem(old, item)) {
+      reused = true;
+      return old;
+    }
+    return item;
+  });
+  return reused ? { ...next, items } : next;
+}
 
 export const canHideMarker = (doc: SlideAnnotations): boolean => doc.hiddenMarkers.length < MAX_HIDDEN_MARKERS;
 

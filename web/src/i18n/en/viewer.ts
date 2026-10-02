@@ -95,6 +95,11 @@ export const viewer = {
       on
         ? 'Write with fingers too: on — a finger writes like the pen (off: fingers scroll and zoom)'
         : 'Write with fingers too: off — only a pen or the mouse writes, fingers scroll and zoom (turn it on without a stylus)',
+    historyGroup: 'Undo and redo',
+    undo: 'Undo',
+    undoTitle: 'Undo: takes back the last annotation edit (⌘Z/Ctrl+Z)',
+    redo: 'Redo',
+    redoTitle: 'Redo: does the undone edit again (⌘⇧Z/Ctrl+Y)',
   },
   layerMenu: {
     label: 'Annotations menu',
@@ -132,7 +137,7 @@ export const viewer = {
     colorAllTitle: (color) => `All selected: ${color}`,
     attach: 'Attach',
     attachTitle: 'Attach this annotation to your question (shown above the message box)',
-    attachManyTitle: 'Attach each selected annotation to your question (shown above the message box)',
+    attachManyTitle: 'Attach each selected annotation to your question — the pen strokes together as one (shown above the message box)',
     expand: 'Expand',
     expandSheetTitle: 'Expand the memo (edit it in the sheet below)',
     expandTitle: 'Expand the memo',

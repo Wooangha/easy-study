@@ -685,6 +685,11 @@ export interface Attachment {
    * attachment stays valid) and question markers skip the attachment.
    */
   removedFrom?: RemovedFrom;
+  /**
+   * kind 'region': the crop has the student's 펜 strokes drawn into it (DESIGN §29), so the tutor is told the dark
+   * strokes are the student's writing, not the slide's.
+   */
+  inked?: true;
   createdAt: string;
 }
 
@@ -706,6 +711,11 @@ export interface CreateRegionRequest {
    * Attachment.annotation; an unknown id → 400 '그 필기를 찾을 수 없습니다'.
    */
   annotationId?: string;
+  /**
+   * Draw the slide's 펜 strokes that meet the region into the crop (DESIGN §29). Omitted = true; the client sends false
+   * while its 필기 layer is hidden (the crop is then the clean slide). A region made from a stroke always has them.
+   */
+  ink?: boolean;
 }
 
 export const MAX_ATTACHMENTS = 6;

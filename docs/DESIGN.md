@@ -2687,7 +2687,8 @@ applies to strokes like to other 필기.
   pressure as a third axis) is typically 20–150 points ≈ 0.3–1 KB stored.
 - shared/ink.ts (no dependency; used by the web and the image worker): encode / decode, inkRect, simplifyInk, inkPieces,
   inkOutline (the filled ribbon as an SVG path in px of a w × h box: filled in every 2 px, smoothed once, drawn through
-  midpoints, round ends; a dot is a circle), inkDistance, inkTouches (an eraser segment against a stroke).
+  midpoints, round ends; a tap — every sample inside the widest disc — is one dot of the widest size; a turn sharper than
+  ~100° gets a disc at its tip, wound like the ribbon so the nonzero fill keeps it), inkDistance, inkTouches (an eraser segment against a stroke).
 
 ### Server
 
@@ -2696,7 +2697,7 @@ decimals), pts matching INK_PTS_RE with 1 … MAX_INK_POINTS points; PATCHABLE [
 ink and other items apart. Other item types keep ANNOTATION_COLORS. 📎 of a stroke: ANNOTATION_TYPES and
 AttachedAnnotationType get 'ink' (label: "the student's handwriting on slide N"); every region crop (📎 of any item, a
 region drag) draws the slide's ink strokes that meet the crop into it (the image worker gets their geometry and renders
-inkOutline with sharp), so the tutor sees what the student wrote. Versions (§28) move strokes like rects.
+inkOutline with sharp), so the tutor sees what the student wrote (see the review fixes for `ink: false` and `inked`). Versions (§28) move strokes like rects.
 
 ### Web
 
@@ -2726,6 +2727,24 @@ inkOutline with sharp), so the tutor sees what the student wrote. Versions (§28
 - The store refuses a mutation that would make the slide doc exceed MAX_SLIDE_ANNOTATION_BYTES (toast) instead of losing
   pending strokes on the server's 400; the ink count is checked against MAX_INK_STROKES.
 - The 빠진 슬라이드 list (§28) shows a slide's strokes as one row "손글씨 N획".
+
+### Review fixes (before release)
+
+- iPadOS makes only the first touch of a sequence primary (a palm first → the Pencil is not primary): a pen press is
+  taken whether primary or not. A stylus tap on a control inside the slides (Q&A badge, marker, memo card, item menu) is
+  not prevented; every touch still is while a stroke runs. A pen replacing a finger / palm gesture clears its leftovers.
+  A stroke the browser cancels within 12 px of its start (Chrome turned it into a scroll during a fling) is dropped.
+- 되돌리기 / 다시 실행 buttons under 펜 / 지우개 (wide toolbar and popover): a tablet has no ⌘Z.
+- The tools fold by measuring the real toolbar (overflow → fold; unfold at the needed width + 24 px), not at a fixed 640 px.
+- The store keeps unchanged item objects when it adopts a server document (PATCH answers, 409s, slide-reset), so stroke
+  outlines and decoded points stay cached; strokes are memoised by value. A pure move shifts the stroke's svg; a
+  multi-selection of strokes draws one box.
+- 📎 of several strokes is ONE region (their union, one slot). POST …/regions `ink: false` while the 필기 layer is hidden or
+  a replay runs (a region made from a stroke always draws strokes); a crop with strokes drawn in is `inked` and labelled
+  for the tutor ("…with the student's own pen strokes drawn over it").
+- The byte guard leaves room for the recording stamp the server may add to each unstamped add; a "slide full" 400 on an
+  add-only write drops only those strokes (and their undo entries), not the slide's history.
+- Dark mode: the black ink swatch has a visible edge.
 
 ### Tests
 

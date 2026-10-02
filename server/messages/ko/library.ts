@@ -92,6 +92,8 @@ export const library = {
     regionOutside: '선택 영역은 슬라이드 안(0–1)에 있고 넓이가 있어야 합니다',
     /** 400 of POST …/regions when `annotationId` names no item of that slide. */
     annotationNotFound: '그 필기를 찾을 수 없습니다',
+    /** 400 of POST …/regions when `ink` (draw the 펜 strokes, DESIGN §29) is not a boolean. */
+    inkNotBoolean: 'ink는 true/false여야 합니다',
     cropFailed: (slide: number) => `슬라이드 ${slide}의 선택 영역을 잘라내지 못했습니다`,
     imageEmpty: '이미지 내용이 비어 있습니다',
     imageOnly: '이미지 파일만 첨부할 수 있습니다 (Content-Type: image/*)',
