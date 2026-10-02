@@ -2664,3 +2664,70 @@ deleted), doc.json gets the old meta and lastChange (kind 'undo', undoable false
 tests/slideMatch.test.ts (matching), tests/versions.test.ts (HTTP: upload → plan → apply → every subsystem remapped →
 undo → back; busy 409s; stale plan; drop; startup recovery of a half-applied swap; image URLs), per-subsystem remap
 unit tests next to their suites, web tests for the dialog's plan view model, URL versioning and the deck event handling.
+
+## 29. 펜 — handwriting with a stylus (0.6.9)
+
+The user: "펜 필기" — on the iPad (Apple Pencil, through the browser / home-screen web app over remote mode), on Android
+tablets (S Pen) and with the mouse on a computer. The pen writes, fingers keep scrolling and zooming (palm rejection);
+the width follows the pressure; an eraser removes strokes; everything else of §25 (sync, undo, replay, 📎, versions)
+applies to strokes like to other 필기.
+
+### Data (shared/types.ts InkItem, shared/ink.ts)
+
+- One stroke = one item `{ type: 'ink', color ∈ INK_COLORS (black · blue · red · green; dark inks), rect, width, pts }`.
+  `rect` = the points' bounding box padded by the widest half width (never empty: a tap is a dot), on the image (0..1,
+  4 decimals). `pts` = the points relative to `rect`, 5 base64url characters each: x, y as 12 bits (0..4095 of the
+  rect), pressure as 6 bits (32 = no pressure: mouse, finger). Moving or resizing a stroke is an `update` of `rect`
+  (the points scale with it); `pts` is never patched. `width` = the nominal width as a fraction of the image height
+  (INK_WIDTHS 0.003 · 0.005 · 0.009 in the UI = 가늘게 · 보통 · 굵게; the server accepts MIN_INK_WIDTH … MAX_INK_WIDTH);
+  the drawn half width is width / 2 × (0.5 + pressure).
+- Limits: ≤ MAX_INK_POINTS 2000 points per stroke (a longer one is stored as several, inkPieces), ≤ MAX_INK_STROKES 3000
+  strokes per slide counted apart from the other items (MAX_ANNOTATION_ITEMS 200 now counts the rest),
+  MAX_SLIDE_ANNOTATION_BYTES raised to 1 MiB. A stroke after simplification (RDP, 0.35 px of a 1000 px tall image, the
+  pressure as a third axis) is typically 20–150 points ≈ 0.3–1 KB stored.
+- shared/ink.ts (no dependency; used by the web and the image worker): encode / decode, inkRect, simplifyInk, inkPieces,
+  inkOutline (the filled ribbon as an SVG path in px of a w × h box: filled in every 2 px, smoothed once, drawn through
+  midpoints, round ends; a dot is a circle), inkDistance, inkTouches (an eraser segment against a stroke).
+
+### Server
+
+normalizeItem 'ink': color ∈ INK_COLORS, rect (normalizeRect), width clamped to MIN…MAX_INK_WIDTH (4 significant
+decimals), pts matching INK_PTS_RE with 1 … MAX_INK_POINTS points; PATCHABLE ['color', 'rect', 'width']. checkCaps counts
+ink and other items apart. Other item types keep ANNOTATION_COLORS. 📎 of a stroke: ANNOTATION_TYPES and
+AttachedAnnotationType get 'ink' (label: "the student's handwriting on slide N"); every region crop (📎 of any item, a
+region drag) draws the slide's ink strokes that meet the crop into it (the image worker gets their geometry and renders
+inkOutline with sharp), so the tutor sees what the student wrote. Versions (§28) move strokes like rects.
+
+### Web
+
+- Tools: 펜 and 지우개 after 범위 선택 (lucide PenLine, Eraser). Under 펜 a press of a stylus (pointerType 'pen') or of
+  the mouse writes — also over existing 필기 (no select / move under the pen); a finger does nothing (the browser scrolls
+  and pinch-zooms) unless 손가락으로도 쓰기 (`fingerInk`, per device, in the pen popover) is on. A stylus's eraser end or
+  barrel button (buttons & 32 / & 2) erases.
+- Live stroke: samples from getCoalescedEvents() (fallback: the event), pressure only from a pen with pressure > 0,
+  drawn imperatively into an overlay <svg> over the image frame (inkOutline per animation frame; no React state per
+  point); on pointerup the stroke becomes one `add` (inkPieces; one undo step per stroke; no selection, no menu) and the
+  overlay goes on the next frame. pointercancel keeps what was drawn.
+- Palm rejection: under 펜 / 지우개 `.slide-box { touch-action: pan-x pan-y pinch-zoom }` (fingers scroll and zoom, no
+  double-tap zoom); a non-passive touchstart / touchmove listener prevents the default for a stylus touch (iOS
+  `touchType === 'stylus'`) and while a stroke is being drawn; a finger or palm already down does not block the pen.
+  With `fingerInk` on: `touch-action: none` and fingers write.
+- Rendering: AnnotationLayer draws each stroke as a filled path in a nested <svg> whose viewBox has the image's aspect
+  (not stretched), mapped through the item's rect (so the move / resize preview moves it), memoised per item object.
+  Ink colors are darker tokens (--ink-black, --ink-blue, --ink-red, --ink-green; dark mode lighter).
+- Hit testing: a stroke is hit near its centre line (inkDistance ≤ slop + half width), not in its bounding box, so
+  handwriting never blocks clicks and drags on what lies under it. Selection, marquee, move, resize, color, width
+  (ItemMenu: the ink colors and 가늘게 · 보통 · 굵게), 첨부 and 삭제 work like for shapes.
+- 지우개: a drag removes every stroke it touches (inkTouches along each move, the touched strokes fade at once); on release
+  one `remove` mutation (one undo step). Only strokes are erased.
+- Toolbar: under 펜 the color dots are the ink colors (`inkColor`, default black) and three width chips (`inkWidth`)
+  follow; compact mode keeps 펜 / 지우개 reachable in the popover.
+- The store refuses a mutation that would make the slide doc exceed MAX_SLIDE_ANNOTATION_BYTES (toast) instead of losing
+  pending strokes on the server's 400; the ink count is checked against MAX_INK_STROKES.
+- The 빠진 슬라이드 list (§28) shows a slide's strokes as one row "손글씨 N획".
+
+### Tests
+
+tests/ink.test.ts (encoding, rect, simplification, splitting, outline, hit testing); server validation / caps / patch
+whitelist / region crops with ink; web: pen routing (pen vs touch vs mouse, fingerInk), eraser plan, ink hit test,
+rendering, store byte guard, toolbar.

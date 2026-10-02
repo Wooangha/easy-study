@@ -850,7 +850,7 @@ export const MAX_RECORDING_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Slide annotations (DESIGN §25): 형광펜 / 텍스트 형광 / 사각형 / 동그라미 / 텍스트 상자 / 스티커 메모 drawn on slides
-// with the mouse or trackpad, stored per slide under the lecture folder (annotations/NNN.json), shared live between
+// with the mouse or trackpad, and 펜 (handwriting, DESIGN §29) with a stylus (Apple Pencil, S Pen) or the mouse, stored per slide under the lecture folder (annotations/NNN.json), shared live between
 // devices over SSE; 질문 표시 (question markers) are derived from sessions, only hidden ones are stored.
 //
 // Coordinates: every geometry is normalised 0..1 to the rendered slide IMAGE (origin top-left, /Rotate applied) —
@@ -859,8 +859,11 @@ export const MAX_RECORDING_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024;
 // 4 decimals; the server clamps to 0..1 and rounds to 4.
 // ---------------------------------------------------------------------------
 
-export type AnnotationColor = 'yellow' | 'green' | 'pink' | 'blue';
+export type AnnotationColor = 'yellow' | 'green' | 'pink' | 'blue' | 'black' | 'red';
+/** The colors of 형광펜, 텍스트 형광, shapes, text boxes and memos (light highlighter tints). */
 export const ANNOTATION_COLORS: readonly AnnotationColor[] = ['yellow', 'green', 'pink', 'blue'];
+/** The colors of 펜 ink (InkItem; dark inks: 'blue' and 'green' render darker than the highlighter tints of the same name). */
+export const INK_COLORS: readonly AnnotationColor[] = ['black', 'blue', 'red', 'green'];
 /** `an-` + 12 hex (6 random bytes, crypto.getRandomValues in the browser), chosen by the client so an optimistic item keeps its id. */
 export const ANNOTATION_ID_RE = /^an-[0-9a-f]{12}$/;
 
@@ -982,7 +985,33 @@ export interface MemoItem extends AnnotationBase {
   /** Text size as a fraction of the slide height (the units of TextItem.size); absent = the UI-sized 13 px of 0.6.1. */
   size?: number;
 }
-export type AnnotationItem = HighlightItem | TextHighlightItem | RectItem | EllipseItem | TextItem | MemoItem;
+/**
+ * 펜 (DESIGN §29): one handwritten stroke. `rect` is its bounding box on the image, padded by half the stroke width (so it
+ * is never empty: a dot is a stroke too); the points are stored relative to it, so moving or resizing the stroke is an
+ * `update` of `rect` alone and the points never change after the stroke is drawn. Color ∈ INK_COLORS.
+ */
+export interface InkItem extends AnnotationBase {
+  type: 'ink';
+  rect: RegionRect;
+  /** Stroke width at medium pressure, as a fraction of the image height (MIN_INK_WIDTH … MAX_INK_WIDTH; INK_WIDTHS in the UI). */
+  width: number;
+  /**
+   * The points, 5 base64url characters each (shared/ink.ts encodeInkPoints): x and y within `rect` (12 bits each,
+   * 0 … 4095 = the rect's left / top … right / bottom edge) and the pen pressure (6 bits, 0 … 63; 32 for a mouse).
+   * 1 … MAX_INK_POINTS points; never patched.
+   */
+  pts: string;
+}
+/** Pen widths offered in the UI (가늘게 · 보통 · 굵게), fractions of the image height. */
+export const INK_WIDTHS: readonly number[] = [0.003, 0.005, 0.009];
+export const MIN_INK_WIDTH = 0.001;
+export const MAX_INK_WIDTH = 0.05;
+/** Points of one stroke, after simplification (a longer stroke is stored as several). */
+export const MAX_INK_POINTS = 2000;
+/** Strokes on one slide (counted apart from MAX_ANNOTATION_ITEMS, which counts the other items). */
+export const MAX_INK_STROKES = 3000;
+
+export type AnnotationItem = HighlightItem | TextHighlightItem | RectItem | EllipseItem | TextItem | MemoItem | InkItem;
 
 /**
  * Which question a marker belongs to: the session (SESSION_ID_RE), the user message (MESSAGE_ID_RE) and the region
@@ -1007,6 +1036,7 @@ export interface SlideAnnotations {
   /** ≤ MAX_HIDDEN_MARKERS, unique keys. */
   hiddenMarkers: MarkerKey[];
 }
+/** Items on one slide other than 펜 strokes (those: MAX_INK_STROKES). */
 export const MAX_ANNOTATION_ITEMS = 200;
 /** Memo / text box text, the highlighted words of a 텍스트 형광, and Attachment.annotation.text. */
 export const MAX_ANNOTATION_TEXT_CHARS = 2000;
@@ -1015,7 +1045,7 @@ export const MAX_ANNOTATION_TEXT_CHARS = 2000;
  * '이 슬라이드의 필기가 너무 많아요 (일부를 지워 주세요)'. Keeps every slide doc, the PATCH bodies and the client's held
  * slides small (≤ 24 loaded slides per client).
  */
-export const MAX_SLIDE_ANNOTATION_BYTES = 256 * 1024;
+export const MAX_SLIDE_ANNOTATION_BYTES = 1024 * 1024;
 export const MAX_MEMO_TAGS = 10;
 export const MAX_TAG_CHARS = 30;
 export const MAX_MEMO_LINKS = 8;
@@ -1169,6 +1199,15 @@ export type AnnotationEvent =
 export interface AnnotationDeviceSettings {
   /** Color of new items (`annotColor`). Default 'yellow'. */
   annotColor: AnnotationColor;
+  /** 펜 color (`inkColor`, one of INK_COLORS). Default 'black'. */
+  inkColor: AnnotationColor;
+  /** 펜 width (`inkWidth`, one of INK_WIDTHS). Default INK_WIDTHS[1]. */
+  inkWidth: number;
+  /**
+   * 손가락으로도 쓰기 (`fingerInk`). Default false: under 펜 and 지우개 a stylus or the mouse writes and fingers scroll and
+   * zoom (palm rejection); true for a device without a stylus (a phone), where the finger writes too.
+   */
+  fingerInk: boolean;
   /** 필기 보기/숨기기 (`annotLayer`). Default true; hidden = layers unmount, tools disabled. */
   annotLayer: boolean;
   /** 슬라이드에 질문 표시 보기 (`questionMarkers`). Default true. */
