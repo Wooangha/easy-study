@@ -2779,9 +2779,17 @@ with them, a short dash after a stroke vanished, dragging a region did nothing. 
 - **The divider cannot freeze the panes**: `is-dragging` only after the slop, ended by every way a press can end; its touch
   grab area reaches 6 px into the slides at most. **채팅 접기 / 펼치기**: a chevron button on the divider collapses the chat
   pane (kept mounted, `chatCollapsed` in localStorage); attaching, asking, opening notes or a recording opens it again.
+- **Listeners at the window** (lib/inputListeners.ts): after all of the above the page still got NO input for 8–16 s at a
+  time (nothing delivered, pointer ids not advancing, until the tab was left and entered again); with the debug overlay's
+  passive capture-phase listeners at the window for every pointer / touch / mouse / gesture event 245 strokes arrived
+  without a gap. Unexplained (known iPadOS suspects: Scribble swallowing quick strokes; Safari tracking one input type at
+  a time), so do-nothing listeners for those events stay at the window while a viewer is mounted.
 - **`?inkdebug=1`** (sessionStorage; `?inkdebug=0` off): a small input log at the viewer's bottom left — presses and what
   was decided, move counts, releases / cancels, touch roles with their radius, pan / pinch / revert, stale-gesture
-  endings, `stall Nms` (frames more than 250 ms apart), `commit Nms`. For screen recordings from a device.
+  endings, `stall Nms` (frames more than 250 ms apart), `commit Nms`; a status line rewritten in place (clock, fps, hover /
+  pen / touch moves per second, touches down, focus) and what arrives at the window (`w:` lines). For screen recordings
+  from a device; a server started with EASY_STUDY_INK_DEBUG=1 also prints the lines in its log (POST /api/debug/ink,
+  absent otherwise).
 
 ### Tests
 

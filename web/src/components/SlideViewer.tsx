@@ -101,6 +101,7 @@ import {
 import { confirmDialog } from '../lib/confirm.ts';
 import { clamp, firstLine, slideSizes } from '../lib/format.ts';
 import { inkDebug } from '../lib/inkDebug.ts';
+import { holdInputListeners } from '../lib/inputListeners.ts';
 import { usePlayhead } from '../lib/recording/playhead.ts';
 import { recorder } from '../lib/recording/recorder.ts';
 import { isNumber, readStorage, rememberSlide, storageKeys, writeStorage } from '../lib/storage.ts';
@@ -1963,6 +1964,9 @@ export function SlideViewer({
   // The debug overlay of the tablet input (lib/inkDebug.ts): only with ?inkdebug=1.
   const viewerRef = useRef<HTMLDivElement>(null);
   useEffect(() => (viewerRef.current ? inkDebug.attach(viewerRef.current) : undefined), []);
+  // Do-nothing listeners at the window for every kind of input: iPad Safari stopped sending input without them
+  // (lib/inputListeners.ts).
+  useEffect(() => holdInputListeners(), []);
 
   // Esc closes the memo sheet (first; its memo stays selected), else cancels a selection (being drawn or waiting in
   // its menu), the annotation tool (back to the default 선택·첨부 state) and the item selection.
