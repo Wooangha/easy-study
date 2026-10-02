@@ -620,10 +620,11 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
   // Lines of the web client's input debug overlay (?inkdebug=1, DESIGN §29), shown in this log — only when the server was
   // started for it (EASY_STUDY_INK_DEBUG=1): otherwise the route does not exist and the client stops sending.
   if (process.env.EASY_STUDY_INK_DEBUG === '1') {
-    api.post('/debug/ink', express.text({ type: () => true, limit: '256kb' }), (req, res) => {
+    api.post('/debug/ink', express.text({ type: () => true, limit: '2mb' }), (req, res) => {
       const body: unknown = req.body;
       if (typeof body === 'string') {
-        for (const line of body.split('\n').slice(0, 500)) console.log(`[ink] ${line.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 240)}`);
+        // A stroke's raw samples ("raw …") are long; everything else is a short line.
+        for (const line of body.split('\n').slice(0, 500)) console.log(`[ink] ${line.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, line.startsWith('raw ') ? 60_000 : 240)}`);
       }
       res.status(204).end();
     });

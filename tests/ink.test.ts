@@ -65,7 +65,7 @@ describe('ink points', () => {
     assert.deepEqual(simple[1], straight[199]);
     const arc = Array.from({ length: 300 }, (_, i) => ({ x: 0.5 + 0.2 * Math.cos(i / 47), y: 0.5 + 0.2 * Math.sin(i / 47), p: 0.5 }));
     const kept = simplifyInk(arc, ASPECT);
-    assert.ok(kept.length > 10 && kept.length < 150, String(kept.length));
+    assert.ok(kept.length > 10 && kept.length < 250, String(kept.length));
   });
 
   test('a long stroke is split into pieces of at most MAX_INK_POINTS that join', () => {
@@ -109,8 +109,17 @@ describe('ink outline and hit testing', () => {
     assert.ok(Math.abs(r - (0.009 * 900 * 1.216) / 2) < 0.2, String(r));
   });
 
+  test('samples far apart (a fast stroke) are joined by a curve, not by straight lines', () => {
+    // A right angle through three points 300 px apart: the curve leaves the corner (it bends from midpoint to midpoint).
+    const d = inkOutline([{ x: 0.2, y: 0.2, p: 0.5 }, { x: 0.5, y: 0.2, p: 0.5 }, { x: 0.5, y: 0.5, p: 0.5 }], 0.005, 1000, 1000);
+    const points = [...d.matchAll(/[MLQ](?:[\d.\-]+ [\d.\-]+ )?([\d.\-]+) ([\d.\-]+)/g)].map((m) => [Number(m[1]), Number(m[2])]);
+    const nearest = Math.min(...points.map(([x, y]) => Math.hypot(x - 500, y - 200)));
+    assert.ok(nearest > 30, String(nearest));
+  });
+
   test('a sharp turn gets a round tip (a disc wound like the ribbon); a gentle curve does not', () => {
-    const v = [...line(20, [0.3, 0.2], [0.35, 0.5], 0.6), ...line(20, [0.35, 0.5], [0.4, 0.2], 0.6).slice(1)];
+    // Samples close together at the tip (a pen that slowed down and turned back): the curve keeps the turn sharp.
+    const v = [...line(250, [0.3, 0.2], [0.35, 0.5], 0.6), ...line(250, [0.35, 0.5], [0.4, 0.2], 0.6).slice(1)];
     const subpaths = (d: string) => d.split('M').length - 1;
     assert.equal(subpaths(inkOutline(v, 0.009, 1600, 900)), 2);
     assert.equal(subpaths(inkOutline(line(30, [0.1, 0.5], [0.5, 0.52], 0.6), 0.009, 1600, 900)), 1);

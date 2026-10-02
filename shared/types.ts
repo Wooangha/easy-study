@@ -1013,7 +1013,7 @@ export interface InkItem extends AnnotationBase {
   pts: string;
 }
 /** Pen widths offered in the UI (가늘게 · 보통 · 굵게), fractions of the image height. */
-export const INK_WIDTHS: readonly number[] = [0.003, 0.005, 0.009];
+export const INK_WIDTHS: readonly number[] = [0.002, 0.0032, 0.0055];
 export const MIN_INK_WIDTH = 0.001;
 export const MAX_INK_WIDTH = 0.05;
 /** Points of one stroke, after simplification (a longer stroke is stored as several). */

@@ -2684,16 +2684,18 @@ applies to strokes like to other 필기.
   4 decimals). `pts` = the points relative to `rect`, 5 base64url characters each: x, y as 12 bits (0..4095 of the
   rect), pressure as 6 bits (32 = no pressure: mouse, finger). Moving or resizing a stroke is an `update` of `rect`
   (the points scale with it); `pts` is never patched. `width` = the nominal width as a fraction of the image height
-  (INK_WIDTHS 0.003 · 0.005 · 0.009 in the UI = 가늘게 · 보통 · 굵게; the server accepts MIN_INK_WIDTH … MAX_INK_WIDTH);
+  (INK_WIDTHS 0.002 · 0.0032 · 0.0055 in the UI = 가늘게 · 보통 · 굵게 — pen lines, not markers: handwriting on a slide is
+  small; the server accepts MIN_INK_WIDTH … MAX_INK_WIDTH);
   the drawn half width is width / 2 × (0.7 + 0.6 × pressure) — a gentle range: handwriting presses anywhere from 0.1 to
   0.7 and a wider one looks blotchy.
 - Limits: ≤ MAX_INK_POINTS 2000 points per stroke (a longer one is stored as several, inkPieces), ≤ MAX_INK_STROKES 3000
   strokes per slide counted apart from the other items (MAX_ANNOTATION_ITEMS 200 now counts the rest),
-  MAX_SLIDE_ANNOTATION_BYTES raised to 1 MiB. A stroke after simplification (RDP, 0.25 px of a 1000 px tall image, the
+  MAX_SLIDE_ANNOTATION_BYTES raised to 1 MiB. A stroke after simplification (RDP, 0.08 px of a 1000 px tall image — only points on a straight run go —, the
   pressure as a third axis) is typically 20–150 points ≈ 0.3–1 KB stored.
 - shared/ink.ts (no dependency; used by the web and the image worker): encode / decode, inkRect, simplifyInk, inkPieces,
-  inkOutline (the filled ribbon as an SVG path in px of a w × h box: filled in every 2 px, smoothed once, drawn through
-  midpoints, round ends; a tap — every sample inside the widest disc — is one dot of the widest size; a turn sharper than
+  inkOutline (the filled ribbon as an SVG path in px of a w × h box along the stroke's curve — from midpoint to midpoint of
+  its points, bending at each point: the curve the live canvas draws, so nothing changes when the pen lifts; smooth
+  where the pen was fast, tight where it slowed for a corner —, round ends; a tap — every sample inside the widest disc — is one dot of the widest size; a turn sharper than
   ~100° gets a disc at its tip, wound like the ribbon so the nonzero fill keeps it), inkDistance, inkTouches (an eraser segment against a stroke).
 
 ### Server
@@ -2712,7 +2714,9 @@ inkOutline with sharp), so the tutor sees what the student wrote (see the review
   and pinch-zooms) unless 손가락으로도 쓰기 (`fingerInk`, per device, in the pen popover) is on. A stylus's eraser end or
   barrel button (buttons & 32 / & 2) erases.
 - Live stroke (components/annotations/liveInk.ts): samples from getCoalescedEvents() (fallback: the event), pressure only
-  from a pen with pressure > 0, eased from sample to sample (raw pressure flickers); drawn imperatively inside the pointer
+  from a pen with pressure > 0, eased from sample to sample (raw pressure flickers); each stored point is its sample eased
+  0.6 of the way from the point before (a steadier hand; the tail still reaches the pen, the release adds the pen's last
+  place); drawn imperatively inside the pointer
   event — no React state per point, no frame of delay — on two canvases over the visible part of the image (a zoomed
   slide is far bigger than the screen; ≤ 6 M backing pixels each): `ink` gets every finished piece once (a curve through
   the samples' midpoints, as wide as the pen pressed: the cost of a frame does not grow with the stroke), `tail` the last

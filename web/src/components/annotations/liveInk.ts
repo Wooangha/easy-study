@@ -1,7 +1,9 @@
 // The stroke being written with 펜 (DESIGN §29), drawn imperatively — no React state per point — on two canvases over
 // the visible part of the slide image:
 // - `ink`: every finished piece of the stroke, drawn once as its samples arrive (the cost of a frame does not grow with
-//   the stroke): a smooth curve through the midpoints of the samples, each piece as wide as the pen pressed there.
+//   the stroke): a smooth curve through the midpoints of the points (shared/ink.ts inkCurve draws the stored stroke the
+//   same way: nothing changes when the pen lifts), each piece as wide as the pen pressed there. The points are the
+//   pen's samples steadied a little (each eased towards its sample from the point before): a calmer line.
 // - `tail`: the last half piece up to the pen and the browser's predicted samples (getPredictedEvents: where the pen
 //   will be when the frame shows), cleared and drawn again with every event — the line stays under the pen's tip.
 // Drawn inside the pointer event (events arrive once per frame), not a frame later. On release the viewer turns
@@ -9,6 +11,7 @@
 import { inkPressureScale, type InkPoint } from '../../../../shared/ink.ts';
 import type { AnnotationColor } from '../../../../shared/types.ts';
 import { inkPressure, inkSamples } from '../../lib/annotations/ink.ts';
+import { inkDebug } from '../../lib/inkDebug.ts';
 import { framePixels, toImagePoint, type Frame } from '../../lib/attachments.ts';
 
 /** What a sample needs of a PointerEvent. */
@@ -24,6 +27,17 @@ const MAX_CANVAS_PIXELS = 6_000_000;
 const PRESSURE_FOLLOW = 0.5;
 /** Predicted samples drawn at most (a longer prediction overshoots at turns). */
 const MAX_PREDICTED = 3;
+/**
+ * How far a stored point follows the pen's sample from the stored point before it (1 = the sample itself): a steadier
+ * hand. The tail is drawn to where the pen really is, so the line does not lag; the release adds the pen's last place.
+ */
+const STEADY = 0.6;
+
+/** The stored point for a sample: eased towards it from the stored point before it (the first as it is). */
+export function steadied(previous: { x: number; y: number } | null, sample: { x: number; y: number }): { x: number; y: number } {
+  if (!previous) return { x: sample.x, y: sample.y };
+  return { x: previous.x + (sample.x - previous.x) * STEADY, y: previous.y + (sample.y - previous.y) * STEADY };
+}
 
 /** The pressure a stroke stores for a raw sample: eased towards it from the previous sample's (the first as it is). */
 export function easedPressure(previous: number | null, raw: number): number {
@@ -43,6 +57,11 @@ export class LiveInk {
   /** Pieces of the curve on the `ink` canvas so far (piece i is centred on point i). */
   private pieces = 0;
   private pressure: number | null = null;
+  /** Where the pen really is (the points are steadied: they trail it a little), on the image. */
+  private pen: { x: number; y: number } | null = null;
+  /** The samples as they came — x, y in tenths of a px of the image, pressure in hundredths, ms since the first — for the debug log. */
+  private readonly raw: number[] = [];
+  private readonly began = performance.now();
 
   constructor(
     private readonly box: HTMLElement,
@@ -110,10 +129,17 @@ export class LiveInk {
     const samples = inkSamples(event);
     for (const s of samples) {
       const at = toImagePoint(s.clientX, s.clientY, rect, this.frame);
+      if (inkDebug.on) this.raw.push(Math.round(at.x * this.w * 10), Math.round(at.y * this.h * 10), Math.round(s.pressure * 100), Math.round(performance.now() - this.began));
       this.pressure = easedPressure(this.pressure, inkPressure(this.pointerType, s.pressure));
       const last = this.points[this.points.length - 1];
-      if (last && last.x === at.x && last.y === at.y) last.p = Math.max(last.p, this.pressure);
-      else this.points.push({ x: at.x, y: at.y, p: this.pressure });
+      if (this.pen && this.pen.x === at.x && this.pen.y === at.y) {
+        // The pen rests: only its pressure counts.
+        if (last) last.p = Math.max(last.p, this.pressure);
+        continue;
+      }
+      this.pen = at;
+      const next = steadied(last ?? null, at);
+      this.points.push({ x: next.x, y: next.y, p: this.pressure });
     }
     this.commit();
     const predicted = typeof event.getPredictedEvents === 'function' ? event.getPredictedEvents().slice(0, MAX_PREDICTED) : [];
@@ -121,10 +147,17 @@ export class LiveInk {
     return samples;
   }
 
-  /** The pen left: the tail without a prediction (the canvases stay until remove()). */
+  /**
+   * The pen left: the stroke ends where the pen was (the steadied points trail it), and the tail is drawn without a
+   * prediction (the canvases stay until remove()).
+   */
   end(): void {
+    const last = this.points[this.points.length - 1];
+    if (last && this.pen && (last.x !== this.pen.x || last.y !== this.pen.y)) this.points.push({ x: this.pen.x, y: this.pen.y, p: last.p });
+    this.pen = null;
     this.commit();
     this.drawTail([]);
+    if (inkDebug.on && this.raw.length > 0) inkDebug.raw(`raw ${Math.round(this.w)}x${Math.round(this.h)} w${this.width} ${this.pointerType} ${this.raw.join(',')}`);
   }
 
   remove(): void {
@@ -186,6 +219,8 @@ export class LiveInk {
     else ctx.moveTo((this.x(last - 1) + this.x(last)) / 2, (this.y(last - 1) + this.y(last)) / 2);
     // A lone point is a dot: a zero-length line with round caps.
     ctx.lineTo(this.x(last), this.y(last));
+    // On to where the pen really is (the points trail it), then where it is predicted to go.
+    if (this.pen) ctx.lineTo(this.pen.x * this.w, this.pen.y * this.h);
     for (const p of predicted) ctx.lineTo(p.x * this.w, p.y * this.h);
     ctx.stroke();
   }

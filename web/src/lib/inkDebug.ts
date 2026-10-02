@@ -238,6 +238,11 @@ class InkDebugPanel {
     this.render();
   }
 
+  /** For the server's log only (a stroke's raw samples): not shown in the panel. */
+  raw(text: string): void {
+    if (this.on && this.outbox.length < SHIP_MAX_LINES) this.outbox.push(text);
+  }
+
   /** A move: counted in the status line (moves would push everything else out of the panel). */
   move(key: string, _coalesced = 0, _predicted = 0): void {
     if (!this.on) return;

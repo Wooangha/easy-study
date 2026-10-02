@@ -114,9 +114,10 @@ export function inkRect(points: readonly InkPoint[], width: number, aspect: numb
 
 /**
  * Drops points the stroke does not need (Ramer–Douglas–Peucker in px of a box INK_SIMPLIFY_HEIGHT tall, the pressure
- * counted as a third axis), keeping the ends. `tolerance` in px.
+ * counted as a third axis), keeping the ends. `tolerance` in px: tiny, so only points on a straight run go — the
+ * stroke is drawn as a curve through its points (inkCurve), and that curve must stay the one the pen drew.
  */
-export function simplifyInk(points: readonly InkPoint[], aspect: number, tolerance = 0.25): InkPoint[] {
+export function simplifyInk(points: readonly InkPoint[], aspect: number, tolerance = 0.08): InkPoint[] {
   if (points.length <= 2) return points.slice();
   const h = INK_SIMPLIFY_HEIGHT;
   const w = h * (aspect > 0 ? aspect : 1);
@@ -172,45 +173,81 @@ export function inkPieces(points: readonly InkPoint[], width: number, aspect: nu
 }
 
 const fmt = (v: number) => (Math.round(v * 10) / 10).toString();
-/** inkOutline fills in points so neighbours are at most this far apart (px). */
-const RESAMPLE_PX = 2;
+/** inkOutline samples the centre line so neighbours are at most this far apart (px). */
+const CURVE_STEP_PX = 2.5;
 
 /**
- * The filled outline of a stroke as an SVG path in a box of `w` × `h` px: a ribbon whose half width follows the
- * pressure (`width` = InkItem.width, a fraction of `h`), with round ends; a single point is a dot. The centre line is
- * filled in every 2 px, smoothed once and drawn through midpoints.
+ * The centre line of a stroke in px of a `w` × `h` box, with the half width at each sample: the curve the live canvas
+ * draws (components/annotations/liveInk.ts) — from the first point straight to the first midpoint, then from midpoint
+ * to midpoint bending at each point (a quadratic B-spline: smooth where the pen moved fast and the samples are far
+ * apart, tight where it slowed down for a corner), then straight to the last point — sampled every CURVE_STEP_PX.
  */
-export function inkOutline(points: readonly InkPoint[], width: number, w: number, h: number): string {
-  // To pixels, filled in so neighbours are at most RESAMPLE_PX apart (a stored stroke keeps only the corners of its
-  // straight runs: smoothing those few points would round a corner into a wide curve), without points closer than
-  // 0.25 px to the previous one.
+function inkCurve(points: readonly InkPoint[], width: number, w: number, h: number): { xs: number[]; ys: number[]; rs: number[]; peak: number } {
+  const base = (width * h) / 2;
+  // To pixels, without points closer than 0.25 px to the previous one.
+  const px: number[] = [];
+  const py: number[] = [];
+  const pr: number[] = [];
+  for (const pt of points) {
+    const x = pt.x * w;
+    const y = pt.y * h;
+    const r = Math.max(0.3, base * inkPressureScale(pt.p));
+    const n = px.length;
+    if (n > 0 && Math.hypot(x - px[n - 1], y - py[n - 1]) < 0.25) {
+      pr[n - 1] = Math.max(pr[n - 1], r);
+      continue;
+    }
+    px.push(x);
+    py.push(y);
+    pr.push(r);
+  }
   const xs: number[] = [];
   const ys: number[] = [];
   const rs: number[] = [];
-  const base = (width * h) / 2;
-  const push = (x: number, y: number, p: number) => {
-    const n = xs.length;
-    if (n > 0 && Math.hypot(x - xs[n - 1], y - ys[n - 1]) < 0.25) return;
-    xs.push(x);
-    ys.push(y);
-    rs.push(Math.max(0.3, base * inkPressureScale(p)));
-  };
-  for (let i = 0; i < points.length; i++) {
-    const pt = points[i];
-    const x = pt.x * w;
-    const y = pt.y * h;
-    if (i > 0) {
-      const prev = points[i - 1];
-      const px = prev.x * w;
-      const py = prev.y * h;
-      const steps = Math.min(200, Math.floor(Math.hypot(x - px, y - py) / RESAMPLE_PX));
-      for (let k = 1; k < steps; k++) {
-        const t = k / steps;
-        push(px + (x - px) * t, py + (y - py) * t, prev.p + (pt.p - prev.p) * t);
-      }
+  const n = px.length;
+  // The widest the pen pressed (the curve's own half widths are blended between the points).
+  const peak = pr.reduce((max, r) => Math.max(max, r), 0);
+  if (n === 0) return { xs, ys, rs, peak };
+  xs.push(px[0]);
+  ys.push(py[0]);
+  rs.push(pr[0]);
+  if (n === 1) return { xs, ys, rs, peak };
+  const line = (x0: number, y0: number, r0: number, x1: number, y1: number, r1: number) => {
+    const steps = Math.min(400, Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / CURVE_STEP_PX)));
+    for (let k = 1; k <= steps; k++) {
+      const t = k / steps;
+      xs.push(x0 + (x1 - x0) * t);
+      ys.push(y0 + (y1 - y0) * t);
+      rs.push(r0 + (r1 - r0) * t);
     }
-    push(x, y, pt.p);
+  };
+  const mid = (i: number) => [(px[i] + px[i + 1]) / 2, (py[i] + py[i + 1]) / 2, (pr[i] + pr[i + 1]) / 2] as const;
+  let [mx, my, mr] = mid(0);
+  line(px[0], py[0], pr[0], mx, my, mr);
+  for (let i = 1; i <= n - 2; i++) {
+    const [nx, ny, nr] = mid(i);
+    const steps = Math.min(400, Math.max(1, Math.ceil((Math.hypot(px[i] - mx, py[i] - my) + Math.hypot(nx - px[i], ny - py[i])) / CURVE_STEP_PX)));
+    for (let k = 1; k <= steps; k++) {
+      const t = k / steps;
+      const a = (1 - t) * (1 - t);
+      const b = 2 * t * (1 - t);
+      const c = t * t;
+      xs.push(a * mx + b * px[i] + c * nx);
+      ys.push(a * my + b * py[i] + c * ny);
+      rs.push(a * mr + b * pr[i] + c * nr);
+    }
+    [mx, my, mr] = [nx, ny, nr];
   }
+  line(mx, my, mr, px[n - 1], py[n - 1], pr[n - 1]);
+  return { xs, ys, rs, peak };
+}
+
+/**
+ * The filled outline of a stroke as an SVG path in a box of `w` × `h` px: a ribbon along the stroke's curve (inkCurve)
+ * whose half width follows the pressure (`width` = InkItem.width, a fraction of `h`), with round ends; a tap is a dot.
+ */
+export function inkOutline(points: readonly InkPoint[], width: number, w: number, h: number): string {
+  const { xs, ys, rs, peak } = inkCurve(points, width, w, h);
   const n = xs.length;
   if (n === 0) return '';
   // A tap (the whole stroke inside its widest disc: a few samples while the pressure ramps up) is a dot of the widest
@@ -221,19 +258,7 @@ export function inkOutline(points: readonly InkPoint[], width: number, w: number
     if (rs[i] > rs[widest]) widest = i;
     spread = Math.max(spread, Math.hypot(xs[i] - xs[0], ys[i] - ys[0]));
   }
-  if (n === 1 || spread <= rs[widest]) return circle(xs[widest], ys[widest], rs[widest], false);
-  // One smoothing pass of the interior points (the ends stay where the pen was): jitter goes, corners stay sharp
-  // within a few px.
-  if (n >= 3) {
-    const sx = xs.slice();
-    const sy = ys.slice();
-    const sr = rs.slice();
-    for (let i = 1; i < n - 1; i++) {
-      xs[i] = (sx[i - 1] + 2 * sx[i] + sx[i + 1]) / 4;
-      ys[i] = (sy[i - 1] + 2 * sy[i] + sy[i + 1]) / 4;
-      rs[i] = (sr[i - 1] + 2 * sr[i] + sr[i + 1]) / 4;
-    }
-  }
+  if (n === 1 || spread <= peak) return circle(xs[widest], ys[widest], peak, false);
   const lx: number[] = [];
   const ly: number[] = [];
   const rx: number[] = [];
@@ -299,7 +324,7 @@ function circle(x: number, y: number, r: number, clockwise: boolean): string {
   return `M${fmt(x - r)} ${fmt(y)}a${fmt(r)} ${fmt(r)} 0 1 ${sweep} ${fmt(2 * r)} 0a${fmt(r)} ${fmt(r)} 0 1 ${sweep} ${fmt(-2 * r)} 0Z`;
 }
 
-/** Points of a centre line (every ~2 px) where it turns by more than ~100° within ±3 points: the sharpest of each turn. */
+/** Points of a centre line (every ~2.5 px) where it turns by more than ~100° within ±3 points: the sharpest of each turn. */
 function sharpTurns(xs: readonly number[], ys: readonly number[]): number[] {
   const k = 3;
   const n = xs.length;

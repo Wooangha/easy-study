@@ -164,11 +164,11 @@ describe('a sample of a pointer event', () => {
 });
 
 describe('hit testing a stroke', () => {
-  const slop = slopFor(SIZE, false); // 4 px; the stroke's widest half width is 0.005 × 900 × 1.5 / 2 ≈ 3.4 px
+  const slop = slopFor(SIZE, false); // 4 px; the stroke's widest half width is 0.0032 × 900 × 1.3 / 2 ≈ 1.9 px
 
   test('near its centre line (slack + half width), never in the rest of its box', () => {
     assert.equal(itemHit(LINE, { x: 0.4, y: 0.5 }, slop), true);
-    assert.equal(itemHit(LINE, { x: 0.4, y: 0.5 + 6 / 900 }, slop), true);
+    assert.equal(itemHit(LINE, { x: 0.4, y: 0.5 + 5 / 900 }, slop), true);
     assert.equal(itemHit(LINE, { x: 0.4, y: 0.5 + 10 / 900 }, slop), false);
     assert.equal(itemHit(DIAGONAL, { x: 0.4, y: 0.4 }, slop), true);
     assert.equal(itemHit(DIAGONAL, { x: 0.55, y: 0.25 }, slop), false, 'inside its bounding box, far from the line');
@@ -202,7 +202,7 @@ describe('지우개: the strokes a move touches', () => {
   });
 
   test('a tap within the eraser radius (8 px) plus the half width', () => {
-    assert.deepEqual(eraserHits([LINE], { x: 0.4, y: 0.5 + 10 / 900 }, { x: 0.4, y: 0.5 + 10 / 900 }, box), [LINE.id]);
+    assert.deepEqual(eraserHits([LINE], { x: 0.4, y: 0.5 + 9 / 900 }, { x: 0.4, y: 0.5 + 9 / 900 }, box), [LINE.id]);
     assert.deepEqual(eraserHits([LINE], { x: 0.4, y: 0.5 + 14 / 900 }, { x: 0.4, y: 0.5 + 14 / 900 }, box), []);
   });
 
