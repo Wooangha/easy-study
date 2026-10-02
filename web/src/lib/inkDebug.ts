@@ -71,9 +71,14 @@ export class InkDebugLines {
     return this.pending !== null && now - this.pending.since >= INK_DEBUG_MOVE_MS;
   }
 
-  private push(text: string, now: number): void {
+  /** `text` stamped like a line (the seconds since the overlay was opened), without adding it. */
+  stamped(text: string, now: number): string {
     const seconds = Math.max(0, (now - this.t0) / 1000) % 1000;
-    this.lines.push(`${seconds.toFixed(1).padStart(5)} ${text}`);
+    return `${seconds.toFixed(1).padStart(5)} ${text}`;
+  }
+
+  private push(text: string, now: number): void {
+    this.lines.push(this.stamped(text, now));
     if (this.lines.length > INK_DEBUG_LINES) this.lines.splice(0, this.lines.length - INK_DEBUG_LINES);
   }
 }
@@ -82,6 +87,11 @@ const ms = (value: number): string => `${value < 10 ? value.toFixed(1) : Math.ro
 
 /** While nothing moves, an "idle" line this often (ms). */
 const IDLE_LINE_MS = 5000;
+/** Two pen hover moves this far apart (ms) with no press between them: a "hover gap" (a lost contact, or the pen out of range). */
+const HOVER_GAP_MS = 100;
+/** This many hover gaps within HOVER_GAPS_WINDOW_MS since the last press: the dead period's signature ("AUTO"). */
+const HOVER_GAPS_AUTO = 3;
+const HOVER_GAPS_WINDOW_MS = 5000;
 const MARK_LABEL = '방금 먹통이었음';
 
 /** How many log lines are kept for the server (when it listens: EASY_STUDY_INK_DEBUG=1) between two sends. */
@@ -96,7 +106,10 @@ const SHIP_MAX_LINES = 400;
  * gesture events, focus and visibility changes, selection, context menu, drag): what the viewer never saw is there.
  * With a server started with EASY_STUDY_INK_DEBUG=1 the lines are also sent to it once a second (its log shows them).
  * Above the panel a button, "방금 먹통이었음", that writes a MARK line: pressed after a dead period, it tells the period
- * from a pause.
+ * from a pause. The dead periods seen so far: pen hover arrives, pen contact does not. So presses and hover starts /
+ * ends carry their place, a hover move long after the last one with no press between them is a "hover gap" line (the
+ * server's log only), three of those in a row an "AUTO" line, and a "geo" line (window, viewer, scroll, panes, the text
+ * fields that show) is written at the start, on a resize and with MARK / AUTO.
  */
 class InkDebugPanel {
   /** Whether the overlay is shown: callers guard what is costly to format with it. */
@@ -129,6 +142,7 @@ class InkDebugPanel {
     mark.textContent = MARK_LABEL;
     let markTimer = 0;
     mark.addEventListener('click', () => {
+      geo();
       this.log('MARK: the input was dead just now');
       mark.textContent = '기록됨 ✓';
       window.clearTimeout(markTimer);
@@ -177,41 +191,113 @@ class InkDebugPanel {
       target.addEventListener(type, handler, options);
       listeners.push([target, type, handler]);
     };
+    const at = (x: number, y: number) => `${Math.round(x)},${Math.round(y)}`;
+    const box = (r: DOMRect) => `${Math.round(r.left)},${Math.round(r.top)},${Math.round(r.width)},${Math.round(r.height)}`;
+    // Where things are: the window, the scroller of the slides, the panes, every text field that shows (what Scribble
+    // could write into) — a press or a hover gap is placed against them.
+    const geo = () => {
+      const scroller = host.querySelector('.viewer-scroll');
+      const split = document.querySelector('.split');
+      const vv = window.visualViewport;
+      const fields = Array.from(document.querySelectorAll<HTMLElement>('textarea, input:not([type=hidden]), [contenteditable]:not([contenteditable=false])'))
+        .filter((field) => field.getClientRects().length > 0 && getComputedStyle(field).visibility !== 'hidden')
+        .map((field) => `${name(field)} ${box(field.getBoundingClientRect())}`);
+      this.log(
+        `geo win ${window.innerWidth}x${window.innerHeight}${vv && vv.scale !== 1 ? ` zoom ${vv.scale.toFixed(2)}` : ''} · viewer ${box(host.getBoundingClientRect())}` +
+          `${scroller ? ` scroll ${at(scroller.scrollLeft, scroller.scrollTop)}` : ''} · split ${split ? split.className.replace(/^split ?/, '') || 'row' : '?'} · fields: ${fields.join(' | ') || 'none'}`,
+      );
+    };
     let hovering = false;
     let hoverAt = 0;
+    let hoverX = 0;
+    let hoverY = 0;
+    // Hover gaps since the last pen press: their times (ms), and whether the AUTO line was written for them.
+    let gaps: number[] = [];
+    let gapsFlagged = false;
+    let lastId = 0;
     for (const type of ['pointerdown', 'pointerup', 'pointercancel', 'gotpointercapture', 'lostpointercapture']) {
       listen(window, type, (e) => {
         const p = e as PointerEvent;
-        if (p.pointerType === 'pen' && (type === 'pointerdown' || type === 'pointerup' || type === 'pointercancel')) this.penDown = type === 'pointerdown';
-        this.log(`w:${type.replace('pointer', 'p-')} ${p.pointerType} id${p.pointerId} prim${p.isPrimary ? 1 : 0} btn${p.buttons} p${p.pressure.toFixed(2)} @${name(p.target)}`);
+        const pen = p.pointerType === 'pen';
+        if (pen && (type === 'pointerdown' || type === 'pointerup' || type === 'pointercancel')) this.penDown = type === 'pointerdown';
+        let more = '';
+        if (type === 'pointerdown') {
+          more = ` ${at(p.clientX, p.clientY)}`;
+          // Ids count up by one per pointer: a jump is a pointer the page never saw.
+          if (lastId && p.pointerId !== lastId + 1 && p.pointerType !== 'mouse') more += ` (id +${p.pointerId - lastId})`;
+          lastId = p.pointerId;
+          if (pen) {
+            gaps = [];
+            gapsFlagged = false;
+            // The hover after this press is not measured against the hover before it.
+            hoverAt = 0;
+            // The slide's image under a pen press in pen mode is not a pointer target: what is this one?
+            if (p.target instanceof HTMLImageElement) more += ` pe=${getComputedStyle(p.target).pointerEvents} in ${name(p.target.parentElement)}`;
+          }
+        }
+        this.log(`w:${type.replace('pointer', 'p-')} ${p.pointerType} id${p.pointerId} prim${p.isPrimary ? 1 : 0} btn${p.buttons} p${p.pressure.toFixed(2)} @${name(p.target)}${more}`);
       });
     }
     listen(window, 'pointermove', (e) => {
       const p = e as PointerEvent;
       if (p.pointerType !== 'pen') return;
       if (p.buttons === 0) {
+        const now = performance.now();
         this.counts.hover += 1;
-        hoverAt = performance.now();
         if (!hovering) {
           hovering = true;
-          this.log('w:hover start');
+          this.log(`w:hover start ${at(p.clientX, p.clientY)} @${name(p.target)}`);
         }
-      } else this.counts.pm += 1;
+        // A hover move long after the one before it, with no press between them: the pen touched down and the page
+        // was not told, or it left the range and came back. For the server only (a resting pen makes many).
+        if (hoverAt > 0 && !this.penDown && now - hoverAt >= HOVER_GAP_MS) {
+          const jump = Math.round(Math.hypot(p.clientX - hoverX, p.clientY - hoverY));
+          this.raw(this.lines.stamped(`w:hover gap ${Math.round(now - hoverAt)}ms jump ${jump}px at ${at(p.clientX, p.clientY)} @${name(p.target)}`, now));
+          gaps = gaps.filter((t) => now - t < HOVER_GAPS_WINDOW_MS);
+          gaps.push(now);
+          if (gaps.length >= HOVER_GAPS_AUTO && !gapsFlagged) {
+            gapsFlagged = true;
+            geo();
+            this.log('AUTO: hover gaps without a press');
+          }
+        }
+        hoverAt = now;
+        hoverX = p.clientX;
+        hoverY = p.clientY;
+      } else {
+        this.counts.pm += 1;
+        // A stroke: the hover after it is not measured against the hover before it.
+        hoverAt = 0;
+      }
     });
     for (const type of ['touchstart', 'touchend', 'touchcancel']) {
       listen(window, type, (e) => {
         const t = e as TouchEvent;
         this.touches = t.touches.length;
-        const kinds = Array.from(t.changedTouches, (touch) => ((touch as Touch & { touchType?: string }).touchType === 'stylus' ? 'S' : 'F')).join('');
-        this.log(`w:${type.replace('touch', 't-')} ${kinds} → ${t.touches.length} down${t.cancelable ? '' : ' (uncancelable)'} @${name(t.target)}`);
+        const stylus = (touch: Touch) => (touch as Touch & { touchType?: string }).touchType === 'stylus';
+        const kinds = Array.from(t.changedTouches, (touch) => (stylus(touch) ? 'S' : 'F')).join('');
+        // Where a finger (a palm) landed and how large it is, wherever that is — the chat pane, the divider.
+        const fingers = type === 'touchstart' ? Array.from(t.changedTouches).filter((touch) => !stylus(touch)).map((touch) => ` r=${Math.round(Math.max(touch.radiusX, touch.radiusY))} ${at(touch.clientX, touch.clientY)}`).join('') : '';
+        this.log(`w:${type.replace('touch', 't-')} ${kinds} → ${t.touches.length} down${t.cancelable ? '' : ' (uncancelable)'}${fingers} @${name(t.target)}`);
       });
     }
     listen(window, 'touchmove', () => {
       this.counts.tm += 1;
     });
-    for (const type of ['mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu', 'dragstart', 'gesturestart', 'gestureend', 'focusin', 'focusout', 'blur', 'focus', 'pagehide', 'pageshow']) {
+    // beforeinput / input / composition: Scribble (handwriting to text) writing into a field.
+    for (const type of ['mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu', 'dragstart', 'gesturestart', 'gestureend', 'focusin', 'focusout', 'blur', 'focus', 'pagehide', 'pageshow', 'beforeinput', 'input', 'compositionstart', 'compositionend']) {
       listen(window, type, (e) => this.log(`w:${type} @${name(e.target)}`));
     }
+    // A scroll the browser runs itself (the viewer's own pan in pen mode scrolls too): one line per target now and then.
+    const scrolledAt = new Map<string, number>();
+    listen(document, 'scroll', (e) => {
+      const target = e.target === document ? 'document' : name(e.target);
+      const now = performance.now();
+      if (now - (scrolledAt.get(target) ?? -Infinity) < 500) return;
+      scrolledAt.set(target, now);
+      this.log(`w:scroll @${target}`);
+    });
+    listen(window, 'resize', geo);
     let selectionAt = 0;
     listen(document, 'selectionchange', () => {
       const now = performance.now();
@@ -225,7 +311,7 @@ class InkDebugPanel {
       const now = performance.now();
       if (hovering && now - hoverAt > 400) {
         hovering = false;
-        this.log('w:hover end');
+        this.log(`w:hover end ${at(hoverX, hoverY)}`);
       }
       const c = this.counts;
       const active = document.activeElement;
@@ -248,7 +334,9 @@ class InkDebugPanel {
     }, 250);
     const shipper = window.setInterval(() => this.send(), 1000);
 
-    this.log(`inkdebug on · touch points ${navigator.maxTouchPoints} · dpr ${window.devicePixelRatio} · ${navigator.userAgent.replace(/^.*?\(([^)]*)\).*?(Version\/[\d.]+)?.*$/, '$1 $2')}`);
+    const agent = navigator.userAgent;
+    this.log(`inkdebug on · touch points ${navigator.maxTouchPoints} · dpr ${window.devicePixelRatio} · ${/\(([^)]*)\)/.exec(agent)?.[1] ?? ''} ${/Version\/[\d.]+/.exec(agent)?.[0] ?? ''}`);
+    geo();
     return () => {
       cancelAnimationFrame(this.frame);
       window.clearInterval(tick);

@@ -2794,8 +2794,13 @@ with them, a short dash after a stroke vanished, dragging a region did nothing. 
   pen / touch moves per second, touches down, focus) and what arrives at the window (`w:` lines). For screen recordings
   from a device; a server started with EASY_STUDY_INK_DEBUG=1 also prints the lines in its log (POST /api/debug/ink,
   absent otherwise). While nothing moves an `idle` line every 5 s (fps, touches down, focus); a button above the panel,
-  "방금 먹통이었음", writes a `MARK` line — pressed after a dead period, it tells the period from a pause (nothing
-  arrives in either).
+  "방금 먹통이었음", writes a `MARK` line — pressed after a dead period, it tells the period from a pause. The marked
+  dead periods so far: pen hover moves arrive, pen contact does not (no pointerdown / touchstart, pointer ids stay
+  consecutive: WebKit's touch recognizer never saw the contact; cause not found — Scribble and a touch recognizer that
+  was not reset are the candidates). So presses and hover starts / ends carry their place, two hover moves ≥ 100 ms
+  apart with no press between them are a `w:hover gap` line (server log only), three of those an `AUTO` line, a `geo`
+  line (window, viewer, scroll, split, visible text fields) comes at the start, on resize and with MARK / AUTO, and
+  `beforeinput` / `input` / composition / `scroll` are logged.
 
 ### Tests
 
