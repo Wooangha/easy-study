@@ -80,13 +80,30 @@ export class InkDebugLines {
 
 const ms = (value: number): string => `${value < 10 ? value.toFixed(1) : Math.round(value)}ms`;
 
-/** The overlay itself: one per page, attached to the viewer while it is mounted. */
+/** How many log lines are kept for the server (when it listens: EASY_STUDY_INK_DEBUG=1) between two sends. */
+const SHIP_MAX_LINES = 400;
+
+/**
+ * The overlay itself: one per page, attached to the viewer while it is mounted. Above the event lines a status line
+ * that is rewritten in place four times a second — a clock (the page is alive), frames per second, how many pen hover
+ * moves, pen moves and touch moves arrived in the last second, the touches down, what has the focus — so a recording
+ * of a dead period shows whether anything at all reaches the page. Besides the viewer's own lines it logs what arrives
+ * at the window (every press, release and cancel of any pointer, touch starts and ends, mouse buttons, Safari's
+ * gesture events, focus and visibility changes, selection, context menu, drag): what the viewer never saw is there.
+ * With a server started with EASY_STUDY_INK_DEBUG=1 the lines are also sent to it once a second (its log shows them).
+ */
 class InkDebugPanel {
   /** Whether the overlay is shown: callers guard what is costly to format with it. */
   on = false;
   private el: HTMLElement | null = null;
   private lines = new InkDebugLines();
   private frame = 0;
+  private status = '';
+  private counts = { frames: 0, hover: 0, pm: 0, tm: 0 };
+  private touches = 0;
+  private penDown = false;
+  private outbox: string[] = [];
+  private ship = true;
 
   /**
    * Reads the switch (the URL, then sessionStorage) and, when it is on, shows the panel over `host` (the viewer) and
@@ -114,19 +131,98 @@ class InkDebugPanel {
       // A hidden page gets no frames: that is not a stall.
       if (now - last > INK_DEBUG_STALL_MS && document.visibilityState === 'visible') this.log(`stall ${Math.round(now - last)}ms`);
       last = now;
-      if (this.lines.due(now) && this.lines.flush()) this.render();
+      this.counts.frames += 1;
       if (++frames % 60 === 0) place();
       this.frame = requestAnimationFrame(beat);
     };
     const onVisible = () => {
       last = performance.now();
+      this.log(`visibility ${document.visibilityState}`);
     };
     this.frame = requestAnimationFrame(beat);
     document.addEventListener('visibilitychange', onVisible);
-    this.log(`inkdebug on · touch points ${navigator.maxTouchPoints} · dpr ${window.devicePixelRatio}`);
+
+    // What arrives at the window, whatever the viewer makes of it.
+    const name = (target: EventTarget | null) => {
+      const node = target instanceof Element ? target : null;
+      if (!node) return '?';
+      const cls = typeof node.className === 'string' ? node.className.split(' ')[0] : '';
+      return `${node.tagName.toLowerCase()}${cls ? `.${cls}` : ''}`;
+    };
+    const options = { capture: true, passive: true } as const;
+    const listeners: [EventTarget, string, EventListener][] = [];
+    const listen = (target: EventTarget, type: string, handler: (e: Event) => void) => {
+      target.addEventListener(type, handler, options);
+      listeners.push([target, type, handler]);
+    };
+    let hovering = false;
+    let hoverAt = 0;
+    for (const type of ['pointerdown', 'pointerup', 'pointercancel', 'gotpointercapture', 'lostpointercapture']) {
+      listen(window, type, (e) => {
+        const p = e as PointerEvent;
+        if (p.pointerType === 'pen' && (type === 'pointerdown' || type === 'pointerup' || type === 'pointercancel')) this.penDown = type === 'pointerdown';
+        this.log(`w:${type.replace('pointer', 'p-')} ${p.pointerType} id${p.pointerId} prim${p.isPrimary ? 1 : 0} btn${p.buttons} p${p.pressure.toFixed(2)} @${name(p.target)}`);
+      });
+    }
+    listen(window, 'pointermove', (e) => {
+      const p = e as PointerEvent;
+      if (p.pointerType !== 'pen') return;
+      if (p.buttons === 0) {
+        this.counts.hover += 1;
+        hoverAt = performance.now();
+        if (!hovering) {
+          hovering = true;
+          this.log('w:hover start');
+        }
+      } else this.counts.pm += 1;
+    });
+    for (const type of ['touchstart', 'touchend', 'touchcancel']) {
+      listen(window, type, (e) => {
+        const t = e as TouchEvent;
+        this.touches = t.touches.length;
+        const kinds = Array.from(t.changedTouches, (touch) => ((touch as Touch & { touchType?: string }).touchType === 'stylus' ? 'S' : 'F')).join('');
+        this.log(`w:${type.replace('touch', 't-')} ${kinds} → ${t.touches.length} down${t.cancelable ? '' : ' (uncancelable)'} @${name(t.target)}`);
+      });
+    }
+    listen(window, 'touchmove', () => {
+      this.counts.tm += 1;
+    });
+    for (const type of ['mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu', 'dragstart', 'gesturestart', 'gestureend', 'focusin', 'focusout', 'blur', 'focus', 'pagehide', 'pageshow']) {
+      listen(window, type, (e) => this.log(`w:${type} @${name(e.target)}`));
+    }
+    let selectionAt = 0;
+    listen(document, 'selectionchange', () => {
+      const now = performance.now();
+      if (now - selectionAt < 500) return;
+      selectionAt = now;
+      this.log(`w:selectionchange "${String(document.getSelection() ?? '').slice(0, 12)}"`);
+    });
+
+    const tick = window.setInterval(() => {
+      const now = performance.now();
+      if (hovering && now - hoverAt > 400) {
+        hovering = false;
+        this.log('w:hover end');
+      }
+      const c = this.counts;
+      const active = document.activeElement;
+      this.status =
+        `alive ${new Date().toTimeString().slice(3, 8)} · ${c.frames * 4}fps · hover ${c.hover * 4}/s · pen ${c.pm * 4}/s · touch ${c.tm * 4}/s · ` +
+        `${this.touches} down${this.penDown ? ' · PEN DOWN' : ''}${hovering ? ' · hovering' : ''} · focus ${name(active)}`;
+      // A second's summary for the server, only when something moved.
+      if ((c.hover || c.pm || c.tm) && this.outbox.length < SHIP_MAX_LINES) this.outbox.push(`      ~ hover ${c.hover} pen ${c.pm} touch ${c.tm} frames ${c.frames} (250ms)`);
+      this.counts = { frames: 0, hover: 0, pm: 0, tm: 0 };
+      this.render();
+    }, 250);
+    const shipper = window.setInterval(() => this.send(), 1000);
+
+    this.log(`inkdebug on · touch points ${navigator.maxTouchPoints} · dpr ${window.devicePixelRatio} · ${navigator.userAgent.replace(/^.*?\(([^)]*)\).*?(Version\/[\d.]+)?.*$/, '$1 $2')}`);
     return () => {
       cancelAnimationFrame(this.frame);
+      window.clearInterval(tick);
+      window.clearInterval(shipper);
       document.removeEventListener('visibilitychange', onVisible);
+      for (const [target, type, handler] of listeners) target.removeEventListener(type, handler, options);
       el.remove();
       if (this.el === el) {
         this.el = null;
@@ -138,12 +234,14 @@ class InkDebugPanel {
   log(text: string): void {
     if (!this.on) return;
     this.lines.add(text, performance.now());
+    if (this.outbox.length < SHIP_MAX_LINES) this.outbox.push(this.lines.lines[this.lines.lines.length - 1]);
     this.render();
   }
 
-  /** A move (throttled: one line per INK_DEBUG_MOVE_MS with the count). */
-  move(key: string, coalesced = 0, predicted = 0): void {
-    if (this.on && this.lines.move(key, performance.now(), coalesced, predicted)) this.render();
+  /** A move: counted in the status line (moves would push everything else out of the panel). */
+  move(key: string, _coalesced = 0, _predicted = 0): void {
+    if (!this.on) return;
+    if (key === 'hover while down') this.log(key);
   }
 
   /** How long something took on the main thread, since `since` (performance.now()): "commit 12ms". */
@@ -152,7 +250,20 @@ class InkDebugPanel {
   }
 
   private render(): void {
-    if (this.el) this.el.textContent = this.lines.lines.join('\n');
+    if (this.el) this.el.textContent = `${this.status}\n${this.lines.lines.join('\n')}`;
+  }
+
+  /** Sends the lines since the last send to the server (it shows them only when started for it; a 404 ends the sending). */
+  private send(): void {
+    if (!this.ship || this.outbox.length === 0) return;
+    const body = this.outbox.join('\n');
+    this.outbox = [];
+    fetch('/api/debug/ink', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body, keepalive: true }).then(
+      (res) => {
+        if (res.status === 404) this.ship = false;
+      },
+      () => {},
+    );
   }
 
   private enabled(): boolean {

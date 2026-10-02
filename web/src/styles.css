@@ -7040,7 +7040,7 @@ details[open] > summary::before {
   z-index: 90;
   margin: 0;
   padding: 4px 6px;
-  max-width: min(70vw, 440px);
+  max-width: min(92vw, 640px);
   overflow: hidden;
   border-radius: 6px;
   background: rgb(15 18 25 / 0.78);
