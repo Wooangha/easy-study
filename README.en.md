@@ -43,7 +43,10 @@ To write on a slide, pick the **Pen** tool: an Apple Pencil (iPad Safari or the 
 S Pen or the mouse writes, also over other annotations, while fingers keep scrolling and zooming (a resting palm writes
 nothing; on a phone without a stylus, turn on **Write with fingers too**). The width follows the pen pressure; the inks
 are black, blue, red and green in three widths. Strokes are selected, moved, resized, recolored and attached like other
-annotations, and the **Eraser** removes the strokes it passes over (a pen's eraser end or side button erases too).
+annotations, and the **Eraser** removes the strokes it passes over (a pen's eraser end or side button erases too). On a
+tablet, pinch to zoom the slides, drag the divider between slides and chat with a finger, and fold the chat pane with its
+**collapse** button. Known issue: on iPad Safari the pen very rarely stops for a few seconds — lift pen and hand fully for
+about two seconds and write again; turning off Settings › Apple Pencil › Scribble may help.
 
 LLMs: sign in to `claude` (Claude Code) or `codex` once in a terminal, or set `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`.
 
