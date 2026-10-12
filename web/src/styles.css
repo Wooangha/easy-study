@@ -6408,6 +6408,7 @@ details[open] > summary::before {
 
 /* The color of an item, as a token its parts read (highlight fill, shape stroke, memo tint, list bar). */
 .annot-shape.is-yellow,
+.annot-draft-shape.is-yellow,
 .annot-text.is-yellow,
 .memo-card.is-yellow,
 .memo-row.is-yellow {
@@ -6415,6 +6416,7 @@ details[open] > summary::before {
 }
 
 .annot-shape.is-green,
+.annot-draft-shape.is-green,
 .annot-text.is-green,
 .memo-card.is-green,
 .memo-row.is-green {
@@ -6422,6 +6424,7 @@ details[open] > summary::before {
 }
 
 .annot-shape.is-pink,
+.annot-draft-shape.is-pink,
 .annot-text.is-pink,
 .memo-card.is-pink,
 .memo-row.is-pink {
@@ -6429,6 +6432,7 @@ details[open] > summary::before {
 }
 
 .annot-shape.is-blue,
+.annot-draft-shape.is-blue,
 .annot-text.is-blue,
 .memo-card.is-blue,
 .memo-row.is-blue {
@@ -6864,8 +6868,10 @@ details[open] > summary::before {
   pointer-events: none;
 }
 
+/* A 형광펜 / 텍스트 형광 band being drawn: as it will be, in its color. */
 .annot-draft-shape.is-band {
-  fill: rgba(255, 210, 63, 0.45);
+  fill: var(--annot-color, var(--annot-yellow));
+  fill-opacity: 0.45;
   stroke: none;
   mix-blend-mode: multiply;
 }

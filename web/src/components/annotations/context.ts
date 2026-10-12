@@ -11,6 +11,8 @@ export interface LayerActions {
   toggleSelect: (slide: number, id: string) => void;
   /** Open (or close, null) a text box / memo for editing. */
   edit: (slide: number, id: string | null) => void;
+  /** Close this item's editing — only if it is still the one open (another may have been opened meanwhile). */
+  endEdit: (slide: number, id: string) => void;
   /** `undoable: false` for a follow-up write that is not a step of its own (a text box's height re-laid out). */
   update: (slide: number, id: string, patch: Patchable<AnnotationItem>, options?: { undoable?: boolean }) => void;
   /** The same patch on several items at once: one write, one undo step (the group menu's color). */

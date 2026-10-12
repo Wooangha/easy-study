@@ -51,6 +51,13 @@ interface Placed {
 /** The px box of an element relative to `origin`'s top-left. */
 const relative = (r: DOMRect, origin: DOMRect): PxRect => ({ left: r.left - origin.left, top: r.top - origin.top, right: r.right - origin.left, bottom: r.bottom - origin.top });
 
+/**
+ * The menu's look controls — the colors, a text box's size / font / bold (the popover of a narrow pane included):
+ * using them while a text box is being typed in does not end the typing (AnnotationLayer TextBox). Their buttons keep
+ * the focus in the text box; the size field and the font take it and the typing stays open meanwhile.
+ */
+export const TEXT_LOOK_CONTROLS = '.annot-item-menu .annot-color-dots, .annot-item-menu .annot-style, .annot-item-menu .annot-style-btn, .annot-style-pop';
+
 export function ItemMenu({ slide, items, questions }: ItemMenuProps) {
   const { actions, compact } = useLayerEnv();
   const firstRef = useRef<HTMLButtonElement>(null);
@@ -149,6 +156,14 @@ export function ItemMenu({ slide, items, questions }: ItemMenuProps) {
       role="toolbar"
       aria-label={many ? m.labelMany(slide, items.length) : m.label(slide)}
       onPointerDown={(e) => e.stopPropagation()}
+      onMouseDown={(e) => {
+        // A text box being typed in keeps the focus when a look button or the menu's bare background is pressed (a new
+        // box, still empty, would go away with it, and the press meant for its size would make a new box): the button
+        // acts, the typing goes on. 첨부 / 삭제 / × take it: the text is committed first.
+        const target = e.target instanceof Element ? e.target : null;
+        if (!target || !document.activeElement?.closest('.annot-text') || target.closest('input, select')) return;
+        if (target.closest(TEXT_LOOK_CONTROLS) || !target.closest('button, a')) e.preventDefault();
+      }}
     >
       {many && <span className="annot-menu-count">{m.count(items.length)}</span>}
       {palette.length > 0 && (

@@ -1861,7 +1861,8 @@ loaded or a tool is active):**
   `pointer-events: visibleStroke` in every state (0.6.2; 0.6.1 had it only under a drawing tool), so its transparent inside passes
   the pointer through to what is under it (the hit-test below counts only its ring) and only the stroke takes it.
 - `<QuestionMarkers>` (see "질문 표시"). A draft (shape being drawn, or the marquee of 범위 선택 — `.annot-draft-shape.is-marquee`)
-  renders as a dashed preview from local state. While replaying (`replay` prop) an item is shown only when `replayVisible(item,
+  renders as a dashed preview from local state; a 형광펜 / 텍스트 형광 band is drawn as it will be, in its color (`Draft.color`: the
+  chosen one, a re-dragged text highlight's own — 0.6.10; it was always yellow before). While replaying (`replay` prop) an item is shown only when `replayVisible(item,
   replay)` (below). The layer's `selectedIds` (several after a marquee / Shift+click) mark every selected item `.is-selected`.
 
 **Tools and gestures (SlideViewer.tsx; the rules in lib/annotations/gesture.ts, pure).** State `tool: AnnotationTool` (`'select'` =
@@ -2054,7 +2055,18 @@ window) is discarded instead of loading the slide. `ScrollRequest` carries `at` 
 `sessionId/messageId/seq`; the `qa` handler also refreshes the sessions list and skips the notes fetch when `study.sessions` already
 holds that session at that `updatedAt`. Memo item menus prefer 'above' (the card hangs below its anchor); a memo pill tap expands
 inline, or opens the sheet when compact. 형광펜 / 텍스트 형광 / 사각형 / 동그라미 need a real drag (≥ MIN_DRAG_PX), 텍스트 / 메모 accept a
-click; a text box left empty on commit is removed. Attaching the same item twice is refused with a toast ('이미 입력창에 첨부되어
+click; a text box left empty on commit is removed. Its menu's look controls (colors, size, font, bold — ItemMenu
+`TEXT_LOOK_CONTROLS`) do not commit it (0.6.10; the user: changing the size of a box just made turned into a new box there —
+the empty box was removed as the press blurred it, the menu went with it, the next press made a box): their buttons and the
+menu's bare background keep the textarea's focus (mousedown prevented while a text box is focused) or, when a tap took it
+anyway (WebKit), give it back once the look changed; the size field and the font take the focus, the text typed so far is
+saved and the typing stays open until a press or the focus goes elsewhere (Enter / Esc in the size field return to the typing
+at once, inside the key press). 첨부 / 삭제 / × and the toolbar's colors end the typing as before. Every end of the editing
+commits — a blur, a press elsewhere while the textarea has no focus, the editing moved to another box, the box gone (a
+microtask later: StrictMode's simulated unmount must not end anything) — with the height measured while typing; "empty"
+means empty when the editing started (a saved text does not keep an emptied new box); a height-only commit is no undo step
+of its own, and a look changed while typing is laid out when it ends. A commit closes only its own editing (`endEdit`): a
+late one leaves a box just made open. Attaching the same item twice is refused with a toast ('이미 입력창에 첨부되어
 있어요'). The playhead store is written whenever a recording is selected in the 녹음 tab (t = 0 while the toggle is off, the live t only
 while it is on) so the viewer can offer the toggle. The 설정 › 정보 rows show ⌘⇧Z in browsers/macOS and Ctrl+Y under the Windows/Linux
 desktop marker. The memo card's own ⋯ menu labels the attach action '📎 질문에 첨부' and its footer button '📎 첨부'; the item menu's

@@ -8,7 +8,7 @@
 // dots over them, a memo's dot on its card). The layer itself takes no pointer events; its interactive children
 // do and carry `data-annot`, so the viewer's scroller knows what was pressed.
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react';
-import type { AnnotationItem, InkItem, RegionRect, SlideAnnotations, TextItem } from '../../../../shared/types.ts';
+import type { AnnotationColor, AnnotationItem, InkItem, RegionRect, SlideAnnotations, TextItem } from '../../../../shared/types.ts';
 import {
   ALL_HANDLES,
   bandHandles,
@@ -25,6 +25,7 @@ import { percentStyle, type Frame, type Point } from '../../lib/attachments.ts';
 import { useLatest } from '../../hooks/useLatest.ts';
 import { msg } from '../../i18n/index.ts';
 import { useLayerEnv } from './context.ts';
+import { TEXT_LOOK_CONTROLS } from './ItemMenu.tsx';
 import { MemoCard } from './MemoCard.tsx';
 import { QuestionMarkers, QuestionRegions, type LightMarker } from './QuestionMarkers.tsx';
 
@@ -34,6 +35,8 @@ export interface Draft {
   rect: RegionRect;
   /** 텍스트 형광 with the slide's layout at hand: the word-fitted rects, one per line (`rect` is their union). */
   rects?: RegionRect[];
+  /** 형광펜 / 텍스트 형광: the color the band will have. */
+  color?: AnnotationColor;
 }
 
 /** Items being moved or resized on this slide, by id (drawn at the new place; one PATCH on pointer-up). */
@@ -235,7 +238,11 @@ function DraftShape({ draft }: { draft: Draft }) {
     return <ellipse className="annot-draft-shape" cx={n(r.x + r.w / 2)} cy={n(r.y + r.h / 2)} rx={n(r.w / 2)} ry={n(r.h / 2)} />;
   }
   const cls =
-    draft.tool === 'highlight' || draft.tool === 'textHighlight' ? 'annot-draft-shape is-band' : draft.tool === 'marquee' ? 'annot-draft-shape is-marquee' : 'annot-draft-shape';
+    draft.tool === 'highlight' || draft.tool === 'textHighlight'
+      ? `annot-draft-shape is-band is-${draft.color ?? 'yellow'}`
+      : draft.tool === 'marquee'
+        ? 'annot-draft-shape is-marquee'
+        : 'annot-draft-shape';
   if (draft.rects) {
     return (
       <>
@@ -277,6 +284,9 @@ function laidOutHeight(el: HTMLElement | null, box: HTMLElement | null, rect: Re
  * A text box: typed text drawn on the slide in its size / font / weight (text.ts textBoxVars); editing swaps in a
  * textarea in the same box, committed on blur / Esc / ⌘Enter — and when the box goes away while typing (the layer
  * hidden, the slide filtered out, the lecture closed): WebKit sends no blur to a textarea removed while focused.
+ * The menu's look controls (ItemMenu TEXT_LOOK_CONTROLS) do not end the typing: their buttons keep the focus (or, when
+ * a tap took it anyway, give it back), the size field and the font take it and the typing stays open until a press
+ * or the focus goes anywhere else — a box just made can get its size before its text.
  * Shown, the box is at least its stored height and grows with its content; when its size, font or weight changes
  * the stored height is re-laid out (a follow-up write, not an undo step of its own).
  */
@@ -286,19 +296,38 @@ function TextBox({ slide, item, rect, selected, editing }: { slide: number; item
   const ref = useRef<HTMLTextAreaElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
-  /** Typed but not committed yet. */
-  const pending = useRef<string | null>(null);
+  /** What the textarea holds (its value when the box goes away while typing). */
+  const typed = useRef(item.text);
+  /** The text when the editing started (the text typed so far may have been saved since). */
+  const startText = useRef(item.text);
+  /** The textarea's laid-out height when last typed in (a commit after it is gone cannot measure it). */
+  const measured = useRef<number | null>(null);
+  /** This editing was committed (a blur, a press elsewhere and the editing's end can each end it). */
+  const done = useRef(false);
+  /** The menu's look control the last press while editing was on (null: anywhere else). */
+  const lookPress = useRef<Element | null>(null);
   useEffect(() => {
-    if (editing) setText(item.text);
+    if (!editing) return;
+    // The item's text changed under the typing (⌘Z, another device): the textarea and what a late commit writes follow.
+    setText(item.text);
+    typed.current = item.text;
   }, [editing, item.text]);
   useLayoutEffect(() => {
-    if (editing) ref.current?.focus({ preventScroll: true });
+    if (!editing) return;
+    done.current = false;
+    lookPress.current = null;
+    typed.current = item.text;
+    startText.current = item.text;
+    measured.current = null;
+    ref.current?.focus({ preventScroll: true });
+    // Only when the editing starts (`item.text` is what it starts from).
   }, [editing]);
 
   const commit = (value: string) => {
-    pending.current = null;
+    if (done.current) return;
+    done.current = true;
     const capped = capText(value);
-    if (capped.trim() === '' && item.text.trim() === '') {
+    if (capped.trim() === '' && startText.current.trim() === '') {
       // A box left empty (just made, or emptied): gone.
       actions.remove(slide, item.id);
       return;
@@ -306,19 +335,87 @@ function TextBox({ slide, item, rect, selected, editing }: { slide: number; item
     const patch: { text?: string; rect?: RegionRect } = {};
     if (capped !== item.text) patch.text = capped;
     // The laid-out height becomes the box's height, so it looks the same on another device.
-    const h = laidOutHeight(ref.current, boxRef.current, rect);
+    const h = laidOutHeight(ref.current, boxRef.current, rect) ?? measured.current;
     if (h !== null && Math.abs(h - rect.h) > 0.002) patch.rect = { ...rect, h };
-    if (patch.text !== undefined || patch.rect) actions.update(slide, item.id, patch);
-    actions.edit(slide, null);
+    // The height alone is not an undo step of its own (the look change before it is).
+    if (patch.text !== undefined || patch.rect) actions.update(slide, item.id, patch, patch.text === undefined ? { undoable: false } : undefined);
+    // Not edit(null): a commit that comes late (the editing already moved to a box just made) leaves that one open.
+    actions.endEdit(slide, item.id);
   };
   const commitRef = useLatest(commit);
-  // A layout effect: its cleanup runs while the textarea is still in the DOM (the height is measured).
+  /** The text so far, written without ending the typing (an empty box stays as it is: its commit decides). */
+  const save = (value: string) => {
+    const capped = capText(value);
+    if (capped === item.text || capped.trim() === '') return;
+    actions.update(slide, item.id, { text: capped });
+  };
+
+  // While editing: a press anywhere but the box and the look controls, or the focus going anywhere but there, ends it
+  // when the textarea has given its focus away (else its blur does) — a moment later, after the size field has
+  // applied what was typed in it.
+  useEffect(() => {
+    if (!editing) return;
+    const look = (target: EventTarget | null) => (target instanceof Element && target.closest(TEXT_LOOK_CONTROLS) ? target : null);
+    // The menu's bare background (padding, gaps, labels) is not elsewhere either; its other buttons are.
+    const bare = (target: EventTarget | null) => target instanceof Element && target.closest('.annot-item-menu, .annot-style-pop') !== null && !target.closest('button, a, input, select');
+    const elsewhere = (target: EventTarget | null) => !look(target) && !bare(target) && !(target instanceof Node && boxRef.current?.contains(target));
+    let timer = 0;
+    const end = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => commitRef.current(typed.current));
+    };
+    const onDown = (e: PointerEvent) => {
+      lookPress.current = look(e.target);
+      if (elsewhere(e.target) && document.activeElement !== ref.current) end();
+    };
+    const onFocus = (e: FocusEvent) => {
+      if (elsewhere(e.target)) end();
+    };
+    // The size field (or the font) left with Enter / Esc — the focus goes nowhere: back to the typing, at once (still
+    // inside the key press: iOS raises its keyboard only then).
+    const onFocusOut = (e: FocusEvent) => {
+      if (!lookPress.current || e.relatedTarget !== null || !(e.target instanceof Element && e.target.matches('input, select') && look(e.target))) return;
+      if (!done.current) ref.current?.focus({ preventScroll: true });
+    };
+    document.addEventListener('pointerdown', onDown, true);
+    document.addEventListener('focusin', onFocus, true);
+    document.addEventListener('focusout', onFocusOut, true);
+    return () => {
+      document.removeEventListener('pointerdown', onDown, true);
+      document.removeEventListener('focusin', onFocus, true);
+      document.removeEventListener('focusout', onFocusOut, true);
+      window.clearTimeout(timer);
+    };
+  }, [editing, commitRef]);
+  // When a look control pressed with the pointer has acted (the look or the color changed), the focus goes back to the
+  // textarea and the typing goes on: from a button that took it (from the size field, or a tap in WebKit, which
+  // focuses nothing), from the font once chosen. Not from the size field while it is in use, nor for the keyboard.
+  const lookKey = `${item.size ?? ''}/${item.font ?? ''}/${item.bold ? 1 : 0}/${item.color}`;
+  useLayoutEffect(() => {
+    const pressed = lookPress.current;
+    if (!editing || done.current || !pressed) return;
+    const active = document.activeElement;
+    const field = pressed.closest('input, select');
+    const acted = field ? field instanceof HTMLSelectElement && active === field : !active || active === document.body || active === pressed.closest('button');
+    if (acted) ref.current?.focus({ preventScroll: true });
+  }, [editing, lookKey]);
+
+  // The editing ended or the box went away before a commit (a press elsewhere that ended it at once, the layer hidden,
+  // the slide filtered out, the lecture closed): what was typed is committed — an empty box goes. A moment later: in
+  // development StrictMode runs this cleanup once on mount and the effect again at once, which must not end anything.
+  const ending = useRef<{ cancelled: boolean } | null>(null);
   useLayoutEffect(() => {
     if (!editing) return;
+    if (ending.current) ending.current.cancelled = true;
+    ending.current = null;
     return () => {
-      const value = pending.current;
-      pending.current = null;
-      if (value !== null) commitRef.current(value);
+      const end = { cancelled: false };
+      ending.current = end;
+      queueMicrotask(() => {
+        if (end.cancelled) return;
+        ending.current = null;
+        commitRef.current(typed.current);
+      });
     };
   }, [editing, commitRef]);
 
@@ -328,9 +425,10 @@ function TextBox({ slide, item, rect, selected, editing }: { slide: number; item
   const lastLook = useRef(look);
   const rectRef = useLatest(rect);
   useLayoutEffect(() => {
-    if (lastLook.current === look) return;
+    // While typing it waits (the textarea fills the box, so it can only grow it): a look changed meanwhile is laid out
+    // when the typing ends.
+    if (editing || lastLook.current === look) return;
     lastLook.current = look;
-    if (editing) return; // the commit measures the textarea
     const r = rectRef.current;
     const h = laidOutHeight(bodyRef.current, boxRef.current, r);
     if (h !== null && Math.abs(h - r.h) > 0.002) actions.update(slide, item.id, { rect: { ...r, h } }, { undoable: false });
@@ -338,6 +436,8 @@ function TextBox({ slide, item, rect, selected, editing }: { slide: number; item
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     e.stopPropagation();
+    // Typed on: a look control reached later with the keyboard does not send the focus back here.
+    lookPress.current = null;
     if (e.key === 'Escape' || ((e.metaKey || e.ctrlKey) && e.key === 'Enter')) {
       e.preventDefault();
       commit(e.currentTarget.value);
@@ -359,9 +459,20 @@ function TextBox({ slide, item, rect, selected, editing }: { slide: number; item
           aria-label={msg().viewer.textBox.label}
           onChange={(e) => {
             setText(e.target.value);
-            pending.current = e.target.value;
+            typed.current = e.target.value;
+            measured.current = laidOutHeight(e.target, boxRef.current, rect);
+            lookPress.current = null;
           }}
-          onBlur={(e) => commit(e.currentTarget.value)}
+          onBlur={(e) => {
+            // Into the menu's look controls (the size field, the font; a button pressed in WebKit, which focuses
+            // nothing): the typing stays open, what was typed is kept already.
+            const to = e.relatedTarget instanceof Element ? e.relatedTarget : null;
+            if (to ? to.closest(TEXT_LOOK_CONTROLS) : lookPress.current) {
+              save(e.currentTarget.value);
+              return;
+            }
+            commit(e.currentTarget.value);
+          }}
           onKeyDown={onKeyDown}
           onPointerDown={(e) => e.stopPropagation()}
         />

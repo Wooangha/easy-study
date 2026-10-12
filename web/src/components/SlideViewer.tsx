@@ -887,6 +887,7 @@ export function SlideViewer({
       select: selectItem,
       toggleSelect,
       edit: (slide, id) => setEditing(id ? { slide, id } : null),
+      endEdit: (slide, id) => setEditing((e) => (e && e.slide === slide && e.id === id ? null : e)),
       update: (slide, id, patch: Patchable<AnnotationItem>, options) => void mutate(slide, [{ op: 'update', id, patch }], options),
       updateMany: (slide, ids, patch: Patchable<AnnotationItem>) =>
         void mutate(
@@ -1256,13 +1257,15 @@ export function SlideViewer({
    * text line, or the word-fitted rects; a plain band until then (and, on release, when it never comes).
    */
   const previewOf = (g: Gesture, point: Point): Draft => {
+    // A band is drawn in the color it will have: the chosen one, or the re-dragged text highlight's own.
+    const color = g.item?.color ?? colorRef.current;
     switch (g.tool) {
       case 'highlight':
-        return { tool: g.tool, rect: snapBand(g.start, point, peekLayout(g.slide)) };
+        return { tool: g.tool, rect: snapBand(g.start, point, peekLayout(g.slide)), color };
       case 'textHighlight': {
         const layout = peekLayout(g.slide);
         const fit = layout ? textHighlightFromDrag(g.start, point, layout) : null;
-        return fit ? { tool: g.tool, rect: unionRects(fit.rects), rects: fit.rects } : { tool: g.tool, rect: snapBand(g.start, point, layout) };
+        return fit ? { tool: g.tool, rect: unionRects(fit.rects), rects: fit.rects, color } : { tool: g.tool, rect: snapBand(g.start, point, layout), color };
       }
       case 'text':
         return { tool: g.tool, rect: textBoxFromDrag(g.start, point) };
