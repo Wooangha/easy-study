@@ -367,6 +367,12 @@ session's when there is no answer; a session whose LLM changed (§5 "LLM switch"
   (§29) the zoom is continuous (0.5–4; lib/zoom.ts): a two-finger pinch on the slides or Ctrl+wheel / a trackpad pinch
   zooms the slides around the fingers / pointer (no page zoom over the slides: `touch-action: pan-x pan-y`), −/＋ step to
   the next level, the middle button shows the percent.
+  Resizing (the window, the divider, the toolbar folding) keeps the focused slide: where the center line sits in it
+  (`anchorRef`: slide, fraction, and the scroller size it was measured at) is put back under the center line by the
+  scroller's ResizeObserver — and, first, by any focus measurement at a size the anchor was not measured at (0.6.11: as
+  a window edge was dragged, a scroll event's frame could measure the new width at the old scroll position before the
+  observer ran, and the anchor drifted to another slide every frame — 12 became 7 or 15; a zoom's own placement is
+  measured as it is).
   Remember the scroll position (slide number) per doc in localStorage.
 - **Chat (right)**, tabs **채팅 | 노트**:
   - Chat header: current slide `p.7 / 42`, 📌 pin toggle (when pinned, the question target stays on the

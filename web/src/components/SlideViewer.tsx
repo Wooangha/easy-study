@@ -419,8 +419,11 @@ export function SlideViewer({
   const focusedRef = useRef(focused);
   const [zoom, setZoom] = useState(() => storedZoom(readStorage(storageKeys.zoom, 1, isNumber)));
   const onFocusChangeRef = useLatest(onFocusChange);
-  /** Where the center line sits inside the focused slide (0..1) — restored after resize / zoom. */
-  const anchorRef = useRef<{ index: number; frac: number } | null>(null);
+  /**
+   * Where the center line sits inside the focused slide (0..1) — restored after resize / zoom —, with the scroller's
+   * size it was measured at: measured again only at that size (computeFocus restores it first after a resize).
+   */
+  const anchorRef = useRef<{ index: number; frac: number; w: number; h: number } | null>(null);
   /** Last keyboard navigation target, so rapid key presses advance past an in-flight smooth scroll. */
   const navRef = useRef<{ target: number; at: number } | null>(null);
 
@@ -506,12 +509,45 @@ export function SlideViewer({
     slideEls.current[index] = el;
   }, []);
 
-  /** Focused slide = the slide crossing the vertical center line (fallback: the more visible neighbour). */
-  const computeFocus = useCallback(() => {
+  /** The glide after a finger's pan under 펜 / 지우개 (the touch listeners below); anything else that scrolls stops it. */
+  const inertiaFrame = useRef(0);
+  const stopInertia = useCallback(() => {
+    cancelAnimationFrame(inertiaFrame.current);
+    inertiaFrame.current = 0;
+  }, []);
+  useEffect(() => stopInertia, [stopInertia]);
+
+  /**
+   * Keep the same point of the focused slide under the center line after the layout changes size (the window, the
+   * divider, the toolbar folding); the anchor then belongs to the new size.
+   */
+  const restoreAnchor = useCallback(() => {
+    const scroller = scrollerRef.current;
+    const anchor = anchorRef.current;
+    const el = anchor ? slideEls.current[anchor.index] : null;
+    if (!scroller || !anchor || !el) return;
+    stopInertia();
+    const sr = scroller.getBoundingClientRect();
+    const er = el.getBoundingClientRect();
+    const delta = er.top + anchor.frac * er.height - (sr.top + scroller.clientHeight / 2);
+    if (Math.abs(delta) > 1) scroller.scrollTop += delta;
+    anchorRef.current = { ...anchor, w: scroller.clientWidth, h: scroller.clientHeight };
+  }, [stopInertia]);
+
+  /**
+   * Focused slide = the slide crossing the vertical center line (fallback: the more visible neighbour). After the
+   * scroller changed size and before its ResizeObserver re-anchored (a scroll event's frame can come first: the
+   * browser clamps or anchors the scroll as the window is dragged), the anchor is restored first — measuring the
+   * center at the new size with the old scroll position would hand the focus to another slide. `keep`: the scroll
+   * position is the one wanted (a zoom placed it), measured as it is.
+   */
+  const computeFocus = useCallback((keep = false) => {
     const scroller = scrollerRef.current;
     const els = slideEls.current;
     const list = shownRef.current;
     if (!scroller || list.length === 0) return;
+    const before = anchorRef.current;
+    if (!keep && before && (before.w !== scroller.clientWidth || before.h !== scroller.clientHeight)) restoreAnchor();
     const box = scroller.getBoundingClientRect();
     const centerY = box.top + scroller.clientHeight / 2;
 
@@ -542,7 +578,7 @@ export function SlideViewer({
 
     const bestRect = els[best]?.getBoundingClientRect();
     if (bestRect && bestRect.height > 0) {
-      anchorRef.current = { index: best, frac: clamp((centerY - bestRect.top) / bestRect.height, 0, 1) };
+      anchorRef.current = { index: best, frac: clamp((centerY - bestRect.top) / bestRect.height, 0, 1), w: scroller.clientWidth, h: scroller.clientHeight };
     }
     const slide = list[best];
     if (slide !== focusedRef.current) {
@@ -550,7 +586,7 @@ export function SlideViewer({
       setFocused(slide);
       onFocusChangeRef.current(slide);
     }
-  }, [onFocusChangeRef, shownRef]);
+  }, [onFocusChangeRef, shownRef, restoreAnchor]);
 
   const rafRef = useRef(0);
   const scheduleFocus = useCallback(() => {
@@ -561,14 +597,6 @@ export function SlideViewer({
     });
   }, [computeFocus]);
   useEffect(() => () => cancelAnimationFrame(rafRef.current), []);
-
-  /** The glide after a finger's pan under 펜 / 지우개 (the touch listeners below); anything else that scrolls stops it. */
-  const inertiaFrame = useRef(0);
-  const stopInertia = useCallback(() => {
-    cancelAnimationFrame(inertiaFrame.current);
-    inertiaFrame.current = 0;
-  }, []);
-  useEffect(() => stopInertia, [stopInertia]);
 
   const scrollToSlide = useCallback(
     (slide: number, behavior: ScrollBehavior = 'smooth') => {
@@ -643,8 +671,8 @@ export function SlideViewer({
         if (Math.abs(by.y) >= 0.5) scroller.scrollTop += by.y;
       }
       // At once (not on the next frame): the focus anchor is right when a resize of the scroller (a scrollbar
-      // coming or going with the zoom) re-anchors by it.
-      computeFocus();
+      // coming or going with the zoom) re-anchors by it. As placed: not restored to the anchor before the zoom.
+      computeFocus(true);
     },
     [computeFocus, stopInertia],
   );
@@ -2078,19 +2106,6 @@ export function SlideViewer({
 
   useImperativeHandle(ref, () => ({ scrollToSlide, showRegion, showItem }), [scrollToSlide, showRegion, showItem]);
 
-  /** Keep the same point of the focused slide under the center line after the layout changes size. */
-  const restoreAnchor = useCallback(() => {
-    const scroller = scrollerRef.current;
-    const anchor = anchorRef.current;
-    const el = anchor ? slideEls.current[anchor.index] : null;
-    if (!scroller || !anchor || !el) return;
-    stopInertia();
-    const sr = scroller.getBoundingClientRect();
-    const er = el.getBoundingClientRect();
-    const delta = er.top + anchor.frac * er.height - (sr.top + scroller.clientHeight / 2);
-    if (Math.abs(delta) > 1) scroller.scrollTop += delta;
-  }, [stopInertia]);
-
   // Restore the last viewed slide of this doc on mount and report the initial focus.
   useLayoutEffect(() => {
     scrollToSlide(focusedRef.current, 'auto');
@@ -2114,17 +2129,16 @@ export function SlideViewer({
     // Re-run only when the set of shown slides changes.
   }, [shownKey]);
 
-  // Re-anchor when the viewer is resized (split divider, window resize); the toolbar folds on a narrow pane.
+  // Re-anchor when the viewer is resized (split divider, window resize); the toolbar folds on a narrow pane. Only for
+  // a size the anchor was not measured at (the first call of the observer reports the size it already has — whenever
+  // it comes: a page that is not drawn gets it late, with a resize).
   useEffect(() => {
     const scroller = scrollerRef.current;
     if (!scroller || typeof ResizeObserver === 'undefined') return;
-    let first = true;
     const ro = new ResizeObserver(() => {
       setViewerWidth(scroller.clientWidth);
-      if (first) {
-        first = false;
-        return;
-      }
+      const anchor = anchorRef.current;
+      if (!anchor || (anchor.w === scroller.clientWidth && anchor.h === scroller.clientHeight)) return;
       restoreAnchor();
       scheduleFocus();
     });
