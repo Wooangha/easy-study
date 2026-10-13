@@ -695,6 +695,9 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
   }, [justUpdated]);
 
   // ---- Logout (remote mode) ----------------------------------------------------------------------
+  // Not in the desktop app's window on its own server: shared with other devices it wants a login like any page, but
+  // the app logs its own window in (DESIGN §16) — logging out there would only lock this computer out of itself.
+  const ownServer = desktop?.connection?.kind === 'local';
   const logout = useCallback(async () => {
     if (!onLogout) return;
     const recording = recorderPhase === 'recording' || recorderPhase === 'paused';
@@ -988,7 +991,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
         choice={choice}
         onChoiceChange={setChoice}
         hasNotes={notesCount > 0}
-        onLogout={authRequired && onLogout ? () => void logout() : undefined}
+        onLogout={authRequired && onLogout && !ownServer ? () => void logout() : undefined}
         onOpenSettings={() => setSettings({ section: null })}
         updatePending={updatePending(update)}
         recordControl={

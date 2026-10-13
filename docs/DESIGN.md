@@ -757,7 +757,9 @@ covered by the cookie automatically (same origin).
 - On start: `GET /api/auth/status`; if `authRequired && !authenticated` show a login screen (Korean): access-code field,
   error / rate-limit messages, hint where the code is shown (the server's terminal). Any 401 from the API later
   (expired/revoked session) returns to the login screen without losing the current doc/slide selection.
-- A logout item in the top bar when `authRequired`.
+- A logout item in the top bar when `authRequired` — except in the desktop app's window on its own server (desktop state
+  `connection.kind === 'local'`, 0.6.12): shared with other devices that server wants a login, but the app logs its own
+  window in, so a logout there would only lock this computer out of itself.
 - PWA: `web/public/manifest.webmanifest` (name "easy-study", short_name, start_url "/", display "standalone",
   theme/background colors matching the light theme, icons 192/512 + maskable 512), `apple-touch-icon`, `theme-color`
   meta for light/dark. No service worker (not needed for installability in Chromium today; avoids stale caches).
