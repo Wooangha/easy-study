@@ -98,7 +98,7 @@ const PATCHABLE_FIELDS: Readonly<Record<AnnotationItem['type'], readonly string[
   rect: ['color', 'rect'],
   ellipse: ['color', 'rect'],
   textHighlight: ['color', 'rects', 'chars', 'engine', 'text'],
-  text: ['color', 'rect', 'text', 'size', 'font', 'bold'],
+  text: ['color', 'rect', 'text', 'size', 'font', 'bold', 'autoWidth'],
   memo: ['color', 'at', 'text', 'tags', 'collapsed', 'tutor', 'links', 'size'],
   // A stroke's points never change after it is drawn: moving or resizing it is an update of `rect` (DESIGN §29).
   ink: ['color', 'rect', 'width'],
@@ -397,7 +397,13 @@ export function normalizeItem(raw: unknown, pageCount: number, now: string): Ann
         type: 'text',
         rect: normalizeRect(raw.rect, raw),
         text: normalizeText(raw.text, raw),
-        ...defined({ size: normalizeSize(raw.size, raw), font: normalizeFont(raw.font, raw), bold: optionalBoolean(raw.bold, 'bold', raw) }),
+        ...defined({
+          size: normalizeSize(raw.size, raw),
+          font: normalizeFont(raw.font, raw),
+          bold: optionalBoolean(raw.bold, 'bold', raw),
+          // Only `true` is kept (false = absent, a width of its own).
+          autoWidth: optionalBoolean(raw.autoWidth, 'autoWidth', raw) === true ? true : undefined,
+        }),
       };
     case 'textHighlight': {
       if (!Array.isArray(raw.rects) || raw.rects.length === 0) throw bad(texts().textHighlightRectsInvalid, raw);

@@ -6975,6 +6975,16 @@ details[open] > summary::before {
   -webkit-user-select: text;
 }
 
+/* The hidden copy of the text a box as wide as its text is measured by while typing (AnnotationLayer TextBox). */
+.annot-text-measure {
+  position: absolute;
+  top: 0;
+  left: 0;
+  visibility: hidden;
+  white-space: pre;
+  pointer-events: none;
+}
+
 /* Selection handles of a rect / ellipse / text box (8) and of a highlight band (2). */
 .annot-handle {
   position: absolute;

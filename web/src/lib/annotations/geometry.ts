@@ -101,7 +101,7 @@ export const PATCHABLE_FIELDS: Record<AnnotationItem['type'], readonly string[]>
   textHighlight: ['color', 'rects', 'chars', 'engine', 'text', 'updatedAt'],
   rect: ['color', 'rect', 'updatedAt'],
   ellipse: ['color', 'rect', 'updatedAt'],
-  text: ['color', 'rect', 'text', 'size', 'font', 'bold', 'updatedAt'],
+  text: ['color', 'rect', 'text', 'size', 'font', 'bold', 'autoWidth', 'updatedAt'],
   memo: ['color', 'at', 'text', 'tags', 'collapsed', 'tutor', 'links', 'size', 'updatedAt'],
   // A stroke's points are relative to its rect: moving / resizing it is a new rect, `pts` is never patched.
   ink: ['color', 'rect', 'width', 'updatedAt'],
@@ -462,11 +462,12 @@ export const TEXT_BOX_DEFAULT = { w: 0.18, h: 0.06 } as const;
 /** A drag shorter than this (either way) is a click for the text tool. */
 export const TEXT_BOX_MIN_DRAG = 0.02;
 
+/** The text tool's press and release were a click, not a drag: a box as wide as its text (TextItem.autoWidth). */
+export const textBoxIsClick = (a: Point, b: Point): boolean => Math.abs(a.x - b.x) < TEXT_BOX_MIN_DRAG && Math.abs(a.y - b.y) < TEXT_BOX_MIN_DRAG;
+
 /** A text box: the dragged rectangle, or the default box at the click. */
 export function textBoxFromDrag(a: Point, b: Point): RegionRect {
-  if (Math.abs(a.x - b.x) >= TEXT_BOX_MIN_DRAG || Math.abs(a.y - b.y) >= TEXT_BOX_MIN_DRAG) {
-    return rectFromPoints(a, b, 0.02);
-  }
+  if (!textBoxIsClick(a, b)) return rectFromPoints(a, b, 0.02);
   return roundRect({
     x: Math.min(Math.max(0, a.x), 1 - TEXT_BOX_DEFAULT.w),
     y: Math.min(Math.max(0, a.y), 1 - TEXT_BOX_DEFAULT.h),
@@ -585,7 +586,14 @@ export const newHighlight = (seed: ItemSeed, rect: RegionRect): HighlightItem =>
 export const newShape = (seed: ItemSeed, type: 'rect' | 'ellipse', rect: RegionRect): RectItem | EllipseItem =>
   type === 'rect' ? { ...base(seed), type: 'rect', rect } : { ...base(seed), type: 'ellipse', rect };
 
-export const newTextBox = (seed: ItemSeed, rect: RegionRect, text = ''): TextItem => ({ ...base(seed), type: 'text', rect, text });
+/** `autoWidth`: made with a click, as wide as its text (TextItem.autoWidth). */
+export const newTextBox = (seed: ItemSeed, rect: RegionRect, text = '', autoWidth = false): TextItem => ({
+  ...base(seed),
+  type: 'text',
+  rect,
+  text,
+  ...(autoWidth ? { autoWidth: true } : {}),
+});
 
 /** A 펜 stroke (one piece of shared/ink.ts inkPieces: its rect and encoded points) of nominal `width`. */
 export const newInk = (seed: ItemSeed, piece: { rect: RegionRect; pts: string }, width: number): InkItem => ({

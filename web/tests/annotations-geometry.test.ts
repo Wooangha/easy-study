@@ -41,6 +41,8 @@ import {
   snapBand,
   suggestTags,
   textBoxFromDrag,
+  textBoxIsClick,
+  newTextBox,
   unionRects,
   withLink,
 } from '../src/lib/annotations/geometry.ts';
@@ -187,6 +189,13 @@ describe('bounds and drags', () => {
     const edge = textBoxFromDrag({ x: 0.95, y: 0.99 }, { x: 0.95, y: 0.99 });
     assert.ok(edge.x + edge.w <= 1 && edge.y + edge.h <= 1);
     assert.deepEqual(textBoxFromDrag({ x: 0.1, y: 0.1 }, { x: 0.5, y: 0.4 }), { x: 0.1, y: 0.1, w: 0.4, h: 0.3 });
+    // A click makes a box as wide as its text; a drag (either way past the minimum) one of the dragged width.
+    assert.equal(textBoxIsClick({ x: 0.3, y: 0.3 }, { x: 0.305, y: 0.31 }), true);
+    assert.equal(textBoxIsClick({ x: 0.3, y: 0.3 }, { x: 0.33, y: 0.3 }), false);
+    assert.equal(textBoxIsClick({ x: 0.3, y: 0.3 }, { x: 0.3, y: 0.25 }), false);
+    const seed = { id: 'an-000000000009', color: 'yellow' as const, createdAt: NOW };
+    assert.equal(newTextBox(seed, { x: 0, y: 0, w: 0.18, h: 0.06 }, '', true).autoWidth, true);
+    assert.ok(!('autoWidth' in newTextBox(seed, { x: 0, y: 0, w: 0.18, h: 0.06 })));
     assert.deepEqual(memoAt({ x: 0.99999, y: 0.3 }), { x: 0.98, y: 0.3 });
   });
 

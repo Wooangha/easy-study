@@ -40,6 +40,7 @@ import {
   resizeRect,
   snapBand,
   textBoxFromDrag,
+  textBoxIsClick,
   type AnnotationTool,
   type Handle,
   unionRects,
@@ -1001,7 +1002,8 @@ export function SlideViewer({
           item = newShape(seed(), g.tool, rectFromPoints(g.start, point));
           break;
         case 'text':
-          item = newTextBox(seed(), textBoxFromDrag(g.start, point));
+          // A click: as wide as its text, widening as it is typed; a drag: the dragged width, wrapped in.
+          item = newTextBox(seed(), textBoxFromDrag(g.start, point), '', textBoxIsClick(g.start, point));
           break;
         case 'memo':
           item = newMemo(seed(), memoAt(g.start));
@@ -1433,7 +1435,9 @@ export function SlideViewer({
           Object.entries(moves).map(([id, m]) => ({ op: 'update', id, patch: m.at ? { at: m.at } : { rect: m.rect! } })),
         );
       } else if ('rect' in item && g.handle) {
-        mutate(g.slide, [{ op: 'update', id: item.id, patch: { rect: resizeRect(item.rect, g.handle, dx, dy) } }]);
+        // A text box as wide as its text given a width by a side handle keeps that width from now on.
+        const fixed = item.type === 'text' && item.autoWidth === true && /[ew]/.test(g.handle);
+        mutate(g.slide, [{ op: 'update', id: item.id, patch: { rect: resizeRect(item.rect, g.handle, dx, dy), ...(fixed ? { autoWidth: null } : {}) } }]);
       }
       return;
     }

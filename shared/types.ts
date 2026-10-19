@@ -966,6 +966,12 @@ export interface TextItem extends AnnotationBase {
   font?: TextFont;
   /** Absent = false. */
   bold?: boolean;
+  /**
+   * Made with a click (0.6.13): as wide as its longest line — it widens to the right as it is typed, up to the slide's
+   * right edge, where it wraps; `rect.w` is the width it was laid out at. A box made by a drag, or given a width by its
+   * handles, keeps its width and wraps in it (absent = false).
+   */
+  autoWidth?: boolean;
 }
 /**
  * Where a memo links to (never a URL). Clicking navigates: a slide of this lecture, a slide of another lecture (its

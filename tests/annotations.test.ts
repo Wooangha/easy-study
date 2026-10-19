@@ -352,6 +352,25 @@ describe('validation (400 with a snippet)', () => {
     assert.equal(normalizeTag('\u0000\u202a'), '');
   });
 
+  test('a text box as wide as its text (autoWidth, 0.6.13): only true is kept, a non-boolean is refused, null removes it', async () => {
+    const AW = 'autowidth-doc';
+    await makeDoc(AW);
+    const doc = await patch(AW, 1, 0, [
+      add({ ...rectItem(), type: 'text', text: '클릭', autoWidth: true }),
+      add({ ...rectItem(), type: 'text', text: '드래그', autoWidth: false }),
+      add(rectItem({ autoWidth: true })),
+    ]);
+    const [click, dragged, rect] = doc.items;
+    assert.ok(click.type === 'text' && click.autoWidth === true);
+    assert.ok(dragged.type === 'text' && !('autoWidth' in dragged), 'false is absent');
+    assert.ok(!('autoWidth' in rect), 'a rect keeps its whitelist');
+    await expectHttp(patch(AW, 1, doc.rev, [add({ ...rectItem(), type: 'text', text: 'x', autoWidth: 'yes' })]), 400, /autoWidth/);
+    // A side handle gives it a width of its own: the field goes, with the new rect, in one update.
+    const fixed = await patch(AW, 1, doc.rev, [{ op: 'update', id: click.id, patch: { rect: { x: 0.1, y: 0.1, w: 0.3, h: 0.1 }, autoWidth: null } }]);
+    const after = fixed.items.find((it) => it.id === click.id);
+    assert.ok(after?.type === 'text' && !('autoWidth' in after) && after.rect.w === 0.3);
+  });
+
   test('text size / font / bold (0.6.2): absent stays absent, a size is capped to 8–72 pt of a 540 pt slide and rounded, a rect never carries them', async () => {
     const min = MIN_TEXT_SIZE_PT / SLIDE_PT_HEIGHT;
     const max = MAX_TEXT_SIZE_PT / SLIDE_PT_HEIGHT;

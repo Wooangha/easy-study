@@ -1621,7 +1621,9 @@ server/internal-types.ts: StudentMemo, `BuildTurnInput.studentMemos`, `BuildTurn
   `rect.h` = the last laid-out height; 0.6.2: optional `size` — the font size as a **fraction of the slide image's height**,
   shown to the user as "pt on the slide" of a SLIDE_PT_HEIGHT = 540 pt tall slide (a 16:9 deck's 7.5 in), 8–72 pt, so it scales
   with the zoom and looks the same on every device; absent = 16 pt, the size of 0.6.1 —, optional `font` ('sans' the app font /
-  'serif' 명조 / 'mono'; absent = sans) and optional `bold`), `memo` (스티커 메모: `at` anchor, `text`, `tags`, `collapsed`,
+  'serif' 명조 / 'mono'; absent = sans) and optional `bold`; 0.6.13: optional `autoWidth` (true only) — made with a click, the
+  box is as wide as its longest line and `rect.w` is the width it was laid out at; made with a drag, or given a width by a side
+  handle (the resize's update carries `autoWidth: null`), it keeps `rect.w` and wraps in it), `memo` (스티커 메모: `at` anchor, `text`, `tags`, `collapsed`,
   `tutor` 👁, `links`; 0.6.2: optional `size` in the same units — absent = the UI-sized 13 px of 0.6.1). Every item:
   `id` (`an-` + 12 hex, minted by the client with `crypto.getRandomValues` so an optimistic item keeps its id), `color`, `createdAt`
   (the client's, kept when it is a valid ISO string), `updatedAt` (always the server's clock), optional `recordedAt` (creation-only,
@@ -1845,7 +1847,12 @@ loaded or a tool is active):**
   grew only when the typing ended): the textarea is sized to its text (`height` 0 → `scrollHeight`, never below the stored
   height) on every change of the text, the look, the rect and the slide's size (a ResizeObserver on the layer), so a new
   line, a wrapped line, a wider font or bold, a narrower box or a zoom show at once; the layer draws the handles at that
-  height (`onLiveHeight`); the stored height still waits for the commit. Blur / Esc / ⌘Enter commits and writes the
+  height (`onLiveSize`); the stored height still waits for the commit. A box made with a click (`autoWidth`, 0.6.13; the user:
+  "클릭해서 만들면 오른쪽으로 계속 길어지게, 드래그해서 만들면 그 박스를 지켜서") widens instead of wrapping: a hidden copy of its
+  text (`.annot-text-measure`, `white-space: pre`) gives its longest line, the box is that wide plus 2 px (so the textarea does not
+  wrap a line that just fits), up to the slide's right edge (`1 − rect.x`), where it wraps; the commit stores the text's own width
+  in `rect.w` (with the height), and shown it is `width: max-content` with `max-width` at the slide's edge (so it matches on every
+  device), its look changes re-laying out the width as well. Blur / Esc / ⌘Enter commits and writes the
   laid-out height back into `rect.h`
   (`laidOutHeight`: the content's scrollHeight plus the box's own padding and border — the box as drawn, so the stored height is
   the visible box and its bottom handles sit on its bottom edge). When
