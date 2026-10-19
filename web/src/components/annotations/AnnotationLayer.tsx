@@ -101,7 +101,15 @@ export function AnnotationLayer({ slide, frame, aspect, doc, markers, selectedId
   const inkW = Math.round(K * imageAspectOf(aspect, frame) * 10) / 10;
   // Handles belong to a single selection; a group is moved by its body.
   const single = selectedIds && selectedIds.length === 1 ? (items.find((it) => it.id === selectedIds[0]) ?? null) : null;
-  const handles = single && single.type !== 'memo' && single.type !== 'textHighlight' ? handlesOf(single, drag) : null;
+  // The text box being typed in grows with its text before its height is stored: its handles go with it.
+  const [live, setLive] = useState<{ id: string; h: number } | null>(null);
+  const onLiveHeight = useCallback(
+    (id: string, h: number | null) =>
+      setLive((cur) => (h === null ? (cur?.id === id ? null : cur) : cur?.id === id && Math.abs(cur.h - h) < 1e-4 ? cur : { id, h })),
+    [],
+  );
+  const liveRect = single && live?.id === single.id && 'rect' in single ? { ...single.rect, h: live.h } : null;
+  const handles = single && single.type !== 'memo' && single.type !== 'textHighlight' ? handlesOf(single, drag, liveRect) : null;
   const group = (selectedIds?.length ?? 0) > 1;
   // One stroke selected: its own box (with the handles); several: one box around all of them, not one per stroke.
   const inkUnion = inkBoxes.length > 1 ? unionRects(inkBoxes) : null;
@@ -147,7 +155,15 @@ export function AnnotationLayer({ slide, frame, aspect, doc, markers, selectedId
         )}
       </svg>
       {texts.map((item) => (
-        <TextBox key={item.id} slide={slide} item={item} rect={rectOf(item)} selected={isSelected(item.id)} editing={item.id === editingId} />
+        <TextBox
+          key={item.id}
+          slide={slide}
+          item={item}
+          rect={rectOf(item)}
+          selected={isSelected(item.id)}
+          editing={item.id === editingId}
+          onLiveHeight={onLiveHeight}
+        />
       ))}
       {draft && draft.tool === 'text' && <div className="annot-text annot-draft" style={percentStyle(draft.rect)} aria-hidden />}
       {memos.map((item) => {
@@ -256,9 +272,9 @@ function DraftShape({ draft }: { draft: Draft }) {
 }
 
 /** Where the handles of the selected item are (as percentages of the layer). */
-function handlesOf(item: AnnotationItem & { rect?: RegionRect }, drag: DragPreview | null): Array<{ handle: Handle; style: CSSProperties }> {
+function handlesOf(item: AnnotationItem & { rect?: RegionRect }, drag: DragPreview | null, live: RegionRect | null = null): Array<{ handle: Handle; style: CSSProperties }> {
   if (!item.rect) return [];
-  const r = drag?.[item.id]?.rect ?? item.rect;
+  const r = drag?.[item.id]?.rect ?? live ?? item.rect;
   const list = item.type === 'highlight' ? bandHandles(r) : ALL_HANDLES;
   return list.map((handle) => {
     const x = handle.includes('w') ? r.x : handle.includes('e') ? r.x + r.w : r.x + r.w / 2;
@@ -287,10 +303,27 @@ function laidOutHeight(el: HTMLElement | null, box: HTMLElement | null, rect: Re
  * The menu's look controls (ItemMenu TEXT_LOOK_CONTROLS) do not end the typing: their buttons keep the focus (or, when
  * a tap took it anyway, give it back), the size field and the font take it and the typing stays open until a press
  * or the focus goes anywhere else — a box just made can get its size before its text.
- * Shown, the box is at least its stored height and grows with its content; when its size, font or weight changes
- * the stored height is re-laid out (a follow-up write, not an undo step of its own).
+ * The box is at least its stored height and grows with its content — while typing too, at once: a new line, a line
+ * that wraps, a font / weight / size that takes more room (the textarea is sized to its text; the commit stores the
+ * height). Shown, when its size, font or weight changes the stored height is re-laid out, and when it was made
+ * narrower it grows to fit its lines (a follow-up write, not an undo step of its own).
  */
-function TextBox({ slide, item, rect, selected, editing }: { slide: number; item: TextItem; rect: RegionRect; selected: boolean; editing: boolean }) {
+function TextBox({
+  slide,
+  item,
+  rect,
+  selected,
+  editing,
+  onLiveHeight,
+}: {
+  slide: number;
+  item: TextItem;
+  rect: RegionRect;
+  selected: boolean;
+  editing: boolean;
+  /** The height the box being typed in has grown to (a fraction of the layer), null when it is its stored one. */
+  onLiveHeight: (id: string, h: number | null) => void;
+}) {
   const { actions } = useLayerEnv();
   const [text, setText] = useState(item.text);
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -300,7 +333,7 @@ function TextBox({ slide, item, rect, selected, editing }: { slide: number; item
   const typed = useRef(item.text);
   /** The text when the editing started (the text typed so far may have been saved since). */
   const startText = useRef(item.text);
-  /** The textarea's laid-out height when last typed in (a commit after it is gone cannot measure it). */
+  /** The textarea's laid-out height when last fitted (a commit after it is gone cannot measure it). */
   const measured = useRef<number | null>(null);
   /** This editing was committed (a blur, a press elsewhere and the editing's end can each end it). */
   const done = useRef(false);
@@ -425,14 +458,58 @@ function TextBox({ slide, item, rect, selected, editing }: { slide: number; item
   const lastLook = useRef(look);
   const rectRef = useLatest(rect);
   useLayoutEffect(() => {
-    // While typing it waits (the textarea fills the box, so it can only grow it): a look changed meanwhile is laid out
-    // when the typing ends.
+    // While typing it waits (the textarea is never shorter than the box, so it could only grow it): a look changed
+    // meanwhile is laid out when the typing ends.
     if (editing || lastLook.current === look) return;
     lastLook.current = look;
     const r = rectRef.current;
     const h = laidOutHeight(bodyRef.current, boxRef.current, r);
     if (h !== null && Math.abs(h - r.h) > 0.002) actions.update(slide, item.id, { rect: { ...r, h } }, { undoable: false });
   }, [look, editing, actions, slide, item.id, rectRef]);
+
+  // Made narrower (its handles, here or on another device): the lines it now needs may not fit — the stored height
+  // grows to them. Never shrinks (a height dragged on purpose stays). The stored width, not a resize being dragged.
+  const lastW = useRef(item.rect.w);
+  useLayoutEffect(() => {
+    if (editing || lastW.current === item.rect.w) return;
+    lastW.current = item.rect.w;
+    const r = item.rect;
+    const h = laidOutHeight(bodyRef.current, boxRef.current, r);
+    if (h !== null && h > r.h + 0.002) actions.update(slide, item.id, { rect: { ...r, h } }, { undoable: false });
+  }, [item.rect, editing, actions, slide, item.id]);
+
+  // While typing: the textarea is as tall as its text (never shorter than the stored box), so the box grows at once —
+  // with every line, a wrap, a look change, the slide's zoom; the layer gets the height for the handles.
+  const fit = useCallback(() => {
+    const el = ref.current;
+    const box = boxRef.current;
+    const layer = box?.parentElement;
+    if (!el || !box || !layer) return;
+    const cs = getComputedStyle(box);
+    const chrome = [cs.paddingTop, cs.paddingBottom, cs.borderTopWidth, cs.borderBottomWidth].reduce((sum, v) => sum + (Number.parseFloat(v) || 0), 0);
+    const r = rectRef.current;
+    const least = Math.max(0, r.h * layer.clientHeight - chrome);
+    el.style.height = '0px';
+    const need = el.scrollHeight;
+    el.style.height = `${Math.max(need, least)}px`;
+    const h = laidOutHeight(el, box, r);
+    measured.current = h;
+    onLiveHeight(item.id, h !== null && h > r.h + 0.002 ? h : null);
+  }, [rectRef, onLiveHeight, item.id]);
+  useLayoutEffect(() => {
+    if (editing) fit();
+  }, [editing, fit, text, look, rect.w, rect.h]);
+  useEffect(() => {
+    const layer = boxRef.current?.parentElement;
+    if (!editing || !layer || typeof ResizeObserver === 'undefined') return;
+    // The slide's size (zoom, the pane): the font and the stored height are fractions of it.
+    const ro = new ResizeObserver(() => fit());
+    ro.observe(layer);
+    return () => {
+      ro.disconnect();
+      onLiveHeight(item.id, null);
+    };
+  }, [editing, fit, onLiveHeight, item.id]);
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     e.stopPropagation();
@@ -446,8 +523,9 @@ function TextBox({ slide, item, rect, selected, editing }: { slide: number; item
 
   const cls = ['annot-text', `is-${item.color}`, selected && 'is-selected', editing && 'is-editing'].filter(Boolean).join(' ');
   const box = percentStyle(rect);
-  // Shown: at least the stored height, growing with the content (a box laid out at another size never clips its text).
-  const style: CSSProperties = editing ? { ...box, ...textBoxVars(item) } : { left: box.left, top: box.top, width: box.width, minHeight: box.height, ...textBoxVars(item) };
+  // At least the stored height, growing with the content (a box laid out at another size never clips its text; while
+  // typing the textarea sets the height).
+  const style: CSSProperties = { left: box.left, top: box.top, width: box.width, minHeight: box.height, ...textBoxVars(item) };
   return (
     <div ref={boxRef} className={cls} style={style} data-annot="item" data-id={item.id}>
       {editing ? (
@@ -460,7 +538,6 @@ function TextBox({ slide, item, rect, selected, editing }: { slide: number; item
           onChange={(e) => {
             setText(e.target.value);
             typed.current = e.target.value;
-            measured.current = laidOutHeight(e.target, boxRef.current, rect);
             lookPress.current = null;
           }}
           onBlur={(e) => {

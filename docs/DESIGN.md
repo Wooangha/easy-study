@@ -1841,12 +1841,18 @@ loaded or a tool is active):**
   stored as a fraction of the slide height scales with the zoom without a per-layer observer (no container query on the layer: a
   size container is a stacking context and would stop the highlights' `mix-blend-mode: multiply` from blending with the image) —,
   `font-family: var(--annot-font)` and `font-weight: var(--annot-weight)`; editing swaps in a `<textarea>` in the same box
-  (`user-select: text`, the explicit height); blur / Esc / ⌘Enter commits and writes the laid-out height back into `rect.h`
+  (`user-select: text`, `overflow: hidden`). Since 0.6.12 the box grows with its text while typing, at once (the user: it
+  grew only when the typing ended): the textarea is sized to its text (`height` 0 → `scrollHeight`, never below the stored
+  height) on every change of the text, the look, the rect and the slide's size (a ResizeObserver on the layer), so a new
+  line, a wrapped line, a wider font or bold, a narrower box or a zoom show at once; the layer draws the handles at that
+  height (`onLiveHeight`); the stored height still waits for the commit. Blur / Esc / ⌘Enter commits and writes the
+  laid-out height back into `rect.h`
   (`laidOutHeight`: the content's scrollHeight plus the box's own padding and border — the box as drawn, so the stored height is
   the visible box and its bottom handles sit on its bottom edge). When
   the box's size / font / bold changes (here or from another device) the shown body is measured and `rect.h` is re-laid out as a
   follow-up `update` with `undoable: false` (not on mount: two devices with different fonts must not keep rewriting each other's
-  height).
+  height); made narrower (its stored `rect.w`, not a resize being dragged) it grows `rect.h` to the lines it now needs, the
+  same way, never shrinking it (a height dragged on purpose stays).
 - Memos: `<MemoCard>` at `percentStyle({ x: at.x, y: at.y })`, UI-sized (width 24 %, min 160 px, max 320 px, 13 px font — or, 0.6.2,
   the memo's own `size` against `--slide-h` inline and in CSS points in the bottom sheet; the textarea is fitted to its text again
   whenever the text, the rendered font — the size — or the zoom / the pane changes: `LayerEnv.trackWidth`, the viewer's `--track-w`

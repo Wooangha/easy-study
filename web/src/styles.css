@@ -6968,6 +6968,8 @@ details[open] > summary::before {
   font: inherit;
   line-height: inherit;
   resize: none;
+  /* Sized to its text while typing (AnnotationLayer TextBox): never a scrollbar, which would narrow the lines. */
+  overflow: hidden;
   outline: none;
   user-select: text;
   -webkit-user-select: text;
