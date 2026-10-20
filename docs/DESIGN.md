@@ -666,7 +666,9 @@ Recap/rollover behaviour is unchanged.
   stay; the files that show the title follow: the course's COURSE.md, STUDY_NOTES.md (`writeNotes`) and DIGEST.md
   (`rewriteDigestMarkdown`: from digest.json; a digest being made writes the current title when it saves). Web: the lecture
   row's and the 미분류 card's ⋯ menu › 이름 바꾸기 turns the title into an input (Enter saves, Esc or an unchanged title
-  cancels; outside the opening button, which cannot hold an input).
+  cancels; outside the opening button, which cannot hold an input). The same menus end with **삭제** (0.6.13; the user: "pdf
+  제거가 없는디?" — only a failed conversion offered it): the confirmation names everything that goes (slide images,
+  conversations, notes, digest, annotations, recordings) and `DELETE /api/docs/:docId` does it; not while converting.
 - Single-instance guard: `library/.server.lock` with `{pid, port, startedAt}`; startup refuses (clear message) when the
   lock's pid is alive, and replaces a stale lock; removed on shutdown.
 

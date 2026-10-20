@@ -1,4 +1,4 @@
-import { FileUp, Folder, GripVertical, Hourglass, Mic, Pencil, TriangleAlert } from 'lucide-react';
+import { FileUp, Folder, GripVertical, Hourglass, Mic, Pencil, Trash, TriangleAlert } from 'lucide-react';
 import { useState } from 'react';
 import type { DocMeta } from '../../../../shared/types.ts';
 import { thumbUrl } from '../../api.ts';
@@ -100,6 +100,8 @@ export function LectureRow({ doc, index, courseId, entries, onOpen, onMove, onRe
           onSelect: () => onMove(e.course.id),
         })),
     },
+    // Last, apart: deleting the lecture (asks first; not while it is being converted).
+    ...(doc.status === 'processing' ? [] : [{ items: [{ key: 'delete', label: msg().common.delete, icon: Trash, danger: true, onSelect: () => onDelete(doc) }] }]),
   ];
 
   return (

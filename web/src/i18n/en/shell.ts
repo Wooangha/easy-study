@@ -56,7 +56,7 @@ export const shell = {
     deleteDocConfirm: {
       title: (title) => `Delete ‘${title}’?`,
       message:
-        'The uploaded PDF and every file made from it (slide images, conversations, notes, digest) will be deleted, and it will be removed from its course.',
+        'The uploaded PDF and every file made from it (slide images, conversations, notes, digest, annotations, recordings) will be deleted, and it will be removed from its course.',
     },
     docDeleted: (title) => `Deleted ‘${title}’.`,
     noLlmForDigest: 'No LLM is available. Check the model choice at the top.',

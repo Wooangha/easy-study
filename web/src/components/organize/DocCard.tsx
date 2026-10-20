@@ -1,4 +1,4 @@
-import { FileUp, Hourglass, Mic, Pencil, TriangleAlert } from 'lucide-react';
+import { FileUp, Hourglass, Mic, Pencil, Trash, TriangleAlert } from 'lucide-react';
 import { useState } from 'react';
 import type { Course, DocMeta, LibraryLayout } from '../../../../shared/types.ts';
 import { viewUrl } from '../../api.ts';
@@ -106,6 +106,8 @@ export function DocCard({ doc, courses, layout, onOpen, onMove, onRetry, onRenam
                   : []),
               ],
             },
+            // Last, apart: deleting the lecture (asks first; not while it is being converted).
+            ...(doc.status === 'processing' ? [] : [{ items: [{ key: 'delete', label: msg().common.delete, icon: Trash, danger: true, onSelect: () => onDelete(doc) }] }]),
           ]}
         />
       </div>

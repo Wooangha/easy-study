@@ -61,7 +61,7 @@ export const shell = {
     },
     deleteDocConfirm: {
       title: (title: string) => `${withParticle(`‘${title}’`, '을', '를')} 삭제할까요?`,
-      message: '업로드한 PDF와 여기서 만든 파일(슬라이드 이미지, 대화, 노트, 정리본)이 모두 지워지고, 과목에서도 빠져요.',
+      message: '업로드한 PDF와 여기서 만든 파일(슬라이드 이미지, 대화, 노트, 정리본, 필기, 녹음)이 모두 지워지고, 과목에서도 빠져요.',
     },
     docDeleted: (title: string) => `‘${title}’을(를) 삭제했어요.`,
     noLlmForDigest: '사용할 수 있는 LLM이 없어요. 상단의 모델 선택을 확인해 주세요.',
