@@ -131,6 +131,7 @@ export const settings = {
       undo: '필기 되돌리기',
       redo: '필기 다시 실행',
       deleteSelected: '선택한 필기 삭제',
+      lecturePicker: '강의 선택 (이름으로 찾기)',
       settings: '설정 (앱)',
       changeConnection: '연결 대상 바꾸기 (앱)',
     },

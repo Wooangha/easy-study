@@ -30,7 +30,7 @@ describe('the language', () => {
     assert.equal(getLangPref(), 'system');
     assert.equal(getLang(), 'ko');
     assert.equal(msg(), ko);
-    assert.equal(msg().shell.topBar.noDocs, '문서 없음');
+    assert.equal(msg().shell.topBar.noDocs, '강의 없음');
   });
 
   test("the browser's language: 'ko*' is Korean, a supported one first, anything else English", () => {
@@ -55,8 +55,8 @@ describe('the language', () => {
     try {
       setLang('en');
       assert.equal(getLang(), 'en');
-      assert.equal(msg().shell.topBar.noDocs, 'No documents');
-      assert.equal(msg('ko').shell.topBar.noDocs, '문서 없음');
+      assert.equal(msg().shell.topBar.noDocs, 'No lectures');
+      assert.equal(msg('ko').shell.topBar.noDocs, '강의 없음');
       assert.equal(intlLocale(), 'en-US');
       assert.equal(items.get('easy-study:lang'), '"en"');
       assert.equal(calls, 1);

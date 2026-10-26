@@ -9,6 +9,8 @@ export const storageKeys = {
   /** The chat pane of the split pane is folded away (either layout). */
   chatCollapsed: 'chatCollapsed',
   lastDoc: 'lastDoc',
+  /** The lectures opened last on this device, newest first (the top bar's lecture picker, lib/lecturePicker.ts). */
+  recentDocs: 'recentDocs',
   zoom: 'zoom',
   providerChoice: 'providerChoice',
   /** Neighbor slides (±N) fed with every question. */

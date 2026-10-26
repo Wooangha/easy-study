@@ -350,7 +350,8 @@ session's when there is no answer; a session whose LLM changed (§5 "LLM switch"
 
 ## 8. Web UI (`web/`)
 
-- **Top bar**: app name, document picker (dropdown of library docs + "＋ PDF 추가"), session picker
+- **Top bar**: app name, lecture picker (since 0.6.14 a popover, below; before, a `<select>` of the library's docs + "＋ PDF
+  추가"), session picker
   for the doc (dropdown: title · provider · #messages, "＋ 새 세션"), provider/model selector used
   for new sessions, link to open `notes.md`.
 - **Empty state / library**: big drop zone ("PDF를 끌어다 놓거나 클릭해서 업로드") + list of docs.
@@ -972,7 +973,25 @@ that no longer exists, rolls the move back with a toast. The client also reloads
   - Native file drops (uploading PDFs onto a course card) keep working alongside (they use HTML5 file drag events, not pointer drags).
 - The ▲▼ buttons are removed; "과목에서 빼기" moves into a small per-lecture "⋯" menu (together with "과목으로 이동 ▸" for keyboard-free
   alternatives). Uncategorised lectures keep a "과목으로 이동" control.
-- Top-bar document picker: optgroup label "📁 <group> › <course>" for grouped courses, in layout order.
+- Top-bar document picker: optgroup label "📁 <group> › <course>" for grouped courses, in layout order. Replaced in 0.6.14 by the
+  **lecture picker** (components/LecturePicker.tsx, lib/lecturePicker.ts; the user chose it from three mock-ups — "2번 ㄱㄱ.
+  깔쌈하게 뽑아보셈"): a button `‹ [course  i/n  title ⌄] ›` (‹ › open the course's previous / next lecture, disabled at its
+  ends, absent outside a course; on a phone the button keeps only `i/n  title`) opening a panel (`Floating`, ≤ 560 px): a
+  search field (focused; ⌘K on Apple devices / Ctrl+K elsewhere opens and closes the picker from anywhere), **최근** — the
+  three lectures opened last on this device (`recentDocs` in localStorage, written whenever the open lecture changes,
+  the open one left out) —, then the courses in layout order ("그룹 › 과목", the open lecture's course unfolded, the
+  others folded) and 미분류 (a plain list when there are no courses). A lecture row: the first slide's thumbnail, the
+  title (no course number before a title that starts with its own, `titleHasNumber`), the course (in 최근 and results),
+  the slide count or the conversion state, ✓ 정리본 / 정리 중, and where it was left on this device (`i/n` and a bar, from
+  the remembered slide when it belongs to the current deck; else 아직 안 봄). The search folds case and width and needs
+  every word in the title or the course label: titles that start with the query first, then title matches, then course
+  matches, library order within; the title's matches are marked. ↑↓ move (wrapping; only a key move scrolls the row into
+  view), → / ← unfold / fold a course row, Enter opens (or toggles a course; not while a Korean syllable is being
+  composed), Esc closes and gives the focus back to what had it before ⌘K (else the button), Tab reaches ＋ PDF 추가 and
+  past it closes, the focus leaving the panel closes it, a press outside closes it, a press in the list keeps the focus
+  in the search field. ⌘K does nothing over an open `<dialog>` or an inert app (the login screen). Opened by a finger
+  or a pen, the search field is not focused (the on-screen keyboard would cover the list). The footer: the key hints (not on a touch screen or a phone) and ＋ PDF 추가 (into the course of the open
+  lecture, as before). Tests: web/tests/lecture-picker.test.ts.
 - Replace window.confirm() in the library view with an in-page confirmation dialog (it does not work inside the upcoming desktop app).
 
 ## 19. Round 8 — desktop app (Tauri 2) for macOS, Windows and Linux

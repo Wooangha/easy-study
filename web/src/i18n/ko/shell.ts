@@ -7,20 +7,42 @@ import { rich } from '../rich.ts';
 export const shell = {
   topBar: {
     toLibrary: '라이브러리로',
-    docPicker: '문서 선택',
-    docPlaceholder: '문서 선택…',
-    noDocs: '문서 없음',
-    addPdf: '＋ PDF 추가',
-    addPdfTo: (course: string) => `＋ PDF 추가 (${course})`,
-    /** A lecture being converted: "Lecture 3 (처리 중 40%)". */
-    docProcessing: (name: string, percent: number) => `${name} (처리 중 ${percent}%)`,
-    docError: (name: string) => `${name} (오류)`,
-    /** The slide count of a ready lecture: "Lecture 3 · 24장". */
+    docPicker: '강의 선택',
+    docPlaceholder: '강의 선택…',
+    noDocs: '강의 없음',
+    /** The slide count of a ready lecture: "24장". */
     slideCount: (n: number) => `${n}장`,
     digestReady: '정리본',
     digestRunning: '정리 중',
-    noLectures: '(강의 없음)',
     uncategorized: '미분류',
+    /** The lecture picker (components/LecturePicker.tsx). */
+    picker: {
+      buttonLabel: (title: string) => `강의 선택: ${title}`,
+      buttonTitle: (shortcut: string) => `강의 선택 (${shortcut})`,
+      prevTitle: (title: string) => `이전 강의: ${title}`,
+      nextTitle: (title: string) => `다음 강의: ${title}`,
+      noPrev: '과목의 첫 강의예요',
+      noNext: '과목의 마지막 강의예요',
+      searchLabel: '강의 찾기',
+      searchPlaceholder: '강의나 과목 이름으로 찾기…',
+      recent: '최근',
+      courses: '과목',
+      allLectures: '강의',
+      results: (n: number) => `검색 결과 ${n}개`,
+      noResults: '찾는 강의가 없어요',
+      lectureCount: (n: number) => `${n}강`,
+      /** A course row for screen readers: its name, its lectures, folded or not. */
+      courseRow: (course: string, n: number, open: boolean) => `${course}, ${n}강, ${open ? '펼쳐짐' : '접힘'}`,
+      converting: (percent: number) => `변환 중 ${percent}%`,
+      failed: '변환 실패',
+      /** Where the lecture was left on this device. */
+      position: (slide: number, total: number) => `${slide}/${total}`,
+      leftAt: (slide: number, total: number) => `이 기기에서 마지막으로 본 곳: ${total}장 중 ${slide}번째`,
+      notOpened: '아직 안 봄',
+      keysHint: '↑↓ 이동 · Enter 열기 · Esc 닫기',
+      addPdf: 'PDF 추가',
+      addPdfTo: (course: string) => `PDF 추가 (${course})`,
+    },
     sessionPicker: '세션 선택',
     sessionsLoading: '세션 불러오는 중…',
     noSessions: '세션 없음',

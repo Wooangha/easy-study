@@ -64,6 +64,8 @@ import { recorder } from './lib/recording/recorder.ts';
 import { getRecordingUploads, subscribeRecordingUploads, uploadRecordingFiles } from './lib/recording/uploads.ts';
 import { earlierLectures } from './lib/courseContext.ts';
 import { providerWithModel } from './lib/format.ts';
+import { pushRecent } from './lib/lecturePicker.ts';
+import { isStringArray } from './lib/libraryLayout.ts';
 import { isString, readRememberedSlide, readStorage, rememberSlide, storageKeys, writeStorage } from './lib/storage.ts';
 import { openChatPane } from './lib/splitPane.ts';
 import { toast } from './lib/toast.ts';
@@ -109,6 +111,10 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
     setDocIdState(id);
     writeStorage(storageKeys.lastDoc, id);
   }, []);
+  // The lecture picker's 최근: every lecture opened, however (the picker, the library, a link, the start).
+  useEffect(() => {
+    if (docId) writeStorage(storageKeys.recentDocs, pushRecent(readStorage(storageKeys.recentDocs, [], isStringArray), docId));
+  }, [docId]);
   const doc = docs?.find((d) => d.id === docId) ?? null;
   const readyDocId = doc?.status === 'ready' ? doc.id : null;
   const docCourse = doc ? (membership.get(doc.id) ?? null) : null;

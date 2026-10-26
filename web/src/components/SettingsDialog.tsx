@@ -485,6 +485,8 @@ function AboutSection({ health, marker }: { health: HealthResponse | null; marke
     [<kbd>{`${mod}Z`}</kbd>, k.undo],
     [<kbd>{marker?.os === 'macos' || !marker ? '⌘⇧Z' : 'Ctrl+Y'}</kbd>, k.redo],
     [<kbd>Delete</kbd>, k.deleteSelected],
+    // The lecture picker's shortcut: ⌘ on Apple devices, Ctrl elsewhere (LecturePicker.tsx).
+    [<kbd>{/Mac|iPhone|iPad/.test(navigator.userAgent) ? '⌘K' : 'Ctrl+K'}</kbd>, k.lecturePicker],
   ];
   if (marker) {
     keys.push([<kbd>{`${mod},`}</kbd>, k.settings]);

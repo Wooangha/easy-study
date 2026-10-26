@@ -2,15 +2,13 @@ import type { ReactNode } from 'react';
 import { BookOpen, NotebookPen, Settings, Trash } from 'lucide-react';
 import type { Course, DocMeta, LibraryLayout, ProviderInfo, SessionSummary } from '../../../shared/types.ts';
 import { notesMarkdownUrl } from '../api.ts';
-import { indexCourses } from '../hooks/useCourses.ts';
 import { msg } from '../i18n/index.ts';
 import type { ProviderChoice, ProviderChoiceUpdate } from '../hooks/useProviderChoice.ts';
 import { confirmDialog } from '../lib/confirm.ts';
 import { formatTime, providerWithModel } from '../lib/format.ts';
-import { courseLabel, layoutEntries } from '../lib/libraryLayout.ts';
+import { LecturePicker } from './LecturePicker.tsx';
 import { NewSessionLlm } from './NewSessionLlm.tsx';
 
-const UPLOAD = '__upload__';
 const NEW_SESSION = '__new__';
 
 interface TopBarProps {
@@ -48,75 +46,6 @@ interface TopBarProps {
   updatePending?: boolean;
 }
 
-function docOptionLabel(d: DocMeta, index?: number): string {
-  const m = msg().shell.topBar;
-  const name = index === undefined ? d.title : `${index}. ${d.title}`;
-  if (d.status === 'processing') {
-    const pct = d.pageCount > 0 ? Math.round((d.progress / d.pageCount) * 100) : 0;
-    return m.docProcessing(name, pct);
-  }
-  if (d.status === 'error') return m.docError(name);
-  const badge = d.digestStatus === 'ready' ? ` · ${m.digestReady}` : d.digestStatus === 'running' ? ` · ${m.digestRunning}` : '';
-  return `${name} · ${m.slideCount(d.pageCount)}${badge}`;
-}
-
-/**
- * Document picker options: one <optgroup> per course in library order ("그룹 › 과목" for grouped courses),
- * lectures in order, + "미분류" (only when courses exist).
- */
-function DocOptions({ docs, courses, layout }: { docs: DocMeta[]; courses: Course[]; layout: LibraryLayout }) {
-  const m = msg().shell.topBar;
-  if (courses.length === 0) {
-    return docs.map((d) => (
-      <option key={d.id} value={d.id}>
-        {docOptionLabel(d)}
-      </option>
-    ));
-  }
-  const byId = new Map(docs.map((d) => [d.id, d]));
-  // A document listed in two courses (data error) shows under the one it belongs to (the oldest).
-  const owner = indexCourses(courses);
-  const placed = new Set<string>();
-  const groups = layoutEntries(layout, courses).map((entry) => {
-    const c = entry.course;
-    const lectures = c.docIds
-      .filter((id) => owner.get(id)?.course.id === c.id)
-      .map((id) => byId.get(id))
-      .filter((d): d is DocMeta => d !== undefined);
-    for (const d of lectures) placed.add(d.id);
-    return (
-      <optgroup key={c.id} label={courseLabel(entry)}>
-        {lectures.length === 0 ? (
-          <option disabled value={`__empty:${c.id}`}>
-            {m.noLectures}
-          </option>
-        ) : (
-          lectures.map((d, i) => (
-            <option key={d.id} value={d.id}>
-              {docOptionLabel(d, i + 1)}
-            </option>
-          ))
-        )}
-      </optgroup>
-    );
-  });
-  const rest = docs.filter((d) => !placed.has(d.id));
-  return (
-    <>
-      {groups}
-      {rest.length > 0 && (
-        <optgroup label={m.uncategorized}>
-          {rest.map((d) => (
-            <option key={d.id} value={d.id}>
-              {docOptionLabel(d)}
-            </option>
-          ))}
-        </optgroup>
-      )}
-    </>
-  );
-}
-
 export function TopBar(props: TopBarProps) {
   const { docs, doc, sessions, sessionId, providers } = props;
   const ready = doc?.status === 'ready';
@@ -129,20 +58,15 @@ export function TopBar(props: TopBarProps) {
         <BookOpen /> easy-study
       </button>
 
-      <select
-        className="picker doc-picker"
-        aria-label={m.docPicker}
-        value={doc?.id ?? ''}
-        onChange={(e) => {
-          const v = e.target.value;
-          if (v === UPLOAD) props.onUploadClick();
-          else props.onSelectDoc(v || null);
-        }}
-      >
-        <option value="">{docs && docs.length > 0 ? m.docPlaceholder : m.noDocs}</option>
-        <DocOptions docs={docs ?? []} courses={props.courses ?? []} layout={props.layout} />
-        <option value={UPLOAD}>{props.uploadCourse ? m.addPdfTo(props.uploadCourse.title) : m.addPdf}</option>
-      </select>
+      <LecturePicker
+        docs={docs}
+        doc={doc}
+        courses={props.courses}
+        layout={props.layout}
+        onSelectDoc={props.onSelectDoc}
+        onUploadClick={props.onUploadClick}
+        uploadCourse={props.uploadCourse}
+      />
 
       {ready && (
         <div className="session-controls">

@@ -113,6 +113,7 @@ export const settings = {
       undo: 'Undo annotation',
       redo: 'Redo annotation',
       deleteSelected: 'Delete selected annotations',
+      lecturePicker: 'Choose a lecture (find by name)',
       settings: 'Settings (app)',
       changeConnection: 'Change connection (app)',
     },
