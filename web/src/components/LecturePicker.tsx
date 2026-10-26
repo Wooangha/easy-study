@@ -4,16 +4,14 @@
 // library order (the open lecture's course unfolded, the others folded) with 미분류 last. Each row: the first slide,
 // the title (the search's matches marked), the slide count, where it was left on this device, the digest. ↑↓ move,
 // → / ← unfold / fold a course, Enter opens, Esc closes. The model and the search are lib/lecturePicker.ts.
-import { ChevronDown, ChevronLeft, ChevronRight, Clock, Folder, Hourglass, Plus, Search, TriangleAlert } from 'lucide-react';
+import { ChevronDown, ChevronLeft, ChevronRight, Plus, Search } from 'lucide-react';
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import type { Course, DocMeta, LibraryLayout } from '../../../shared/types.ts';
-import { thumbUrl } from '../api.ts';
 import { msg } from '../i18n/index.ts';
 import { highlightParts, neighbours, pickerModel, recentLectures, searchLectures, titleHasNumber, type PickerCourse } from '../lib/lecturePicker.ts';
 import { isStringArray } from '../lib/libraryLayout.ts';
 import { readRememberedSlide, readStorage, storageKeys } from '../lib/storage.ts';
 import { Floating } from './annotations/Floating.tsx';
-import { SlideImage } from './SlideImage.tsx';
 
 interface LecturePickerProps {
   docs: DocMeta[] | null;
@@ -32,7 +30,7 @@ const SHORTCUT = apple ? '⌘K' : 'Ctrl K';
 const isShortcut = (e: globalThis.KeyboardEvent) =>
   e.key?.toLowerCase() === 'k' && !e.shiftKey && !e.altKey && (apple ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey);
 
-const PANEL_WIDTH = 560;
+const PANEL_WIDTH = 480;
 const PANEL_HEIGHT = 560;
 const UNCATEGORIZED = '__uncategorized__';
 
@@ -214,7 +212,7 @@ export function LecturePicker({ docs, doc, courses, layout, onSelectDoc, onUploa
     if (i === 0)
       return (
         <div className="lp-sec" role="presentation">
-          <Clock /> {p.recent}
+          {p.recent}
         </div>
       );
     return i === recent.length ? (
@@ -328,7 +326,7 @@ export function LecturePicker({ docs, doc, courses, layout, onSelectDoc, onUploa
               spellCheck={false}
               autoComplete="off"
             />
-            <kbd className="lp-kbd">{query ? 'Esc' : SHORTCUT}</kbd>
+            <kbd className="lp-kbd">Esc</kbd>
           </div>
           {rows.length === 0 && <div className="lp-empty">{query.trim() ? p.noResults : m.noDocs}</div>}
           <div
@@ -356,7 +354,6 @@ export function LecturePicker({ docs, doc, courses, layout, onSelectDoc, onUploa
             ))}
           </div>
           <div className="lp-foot">
-            <span>{p.keysHint}</span>
             <button
               type="button"
               className="lp-add"
@@ -406,21 +403,20 @@ function PickerRow({
           role="option"
           aria-selected={active}
           aria-label={p.courseRow(row.label, row.count, row.open)}
-          className={`lp-course${active ? ' is-active' : ''}`}
+          className={`lp-course${active ? ' is-active' : ''}${row.open ? ' is-open' : ''}`}
           onPointerMove={onHover}
           onClick={() => onToggle(row.id)}
         >
-          {row.open ? <ChevronDown className="lp-fold" /> : <ChevronRight className="lp-fold" />}
-          <Folder />
+          <ChevronRight className="lp-fold" />
           <span className="lp-course-name">{row.label}</span>
-          <span className="lp-count">{p.lectureCount(row.count)}</span>
+          <span className="lp-count">{row.count}</span>
         </div>
       </>
     );
   }
   const { doc } = row;
   const isCurrent = doc.id === currentDoc;
-  const number = row.index !== null && !row.showCourse && !titleHasNumber(doc.title) ? `${row.index} · ` : '';
+  const nested = !row.showCourse;
   return (
     <>
       {heading}
@@ -430,67 +426,40 @@ function PickerRow({
         role="option"
         aria-selected={active}
         aria-current={isCurrent ? 'true' : undefined}
-        className={`lp-row${active ? ' is-active' : ''}${isCurrent ? ' is-current' : ''}${row.showCourse ? '' : ' is-nested'}`}
+        className={`lp-row${active ? ' is-active' : ''}${isCurrent ? ' is-current' : ''}${nested ? ' is-nested' : ''}${doc.status === 'ready' ? '' : ' is-pending'}`}
         onPointerMove={onHover}
         onClick={() => onPick(doc)}
       >
-        <span className="lp-thumb" style={{ aspectRatio: doc.aspectRatio > 0 ? doc.aspectRatio : 16 / 9 }}>
-          {doc.status === 'ready' ? (
-            <SlideImage docId={doc.id} slide={1} src={thumbUrl(doc.id, 1)} alt="" draggable={false} />
-          ) : doc.status === 'error' ? (
-            <TriangleAlert />
-          ) : (
-            <Hourglass />
-          )}
+        {/* Inside a course: its place there, unless the title carries its own number (a column, so titles line up). */}
+        {nested && <span className="lp-num">{row.index !== null && !titleHasNumber(doc.title) ? row.index : ''}</span>}
+        <span className="lp-title">
+          {row.ranges ? highlightParts(doc.title, row.ranges).map((part, i) => (part.hit ? <mark key={i}>{part.text}</mark> : <span key={i}>{part.text}</span>)) : doc.title}
         </span>
-        <span className="lp-main">
-          <span className="lp-title">
-            {number && <span className="lp-num">{number}</span>}
-            {row.ranges ? highlightParts(doc.title, row.ranges).map((part, i) => (part.hit ? <mark key={i}>{part.text}</mark> : <span key={i}>{part.text}</span>)) : doc.title}
-          </span>
-          <span className="lp-sub">
-            <LectureFacts doc={doc} course={row.showCourse ? row.course : null} />
-          </span>
-        </span>
-        <Where doc={doc} />
+        {row.showCourse && row.course && <span className="lp-tag">{row.course.label}</span>}
+        <Meta doc={doc} />
       </div>
     </>
   );
 }
 
-/** "데이터베이스 · 26장 · 정리본" / "변환 중 40%" / "변환 실패". */
-function LectureFacts({ doc, course }: { doc: DocMeta; course: PickerCourse | null }) {
+/**
+ * The right end of a row: where the lecture was left on this device ("20/45"), else its slide count; the conversion
+ * state of a lecture that is not ready.
+ */
+function Meta({ doc }: { doc: DocMeta }) {
   const m = msg().shell.topBar;
   const p = m.picker;
-  const parts: ReactNode[] = [];
-  if (course) parts.push(course.label);
-  if (doc.status === 'processing') parts.push(p.converting(doc.pageCount > 0 ? Math.round((doc.progress / doc.pageCount) * 100) : 0));
-  else if (doc.status === 'error') parts.push(p.failed);
-  else parts.push(m.slideCount(doc.pageCount));
-  return (
-    <>
-      {parts.join(' · ')}
-      {doc.status === 'ready' && doc.digestStatus === 'ready' && <span className="lp-badge is-ok">✓ {m.digestReady}</span>}
-      {doc.status === 'ready' && doc.digestStatus === 'running' && <span className="lp-badge">{m.digestRunning}</span>}
-    </>
-  );
-}
-
-/** Where the lecture was left on this device: "12/26" and a bar (nothing for a lecture never opened here). */
-function Where({ doc }: { doc: DocMeta }) {
-  const p = msg().shell.topBar.picker;
-  if (doc.status !== 'ready' || doc.pageCount <= 0) return null;
+  if (doc.status === 'processing') {
+    return <span className="lp-meta is-busy">{p.converting(doc.pageCount > 0 ? Math.round((doc.progress / doc.pageCount) * 100) : 0)}</span>;
+  }
+  if (doc.status === 'error') return <span className="lp-meta is-failed">{p.failed}</span>;
   const left = readRememberedSlide(doc.id);
-  // A position remembered in an older deck (a new version since) is not shown: its numbers mean other slides.
-  if (!left) return <span className="lp-where muted">{p.notOpened}</span>;
-  if (left.rev !== (doc.deckRev ?? 0)) return null;
+  // A position remembered in an older deck (a new version since) means other slides: the count instead.
+  if (!left || left.rev !== (doc.deckRev ?? 0) || doc.pageCount <= 0) return <span className="lp-meta">{m.slideCount(doc.pageCount)}</span>;
   const slide = Math.min(left.slide, doc.pageCount);
   return (
-    <span className="lp-where" title={p.leftAt(slide, doc.pageCount)}>
-      <span className="lp-where-num">{p.position(slide, doc.pageCount)}</span>
-      <span className="lp-bar" aria-hidden="true">
-        <i style={{ width: `${Math.round((slide / doc.pageCount) * 100)}%` }} />
-      </span>
+    <span className="lp-meta is-left" title={p.leftAt(slide, doc.pageCount)}>
+      {p.position(slide, doc.pageCount)}
     </span>
   );
 }

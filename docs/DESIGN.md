@@ -980,10 +980,12 @@ that no longer exists, rolls the move back with a toast. The client also reloads
   search field (focused; ⌘K on Apple devices / Ctrl+K elsewhere opens and closes the picker from anywhere), **최근** — the
   three lectures opened last on this device (`recentDocs` in localStorage, written whenever the open lecture changes,
   the open one left out) —, then the courses in layout order ("그룹 › 과목", the open lecture's course unfolded, the
-  others folded) and 미분류 (a plain list when there are no courses). A lecture row: the first slide's thumbnail, the
-  title (no course number before a title that starts with its own, `titleHasNumber`), the course (in 최근 and results),
-  the slide count or the conversion state, ✓ 정리본 / 정리 중, and where it was left on this device (`i/n` and a bar, from
-  the remembered slide when it belongs to the current deck; else 아직 안 봄). The search folds case and width and needs
+  others folded) and 미분류 (a plain list when there are no courses). A lecture is one line (the user, on the first
+  version with thumbnails, digest badges and progress bars: "디자인을 좀 정리해줘. 그게 최선이야?" — title-slide
+  thumbnails all looked alike): its place in the course as a muted column (none before a title that starts with its own
+  number, `titleHasNumber`), the title (the open lecture's in the accent color), the course name in 최근 and the
+  results, and at the right where it was left on this device (`20/45`, from the remembered slide when it belongs to the
+  current deck) or else its slide count, or the conversion state. Course headings: a chevron, the name, the count. The search folds case and width and needs
   every word in the title or the course label: titles that start with the query first, then title matches, then course
   matches, library order within; the title's matches are marked. ↑↓ move (wrapping; only a key move scrolls the row into
   view), → / ← unfold / fold a course row, Enter opens (or toggles a course; not while a Korean syllable is being

@@ -12,8 +12,6 @@ export const shell = {
     noDocs: '강의 없음',
     /** The slide count of a ready lecture: "24장". */
     slideCount: (n: number) => `${n}장`,
-    digestReady: '정리본',
-    digestRunning: '정리 중',
     uncategorized: '미분류',
     /** The lecture picker (components/LecturePicker.tsx). */
     picker: {
@@ -30,7 +28,6 @@ export const shell = {
       allLectures: '강의',
       results: (n: number) => `검색 결과 ${n}개`,
       noResults: '찾는 강의가 없어요',
-      lectureCount: (n: number) => `${n}강`,
       /** A course row for screen readers: its name, its lectures, folded or not. */
       courseRow: (course: string, n: number, open: boolean) => `${course}, ${n}강, ${open ? '펼쳐짐' : '접힘'}`,
       converting: (percent: number) => `변환 중 ${percent}%`,
@@ -38,8 +35,6 @@ export const shell = {
       /** Where the lecture was left on this device. */
       position: (slide: number, total: number) => `${slide}/${total}`,
       leftAt: (slide: number, total: number) => `이 기기에서 마지막으로 본 곳: ${total}장 중 ${slide}번째`,
-      notOpened: '아직 안 봄',
-      keysHint: '↑↓ 이동 · Enter 열기 · Esc 닫기',
       addPdf: 'PDF 추가',
       addPdfTo: (course: string) => `PDF 추가 (${course})`,
     },
