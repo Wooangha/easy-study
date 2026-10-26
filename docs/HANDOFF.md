@@ -28,14 +28,14 @@ The user writes short casual Korean. Keep replies in Korean, short, plain; lead 
 
 ## Repository state (at the time of writing)
 
-- `main`: released up to **v0.6.13** (click-made text boxes as wide as their text, `autoWidth`; a lecture's ⋯ menu ›
-  삭제; 0.6.12: no logout in the desktop app's window on its own server, a text box grows with its text while typing; 0.6.11:
+- `main`: released up to **v0.6.14** (the top bar's lecture picker: search, recent lectures, ‹ › through the course,
+  DESIGN §13; 0.6.13: click-made text boxes as wide as their text, `autoWidth`; a lecture's ⋯ menu › 삭제; 0.6.12: no logout in the desktop app's window on its own server, a text box grows with its text while typing; 0.6.11:
   resizing the window keeps the slide being viewed — the focus anchor carries
   the scroller size it was measured at, DESIGN "Slide viewer"; 0.6.10: a text box keeps a size / font / bold / color change made right away — it used to
   turn into a new box —, and the highlighter's preview shows its color, DESIGN §25; 0.6.9: 펜: handwriting with Apple Pencil / S Pen / the mouse, pinch zoom and a collapsible chat on tablets, DESIGN §29 — open: on iPad Safari pen contact is very rarely not delivered for a few seconds while hover is, cause not found, see §29 "On the iPad" and `?inkdebug=1`; 0.6.8: 새 버전 올리기: a new version of a lecture PDF, DESIGN §28; 0.6.7: English next to Korean: web, server, desktop shell, tutor/digest language; 0.6.6: the headless Linux server `easy-study server` / `update`; 0.6.5: lectures can be renamed; 0.6.4: Vulkan GPU transcription on Windows/Linux x64, Lucide icons, a one-line top bar) (in-app updates from 0.5.0; LAN sharing + the loopback relay in 0.5.1). Pushed; no
-  other branches. Tags v0.1.0 … v0.6.13. Releases up to v0.4.2 are drafts in the private repo (the user may publish
-  them); v0.5.0 … v0.6.13 are published there AND in the public repo `Wooangha/easy-study-releases` (installers +
-  latest.json, signed on this Mac with `publish-release.mjs`). `packaging/arch/PKGBUILD` + `.SRCINFO` are at 0.6.13.
+  other branches. Tags v0.1.0 … v0.6.14. Releases up to v0.4.2 are drafts in the private repo (the user may publish
+  them); v0.5.0 … v0.6.14 are published there AND in the public repo `Wooangha/easy-study-releases` (installers +
+  latest.json, signed on this Mac with `publish-release.mjs`). `packaging/arch/PKGBUILD` + `.SRCINFO` are at 0.6.14.
 - `gh` is installed and logged in. SSH push to origin works.
 
 ## Commands
