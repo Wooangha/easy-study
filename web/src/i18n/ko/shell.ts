@@ -248,8 +248,6 @@ export const shell = {
     collapseAll: '모두 접기',
     expandAll: '모두 펼치기',
     newGroupTitle: '과목을 묶는 그룹 (예: 학기)',
-    newGroup: '＋ 새 그룹',
-    newCourse: '＋ 새 과목',
     coursesLoadFailed: (error: string) => `과목 목록을 불러오지 못했어요: ${error}`,
     layoutLoadFailed: (error: string) => `과목 배치(그룹·순서)를 불러오지 못해서 과목을 만든 순서대로 보여 줘요: ${error}`,
     groupPlaceholder: '그룹 이름 (예: 2026-2학기)',
@@ -296,6 +294,12 @@ export const shell = {
     create: '만들기',
     /** The library's two columns (0.6.15): the tree on the left, the chosen course's lectures on the right. */
     uploadPdf: 'PDF 올리기',
+    uploadTo: (course: string) => `‘${course}’에 강의 PDF 올리기`,
+    uploadToUncategorized: '미분류에 강의 PDF 올리기',
+    /** ＋ 과목 / ＋ 그룹 beside the tree's heading (top level). */
+    addCourse: '＋ 과목',
+    addGroup: '＋ 그룹',
+    newCourseTitle: '새 과목 만들기',
     /** A lecture's upload date after its slide count. */
     uploadedOn: (date: string) => `${date} 올림`,
     treeLabel: '과목 목록',
@@ -320,7 +324,6 @@ export const shell = {
     rename: '과목 이름 바꾸기',
     renameLabel: (title: string) => `‘${title}’ 과목 이름 바꾸기`,
     lectureCount: (n: number) => `강의 ${n}개`,
-    dropAtEnd: '놓으면 이 과목 끝에 추가',
     makeDigestsTitle:
       '정리본이 있는 강의만 요약이 다음 강의를 공부할 때 LLM에게 전달돼요 — 없는 강의의 정리본을 한 번에 만들어요',
     noLlm: '사용할 수 있는 LLM이 없어요',
@@ -359,18 +362,13 @@ export const shell = {
     nameLabel: '그룹 이름',
     rename: '그룹 이름 바꾸기',
     renameLabel: (title: string) => `‘${title}’ 그룹 이름 바꾸기`,
-    courseCount: (n: number) => `과목 ${n}개`,
     /** What a group holds: its groups (when any) and the courses in it at any depth. */
     contents: (groups: number, courses: number) => (groups > 0 ? `그룹 ${groups}개 · 과목 ${courses}개` : `과목 ${courses}개`),
-    opensSoon: '잠시 기다리면 열려요',
-    dropAtEnd: '놓으면 이 그룹 끝에 추가',
     newCourseTitle: '이 그룹 안에 새 과목 만들기',
-    newCourse: '＋ 과목',
     deleteTitle: '그룹 삭제 (안의 그룹·과목과 강의는 남아요)',
     deleteLabel: (title: string) => `‘${title}’ 그룹 삭제`,
     newCourseName: (title: string) => `‘${title}’ 그룹에 만들 과목 이름`,
     newGroupTitle: '이 그룹 안에 그룹 만들기',
-    newGroup: '＋ 그룹',
     newGroupName: (title: string) => `‘${title}’ 그룹 안에 만들 그룹 이름`,
     menu: (title: string) => `‘${title}’ 그룹 메뉴`,
     addCourse: '안에 과목 만들기',

@@ -81,7 +81,8 @@ describe('shell texts in English', () => {
     const m = msg().shell;
     assert.equal(m.course.lectureCount(1), '1 lecture');
     assert.equal(m.course.lectureCount(3), '3 lectures');
-    assert.equal(m.group.courseCount(0), '0 courses');
+    assert.equal(m.group.contents(0, 0), '0 courses');
+    assert.equal(m.group.contents(1, 3), '1 group · 3 courses');
     assert.equal(m.library.slideCount(1), '1 slide');
     assert.equal(m.library.summary.digestsTitle(1, 1), '1 of 1 lecture has a digest');
     assert.equal(m.library.summary.digestsTitle(2, 5), '2 of 5 lectures have a digest');

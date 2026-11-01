@@ -4,7 +4,7 @@
 // dropped on a course goes to the end of it, on 미분류 out of its course; a PDF dropped on a course is added to it.
 import { useDroppable } from '@dnd-kit/core';
 import { useState, type CSSProperties, type DragEvent, type ReactNode } from 'react';
-import { Folder, FolderPlus, Folders, GripVertical, Inbox, Pencil, Trash } from 'lucide-react';
+import { Folder, FolderPlus, Folders, GripVertical, Inbox, Pencil, Trash, Upload } from 'lucide-react';
 import type { Course, CourseGroup } from '../../../../shared/types.ts';
 import { msg } from '../../i18n/index.ts';
 import { confirmDialog } from '../../lib/confirm.ts';
@@ -257,8 +257,7 @@ export function TreeUncategorized({ count, actions, label }: { count: number; ac
 }
 
 /**
- * The column: the heading, the tree, 미분류, ＋ 과목 / ＋ 그룹 at the top level. (No upload button: the pane's "＋ 강의 추가" /
- * "PDF 올리기" uploads into the same place, and a PDF dropped anywhere goes there too.)
+ * The column: PDF 올리기, the heading with ＋ 과목 / ＋ 그룹 (top level; the form opens right under it), the tree, 미분류.
  */
 export function LibraryTree({
   rows,
@@ -269,6 +268,8 @@ export function LibraryTree({
   canCreateGroup,
   saving,
   headingRef,
+  uploadTitle,
+  onPickFiles,
   notices,
   footer,
 }: {
@@ -280,6 +281,8 @@ export function LibraryTree({
   canCreateGroup: boolean;
   saving: boolean;
   headingRef: string;
+  uploadTitle: string;
+  onPickFiles: () => void;
   /** Load errors of the courses or of the layout. */
   notices?: ReactNode;
   /** Below the tree (the bottom drop zone while a course or a group is dragged). */
@@ -289,6 +292,9 @@ export function LibraryTree({
   const m = msg().shell.library;
   return (
     <nav className="lib-side" aria-label={m.treeLabel}>
+      <button type="button" className="lib-upload" onClick={onPickFiles} title={uploadTitle}>
+        <Upload /> {m.uploadPdf}
+      </button>
       <div className="lib-side-head">
         <h2 className="lib-side-heading" tabIndex={-1} data-org-key={headingRef}>
           {m.courses}
@@ -298,36 +304,35 @@ export function LibraryTree({
             {m.saving}
           </span>
         )}
+        <span className="spacer" />
+        <button type="button" className="lib-side-add" onClick={() => setCreating('course')} disabled={!canCreate} title={m.newCourseTitle}>
+          {m.addCourse}
+        </button>
+        <button type="button" className="lib-side-add" onClick={() => setCreating('group')} disabled={!canCreateGroup} title={m.newGroupTitle}>
+          {m.addGroup}
+        </button>
       </div>
       {notices}
+      {creating && (
+        <div className="tree-create" style={at(0)}>
+          <NewTitleForm
+            icon={creating === 'course' ? Folder : Folders}
+            placeholder={creating === 'course' ? m.coursePlaceholder : m.groupPlaceholder}
+            label={creating === 'course' ? m.newCourseName : m.newGroupName}
+            onCancel={() => setCreating(null)}
+            onCreate={async (title) => {
+              const made = creating === 'course' ? await actions.onCreateCourse(title, null) : await actions.onCreateGroup(title, null);
+              if (made) setCreating(null);
+            }}
+          />
+        </div>
+      )}
       <ul className="tree">
         <TreeRows rows={rows} depth={0} actions={actions} />
-        {creating && (
-          <li className="tree-create" style={at(0)}>
-            <NewTitleForm
-              icon={creating === 'course' ? Folder : Folders}
-              placeholder={creating === 'course' ? m.coursePlaceholder : m.groupPlaceholder}
-              label={creating === 'course' ? m.newCourseName : m.newGroupName}
-              onCancel={() => setCreating(null)}
-              onCreate={async (title) => {
-                const made = creating === 'course' ? await actions.onCreateCourse(title, null) : await actions.onCreateGroup(title, null);
-                if (made) setCreating(null);
-              }}
-            />
-          </li>
-        )}
       </ul>
       {footer}
       {!hasCourses && !creating && <p className="lib-side-hint muted small">{m.courseHintShort}</p>}
       <TreeUncategorized count={uncategorizedCount} actions={actions} label={hasCourses ? m.uncategorized : m.myDocs} />
-      <div className="lib-side-foot">
-        <button type="button" className="ghost-btn small" onClick={() => setCreating('course')} disabled={!canCreate}>
-          {m.newCourse}
-        </button>
-        <button type="button" className="ghost-btn small" onClick={() => setCreating('group')} disabled={!canCreateGroup} title={m.newGroupTitle}>
-          {m.newGroup}
-        </button>
-      </div>
     </nav>
   );
 }

@@ -292,6 +292,8 @@ export function LibraryView(props: LibraryViewProps) {
           canCreateGroup={coursesKnown && !org.layoutError}
           saving={saving}
           headingRef={HEADING_KEY}
+          uploadTitle={selected ? m.uploadTo(selected.title) : m.uploadToUncategorized}
+          onPickFiles={props.onPickFiles}
           notices={notices}
           footer={<TopEndZone />}
         />
