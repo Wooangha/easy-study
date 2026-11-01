@@ -6,7 +6,7 @@ export const common = {
     doc: '문서를 찾을 수 없습니다',
     course: '과목을 찾을 수 없습니다',
     group: '그룹을 찾을 수 없습니다',
-    session: '세션을 찾을 수 없습니다',
+    session: '대화를 찾을 수 없습니다',
     slide: '슬라이드를 찾을 수 없습니다',
     attachment: '첨부를 찾을 수 없습니다',
     apiRoute: 'API 경로를 찾을 수 없습니다',

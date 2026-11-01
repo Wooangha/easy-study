@@ -38,17 +38,6 @@ export const shell = {
       addPdf: 'PDF 추가',
       addPdfTo: (course: string) => `PDF 추가 (${course})`,
     },
-    sessionPicker: '세션 선택',
-    sessionsLoading: '세션 불러오는 중…',
-    noSessions: '세션 없음',
-    messageCount: (n: number) => `메시지 ${n}개`,
-    newSession: '＋ 새 세션',
-    deleteSession: '이 세션 삭제',
-    deleteSessionConfirm: {
-      title: '이 세션을 삭제할까요?',
-      message: '세션과 대화 기록(노트 포함)이 지워지고 되돌릴 수 없어요.',
-      confirmLabel: '세션 삭제',
-    },
     notesFile: '노트 파일',
     openNotes: 'STUDY_NOTES.md 열기',
     noNotesYet: '아직 저장된 Q&A가 없어요',
@@ -60,7 +49,7 @@ export const shell = {
 
   /** App.tsx: toasts, banners, the drop overlay and the reasons a question cannot be asked. */
   app: {
-    qaSessionMissing: '그 질문의 세션을 찾을 수 없어요',
+    qaSessionMissing: '그 질문의 대화를 찾을 수 없어요',
     recordingMissing: '그 녹음을 찾을 수 없어요',
     lectureDeleted: '그 강의는 지워졌어요',
     /**
@@ -182,16 +171,16 @@ export const shell = {
     },
   },
 
-  /** The LLM pickers: the top bar's LLM for new sessions, ProviderPicker, the LLM switch of a session. */
+  /** The LLM pickers: the LLM for new chats (새 대화, the empty chat, 설정), ProviderPicker, the LLM switch of a chat. */
   llm: {
     checking: 'LLM 확인 중…',
     noInfo: 'LLM 정보 없음',
     noneAvailable: '사용 가능한 LLM 없음',
-    newSessionLlm: '새 세션에 쓸 LLM',
+    newSessionLlm: '새 대화에 쓸 LLM',
     /** `full`: "Codex · gpt-5.5 · 추론 높음". */
-    newSessionLlmIs: (full: string) => `새 세션에 쓸 LLM: ${full}`,
+    newSessionLlmIs: (full: string) => `새 대화에 쓸 LLM: ${full}`,
     noLlm: 'LLM 없음',
-    popHint: '지금 세션의 LLM은 채팅 위의 LLM 이름을 눌러 바꿔요.',
+    popHint: '지금 대화의 LLM은 채팅 위의 LLM 이름을 눌러 바꿔요.',
     /** "Codex: 사용 불가" in the tooltip of unavailable providers (when they give no reason). */
     unavailable: '사용 불가',
     choose: 'LLM 선택',
@@ -210,7 +199,7 @@ export const shell = {
     /** `names`: the unavailable providers, comma-separated. */
     unavailableList: (names: string) => `사용할 수 없음: ${names}`,
     unavailableLabel: (details: string) => `사용 불가 LLM: ${details}`,
-    switchTitle: '이 세션의 LLM 바꾸기',
+    switchTitle: '이 대화의 LLM 바꾸기',
     switchCurrent: (name: string) => `지금: ${name}`,
     switchNote:
       '다음 질문부터 새 LLM이 답해요. 슬라이드와 최근 대화 요약을 다시 보내서 처음 질문은 토큰이 더 들어요. 지금까지의 대화는 그대로 남아요.',

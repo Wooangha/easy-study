@@ -30,6 +30,8 @@ export const settings = {
   },
 
   study: {
+    llm: 'LLM for new chats and digests',
+    llmHint: "The same setting as ‘New chat’ in the Chat tab. To change the current chat's LLM, click the LLM name above the chat.",
     neighbors: 'Neighboring slides sent with a question',
     neighborsNone: 'Current slide only',
     neighborsCount: (n) => (n === 1 ? '1 slide on each side' : `${n} slides on each side`),

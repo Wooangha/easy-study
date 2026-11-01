@@ -6,7 +6,7 @@ import type { AttachmentsApi } from '../hooks/useAttachments.ts';
 import type { CourseMembership } from '../hooks/useCourses.ts';
 import { useLatest } from '../hooks/useLatest.ts';
 import { NEIGHBOR_OPTIONS } from '../hooks/useNeighbors.ts';
-import type { ProviderChoice } from '../hooks/useProviderChoice.ts';
+import type { ProviderChoice, ProviderChoiceUpdate } from '../hooks/useProviderChoice.ts';
 import { PENDING_ASSISTANT_ID, type StudySession } from '../hooks/useStudySession.ts';
 import type { Chip } from '../lib/attachments.ts';
 import { msg } from '../i18n/index.ts';
@@ -14,9 +14,11 @@ import { canOpenFiles, courseBadgeTitle, courseContextSentence, type EarlierLect
 import { effortName, llmSwitchNotice, providerLabel, providerWithModel } from '../lib/format.ts';
 import { sessionChoice } from '../lib/providerChoice.ts';
 import { unrecordedAnswers } from '../lib/usage.ts';
+import { ChatHistory } from './ChatHistory.tsx';
 import { Composer } from './Composer.tsx';
 import { LlmSwitchDialog } from './LlmSwitchDialog.tsx';
 import { MessageList } from './MessageList.tsx';
+import { NewSessionLlm } from './NewSessionLlm.tsx';
 import { RecordingTabBadge } from './recording/LectureSpeech.tsx';
 import { UsageBar } from './UsageBar.tsx';
 
@@ -36,7 +38,10 @@ interface ChatPanelProps {
   providers: ProviderInfo[] | undefined;
   /** Why no provider can be used (health failed / none available), or null. */
   providerProblem: string | null;
+  providersLoading: boolean;
+  /** The LLM for new chats (and digests). */
   choice: ProviderChoice | null;
+  onChoiceChange: (choice: ProviderChoiceUpdate) => void;
   study: StudySession;
   focusedSlide: number;
   pinnedSlide: number | null;
@@ -118,7 +123,9 @@ export function ChatPanel({
   doc,
   providers,
   providerProblem,
+  providersLoading,
   choice,
+  onChoiceChange,
   study,
   focusedSlide,
   pinnedSlide,
@@ -246,9 +253,12 @@ export function ChatPanel({
         </div>
       )}
       {choice ? (
-        <button type="button" className="primary-btn" onClick={() => void study.newSession(targetSlide)}>
-          {m.startSession}
-        </button>
+        <div className="chat-start">
+          <button type="button" className="primary-btn" onClick={() => void study.newSession(targetSlide)}>
+            {m.startSession}
+          </button>
+          <NewSessionLlm providers={providers} loading={providersLoading} choice={choice} onChange={onChoiceChange} />
+        </div>
       ) : (
         <p className="warn-text">
           <TriangleAlert /> {providerProblem ?? shared.noLlmSentence}
@@ -287,58 +297,72 @@ export function ChatPanel({
 
   return (
     <section className="chat-panel">
-      <div className="panel-tabs" role="tablist">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={tab === 'chat'}
-          className={tab === 'chat' ? 'panel-tab is-active' : 'panel-tab'}
-          onClick={() => onTabChange('chat')}
-        >
-          {m.tabs.chat}
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={tab === 'digest'}
-          className={tab === 'digest' ? 'panel-tab is-active' : 'panel-tab'}
-          onClick={() => onTabChange('digest')}
-        >
-          {m.tabs.digest}
-          <DigestTabBadge info={digestInfo} />
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={tab === 'notes'}
-          className={tab === 'notes' ? 'panel-tab is-active' : 'panel-tab'}
-          onClick={() => onTabChange('notes')}
-        >
-          {m.tabs.notes}
-          {notesCount > 0 && <span className="tab-count">{notesCount}</span>}
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={tab === 'memos'}
-          className={tab === 'memos' ? 'panel-tab is-active' : 'panel-tab'}
-          onClick={() => onTabChange('memos')}
-          title={m.tabs.memosTitle}
-        >
-          {m.tabs.memos}
-          {memoCount > 0 && <span className="tab-count">{memoCount}</span>}
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={tab === 'recordings'}
-          className={tab === 'recordings' ? 'panel-tab is-active' : 'panel-tab'}
-          onClick={() => onTabChange('recordings')}
-          title={m.tabs.recordingsTitle}
-        >
-          {m.tabs.recordings}
-          <RecordingTabBadge docId={doc.id} count={recordingCount} />
-        </button>
+      <div className="panel-head">
+        <div className="panel-tabs" role="tablist">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'chat'}
+            className={tab === 'chat' ? 'panel-tab is-active' : 'panel-tab'}
+            onClick={() => onTabChange('chat')}
+          >
+            {m.tabs.chat}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'digest'}
+            className={tab === 'digest' ? 'panel-tab is-active' : 'panel-tab'}
+            onClick={() => onTabChange('digest')}
+          >
+            {m.tabs.digest}
+            <DigestTabBadge info={digestInfo} />
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'notes'}
+            className={tab === 'notes' ? 'panel-tab is-active' : 'panel-tab'}
+            onClick={() => onTabChange('notes')}
+          >
+            {m.tabs.notes}
+            {notesCount > 0 && <span className="tab-count">{notesCount}</span>}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'memos'}
+            className={tab === 'memos' ? 'panel-tab is-active' : 'panel-tab'}
+            onClick={() => onTabChange('memos')}
+            title={m.tabs.memosTitle}
+          >
+            {m.tabs.memos}
+            {memoCount > 0 && <span className="tab-count">{memoCount}</span>}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'recordings'}
+            className={tab === 'recordings' ? 'panel-tab is-active' : 'panel-tab'}
+            onClick={() => onTabChange('recordings')}
+            title={m.tabs.recordingsTitle}
+          >
+            {m.tabs.recordings}
+            <RecordingTabBadge docId={doc.id} count={recordingCount} />
+          </button>
+        </div>
+        {tab === 'chat' && (
+          <ChatHistory
+            key={doc.id}
+            study={study}
+            providers={providers}
+            providersLoading={providersLoading}
+            choice={choice}
+            onChoiceChange={onChoiceChange}
+            providerProblem={providerProblem}
+            targetSlide={targetSlide}
+          />
+        )}
       </div>
 
       <div className="chat-view" hidden={tab !== 'chat'}>

@@ -165,8 +165,8 @@ export const chat = {
     questionTooLong: (max: string) => `질문이 너무 깁니다 (최대 ${max}자)`,
     memosNotBoolean: 'memos는 true/false여야 합니다',
     neighborsInvalid: (max: number) => `neighbors는 0부터 ${max} 사이의 정수여야 합니다`,
-    busy: '이 세션은 답변을 생성하고 있습니다. 답변이 끝난 뒤에 다시 시도해 주세요',
-    alreadyAnswering: '이 세션은 이미 답변을 생성하고 있습니다',
+    busy: '이 대화는 답변을 생성하고 있습니다. 답변이 끝난 뒤에 다시 시도해 주세요',
+    alreadyAnswering: '이 대화는 이미 답변을 생성하고 있습니다',
     waitingForSlot: '다른 답변이 끝나기를 기다리는 중…',
     /** While a turn is retried in a new provider conversation. */
     recovery: {
@@ -185,7 +185,7 @@ export const chat = {
   /** Sessions and their notes (server/sessions.ts). */
   sessions: {
     /** The default title of a new session: `date` MM/DD, `time` HH:MM (local); `at` is the same moment, for a language that formats it itself. */
-    defaultTitle: (date: string, time: string, _at: Date) => `세션 ${date} ${time}`,
+    defaultTitle: (date: string, time: string, _at: Date) => `대화 ${date} ${time}`,
     /** Alt texts of a question's attachments in STUDY_NOTES.md and notes/<session>.md. */
     regionAlt: (slide: number) => `p.${slide} 영역`,
     imageAlt: '이미지',

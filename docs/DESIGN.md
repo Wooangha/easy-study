@@ -317,8 +317,9 @@ assistant messages carry it (`ChatMessage.effort`) and the notes name it ("Claud
 model and effort of a session can be changed later (PATCH /sessions/:sid, §5 "LLM switch"). A digest
 started by a session (DESIGN §11) or by POST /digest keeps its `effort` in digest.json for every batch and the lecture
 summary. The recordings' AI alignment (§22) takes no effort: it runs with the CLI's default (Claude Code on Haiku).
-Web: the top bar's "새 세션" LLM is one button since 0.6.4 (NewSessionLlm.tsx: a robot icon, "Claude Code · CLI 기본값", a
-chevron; the three selects made the bar wrap) that opens a panel with the full picker stacked; the picker shows a "추론" select
+Web: the "새 세션" LLM is one button since 0.6.4 (NewSessionLlm.tsx: a robot icon, "Claude Code · CLI 기본값", a
+chevron; the three selects made the bar wrap) that opens a panel with the full picker stacked — in the top bar until
+0.6.15, now next to the empty chat's start button, with the chat tab's 새 대화 and in 설정 › 공부 (§13 "Chats"); the picker shows a "추론" select
 after the model select for providers with levels
 ("추론 기본값" first, the model's levels, catalog descriptions as tooltips; disabled for a model without levels). The
 choice `{provider, model, effort}` is stored in localStorage; a choice stored before efforts existed reads as 기본값,
@@ -351,9 +352,9 @@ session's when there is no answer; a session whose LLM changed (§5 "LLM switch"
 ## 8. Web UI (`web/`)
 
 - **Top bar**: app name, lecture picker (since 0.6.14 a popover, below; before, a `<select>` of the library's docs + "＋ PDF
-  추가"), session picker
-  for the doc (dropdown: title · provider · #messages, "＋ 새 세션"), provider/model selector used
-  for new sessions, link to open `notes.md`.
+  추가"), the record button, link to open `notes.md`, ⚙. Until 0.6.15 also a session picker for the doc (dropdown: title ·
+  provider · #messages, "＋ 새 세션") with a delete button and the LLM for new sessions; now the chat tab's 대화 기록 / 새
+  대화 (§13 "Chats").
 - **Empty state / library**: big drop zone ("PDF를 끌어다 놓거나 클릭해서 업로드") + list of docs.
   While a doc is processing show a progress bar (`progress / pageCount`, poll `GET /api/docs/:id` every 800 ms).
 - **Split view** with a draggable divider (default 58% / 42%, persisted in localStorage). Since 0.6.9 (§29): on
@@ -378,7 +379,7 @@ session's when there is no answer; a session whose LLM changed (§5 "LLM switch"
 - **Chat (right)**, tabs **채팅 | 노트**:
   - Chat header: current slide `p.7 / 42`, 📌 pin toggle (when pinned, the question target stays on the
     pinned slide even when scrolling), the session's LLM badge — a button (disabled while an answer streams)
-    that opens the "LLM 바꾸기" dialog (`LlmSwitchDialog.tsx`: the `ProviderPicker` shared with the top bar,
+    that opens the "LLM 바꾸기" dialog (`LlmSwitchDialog.tsx`: the `ProviderPicker` shared with 새 대화,
     started from the session's LLM; "LLM 바꾸기" calls PATCH, §5 "LLM switch"). Afterwards a one-line notice
     ("다음 질문부터 Codex · gpt-5.5(으)로 답해요. 슬라이드와 최근 대화 요약을 다시 보내서 처음 질문은 토큰이 더 들어요.")
     stays until the next turn starts, and the message list shows a `🔀 여기부터 Codex · gpt-5.5` card where the
@@ -647,6 +648,16 @@ Recap/rollover behaviour is unchanged.
   sessions, abort; content mode "현재 슬라이드" (default: the focused slide's entry, follows scrolling) or "전체"
   (lecture summary + all entries, auto-scrolls to the focused slide); link to DIGEST.md. Failed entries show a warning.
 - DocMeta.digestStatus badge in pickers (✓ 정리본 / ⏳).
+- **Chats** (0.6.15; the user asked why the top bar had a session picker — "있는 이유가 궁금함" — and chose mock-up B of
+  two, "B ㄱㄱ"): the UI calls a session 대화 / chat. The top bar no longer has the session select, its delete button or
+  the LLM for new chats. Right of the panel tabs while the 채팅 tab is shown (ChatHistory.tsx, beside the tablist in
+  `.panel-head`): **대화 기록** (a clock and, with more than one, the number of chats; disabled without any) opens a list
+  (`Floating`): each chat's start time, message count and LLM, the open one marked (a dot, the accent color); a row opens
+  that chat, its trash deletes it after a confirmation (not the open one while it answers). **새 대화** (a pen; on a phone
+  the pen alone) opens the LLM picker for new chats with "새 대화 시작 (슬라이드 전달)" (disabled while an answer runs).
+  Opened from the keyboard, the focus goes into the panel; Esc closes it and gives the focus back; a press outside closes
+  it. The LLM for new chats (and digests) is chosen there, next to the empty chat's start button (NewSessionLlm.tsx) and
+  in 설정 › 공부. New chats are titled "대화 09/30 11:36" / "Chat Sep 30, 11:36 AM" (earlier ones keep "세션 …").
 
 ## 14. Round 3 (review fixes) — contract additions
 
@@ -1400,7 +1411,7 @@ app shows what each answer and each session used, live, and the plan's limits wh
 ### Web
 - Under each answer a muted line "입력 4.7만 (캐시 4.1만) · 출력 820", growing while it streams; tooltip: the exact numbers
   (cache read / written, reasoning, total).
-- Under the composer: "이 세션 12.3만 토큰" (saved totals + the streaming turn; tooltip: exact numbers, the priming part,
+- Under the composer: "이 대화 12.3만 토큰" (saved totals + the streaming turn; tooltip: exact numbers, the priming part,
   and how many answers were saved without usage, e.g. before §23) and the limits "5시간 한도 12% · 주간 9%" (tooltip:
   provider, report time, each window's reset time). The limits are the newest report of the session's provider from any
   session seen (useStudySession; cached per device in localStorage), not the session's own; a report an hour old or
@@ -2318,7 +2329,7 @@ windowStartFor(messages, index) })` (new pure helper in lib/chatWindow.ts, keepi
 run it scrolls `.msg[data-msg-id="<id>"]` into view (`block: 'center'`) and adds `.is-target` for 2 s (an outline flash like
 `.region-flash`). `data-msg-id` is added to `.msg` in `UserBubble`, `AssistantMessage` and `PrimeCard`. While the session is still
 loading the effect retries whenever `messages` changes and gives up after 10 s; a session that no longer exists → toast '그 질문의
-세션을 찾을 수 없어요'. The tooltip also offers '노트에서 보기' → `openNotesFor(slide)` (NoteCards are keyed by `question.id` already).
+대화를 찾을 수 없어요'. The tooltip also offers '노트에서 보기' → `openNotesFor(slide)` (NoteCards are keyed by `question.id` already).
 
 **Setting.** '슬라이드에 질문 표시 보기' in 설정 › 공부 and in the 필기 menu (`storageKeys.questionMarkers`, default true).
 
@@ -2520,7 +2531,7 @@ reference: every text is written in Korean first and every test pins the Korean 
   unclear; a digest run, a session's latest turn and a recording (`RecordingMeta.lang`) store their language (absent =
   Korean), so work resumed at startup (digest, conversion, transcription, a cut-off answer) writes in it. A digest run
   that continues earlier entries keeps their language; only a redo (or a first run) takes the request's. `DIGEST.md`
-  headings and default titles ("세션 09/30 11:36" / "Session Sep 30, 11:36 AM", "녹음 2026-09-27 15:30" / "Recording Sep
+  headings and default titles ("대화 09/30 11:36" / "Chat Sep 30, 11:36 AM" — "세션" / "Session" before 0.6.15 —, "녹음 2026-09-27 15:30" / "Recording Sep
   27, 2026, 3:30 PM") use it; `COURSE.md` is rewritten in the language of the request that changes or opens it (its link
   carries `?lang=`). An English digest ends each slide with "Key point:" instead of "핵심:" (context.ts reads both; the AI
   alignment reads only the digest's own label, its last one, so a transcribed "Key points of …" bullet in a Korean

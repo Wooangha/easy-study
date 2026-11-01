@@ -147,8 +147,8 @@ export const chat = {
     questionTooLong: (max) => `The question is too long (${max} characters max)`,
     memosNotBoolean: 'memos must be true or false',
     neighborsInvalid: (max) => `neighbors must be an integer from 0 to ${max}`,
-    busy: 'This session is writing an answer. Try again when the answer is done',
-    alreadyAnswering: 'This session is already writing an answer',
+    busy: 'This chat is writing an answer. Try again when the answer is done',
+    alreadyAnswering: 'This chat is already writing an answer',
     waitingForSlot: 'Waiting for another answer to finish…',
     recovery: {
       resumeInvalid: "The previous conversation can't be continued, so a new one is starting",
@@ -162,7 +162,7 @@ export const chat = {
     stopped: 'Stopped',
   },
   sessions: {
-    defaultTitle: (_date, _time, at) => `Session ${sessionStamp(at)}`,
+    defaultTitle: (_date, _time, at) => `Chat ${sessionStamp(at)}`,
     regionAlt: (slide) => `p.${slide} region`,
     imageAlt: 'image',
   },

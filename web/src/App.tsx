@@ -851,7 +851,9 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
               doc={doc}
               providers={providers}
               providerProblem={providerProblem}
+              providersLoading={healthLoading}
               choice={choice}
+              onChoiceChange={setChoice}
               study={study}
               focusedSlide={focusedSlide}
               pinnedSlide={pinnedSlide}
@@ -986,16 +988,6 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
         onSelectDoc={setDocId}
         onUploadClick={pickFiles}
         uploadCourse={uploadTarget}
-        sessions={study.sessions}
-        sessionId={study.sessionId}
-        sessionBusy={study.running}
-        onSelectSession={study.selectSession}
-        onNewSession={() => void study.newSession(pinnedSlide ?? focusedSlide)}
-        onDeleteSession={(sid) => void study.deleteSession(sid)}
-        providers={providers}
-        providersLoading={healthLoading}
-        choice={choice}
-        onChoiceChange={setChoice}
         hasNotes={notesCount > 0}
         onLogout={authRequired && onLogout && !ownServer ? () => void logout() : undefined}
         onOpenSettings={() => setSettings({ section: null })}
@@ -1140,6 +1132,7 @@ export function App({ suspended = false, authRequired = false, onLogout }: AppPr
         onClose={() => setSettings(null)}
         health={health}
         busy={pageBusy}
+        llm={{ providers, providersLoading: healthLoading, choice, onChoiceChange: setChoice }}
       />
       <ConfirmHost suspended={suspended} />
     </div>

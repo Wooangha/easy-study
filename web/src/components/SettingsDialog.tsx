@@ -4,10 +4,11 @@
 // inside the app, which the shell keeps for all of its windows.
 import { useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { ExternalLink, Languages, Settings, TriangleAlert, X } from 'lucide-react';
-import type { HealthResponse } from '../../../shared/types.ts';
+import type { HealthResponse, ProviderInfo } from '../../../shared/types.ts';
 import { useAsrStatus } from '../hooks/useAsrStatus.ts';
 import { useLatest } from '../hooks/useLatest.ts';
 import { NEIGHBOR_OPTIONS, useNeighbors } from '../hooks/useNeighbors.ts';
+import type { ProviderChoice, ProviderChoiceUpdate } from '../hooks/useProviderChoice.ts';
 import { msg } from '../i18n/index.ts';
 import { LangSelect } from '../i18n/LangSelect.tsx';
 import { useMemosToTutor, useQuestionMarkers } from '../lib/annotations/settings.ts';
@@ -37,6 +38,7 @@ import {
 import { storageKeys, writeStorage } from '../lib/storage.ts';
 import { THEME_PREFS, setThemePref, useThemePref } from '../lib/theme.ts';
 import { toast } from '../lib/toast.ts';
+import { ProviderPicker } from './ProviderPicker.tsx';
 import { AsrSettings } from './recording/AsrSettings.tsx';
 import { Toaster } from './Toaster.tsx';
 import { UpdateProgress, startInstall } from './UpdateBanner.tsx';
@@ -49,9 +51,18 @@ interface SettingsDialogProps {
   health: HealthResponse | null;
   /** What the page is doing (an update or a change of server would interrupt it). */
   busy: PageBusy;
+  /** The LLM for new chats and digests (공부; also the chat tab's "새 대화"). */
+  llm: StudyLlm;
 }
 
-export function SettingsDialog({ open, section, onClose, health, busy }: SettingsDialogProps) {
+interface StudyLlm {
+  providers: ProviderInfo[] | undefined;
+  providersLoading: boolean;
+  choice: ProviderChoice | null;
+  onChoiceChange: (choice: ProviderChoiceUpdate) => void;
+}
+
+export function SettingsDialog({ open, section, onClose, health, busy, llm }: SettingsDialogProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const returnFocus = useRef<HTMLElement | null>(null);
 
@@ -90,14 +101,14 @@ export function SettingsDialog({ open, section, onClose, health, busy }: Setting
       // The app's shortcuts (j/k, /) must not act on the page behind the dialog.
       onKeyDown={(e) => e.stopPropagation()}
     >
-      {open && <SettingsContent section={section} onClose={onClose} health={health} busy={busy} />}
+      {open && <SettingsContent section={section} onClose={onClose} health={health} busy={busy} llm={llm} />}
       {/* The page's toasts are under the modal's backdrop: shown here while it is open (App leaves its own out). */}
       {open && <Toaster />}
     </dialog>
   );
 }
 
-function SettingsContent({ section, onClose, health, busy }: Omit<SettingsDialogProps, 'open'>) {
+function SettingsContent({ section, onClose, health, busy, llm }: Omit<SettingsDialogProps, 'open'>) {
   const marker = desktopMarker();
   const sections = SETTINGS_SECTIONS.filter((s) => s !== 'desktop' || marker !== null);
   const first = section && sections.includes(section) ? section : sections[0];
@@ -140,7 +151,7 @@ function SettingsContent({ section, onClose, health, busy }: Omit<SettingsDialog
   const titles = m.settings.dialog.sections;
   const content: Record<SettingsSection, ReactNode> = {
     display: <DisplaySection inApp={marker !== null} />,
-    study: <StudySection />,
+    study: <StudySection llm={llm} />,
     recording: <RecordingSection />,
     desktop: marker ? <DesktopSection marker={marker} busy={busy} /> : null,
     about: <AboutSection health={health} marker={marker} />,
@@ -225,14 +236,19 @@ function DisplaySection({ inApp }: { inApp: boolean }) {
   );
 }
 
-function StudySection() {
+function StudySection({ llm }: { llm: StudyLlm }) {
   const [neighbors, setNeighbors] = useNeighbors();
   const [memosToTutor, setMemosToTutor] = useMemosToTutor();
   const [markers, setMarkers] = useQuestionMarkers();
   const m = msg().settings.study;
   return (
     <>
-      <label className="settings-row">
+      <div className="settings-row">
+        <span className="settings-label">{m.llm}</span>
+        <ProviderPicker providers={llm.providers} loading={llm.providersLoading} choice={llm.choice} onChange={llm.onChoiceChange} />
+      </div>
+      <p className="settings-hint">{m.llmHint}</p>
+      <label className="settings-row settings-row-gap">
         <span className="settings-label">{m.neighbors}</span>
         <select className="picker" value={neighbors} onChange={(e) => setNeighbors(Number(e.target.value))}>
           {NEIGHBOR_OPTIONS.map((n) => (

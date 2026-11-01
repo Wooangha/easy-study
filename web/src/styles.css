@@ -993,18 +993,8 @@ details[open] > summary::before {
   }
 }
 
-.session-controls {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  min-width: 0;
-}
-
-.session-picker {
-  max-width: 340px;
-}
-
-/* The top bar's "새 세션" LLM, folded into one button (NewSessionLlm.tsx) and its panel. */
+/* The LLM for new chats, folded into one button next to the empty chat's start button (NewSessionLlm.tsx), and its
+   panel (also the chat tab's "새 대화", ChatHistory.tsx). */
 .llm-chip {
   display: inline-flex;
   align-items: center;
@@ -1685,12 +1675,20 @@ details[open] > summary::before {
   background: var(--surface);
 }
 
-.panel-tabs {
+/* The tabs, and on the 채팅 tab the chats' 대화 기록 · 새 대화 at the right (ChatHistory.tsx). */
+.panel-head {
   flex: none;
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+}
+
+.panel-tabs {
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   gap: 2px;
   padding: 0 10px;
-  border-bottom: 1px solid var(--border);
   /* A narrow pane (a phone, or longer tab names in English) scrolls the row sideways instead of breaking it. */
   overflow-x: auto;
   scrollbar-width: none;
@@ -1727,6 +1725,160 @@ details[open] > summary::before {
 .panel-tab.is-active {
   color: var(--text);
   border-bottom-color: var(--accent);
+}
+
+.chat-history {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 8px 0 4px;
+}
+
+.chat-tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: none;
+  color: var(--text-2);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.chat-tool svg {
+  width: 15px;
+  height: 15px;
+}
+
+.chat-tool:hover:not(:disabled),
+.chat-tool.is-open {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.chat-tool.is-open {
+  border-color: var(--border);
+}
+
+.chat-tool:disabled {
+  opacity: 0.45;
+}
+
+.chat-tool-count {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-history-pop {
+  z-index: 62;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  padding: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+  overflow-y: auto;
+}
+
+.chat-history-head {
+  padding: 6px 8px 4px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.chat-history-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.chat-history-row {
+  display: flex;
+  align-items: center;
+  border-radius: 7px;
+}
+
+.chat-history-row:hover,
+.chat-history-row:focus-within {
+  background: var(--surface-2);
+}
+
+.chat-history-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 38px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+}
+
+.chat-history-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.chat-history-row.is-current .chat-history-dot {
+  background: var(--accent);
+}
+
+.chat-history-when {
+  flex: none;
+  font-size: 13.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-history-row.is-current .chat-history-when {
+  color: var(--accent);
+}
+
+.chat-history-meta {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.chat-history-delete {
+  flex: none;
+  margin-right: 4px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+}
+
+.chat-history-delete:hover:not(:disabled) {
+  color: var(--danger);
+}
+
+/* The empty chat: the start button and the LLM it starts with. */
+.chat-start {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
 }
 
 .tab-count {
@@ -6671,8 +6823,7 @@ details[open] > summary::before {
     display: none;
   }
 
-  .lecture-picker,
-  .session-picker {
+  .lecture-picker {
     max-width: 46vw;
   }
 
@@ -6757,6 +6908,11 @@ details[open] > summary::before {
   }
 
   .hide-narrow {
+    display: none;
+  }
+
+  /* The tabs need the line: "새 대화" is its pen alone (the tooltip says it). */
+  .chat-tool-label {
     display: none;
   }
 }

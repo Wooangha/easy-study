@@ -117,7 +117,7 @@ describe('dates, durations and token counts in English', () => {
     assert.equal(usageLine({ input: 8_595, output: 5 }), '8,595 in · 5 out');
     assert.equal(usageTitle({ input: 10, output: 2 }), ['Tokens used by this answer', 'Input 10', 'Output 2', 'Total 12'].join('\n'));
     const summary = sessionUsageSummary({ total: { input: 50_000, output: 900 } }, 1);
-    assert.equal(summary.text, 'This session: 50.9K tokens');
+    assert.equal(summary.text, 'This chat: 50.9K tokens');
     assert.match(summary.title, /1 answer without recorded tokens isn't included/);
   });
 });

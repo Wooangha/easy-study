@@ -66,8 +66,8 @@ describe('token counts', () => {
       total: { input: 120_000, cachedInput: 80_000, output: 3_000 },
       priming: { input: 40_000, output: 900 },
     });
-    assert.equal(summary.text, '이 세션 12.3만 토큰');
-    assert.match(summary.title, /^이 세션에서 쓴 토큰/);
+    assert.equal(summary.text, '이 대화 12.3만 토큰');
+    assert.match(summary.title, /^이 대화에서 쓴 토큰/);
     assert.match(summary.title, /합계 123,000/);
     assert.match(summary.title, /그중 슬라이드 전달 40,900$/);
     assert.doesNotMatch(sessionUsageSummary({ total: { input: 5, output: 1 } }).title, /슬라이드 전달 \d/);

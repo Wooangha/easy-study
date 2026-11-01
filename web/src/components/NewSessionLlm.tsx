@@ -1,6 +1,7 @@
-// The top bar's "새 세션" LLM (0.6.4): one small button — "Codex · GPT-6-Luna" — instead of the three selects, which made
-// the bar wrap. It opens a panel with the full ProviderPicker (provider, model, reasoning effort) stacked. The open
-// session's LLM is still changed from the chat header (ChatPanel.tsx / LlmSwitchDialog.tsx).
+// The LLM for new chats (0.6.4, in the top bar until 0.6.15; now next to the empty chat's start button): one small
+// button — "Codex · GPT-6-Luna" — instead of the three selects. It opens a panel with the full ProviderPicker (provider,
+// model, reasoning effort) stacked. The open chat's LLM is changed from the chat header (ChatPanel.tsx /
+// LlmSwitchDialog.tsx).
 import { Bot, ChevronDown } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ProviderInfo } from '../../../shared/types.ts';

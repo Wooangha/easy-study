@@ -146,7 +146,7 @@ describe('session records', () => {
 
   test('default title and 404 for unknown docs', async () => {
     const record = await createSession(DOC_ID, { provider: 'codex', model: '' });
-    assert.match(record.title, /^세션 \d{2}\/\d{2} \d{2}:\d{2}$/);
+    assert.match(record.title, /^대화 \d{2}\/\d{2} \d{2}:\d{2}$/);
     await assert.rejects(
       createSession('missing-doc-000000', { provider: 'codex', model: '' }),
       (err: unknown) => err instanceof HttpError && err.status === 404,

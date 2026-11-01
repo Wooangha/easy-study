@@ -36,6 +36,8 @@ export const settings = {
   },
 
   study: {
+    llm: '새 대화와 정리본에 쓸 LLM',
+    llmHint: '채팅 탭의 ‘새 대화’에서 고르는 것과 같은 설정이에요. 지금 대화의 LLM은 채팅 위 LLM 이름을 눌러 바꿔요.',
     neighbors: '질문과 함께 보낼 앞뒤 슬라이드',
     neighborsNone: '지금 슬라이드만',
     /** An option of the picker: "앞뒤 2장". */

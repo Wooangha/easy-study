@@ -469,9 +469,9 @@ describe('files, titles and API errors in the request language', () => {
   test('a new session is titled in the language of the request that made it', async () => {
     const en = await call('POST', '/api/docs/deck-api-eee555/sessions', { provider: 'claude-code' }, 'en');
     assert.equal(en.status, 201);
-    assert.match(en.body.title ?? '', /^Session [A-Z][a-z]{2} \d{1,2}, \d{1,2}:\d\d [AP]M$/);
+    assert.match(en.body.title ?? '', /^Chat [A-Z][a-z]{2} \d{1,2}, \d{1,2}:\d\d [AP]M$/);
     const ko = await call('POST', '/api/docs/deck-api-eee555/sessions', { provider: 'claude-code' });
-    assert.match(ko.body.title ?? '', /^세션 \d\d\/\d\d \d\d:\d\d$/);
+    assert.match(ko.body.title ?? '', /^대화 \d\d\/\d\d \d\d:\d\d$/);
   });
 
   test('an answer the server stopped is marked in the language of its turn', async () => {

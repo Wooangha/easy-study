@@ -1,6 +1,6 @@
 // The LLM picker: provider, model (listed ones and 직접 입력…) and reasoning effort selects, with the compatibility
-// rules of web/src/lib/providerChoice.ts. Shared by the top bar's "새 세션" choice (TopBar.tsx) and the LLM switch of
-// the open session (LlmSwitchDialog.tsx).
+// rules of web/src/lib/providerChoice.ts. Shared by the LLM for new chats (NewSessionLlm.tsx, ChatHistory.tsx, 설정 ›
+// 공부) and the LLM switch of the open chat (LlmSwitchDialog.tsx).
 import { useId, useState } from 'react';
 import { Info } from 'lucide-react';
 import type { ProviderId, ProviderInfo } from '../../../shared/types.ts';
@@ -16,7 +16,7 @@ interface ProviderPickerProps {
   loading?: boolean;
   choice: ProviderChoice | null;
   onChange: (choice: ProviderChoiceUpdate) => void;
-  /** Text before the selects (the top bar's "새 세션"); none by default. */
+  /** Text before the selects; none by default. */
   label?: string;
   /** Tooltip of the whole picker. */
   title?: string;
@@ -34,7 +34,7 @@ export function ProviderPicker({ providers, loading = false, choice, onChange, l
   const effort = efforts.find((e) => e.id === choice?.effort);
   const unavailable = (providers ?? []).filter((p) => !p.available);
   const unavailableTitle = unavailable.map((p) => `${p.label}: ${p.reason ?? m.unavailable}`).join('\n');
-  // Two pickers may show at once (the top bar's and the dialog's): each has its own model list.
+  // Two pickers may show at once (the new chat's and the switch dialog's): each has its own model list.
   const modelListId = `${useId()}-models`;
   const cls = ['provider-picker', className].filter(Boolean).join(' ');
 
