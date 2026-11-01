@@ -117,13 +117,36 @@ export function textSha256(file) {
   return createHash('sha256').update(fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n')).digest('hex');
 }
 
+/**
+ * Network failures and 5xx answers are tried again this many times in all, waiting longer each time: ffmpeg.org often
+ * times out from CI runners (on 2026-11-01 four of five build jobs failed to connect, twice in a row).
+ */
+const DOWNLOAD_ATTEMPTS = 6;
+
 /** Downloads `url` to `file` (through a temporary file) and checks its SHA-256. Reuses a file that matches. */
 export async function download(url, file, want) {
   if (fs.existsSync(file) && sha256(file) === want) return file;
   console.log(`downloading ${url}`);
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`GET ${url}: HTTP ${res.status}`);
-  const buf = Buffer.from(await res.arrayBuffer());
+  let buf;
+  for (let attempt = 1; ; attempt++) {
+    let failure;
+    try {
+      const res = await fetch(url);
+      if (res.ok) {
+        buf = Buffer.from(await res.arrayBuffer());
+        break;
+      }
+      if (res.status < 500) throw new Error(`GET ${url}: HTTP ${res.status}`);
+      failure = `HTTP ${res.status}`;
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith('GET ')) throw err;
+      failure = err?.cause?.code ?? err?.cause?.message ?? err?.message ?? String(err);
+    }
+    if (attempt >= DOWNLOAD_ATTEMPTS) throw new Error(`GET ${url}: ${failure} (${attempt} attempts)`);
+    const wait = Math.min(60, 5 * 2 ** (attempt - 1));
+    console.log(`  ${failure}; trying again in ${wait} s (${attempt}/${DOWNLOAD_ATTEMPTS})`);
+    await new Promise((resolve) => setTimeout(resolve, wait * 1000));
+  }
   const got = sha256(buf);
   if (got !== want) throw new Error(`sha256 mismatch for ${url}: ${got} != ${want}`);
   fs.mkdirSync(path.dirname(file), { recursive: true });
