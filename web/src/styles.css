@@ -3966,12 +3966,12 @@ details[open] > summary::before {
   font-size: 12px;
 }
 
+/* Right under the list (not at the bottom of a tall column, far from what it adds to). */
 .lib-side-foot {
-  margin-top: auto;
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
-  padding: 12px 2px 0;
+  padding: 10px 2px 0;
 }
 
 .lib-main {
