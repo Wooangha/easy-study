@@ -25,7 +25,7 @@ const COURSES = [course('c-os', '운영체제', ['os1']), course('c-db', '데이
 /** The app normalizes the layout before the pickers see it (every course placed, creation order for the unplaced). */
 const flat = (courses: Course[]): LibraryLayout => normalizeLayout(null, courses);
 const LAYOUT: LibraryLayout = normalizeLayout(
-  { groups: [{ id: 'g1', title: '2학기', createdAt: '2026-10-01T00:00:00.000Z', courseIds: ['c-db', 'c-cc'] }], order: [{ type: 'group', id: 'g1' }, { type: 'course', id: 'c-os' }] },
+  { groups: [{ id: 'g1', title: '2학기', createdAt: '2026-10-01T00:00:00.000Z', items: [{ type: 'course', id: 'c-db' }, { type: 'course', id: 'c-cc' }] }], order: [{ type: 'group', id: 'g1' }, { type: 'course', id: 'c-os' }] },
   COURSES,
 );
 

@@ -1,9 +1,9 @@
 // Version of a library arrangement (DESIGN §18), for PutLayoutRequest.baseRevision: the server refuses a PUT
 // (409) that was computed from another arrangement than the current one, so a tab or device with stale data
 // cannot silently undo a change made elsewhere. Computed from the normalised layout by the server and the web
-// client alike (so no response has to carry it): the top-level order and the courses of every group. Titles are
+// client alike (so no response has to carry it): the top-level order and what every group holds. Titles are
 // left out — a PUT never changes them.
-import type { LibraryLayout } from './types.ts';
+import type { LayoutItem, LibraryLayout } from './types.ts';
 
 /** cyrb53: a small, fast 53-bit string hash (not cryptographic; only has to tell arrangements apart). */
 function hash53(text: string): string {
@@ -21,9 +21,17 @@ function hash53(text: string): string {
 
 /** The revision of a (normalised) arrangement: equal arrangements have equal revisions. */
 export function layoutRevision(layout: Pick<LibraryLayout, 'groups' | 'order'>): string {
-  const courseIdsOf = new Map(layout.groups.map((group) => [group.id, group.courseIds]));
-  const canonical = layout.order
-    .map((item) => (item.type === 'course' ? `c:${item.id}` : `g:${item.id}(${(courseIdsOf.get(item.id) ?? []).join(',')})`))
-    .join('|');
-  return `r${hash53(canonical)}`;
+  const itemsOf = new Map(layout.groups.map((group) => [group.id, group.items]));
+  const seen = new Set<string>();
+  // A group's items in parentheses after it, nested groups the same way (each group once: no loop on bad data).
+  const write = (items: readonly LayoutItem[]): string =>
+    items
+      .map((item) => {
+        if (item.type === 'course') return `c:${item.id}`;
+        if (seen.has(item.id)) return `g:${item.id}`;
+        seen.add(item.id);
+        return `g:${item.id}(${write(itemsOf.get(item.id) ?? [])})`;
+      })
+      .join('|');
+  return `r${hash53(write(layout.order))}`;
 }

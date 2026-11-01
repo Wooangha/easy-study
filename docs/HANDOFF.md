@@ -30,7 +30,7 @@ The user writes short casual Korean. Keep replies in Korean, short, plain; lead 
 
 - `main`: unreleased since v0.6.14: chats (sessions) moved from the top bar to the chat tab — 대화 기록 / 새 대화 right of the
   panel tabs, the LLM for new chats also in 설정 › 공부 and next to the empty chat's start button, the UI says 대화 / chat
-  (DESIGN §13 "Chats").
+  (DESIGN §13 "Chats"); groups inside groups in the library (layout.json version 2, `CourseGroup.items`, DESIGN §18).
   Released up to **v0.6.14** (the top bar's lecture picker: search, recent lectures, ‹ › through the course,
   DESIGN §13; 0.6.13: click-made text boxes as wide as their text, `autoWidth`; a lecture's ⋯ menu › 삭제; 0.6.12: no logout in the desktop app's window on its own server, a text box grows with its text while typing; 0.6.11:
   resizing the window keeps the slide being viewed — the focus anchor carries

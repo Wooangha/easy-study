@@ -1048,7 +1048,7 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
 
   api.post('/groups', async (req, res) => {
     const body = jsonBody(req);
-    res.status(201).json(await createGroup(body.title, body.courseIds));
+    res.status(201).json(await createGroup(body.title, body.courseIds, new Date(), body.parentId));
   });
 
   api.patch('/groups/:groupId', async (req, res) => {

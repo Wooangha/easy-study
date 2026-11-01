@@ -57,6 +57,7 @@ export const library = {
     groupNotFoundId: (groupId: string) => `그룹을 찾을 수 없습니다: ${groupId}`,
     courseNotFoundId: (courseId: string) => `과목을 찾을 수 없습니다: ${courseId}`,
     groupIdInvalid: 'groupId는 그룹 id여야 합니다',
+    parentIdInvalid: 'parentId는 그룹 id여야 합니다',
     lecturesChanged: '다른 곳에서 이 과목의 강의 목록이 바뀌었습니다. 새로 불러온 뒤 다시 시도해 주세요',
   },
   /** COURSE.md (server/courses.ts courseMarkdown), written in the language of the request that changed the course. */
@@ -79,6 +80,7 @@ export const library = {
     duplicateCourses: (ids: string) => `같은 과목이 두 번 들어 있습니다: ${ids}`,
     missingGroups: (ids: string) => `배치에 빠진 그룹이 있습니다 (다른 곳에서 바뀌었을 수 있으니 새로 고친 뒤 다시 시도해 주세요): ${ids}`,
     missingCourses: (ids: string) => `배치에 빠진 과목이 있습니다 (다른 곳에서 바뀌었을 수 있으니 새로 고친 뒤 다시 시도해 주세요): ${ids}`,
+    groupInsideItself: (ids: string) => `그룹을 자기 안(또는 자기가 품은 그룹 안)에 넣을 수 없습니다: ${ids}`,
     courseIdsInvalid: 'courseIds는 과목 id 목록이어야 합니다',
   },
   /** server/attachments.ts and the attachment routes: selected regions and images of a question. */

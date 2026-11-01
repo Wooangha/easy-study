@@ -96,7 +96,7 @@ export function LectureRow({ doc, index, courseId, entries, onOpen, onMove, onRe
           key: e.course.id,
           label: e.course.title,
           icon: Folder,
-          hint: e.group?.title,
+          hint: e.path.map((g) => g.title).join(' › ') || undefined,
           onSelect: () => onMove(e.course.id),
         })),
     },

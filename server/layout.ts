@@ -28,19 +28,6 @@ export function listIds(ids: readonly string[]): string {
     : shown.join(', ');
 }
 
-/** A stored group, or null when the entry is unusable (bad id, no title). Invalid course ids are dropped. */
-function parseStoredGroup(value: unknown): CourseGroup | null {
-  if (!isObject(value)) return null;
-  const { id, title, createdAt, courseIds } = value;
-  if (typeof id !== 'string' || !COURSE_ID_RE.test(id) || typeof title !== 'string') return null;
-  return {
-    id,
-    title,
-    createdAt: typeof createdAt === 'string' ? createdAt : '',
-    courseIds: Array.isArray(courseIds) ? courseIds.filter((courseId): courseId is string => typeof courseId === 'string') : [],
-  };
-}
-
 function parseItem(value: unknown): LayoutItem | null {
   if (!isObject(value) || typeof value.id !== 'string') return null;
   if (value.type === 'group') return { type: 'group', id: value.id };
@@ -49,16 +36,31 @@ function parseItem(value: unknown): LayoutItem | null {
 }
 
 /**
+ * A stored group, or null when the entry is unusable (bad id, no title). Malformed items are dropped; a group
+ * saved before 0.6.15 lists its courses as `courseIds`.
+ */
+function parseStoredGroup(value: unknown): CourseGroup | null {
+  if (!isObject(value)) return null;
+  const { id, title, createdAt, items, courseIds } = value;
+  if (typeof id !== 'string' || !COURSE_ID_RE.test(id) || typeof title !== 'string') return null;
+  const parsed = Array.isArray(items)
+    ? items.map(parseItem).filter((item): item is LayoutItem => item !== null)
+    : Array.isArray(courseIds)
+      ? courseIds.filter((courseId): courseId is string => typeof courseId === 'string').map((courseId): LayoutItem => ({ type: 'course', id: courseId }))
+      : [];
+  return { id, title, createdAt: typeof createdAt === 'string' ? createdAt : '', items: parsed };
+}
+
+/**
  * The layout as the API shows it, from whatever library/layout.json holds (`null` when it is missing or
- * unreadable) and the ids of the existing courses, oldest first:
- * - unknown/deleted course ids and group items of unknown groups are dropped (so are malformed entries;
- *   of two groups with the same id the first one counts);
- * - groups missing from `order` are appended to the top level;
- * - a course listed twice keeps its first position in display order (the top-level order, a group's courses
- *   in the group's place);
+ * unreadable) and the ids of the existing courses, oldest first. Read from the top level down, in display order:
+ * - unknown/deleted course ids and items of unknown groups are dropped (so are malformed entries; of two groups
+ *   with the same id the first one counts);
+ * - a course or group listed twice keeps its first place (so a group can never end up inside itself);
+ * - groups that are nowhere (not in `order`, not in a group that is) are appended to the top level;
  * - existing courses that are not mentioned are appended to the top level in createdAt order.
- * A missing file therefore gives every course at the top level, oldest first. `groups` follows the top-level
- * order, so every existing course appears exactly once and every group exactly once.
+ * A missing file therefore gives every course at the top level, oldest first. `groups` lists every group in display
+ * order (a group before what it holds), so every existing course appears exactly once and every group exactly once.
  */
 export function normalizeLayout(stored: unknown, courseIds: readonly string[]): LibraryLayout {
   const existing = new Set(courseIds);
@@ -70,40 +72,37 @@ export function normalizeLayout(stored: unknown, courseIds: readonly string[]): 
     if (group && !groupsById.has(group.id)) groupsById.set(group.id, group);
   }
 
-  const items: LayoutItem[] = [];
-  const mentionedGroups = new Set<string>();
-  for (const value of Array.isArray(source.order) ? source.order : []) {
-    const item = parseItem(value);
-    if (!item) continue;
-    if (item.type === 'group') {
-      if (!groupsById.has(item.id) || mentionedGroups.has(item.id)) continue;
-      mentionedGroups.add(item.id);
-    }
-    items.push(item);
-  }
-  for (const id of groupsById.keys()) {
-    if (!mentionedGroups.has(id)) items.push({ type: 'group', id });
-  }
-
-  const placed = new Set<string>();
-  const place = (courseId: string): boolean => {
-    if (!existing.has(courseId) || placed.has(courseId)) return false;
-    placed.add(courseId);
-    return true;
-  };
+  const placedCourses = new Set<string>();
+  const placedGroups = new Set<string>();
   const groups: CourseGroup[] = [];
-  const order: LayoutItem[] = [];
-  for (const item of items) {
-    if (item.type === 'course') {
-      if (place(item.id)) order.push(item);
-      continue;
+  /** The items as shown: each course and group once, groups read with what they hold. */
+  const place = (items: readonly LayoutItem[]): LayoutItem[] => {
+    const shown: LayoutItem[] = [];
+    for (const item of items) {
+      if (item.type === 'course') {
+        if (!existing.has(item.id) || placedCourses.has(item.id)) continue;
+        placedCourses.add(item.id);
+        shown.push({ type: 'course', id: item.id });
+        continue;
+      }
+      const group = groupsById.get(item.id);
+      if (!group || placedGroups.has(item.id)) continue;
+      placedGroups.add(item.id);
+      const entry: CourseGroup = { ...group, items: [] };
+      groups.push(entry);
+      entry.items = place(group.items);
+      shown.push({ type: 'group', id: item.id });
     }
-    const group = groupsById.get(item.id) as CourseGroup;
-    groups.push({ ...group, courseIds: group.courseIds.filter(place) });
-    order.push(item);
+    return shown;
+  };
+
+  const storedOrder = (Array.isArray(source.order) ? source.order : []).map(parseItem).filter((item): item is LayoutItem => item !== null);
+  const order = place(storedOrder);
+  for (const id of groupsById.keys()) {
+    if (!placedGroups.has(id)) order.push(...place([{ type: 'group', id }]));
   }
   for (const courseId of courseIds) {
-    if (place(courseId)) order.push({ type: 'course', id: courseId });
+    if (!placedCourses.has(courseId)) order.push(...place([{ type: 'course', id: courseId }]));
   }
   return { groups, order };
 }
@@ -112,9 +111,10 @@ export function normalizeLayout(stored: unknown, courseIds: readonly string[]): 
  * Validates PUT /api/layout (PutLayoutRequest) against the current normalised layout and returns the new one.
  * With `baseRevision`, the request must have been made from the current arrangement (409 otherwise: it was
  * changed in another tab or on another device, and this request would silently undo that). The request is the
- * full arrangement: every existing group and course exactly once, nothing unknown (400 otherwise, e.g. when a
- * course was created or deleted elsewhere since the client loaded the layout). Titles and creation times are
- * kept; `groups` of the result follows the new top-level order.
+ * full arrangement: every existing group and course exactly once, reachable from the top level, nothing unknown
+ * (400 otherwise, e.g. when a course was created or deleted elsewhere since the client loaded the layout); a
+ * group inside itself (or inside a group it holds) is refused too. Titles and creation times are kept; `groups`
+ * of the result follows the new display order.
  */
 export function validateLayoutRequest(body: unknown, current: LibraryLayout, courseIds: readonly string[]): LibraryLayout {
   const m = smsg().library.layout;
@@ -134,62 +134,85 @@ export function validateLayoutRequest(body: unknown, current: LibraryLayout, cou
   const duplicateGroups: string[] = [];
   const duplicateCourses: string[] = [];
 
+  const parseItems = (value: unknown): LayoutItem[] => {
+    if (!Array.isArray(value)) throw malformed();
+    return value.map((entry) => {
+      const item = parseItem(entry);
+      if (!item) throw malformed();
+      return item;
+    });
+  };
+
+  const listed = new Map<string, LayoutItem[]>();
+  for (const value of body.groups) {
+    if (!isObject(value) || typeof value.id !== 'string') throw malformed();
+    // A client from before 0.6.15 sends the courses of a group as `courseIds`.
+    let items: LayoutItem[];
+    if (value.items !== undefined) items = parseItems(value.items);
+    else if (Array.isArray(value.courseIds) && value.courseIds.every((courseId) => typeof courseId === 'string')) {
+      items = (value.courseIds as string[]).map((courseId) => ({ type: 'course', id: courseId }));
+    } else throw malformed();
+    const id = value.id;
+    if (!knownGroups.has(id)) unknownGroups.push(id);
+    else if (listed.has(id)) duplicateGroups.push(id);
+    else listed.set(id, items);
+  }
+  const order = parseItems(body.order);
+
+  // From the top level down, in display order, so that "listed twice" names the later place.
   const placedCourses = new Set<string>();
   const placeCourse = (courseId: string): void => {
     if (!knownCourses.has(courseId)) unknownCourses.push(courseId);
     else if (placedCourses.has(courseId)) duplicateCourses.push(courseId);
     else placedCourses.add(courseId);
   };
-
-  const listed = new Map<string, string[]>();
-  for (const value of body.groups) {
-    if (!isObject(value) || typeof value.id !== 'string' || !Array.isArray(value.courseIds)) throw malformed();
-    if (value.courseIds.some((courseId) => typeof courseId !== 'string')) throw malformed();
-    const id = value.id;
-    if (!knownGroups.has(id)) unknownGroups.push(id);
-    else if (listed.has(id)) duplicateGroups.push(id);
-    else listed.set(id, value.courseIds as string[]);
-  }
-
-  const order: LayoutItem[] = [];
-  const orderedGroups = new Set<string>();
-  for (const value of body.order) {
-    const item = parseItem(value);
-    if (!item) throw malformed();
-    if (item.type === 'course') {
-      order.push(item);
-      continue;
-    }
-    if (!knownGroups.has(item.id)) unknownGroups.push(item.id);
-    else if (orderedGroups.has(item.id)) duplicateGroups.push(item.id);
-    else {
-      orderedGroups.add(item.id);
-      order.push(item);
-    }
-  }
-
-  // Courses in display order, so that "listed twice" names the later place.
+  const reached = new Set<string>();
   const groups: CourseGroup[] = [];
-  for (const item of order) {
-    if (item.type === 'course') {
-      placeCourse(item.id);
-      continue;
+  const walk = (items: readonly LayoutItem[]): void => {
+    for (const item of items) {
+      if (item.type === 'course') {
+        placeCourse(item.id);
+        continue;
+      }
+      if (!knownGroups.has(item.id)) unknownGroups.push(item.id);
+      else if (reached.has(item.id)) duplicateGroups.push(item.id);
+      else {
+        reached.add(item.id);
+        const children = listed.get(item.id) ?? [];
+        groups.push({ ...(knownGroups.get(item.id) as CourseGroup), items: [...children] });
+        walk(children);
+      }
     }
-    const courseIdsOfGroup = listed.get(item.id) ?? [];
-    courseIdsOfGroup.forEach(placeCourse);
-    groups.push({ ...(knownGroups.get(item.id) as CourseGroup), courseIds: [...courseIdsOfGroup] });
+  };
+  walk(order);
+  // Groups listed in `groups` but not reached from the top level: in a loop (a group inside itself, or inside a group
+  // it holds) or simply left out, with what they hold. What they hold still counts as placed (so the error names
+  // those groups, not the courses and groups that are merely inside them).
+  const unreached = [...listed.keys()].filter((id) => !reached.has(id));
+  const parentOf = new Map<string, string>();
+  for (const [id, items] of listed) {
+    for (const item of items) if (item.type === 'group' && !parentOf.has(item.id)) parentOf.set(item.id, id);
   }
-  // Groups listed in `groups` but left out of `order`: their courses still count as placed (so the error
-  // names the missing group, not courses that are merely inside it).
-  for (const [id, courseIdsOfGroup] of listed) {
-    if (!orderedGroups.has(id)) courseIdsOfGroup.forEach(placeCourse);
+  const inLoop = unreached.filter((id) => {
+    const seen = new Set<string>();
+    for (let at = parentOf.get(id); at !== undefined && !seen.has(at); at = parentOf.get(at)) {
+      if (at === id) return true;
+      seen.add(at);
+    }
+    return false;
+  });
+  /** Left out: the outermost of the unreached groups (those inside them are not named). */
+  const leftOut = unreached.filter((id) => !inLoop.includes(id) && !unreached.includes(parentOf.get(id) ?? ''));
+  for (const id of unreached) {
+    for (const item of listed.get(id) ?? []) if (item.type === 'course') placeCourse(item.id);
   }
 
   if (unknownGroups.length > 0) throw new HttpError(400, m.unknownGroups(listIds(unknownGroups)));
   if (unknownCourses.length > 0) throw new HttpError(400, m.unknownCourses(listIds(unknownCourses)));
   if (duplicateGroups.length > 0) throw new HttpError(400, m.duplicateGroups(listIds(duplicateGroups)));
   if (duplicateCourses.length > 0) throw new HttpError(400, m.duplicateCourses(listIds(duplicateCourses)));
-  const missingGroups = current.groups.map((group) => group.id).filter((id) => !listed.has(id) || !orderedGroups.has(id));
+  if (inLoop.length > 0) throw new HttpError(400, m.groupInsideItself(listIds(inLoop)));
+  const missingGroups = current.groups.map((group) => group.id).filter((id) => !listed.has(id) || leftOut.includes(id));
   if (missingGroups.length > 0) throw new HttpError(400, m.missingGroups(listIds(missingGroups)));
   const missingCourses = courseIds.filter((id) => !placedCourses.has(id));
   if (missingCourses.length > 0) throw new HttpError(400, m.missingCourses(listIds(missingCourses)));
@@ -221,16 +244,40 @@ export function validateGroupCourseIds(value: unknown, courseIds: readonly strin
 /** The layout without these courses (wherever they were). */
 export function withoutCourses(layout: LibraryLayout, courseIds: Iterable<string>): LibraryLayout {
   const removed = new Set(courseIds);
+  const keep = (item: LayoutItem) => item.type === 'group' || !removed.has(item.id);
   return {
-    groups: layout.groups.map((group) => ({ ...group, courseIds: group.courseIds.filter((id) => !removed.has(id)) })),
-    order: layout.order.filter((item) => item.type === 'group' || !removed.has(item.id)),
+    groups: layout.groups.map((group) => ({ ...group, items: group.items.filter(keep) })),
+    order: layout.order.filter(keep),
   };
 }
 
-/** Appends a new group at the end of the top level; `group.courseIds` are moved into it from wherever they were. */
-export function withGroupAppended(layout: LibraryLayout, group: CourseGroup): LibraryLayout {
-  const rest = withoutCourses(layout, group.courseIds);
-  return { groups: [...rest.groups, { ...group }], order: [...rest.order, { type: 'group', id: group.id }] };
+/** `groups` in display order (a group before what it holds), as normalizeLayout and validateLayoutRequest give it. */
+function inDisplayOrder(layout: LibraryLayout): LibraryLayout {
+  const byId = new Map(layout.groups.map((group) => [group.id, group]));
+  const groups: CourseGroup[] = [];
+  const walk = (items: readonly LayoutItem[]): void => {
+    for (const item of items) {
+      const group = item.type === 'group' ? byId.get(item.id) : undefined;
+      if (!group) continue;
+      byId.delete(item.id);
+      groups.push(group);
+      walk(group.items);
+    }
+  };
+  walk(layout.order);
+  return { groups, order: layout.order };
+}
+
+/**
+ * Appends a new group at the end of `parentId`'s items (null: of the top level); `group.items` (courses) are moved
+ * into it from wherever they were. The parent must exist.
+ */
+export function withGroupAppended(layout: LibraryLayout, group: CourseGroup, parentId: string | null = null): LibraryLayout {
+  const moving = group.items.filter((item) => item.type === 'course').map((item) => item.id);
+  const rest = withoutCourses(layout, moving);
+  const self: LayoutItem = { type: 'group', id: group.id };
+  const groups = rest.groups.map((candidate) => (candidate.id === parentId ? { ...candidate, items: [...candidate.items, self] } : candidate));
+  return inDisplayOrder({ groups: [...groups, { ...group }], order: parentId === null ? [...rest.order, self] : rest.order });
 }
 
 /** Moves a course to the end of a group (which must exist). */
@@ -238,16 +285,18 @@ export function withCourseInGroup(layout: LibraryLayout, courseId: string, group
   const rest = withoutCourses(layout, [courseId]);
   return {
     ...rest,
-    groups: rest.groups.map((group) => (group.id === groupId ? { ...group, courseIds: [...group.courseIds, courseId] } : group)),
+    groups: rest.groups.map((group) => (group.id === groupId ? { ...group, items: [...group.items, { type: 'course', id: courseId }] } : group)),
   };
 }
 
-/** Removes a group; its courses move to the top level at the group's position, in the group's order. */
+/** Removes a group; what it held (courses and groups) moves to the group's place, in the group's order. */
 export function withoutGroup(layout: LibraryLayout, groupId: string): LibraryLayout {
   const group = layout.groups.find((candidate) => candidate.id === groupId);
-  const courses: LayoutItem[] = (group?.courseIds ?? []).map((id) => ({ type: 'course', id }));
-  return {
-    groups: layout.groups.filter((candidate) => candidate.id !== groupId),
-    order: layout.order.flatMap((item) => (item.type === 'group' && item.id === groupId ? courses : [item])),
-  };
+  const held = group?.items ?? [];
+  const replace = (items: readonly LayoutItem[]): LayoutItem[] =>
+    items.flatMap((item) => (item.type === 'group' && item.id === groupId ? held : [item]));
+  return inDisplayOrder({
+    groups: layout.groups.filter((candidate) => candidate.id !== groupId).map((candidate) => ({ ...candidate, items: replace(candidate.items) })),
+    order: replace(layout.order),
+  });
 }

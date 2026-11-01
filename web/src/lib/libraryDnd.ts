@@ -8,11 +8,16 @@ import {
   applyCourseMove,
   applyGroupMove,
   applyLectureMove,
+  childrenOf,
   collapseKey,
   findGroup,
+  isWithin,
   lectureMovePatch,
+  parentOf,
+  sameItem,
   sameLayout,
   type CourseMove,
+  type GroupMove,
   type LectureMove,
   type Move,
 } from './libraryLayout.ts';
@@ -28,14 +33,14 @@ export type DragKind = DragItem['kind'];
 export type DropData =
   | { role: 'lecture'; docId: string; courseId: string | null }
   | { role: 'course'; courseId: string; groupId: string | null }
-  | { role: 'group'; groupId: string }
+  | { role: 'group'; groupId: string; parentId: string | null }
   /** Header of a course card: a lecture dropped here goes to the start (or, collapsed, the end) of the course. */
   | { role: 'course-head'; courseId: string }
   /** Lecture list of an expanded course (its free space = the end of the course). */
   | { role: 'course-body'; courseId: string }
   /**
-   * Header of a group. Courses: its top third = before the group, the rest = into the group. Lectures: only
-   * while the group is collapsed, and only to open it (hovering) — releasing there puts the lecture back.
+   * Header of a group. Courses and groups: its top third = before the group, the rest = into the group. Lectures:
+   * only while the group is collapsed, and only to open it (hovering) — releasing there puts the lecture back.
    */
   | { role: 'group-head'; groupId: string }
   /** Course list of an expanded group (its free space = the end of the group). */
@@ -102,8 +107,23 @@ export function accepts(item: DragItem, data: DropData, view: OrgView): boolean 
       return (
         data.role === 'course' || data.role === 'group-head' || data.role === 'group-body' || data.role === 'top-end'
       );
-    case 'group':
-      return (data.role === 'course' && data.groupId === null) || data.role === 'group' || data.role === 'top-end';
+    case 'group': {
+      // Anywhere but inside itself (its own card is the place it already has).
+      const inside = (groupId: string | null) => groupId !== null && isWithin(view.layout, groupId, item.groupId);
+      switch (data.role) {
+        case 'course':
+          return !inside(data.groupId);
+        case 'group':
+          return !inside(data.parentId);
+        case 'group-head':
+        case 'group-body':
+          return !inside(data.groupId);
+        case 'top-end':
+          return true;
+        default:
+          return false;
+      }
+    }
   }
 }
 
@@ -130,7 +150,7 @@ export interface DropTarget {
 
 export const NOOP_TARGET: DropTarget = { key: 'noop', move: null, indicator: null };
 
-/** Top third of a group header = before the group (top level); the rest = into the group. */
+/** Top third of a group header = before the group (where it is); the rest = into the group. */
 export const GROUP_HEAD_BEFORE = 1 / 3;
 
 const docIdsOf = (view: OrgView, courseId: string): string[] => view.courses.find((c) => c.id === courseId)?.docIds ?? [];
@@ -181,51 +201,41 @@ export function resolveDrop(item: DragItem, over: DropData, relY: number, view: 
       }
       return finish(move, view);
     }
-    case 'course': {
-      const courseId = item.courseId;
-      const isSelf = (x: LayoutItem) => x.type === 'course' && x.id === courseId;
-      let move: CourseMove;
-      if (over.role === 'course') {
-        if (over.courseId === courseId) return NOOP_TARGET;
-        const self: LayoutItem = { type: 'course', id: over.courseId };
-        if (over.groupId !== null) {
-          const list: LayoutItem[] = (findGroup(view.layout, over.groupId)?.courseIds ?? []).map((id) => ({ type: 'course', id }));
-          const i = list.findIndex((x) => x.id === over.courseId);
-          move = { kind: 'course', courseId, groupId: over.groupId, before: upper ? self : nextOther(list, i, isSelf) };
-        } else {
-          const list = view.layout.order;
-          const i = list.findIndex((x) => x.type === 'course' && x.id === over.courseId);
-          move = { kind: 'course', courseId, groupId: null, before: upper ? self : nextOther(list, i, isSelf) };
-        }
+    case 'course':
+    case 'group': {
+      // Courses and groups go to the same places: before / after a course or group, into a group, the end.
+      const self: LayoutItem = item.kind === 'course' ? { type: 'course', id: item.courseId } : { type: 'group', id: item.groupId };
+      const isSelf = (x: LayoutItem) => sameItem(x, self);
+      let parentId: string | null;
+      let before: LayoutItem | null;
+      if (over.role === 'course' || over.role === 'group') {
+        const target: LayoutItem = over.role === 'course' ? { type: 'course', id: over.courseId } : { type: 'group', id: over.groupId };
+        if (isSelf(target)) return NOOP_TARGET;
+        parentId = over.role === 'course' ? over.groupId : over.parentId;
+        const list = childrenOf(view.layout, parentId);
+        before = upper ? target : nextOther(list, list.findIndex((x) => sameItem(x, target)), isSelf);
       } else if (over.role === 'group-head') {
+        const head: LayoutItem = { type: 'group', id: over.groupId };
         if (relY < GROUP_HEAD_BEFORE) {
-          move = { kind: 'course', courseId, groupId: null, before: { type: 'group', id: over.groupId } };
+          parentId = parentOf(view.layout, head) ?? null;
+          before = head;
         } else {
+          parentId = over.groupId;
           const collapsed = view.isCollapsed(collapseKey.group(over.groupId));
-          const first = (findGroup(view.layout, over.groupId)?.courseIds ?? []).find((id) => id !== courseId) ?? null;
-          const before: LayoutItem | null = !collapsed && first !== null ? { type: 'course', id: first } : null;
-          move = { kind: 'course', courseId, groupId: over.groupId, before };
+          before = collapsed ? null : (childrenOf(view.layout, over.groupId).find((x) => !isSelf(x)) ?? null);
         }
       } else if (over.role === 'group-body') {
-        move = { kind: 'course', courseId, groupId: over.groupId, before: null };
+        parentId = over.groupId;
+        before = null;
       } else {
-        move = { kind: 'course', courseId, groupId: null, before: null };
+        parentId = null;
+        before = null;
       }
+      const move: CourseMove | GroupMove =
+        item.kind === 'course'
+          ? { kind: 'course', courseId: item.courseId, groupId: parentId, before }
+          : { kind: 'group', groupId: item.groupId, parentId, before };
       return finish(move, view);
-    }
-    case 'group': {
-      const groupId = item.groupId;
-      const isSelf = (x: LayoutItem) => x.type === 'group' && x.id === groupId;
-      let before: LayoutItem | null = null;
-      if (over.role === 'course' || over.role === 'group') {
-        const self: LayoutItem =
-          over.role === 'course' ? { type: 'course', id: over.courseId } : { type: 'group', id: over.groupId };
-        if (isSelf(self)) return NOOP_TARGET;
-        const list = view.layout.order;
-        const i = list.findIndex((x) => x.type === self.type && x.id === self.id);
-        before = upper ? self : nextOther(list, i, isSelf);
-      }
-      return finish({ kind: 'group', groupId, before }, view);
     }
   }
 }
@@ -240,22 +250,15 @@ function finish(move: Move, view: OrgView): DropTarget {
       const key = `lecture>${move.courseId}>${list.indexOf(move.docId)}`;
       return { key, move, indicator: lectureIndicator(move, move.courseId, view) };
     }
-    case 'course': {
-      const next = applyCourseMove(view.layout, move);
-      if (sameLayout(next, view.layout)) return NOOP_TARGET;
-      const self = (x: LayoutItem) => x.type === 'course' && x.id === move.courseId;
-      const position =
-        move.groupId === null
-          ? next.order.findIndex(self)
-          : (findGroup(next, move.groupId)?.courseIds.indexOf(move.courseId) ?? -1);
-      return { key: `course>${move.groupId ?? '-'}>${position}`, move, indicator: courseIndicator(move, view) };
-    }
+    case 'course':
     case 'group': {
-      const next = applyGroupMove(view.layout, move);
+      const next = move.kind === 'course' ? applyCourseMove(view.layout, move) : applyGroupMove(view.layout, move);
       if (sameLayout(next, view.layout)) return NOOP_TARGET;
-      const position = next.order.findIndex((x) => x.type === 'group' && x.id === move.groupId);
-      const isSelf = (x: LayoutItem) => x.type === 'group' && x.id === move.groupId;
-      return { key: `group>${position}`, move, indicator: topIndicator(move.before, view.layout.order, isSelf) };
+      const parentId = move.kind === 'course' ? move.groupId : move.parentId;
+      const self: LayoutItem = move.kind === 'course' ? { type: 'course', id: move.courseId } : { type: 'group', id: move.groupId };
+      const isSelf = (x: LayoutItem) => sameItem(x, self);
+      const position = childrenOf(next, parentId).findIndex(isSelf);
+      return { key: `${move.kind}>${parentId ?? '-'}>${position}`, move, indicator: listIndicator(parentId, move.before, isSelf, view) };
     }
   }
 }
@@ -268,14 +271,13 @@ function lectureIndicator(move: LectureMove, courseId: string, view: OrgView): I
   return last === null ? into : { type: 'line', key: dndId.lecture(last), side: 'after' };
 }
 
-function courseIndicator(move: CourseMove, view: OrgView): Indicator {
-  const isSelf = (x: LayoutItem) => x.type === 'course' && x.id === move.courseId;
-  if (move.groupId === null) return topIndicator(move.before, view.layout.order, isSelf);
-  const into: Indicator = { type: 'into', key: dndId.group(move.groupId) };
-  if (view.isCollapsed(collapseKey.group(move.groupId))) return into;
-  if (move.before) return { type: 'line', key: layoutItemKey(move.before), side: 'before' };
-  const list: LayoutItem[] = (findGroup(view.layout, move.groupId)?.courseIds ?? []).map((id) => ({ type: 'course', id }));
-  const last = lastOther(list, isSelf);
+/** A course or group going into `parentId` (null: the top level) before `before` (null: at the end). */
+function listIndicator(parentId: string | null, before: LayoutItem | null, isSelf: (x: LayoutItem) => boolean, view: OrgView): Indicator {
+  if (parentId === null) return topIndicator(before, view.layout.order, isSelf);
+  const into: Indicator = { type: 'into', key: dndId.group(parentId) };
+  if (view.isCollapsed(collapseKey.group(parentId))) return into;
+  if (before) return { type: 'line', key: layoutItemKey(before), side: 'before' };
+  const last = lastOther(childrenOf(view.layout, parentId), isSelf);
   return last === null ? into : { type: 'line', key: layoutItemKey(last), side: 'after' };
 }
 
@@ -304,20 +306,18 @@ export function describeTarget(target: DropTarget, view: OrgView): { place: stri
       if (!course) return { place: m.course, total: null };
       return { place: m.inCourse(course.title, course.docIds.indexOf(move.docId) + 1), total: course.docIds.length };
     }
-    case 'course': {
-      const next = applyCourseMove(view.layout, move);
-      if (move.groupId !== null) {
-        const group = findGroup(next, move.groupId);
-        if (!group) return { place: m.group, total: null };
-        return { place: m.inGroup(group.title, group.courseIds.indexOf(move.courseId) + 1), total: group.courseIds.length };
-      }
-      const i = next.order.findIndex((x) => x.type === 'course' && x.id === move.courseId);
-      return { place: m.outsideGroups(i + 1), total: next.order.length };
-    }
+    case 'course':
     case 'group': {
-      const next = applyGroupMove(view.layout, move);
-      const i = next.order.findIndex((x) => x.type === 'group' && x.id === move.groupId);
-      return { place: m.topLevel(i + 1), total: next.order.length };
+      const next = move.kind === 'course' ? applyCourseMove(view.layout, move) : applyGroupMove(view.layout, move);
+      const parentId = move.kind === 'course' ? move.groupId : move.parentId;
+      const self: LayoutItem = move.kind === 'course' ? { type: 'course', id: move.courseId } : { type: 'group', id: move.groupId };
+      if (parentId !== null) {
+        const group = findGroup(next, parentId);
+        if (!group) return { place: m.group, total: null };
+        return { place: m.inGroup(group.title, group.items.findIndex((x) => sameItem(x, self)) + 1), total: group.items.length };
+      }
+      const i = next.order.findIndex((x) => sameItem(x, self));
+      return { place: move.kind === 'course' ? m.outsideGroups(i + 1) : m.topLevel(i + 1), total: next.order.length };
     }
   }
 }

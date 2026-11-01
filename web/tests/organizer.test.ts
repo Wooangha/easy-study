@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { beforeEach, describe, test } from 'node:test';
 import { layoutRevision } from '../../shared/layoutRevision.ts';
-import type { Course, CourseGroup, LibraryLayout } from '../../shared/types.ts';
+import type { Course, CourseGroup, LayoutItem, LibraryLayout } from '../../shared/types.ts';
 import { answerConfirm, cancelAllConfirms, confirmDialog, getConfirmRequest, subscribeConfirm } from '../src/lib/confirm.ts';
 import { normalizeLayout } from '../src/lib/libraryLayout.ts';
 import { createOrganizer, type OrganizerApi } from '../src/lib/organizer.ts';
@@ -17,7 +17,7 @@ const initialCourses = (): Course[] => [
   { id: 'c3', title: 'DB', createdAt: '2026-09-03T00:00:00Z', docIds: [] },
 ];
 const initialLayout = (): LibraryLayout => ({
-  groups: [{ id: 'g1', title: '2026-2학기', createdAt: '2026-09-04T00:00:00Z', courseIds: ['c2', 'c3'] }],
+  groups: [{ id: 'g1', title: '2026-2학기', createdAt: '2026-09-04T00:00:00Z', items: [{ type: 'course', id: 'c2' }, { type: 'course', id: 'c3' }] }],
   order: [
     { type: 'course', id: 'c1' },
     { type: 'group', id: 'g1' },
@@ -63,7 +63,7 @@ function fakeServer() {
       await enter('createCourse', `POST /api/courses ${JSON.stringify(body)}`);
       const course: Course = { id: `n${++seq}`, title: body.title, createdAt: `2026-09-1${seq}T00:00:00Z`, docIds: [] };
       courses = [...courses, course];
-      if (body.groupId) layout.groups.find((g) => g.id === body.groupId)?.courseIds.push(course.id);
+      if (body.groupId) layout.groups.find((g) => g.id === body.groupId)?.items.push({ type: 'course', id: course.id });
       else layout.order.push({ type: 'course', id: course.id });
       return clone(course);
     },
@@ -87,24 +87,30 @@ function fakeServer() {
       courses = courses.filter((c) => c.id !== courseId);
     },
     async putLayout(body) {
-      await enter('putLayout', `PUT ${body.order.map((i) => i.id).join(',')} | ${body.groups.map((g) => `${g.id}:${g.courseIds.join(',')}`).join(' ')}`);
+      await enter('putLayout', `PUT ${body.order.map((i) => i.id).join(',')} | ${body.groups.map((g) => `${g.id}:${g.items.map((i) => i.id).join(',')}`).join(' ')}`);
       if (body.baseRevision !== undefined && body.baseRevision !== layoutRevision(normalizeLayout(layout, courses))) {
         calls.push('→ 409');
         throw conflict();
       }
       if (body.groups.some((g) => !layout.groups.some((x) => x.id === g.id))) throw new Error('알 수 없는 그룹');
       layout = {
-        groups: body.groups.map((g) => ({ ...(layout.groups.find((x) => x.id === g.id) as CourseGroup), courseIds: g.courseIds })),
+        groups: body.groups.map((g) => ({ ...(layout.groups.find((x) => x.id === g.id) as CourseGroup), items: g.items })),
         order: body.order,
       };
       return clone(layout);
     },
     async createGroup(body) {
       await enter('createGroup', `POST /api/groups ${JSON.stringify(body)}`);
-      const group: CourseGroup = { id: `grp${++seq}`, title: body.title, createdAt: '', courseIds: body.courseIds ?? [] };
+      const moving = body.courseIds ?? [];
+      const group: CourseGroup = { id: `grp${++seq}`, title: body.title, createdAt: '', items: moving.map((id) => ({ type: 'course', id })) };
+      const keep = (i: LayoutItem) => !(i.type === 'course' && moving.includes(i.id));
+      const self: LayoutItem = { type: 'group', id: group.id };
       layout = {
-        groups: [...layout.groups.map((g) => ({ ...g, courseIds: g.courseIds.filter((id) => !group.courseIds.includes(id)) })), group],
-        order: [...layout.order.filter((i) => !(i.type === 'course' && group.courseIds.includes(i.id))), { type: 'group', id: group.id }],
+        groups: [
+          ...layout.groups.map((g) => ({ ...g, items: [...g.items.filter(keep), ...(g.id === body.parentId ? [self] : [])] })),
+          group,
+        ],
+        order: [...layout.order.filter(keep), ...(body.parentId ? [] : [self])],
       };
       return clone(group);
     },
@@ -116,14 +122,12 @@ function fakeServer() {
     },
     async deleteGroup(groupId) {
       await enter('deleteGroup', `DELETE group ${groupId}`);
+      const held = layout.groups.find((g) => g.id === groupId)?.items ?? [];
+      const replace = (items: LayoutItem[]) => items.flatMap((i) => (i.type === 'group' && i.id === groupId ? held : [i]));
       layout = normalizeLayout(
         {
-          groups: layout.groups.filter((g) => g.id !== groupId),
-          order: layout.order.flatMap((i) =>
-            i.type === 'group' && i.id === groupId
-              ? (layout.groups.find((g) => g.id === groupId)?.courseIds ?? []).map((id) => ({ type: 'course' as const, id }))
-              : [i],
-          ),
+          groups: layout.groups.filter((g) => g.id !== groupId).map((g) => ({ ...g, items: replace(g.items) })),
+          order: replace(layout.order),
         },
         courses,
       );
@@ -174,7 +178,7 @@ function setup() {
   const orderOf = () => {
     const { layout } = org.getSnapshot();
     return layout.order
-      .map((i) => (i.type === 'course' ? i.id : `${i.id}[${layout.groups.find((g) => g.id === i.id)?.courseIds.join(',')}]`))
+      .map((i) => (i.type === 'course' ? i.id : `${i.id}[${layout.groups.find((g) => g.id === i.id)?.items.map((x) => x.id).join(',')}]`))
       .join(' ');
   };
   return { server, errors, org, docsOf, orderOf };
@@ -247,7 +251,7 @@ describe('organizer store', () => {
     assert.equal(await org.moveCourse('c3', null, { type: 'course', id: 'c1' }), true);
     assert.equal(server.calls.at(-1), 'PUT c3,c1,g1 | g1:c2');
     assert.equal(orderOf(), 'c3 c1 g1[c2]');
-    assert.equal(await org.moveGroup('g1', { type: 'course', id: 'c3' }), true);
+    assert.equal(await org.moveGroup('g1', null, { type: 'course', id: 'c3' }), true);
     assert.equal(orderOf(), 'g1[c2] c3 c1');
   });
 
@@ -266,6 +270,26 @@ describe('organizer store', () => {
     assert.equal(orderOf(), `c2 c3 ${group.id}[c1,${created.id}]`); // shown at once
     assert.equal(await deleting, true);
     assert.equal(orderOf(), `c2 c3 ${group.id}[c1,${created.id}]`);
+  });
+
+  test('groups inside groups: create one inside, move one in and out, delete the outer one', async () => {
+    const { server, org, orderOf } = setup();
+    await org.refresh();
+    const inner = await org.createGroup('전공', ['c1'], 'g1');
+    assert.ok(inner);
+    assert.equal(server.calls.at(-1), `POST /api/groups {"title":"전공","courseIds":["c1"],"parentId":"g1"}`);
+    assert.equal(orderOf(), `g1[c2,c3,${inner.id}]`);
+    assert.equal(await org.moveGroup(inner.id, null, { type: 'group', id: 'g1' }), true);
+    assert.equal(server.calls.at(-1), `PUT ${inner.id},g1 | ${inner.id}:c1 g1:c2,c3`);
+    assert.equal(orderOf(), `${inner.id}[c1] g1[c2,c3]`);
+    assert.equal(await org.moveGroup('g1', inner.id, null), true);
+    assert.equal(orderOf(), `${inner.id}[c1,g1]`);
+    // Not into itself: nothing is sent.
+    const calls = server.calls.length;
+    assert.equal(await org.moveGroup(inner.id, 'g1', null), true);
+    assert.equal(server.calls.length, calls);
+    assert.equal(await org.deleteGroup(inner.id), true);
+    assert.equal(orderOf(), 'c1 g1[c2,c3]');
   });
 
   test('deleting a course: its lectures become uncategorized; a failure brings it back', async () => {
@@ -296,7 +320,7 @@ describe('organizer store', () => {
     await org.refresh();
     // Another tab puts c1 into g1; this tab still shows c1 at the top level.
     server.edit((st) => {
-      st.layout = { groups: [{ ...st.layout.groups[0], courseIds: ['c2', 'c3', 'c1'] }], order: [{ type: 'group', id: 'g1' }] };
+      st.layout = { groups: [{ ...st.layout.groups[0], items: ['c2', 'c3', 'c1'].map((id) => ({ type: 'course', id })) }], order: [{ type: 'group', id: 'g1' }] };
     });
     // Here: c3 out of the group, before it.
     assert.equal(await org.moveCourse('c3', null, { type: 'group', id: 'g1' }), true);
@@ -308,7 +332,7 @@ describe('organizer store', () => {
       'PUT c3,g1 | g1:c2,c1', // the same move on top of the other tab's
     ]);
     assert.equal(orderOf(), 'c3 g1[c2,c1]');
-    assert.deepEqual(server.state().layout.groups[0].courseIds, ['c2', 'c1']);
+    assert.deepEqual(server.state().layout.groups[0].items.map((i) => i.id), ['c2', 'c1']);
     assert.deepEqual(errors, []);
   });
 

@@ -2,7 +2,7 @@
 // Run: node --test web/tests/*.test.ts
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import type { Course, LibraryLayout } from '../../shared/types.ts';
+import type { Course, CourseGroup, LayoutItem, LibraryLayout } from '../../shared/types.ts';
 import { createCollapsedStore, type KeyStorage } from '../src/lib/collapsed.ts';
 import {
   describePlace,
@@ -24,6 +24,9 @@ import {
   applyGroupMove,
   applyLectureMove,
   courseLabel,
+  coursesInside,
+  groupPath,
+  isWithin,
   layoutEntries,
   layoutRows,
   lectureMovePatch,
@@ -35,6 +38,11 @@ import {
   withGroupAppended,
   withoutGroup,
 } from '../src/lib/libraryLayout.ts';
+
+/** Course items of a group (`items: cs('c2', 'c3')`). */
+const cs = (...ids: string[]): LayoutItem[] => ids.map((id) => ({ type: 'course', id }));
+/** The courses directly in a group. */
+const coursesIn = (g: Pick<CourseGroup, 'items'>): string[] => g.items.filter((item) => item.type === 'course').map((item) => item.id);
 
 const course = (id: string, docIds: string[], createdAt = '2026-09-01T00:00:00Z'): Course => ({
   id,
@@ -50,7 +58,7 @@ const courses = [
   course('c3', [], '2026-09-03T00:00:00Z'),
 ];
 const layout: LibraryLayout = {
-  groups: [{ id: 'g1', title: '2026-2학기', createdAt: '2026-09-04T00:00:00Z', courseIds: ['c2', 'c3'] }],
+  groups: [{ id: 'g1', title: '2026-2학기', createdAt: '2026-09-04T00:00:00Z', items: cs('c2', 'c3') }],
   order: [
     { type: 'course', id: 'c1' },
     { type: 'group', id: 'g1' },
@@ -73,8 +81,8 @@ describe('normalizeLayout', () => {
   test('unknown ids are dropped, duplicates keep their first place, missing courses and groups are appended', () => {
     const messy: LibraryLayout = {
       groups: [
-        { id: 'g1', title: 'G1', createdAt: '', courseIds: ['c2', 'gone', 'c1'] },
-        { id: 'g2', title: 'G2', createdAt: '', courseIds: [] },
+        { id: 'g1', title: 'G1', createdAt: '', items: cs('c2', 'gone', 'c1') },
+        { id: 'g2', title: 'G2', createdAt: '', items: cs() },
       ],
       order: [
         { type: 'course', id: 'c1' },
@@ -92,7 +100,7 @@ describe('normalizeLayout', () => {
       { type: 'course', id: 'c3' },
     ]);
     assert.deepEqual(
-      n.groups.map((g) => [g.id, g.courseIds]),
+      n.groups.map((g) => [g.id, coursesIn(g)]),
       [
         ['g1', ['c2']], // c1 keeps its first (top-level) place, 'gone' does not exist
         ['g2', []],
@@ -103,12 +111,12 @@ describe('normalizeLayout', () => {
   test('rows, entries and picker labels follow the layout', () => {
     const rows = layoutRows(layout, courses);
     assert.deepEqual(
-      rows.map((r) => (r.type === 'course' ? r.course.id : `${r.group.id}:${r.courses.map((c) => c.id).join(',')}`)),
+      rows.map((r) => (r.type === 'course' ? r.course.id : `${r.group.id}:${r.children.map((c) => (c.type === 'course' ? c.course.id : c.group.id)).join(',')}`)),
       ['c1', 'g1:c2,c3'],
     );
     assert.deepEqual(layoutEntries(layout, courses).map(courseLabel), ['C1', '2026-2학기 › C2', '2026-2학기 › C3']);
     assert.deepEqual(toPutLayout(layout), {
-      groups: [{ id: 'g1', courseIds: ['c2', 'c3'] }],
+      groups: [{ id: 'g1', items: cs('c2', 'c3') }],
       order: layout.order,
     });
     assert.deepEqual(allCollapseKeys(layout, courses), ['group:g1', 'course:c1', 'course:c2', 'course:c3']);
@@ -157,18 +165,18 @@ describe('moves', () => {
   test('course: into a group, out of a group, between groups', () => {
     const into = applyCourseMove(layout, { kind: 'course', courseId: 'c1', groupId: 'g1', before: { type: 'course', id: 'c3' } });
     assert.deepEqual(into.order, [{ type: 'group', id: 'g1' }]);
-    assert.deepEqual(into.groups[0].courseIds, ['c2', 'c1', 'c3']);
+    assert.deepEqual(coursesIn(into.groups[0]), ['c2', 'c1', 'c3']);
     const out = applyCourseMove(layout, { kind: 'course', courseId: 'c3', groupId: null, before: { type: 'course', id: 'c1' } });
     assert.deepEqual(out.order, [
       { type: 'course', id: 'c3' },
       { type: 'course', id: 'c1' },
       { type: 'group', id: 'g1' },
     ]);
-    assert.deepEqual(out.groups[0].courseIds, ['c2']);
-    const withG2 = withGroupAppended(layout, { id: 'g2', title: 'G2', createdAt: '', courseIds: [] });
+    assert.deepEqual(coursesIn(out.groups[0]), ['c2']);
+    const withG2 = withGroupAppended(layout, { id: 'g2', title: 'G2', createdAt: '', items: cs() });
     const between = applyCourseMove(withG2, { kind: 'course', courseId: 'c2', groupId: 'g2', before: null });
     assert.deepEqual(
-      between.groups.map((g) => g.courseIds),
+      between.groups.map(coursesIn),
       [['c3'], ['c2']],
     );
     assert.ok(sameLayout(applyCourseMove(layout, { kind: 'course', courseId: 'c2', groupId: 'g1', before: { type: 'course', id: 'c3' } }), layout));
@@ -176,14 +184,69 @@ describe('moves', () => {
   });
 
   test('group: reorder at the top level (groups stay in top-level order)', () => {
-    const withG2 = withGroupAppended(layout, { id: 'g2', title: 'G2', createdAt: '', courseIds: ['c1'] });
+    const withG2 = withGroupAppended(layout, { id: 'g2', title: 'G2', createdAt: '', items: cs('c1') });
     assert.deepEqual(withG2.order, [
       { type: 'group', id: 'g1' },
       { type: 'group', id: 'g2' },
     ]);
-    const moved = applyGroupMove(withG2, { kind: 'group', groupId: 'g2', before: { type: 'group', id: 'g1' } });
+    const moved = applyGroupMove(withG2, { kind: 'group', groupId: 'g2', parentId: null, before: { type: 'group', id: 'g1' } });
     assert.deepEqual(moved.order.map((i) => i.id), ['g2', 'g1']);
     assert.deepEqual(moved.groups.map((g) => g.id), ['g2', 'g1']);
+  });
+
+  test('groups inside groups: into a group, out of it, never into itself; deleting one keeps what it held in place', () => {
+    // g1 (c2, c3) and g2 (c1) at the top level; g2 goes into g1 between c2 and c3.
+    const two = withGroupAppended(layout, { id: 'g2', title: 'G2', createdAt: '', items: cs('c1') });
+    const nested = applyGroupMove(two, { kind: 'group', groupId: 'g2', parentId: 'g1', before: { type: 'course', id: 'c3' } });
+    assert.deepEqual(nested.order, [{ type: 'group', id: 'g1' }]);
+    assert.deepEqual(nested.groups.map((g) => [g.id, g.items.map((i) => i.id)]), [['g1', ['c2', 'g2', 'c3']], ['g2', ['c1']]]);
+    assert.deepEqual(layoutEntries(nested, courses).map(courseLabel), ['2026-2학기 › C2', '2026-2학기 › G2 › C1', '2026-2학기 › C3']);
+    assert.deepEqual(groupPath(nested, { type: 'course', id: 'c1' }).map((g) => g.id), ['g1', 'g2']);
+    assert.ok(isWithin(nested, 'g2', 'g1') && !isWithin(nested, 'g1', 'g2'));
+    assert.deepEqual(coursesInside(nested, 'g1'), ['c2', 'c1', 'c3']);
+    // Not into itself, nor into a group it holds.
+    assert.equal(applyGroupMove(nested, { kind: 'group', groupId: 'g1', parentId: 'g2', before: null }), nested);
+    assert.equal(applyGroupMove(nested, { kind: 'group', groupId: 'g1', parentId: 'g1', before: null }), nested);
+    // A new group inside a group.
+    const g3 = withGroupAppended(nested, { id: 'g3', title: 'G3', createdAt: '', items: [] }, 'g2');
+    assert.deepEqual(g3.groups.map((g) => g.id), ['g1', 'g2', 'g3']);
+    assert.deepEqual(toPutLayout(g3).groups.find((g) => g.id === 'g2')?.items, [{ type: 'course', id: 'c1' }, { type: 'group', id: 'g3' }]);
+    // Out again, to the top level.
+    const out = applyGroupMove(nested, { kind: 'group', groupId: 'g2', parentId: null, before: null });
+    assert.deepEqual(out.order.map((i) => i.id), ['g1', 'g2']);
+    assert.deepEqual(coursesIn(out.groups[0]), ['c2', 'c3']);
+    // Deleting g1: c2, g2 (with c1) and c3 take its place.
+    const gone = withoutGroup(nested, 'g1');
+    assert.deepEqual(gone.order.map((i) => i.id), ['c2', 'g2', 'c3']);
+    assert.deepEqual(neighbourAfterDelete(nested, { type: 'group', id: 'g2' }), { type: 'course', id: 'c1' });
+    assert.deepEqual(neighbourAfterDelete(nested, { type: 'course', id: 'c1' }), { type: 'group', id: 'g2' });
+    // A loop in what the server sent (it never sends one) is cut where it closes.
+    const loop = normalizeLayout({ groups: [{ id: 'g1', title: 'A', createdAt: '', items: [{ type: 'group', id: 'g2' }] }, { id: 'g2', title: 'B', createdAt: '', items: [{ type: 'group', id: 'g1' }] }], order: [] }, courses);
+    assert.deepEqual(loop.groups.map((g) => [g.id, g.items.map((i) => i.id)]), [['g1', ['g2']], ['g2', []]]);
+  });
+
+  test('dragging a group into a group: header (rest) and body = into, a course inside = beside it', () => {
+    const two = withGroupAppended(layout, { id: 'g2', title: 'G2', createdAt: '', items: [] });
+    const v = (collapsed: string[] = []): OrgView => ({ courses, layout: two, isCollapsed: (k) => collapsed.includes(k) });
+    const g2 = { kind: 'group' as const, groupId: 'g2' };
+    const into = resolveDrop(g2, { role: 'group-head', groupId: 'g1' }, 0.6, v());
+    assert.deepEqual(into?.move, { kind: 'group', groupId: 'g2', parentId: 'g1', before: { type: 'course', id: 'c2' } });
+    assert.deepEqual(into?.indicator, { type: 'line', key: 'course:c2', side: 'before' });
+    assert.equal(describePlace(into!, v()), '‘2026-2학기’ 그룹의 1번째 자리 (3개 중)');
+    const atEnd = resolveDrop(g2, { role: 'group-body', groupId: 'g1' }, 0.99, v());
+    assert.deepEqual(atEnd?.move, { kind: 'group', groupId: 'g2', parentId: 'g1', before: null });
+    assert.deepEqual(atEnd?.indicator, { type: 'line', key: 'course:c3', side: 'after' });
+    const collapsed = resolveDrop(g2, { role: 'group-head', groupId: 'g1' }, 0.6, v(['group:g1']));
+    assert.deepEqual(collapsed?.indicator, { type: 'into', key: 'group:g1' });
+    const beside = resolveDrop(g2, { role: 'course', courseId: 'c3', groupId: 'g1' }, 0.2, v());
+    assert.deepEqual(beside?.move, { kind: 'group', groupId: 'g2', parentId: 'g1', before: { type: 'course', id: 'c3' } });
+    // Top third of a group's header: before it, where it is.
+    const nested = applyGroupMove(two, { kind: 'group', groupId: 'g2', parentId: 'g1', before: null });
+    const vn: OrgView = { courses, layout: nested, isCollapsed: () => false };
+    const course1 = resolveDrop({ kind: 'course', courseId: 'c1' }, { role: 'group-head', groupId: 'g2' }, 0.1, vn);
+    assert.deepEqual(course1?.move, { kind: 'course', courseId: 'c1', groupId: 'g1', before: { type: 'group', id: 'g2' } });
+    // The outer group cannot go into the inner one.
+    assert.equal(resolveDrop({ kind: 'group', groupId: 'g1' }, { role: 'group-head', groupId: 'g2' }, 0.6, vn), null);
   });
 
   test('deleting a group puts its courses where it was; new courses go to the end of their group', () => {
@@ -196,13 +259,13 @@ describe('moves', () => {
         { type: 'course', id: 'c3' },
       ],
     });
-    assert.deepEqual(withCourseAdded(layout, 'c9', 'g1').groups[0].courseIds, ['c2', 'c3', 'c9']);
+    assert.deepEqual(coursesIn(withCourseAdded(layout, 'c9', 'g1').groups[0]), ['c2', 'c3', 'c9']);
     assert.deepEqual(withCourseAdded(layout, 'c9', null).order.at(-1), { type: 'course', id: 'c9' });
   });
 
   test('focus after a delete: the next item of the same list, else the previous one, else the group', () => {
     const three: LibraryLayout = {
-      groups: [{ ...layout.groups[0], courseIds: ['c2', 'c3', 'c4'] }],
+      groups: [{ ...layout.groups[0], items: cs('c2', 'c3', 'c4') }],
       order: [{ type: 'course', id: 'c1' }, { type: 'group', id: 'g1' }, { type: 'course', id: 'c5' }],
     };
     const c = (id: string) => ({ type: 'course' as const, id });
@@ -210,11 +273,11 @@ describe('moves', () => {
     assert.deepEqual(neighbourAfterDelete(three, c('c4')), c('c3'));
     assert.deepEqual(neighbourAfterDelete(layout, c('c1')), { type: 'group', id: 'g1' });
     assert.deepEqual(neighbourAfterDelete(three, c('c5')), { type: 'group', id: 'g1' });
-    const alone: LibraryLayout = { groups: [{ ...layout.groups[0], courseIds: ['c2'] }], order: [{ type: 'group', id: 'g1' }] };
+    const alone: LibraryLayout = { groups: [{ ...layout.groups[0], items: cs('c2') }], order: [{ type: 'group', id: 'g1' }] };
     assert.deepEqual(neighbourAfterDelete(alone, c('c2')), { type: 'group', id: 'g1' });
     // A group: its first course stays where it was.
     assert.deepEqual(neighbourAfterDelete(three, { type: 'group', id: 'g1' }), c('c2'));
-    const empty: LibraryLayout = { groups: [{ ...layout.groups[0], courseIds: [] }], order: [{ type: 'group', id: 'g1' }] };
+    const empty: LibraryLayout = { groups: [{ ...layout.groups[0], items: cs() }], order: [{ type: 'group', id: 'g1' }] };
     assert.equal(neighbourAfterDelete(empty, { type: 'group', id: 'g1' }), null);
     assert.equal(neighbourAfterDelete(layout, c('nope')), null);
   });
@@ -356,8 +419,9 @@ describe('resolveDrop', () => {
   test('drop zones only take their kind', () => {
     assert.equal(resolveDrop(lecture('a'), { role: 'group-head', groupId: 'g1' }, 0.5, view()), null);
     assert.equal(resolveDrop({ kind: 'course', courseId: 'c1' }, row('a', 'c1'), 0.5, view()), null);
-    // Groups only move among top-level items.
+    // A group never goes inside itself.
     assert.equal(resolveDrop({ kind: 'group', groupId: 'g1' }, { role: 'course', courseId: 'c2', groupId: 'g1' }, 0.5, view()), null);
+    assert.equal(resolveDrop({ kind: 'group', groupId: 'g1' }, { role: 'group-body', groupId: 'g1' }, 0.5, view()), null);
   });
 
   test('course over a group header: top third = before the group, the rest = into it', () => {
@@ -381,7 +445,7 @@ describe('resolveDrop', () => {
     const t = resolveDrop({ kind: 'course', courseId: 'c2' }, { role: 'top-end' }, 0.5, view());
     assert.deepEqual(t?.indicator, { type: 'line', key: 'group:g1', side: 'after' });
     const g = resolveDrop({ kind: 'group', groupId: 'g1' }, { role: 'course', courseId: 'c1', groupId: null }, 0.2, view());
-    assert.deepEqual(g?.move, { kind: 'group', groupId: 'g1', before: { type: 'course', id: 'c1' } });
+    assert.deepEqual(g?.move, { kind: 'group', groupId: 'g1', parentId: null, before: { type: 'course', id: 'c1' } });
     assert.equal(describePlace(g!, view()), '전체 목록의 1번째 자리 (2개 중)');
   });
 
@@ -417,7 +481,7 @@ describe('geometry and keyboard stops', () => {
     box('lecture:a', { role: 'lecture', docId: 'a', courseId: 'c1' }, 40, 60, 10, 580),
     box('lecture:b', { role: 'lecture', docId: 'b', courseId: 'c1' }, 100, 60, 10, 580),
     box('lecture:c', { role: 'lecture', docId: 'c', courseId: 'c1' }, 160, 60, 10, 580),
-    box('group:g1', { role: 'group', groupId: 'g1' }, 240, 120),
+    box('group:g1', { role: 'group', groupId: 'g1', parentId: null }, 240, 120),
     box('group-head:g1', { role: 'group-head', groupId: 'g1' }, 240, 40),
     box('course:c2', { role: 'course', courseId: 'c2', groupId: 'g1' }, 290, 30, 10, 580),
     box('course-head:c2', { role: 'course-head', courseId: 'c2' }, 290, 30, 10, 580),

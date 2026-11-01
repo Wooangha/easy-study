@@ -7,69 +7,68 @@ import type { Course, CourseGroup, LayoutItem, LibraryLayout, PutLayoutRequest }
 export const EMPTY_LAYOUT: LibraryLayout = { groups: [], order: [] };
 
 /**
- * The layout as the server normalises it (DESIGN §18), against the courses the client knows (createdAt order):
- * unknown courses and group items of unknown groups are dropped, a course listed twice keeps its first
- * position in display order, groups missing from `order` are appended, existing courses that are not mentioned
- * are appended to the top level. `groups` follows the top-level order. `null` = every course at the top level.
+ * The layout as the server normalises it (DESIGN §18), against the courses the client knows (createdAt order),
+ * read from the top level down: unknown courses and items of unknown groups are dropped, a course or group listed
+ * twice keeps its first place (so no group is inside itself), groups that are nowhere are appended to the top
+ * level (with what they hold), existing courses that are not mentioned too. `groups` lists every group in display
+ * order (a group before what it holds). `null` = every course at the top level.
  */
 export function normalizeLayout(layout: LibraryLayout | null | undefined, courses: readonly Course[]): LibraryLayout {
   const existing = new Set(courses.map((c) => c.id));
   const groupsById = new Map<string, CourseGroup>();
   for (const g of layout?.groups ?? []) if (!groupsById.has(g.id)) groupsById.set(g.id, g);
 
-  const items: LayoutItem[] = [];
-  const mentioned = new Set<string>();
-  for (const item of layout?.order ?? []) {
-    if (item.type === 'group') {
-      if (!groupsById.has(item.id) || mentioned.has(item.id)) continue;
-      mentioned.add(item.id);
-    }
-    items.push(item);
-  }
-  for (const id of groupsById.keys()) if (!mentioned.has(id)) items.push({ type: 'group', id });
-
-  const placed = new Set<string>();
-  const place = (courseId: string): boolean => {
-    if (!existing.has(courseId) || placed.has(courseId)) return false;
-    placed.add(courseId);
-    return true;
-  };
+  const placedCourses = new Set<string>();
+  const placedGroups = new Set<string>();
   const groups: CourseGroup[] = [];
-  const order: LayoutItem[] = [];
-  for (const item of items) {
-    if (item.type === 'course') {
-      if (place(item.id)) order.push({ type: 'course', id: item.id });
-      continue;
+  const place = (items: readonly LayoutItem[]): LayoutItem[] => {
+    const shown: LayoutItem[] = [];
+    for (const item of items) {
+      if (item.type === 'course') {
+        if (!existing.has(item.id) || placedCourses.has(item.id)) continue;
+        placedCourses.add(item.id);
+        shown.push({ type: 'course', id: item.id });
+        continue;
+      }
+      const group = groupsById.get(item.id);
+      if (!group || placedGroups.has(item.id)) continue;
+      placedGroups.add(item.id);
+      const entry: CourseGroup = { ...group, items: [] };
+      groups.push(entry);
+      entry.items = place(group.items ?? []);
+      shown.push({ type: 'group', id: item.id });
     }
-    const group = groupsById.get(item.id) as CourseGroup;
-    groups.push({ ...group, courseIds: group.courseIds.filter(place) });
-    order.push({ type: 'group', id: item.id });
-  }
-  for (const c of courses) if (place(c.id)) order.push({ type: 'course', id: c.id });
+    return shown;
+  };
+  const order = place(layout?.order ?? []);
+  for (const id of groupsById.keys()) if (!placedGroups.has(id)) order.push(...place([{ type: 'group', id }]));
+  for (const c of courses) if (!placedCourses.has(c.id)) order.push(...place([{ type: 'course', id: c.id }]));
   return { groups, order };
 }
 
-const sameItem = (a: LayoutItem | null | undefined, b: LayoutItem | null | undefined): boolean =>
+export const sameItem = (a: LayoutItem | null | undefined, b: LayoutItem | null | undefined): boolean =>
   !!a && !!b && a.type === b.type && a.id === b.id;
 
 const sameList = (a: readonly string[], b: readonly string[]): boolean =>
   a.length === b.length && a.every((x, i) => x === b[i]);
 
+const sameItems = (a: readonly LayoutItem[], b: readonly LayoutItem[]): boolean =>
+  a.length === b.length && a.every((x, i) => sameItem(x, b[i]));
+
 /** Same arrangement and titles (what the library shows). */
 export function sameLayout(a: LibraryLayout, b: LibraryLayout): boolean {
-  if (a.order.length !== b.order.length || a.groups.length !== b.groups.length) return false;
-  if (!a.order.every((item, i) => sameItem(item, b.order[i]))) return false;
+  if (!sameItems(a.order, b.order) || a.groups.length !== b.groups.length) return false;
   const byId = new Map(b.groups.map((g) => [g.id, g]));
   return a.groups.every((g) => {
     const other = byId.get(g.id);
-    return !!other && other.title === g.title && sameList(g.courseIds, other.courseIds);
+    return !!other && other.title === g.title && sameItems(g.items, other.items);
   });
 }
 
 /** PUT /api/layout body for an arrangement. */
 export function toPutLayout(layout: LibraryLayout): PutLayoutRequest {
   return {
-    groups: layout.groups.map((g) => ({ id: g.id, courseIds: [...g.courseIds] })),
+    groups: layout.groups.map((g) => ({ id: g.id, items: g.items.map((item) => ({ type: item.type, id: item.id })) })),
     order: layout.order.map((item) => ({ type: item.type, id: item.id })),
   };
 }
@@ -78,47 +77,95 @@ export function findGroup(layout: LibraryLayout, groupId: string): CourseGroup |
   return layout.groups.find((g) => g.id === groupId) ?? null;
 }
 
-/** The group a course is in (null = top level or unknown). */
-export function groupOfCourse(layout: LibraryLayout, courseId: string): CourseGroup | null {
-  return layout.groups.find((g) => g.courseIds.includes(courseId)) ?? null;
+/** The items of a group, or of the top level (null). */
+export function childrenOf(layout: LibraryLayout, parentId: string | null): LayoutItem[] {
+  return parentId === null ? layout.order : (findGroup(layout, parentId)?.items ?? []);
 }
 
-export type LayoutRow = { type: 'group'; group: CourseGroup; courses: Course[] } | { type: 'course'; course: Course };
+/** The group an item is in: its id, null for the top level, undefined when the item is nowhere. */
+export function parentOf(layout: LibraryLayout, item: LayoutItem): string | null | undefined {
+  if (layout.order.some((x) => sameItem(x, item))) return null;
+  return layout.groups.find((g) => g.items.some((x) => sameItem(x, item)))?.id;
+}
 
-/** Top-level rows to render: groups (with their courses) and ungrouped courses, in layout order. */
+/** The group a course is in (null = top level or unknown). */
+export function groupOfCourse(layout: LibraryLayout, courseId: string): CourseGroup | null {
+  return layout.groups.find((g) => g.items.some((item) => item.type === 'course' && item.id === courseId)) ?? null;
+}
+
+/** The groups an item is in, outermost first ([] at the top level). */
+export function groupPath(layout: LibraryLayout, item: LayoutItem): CourseGroup[] {
+  const path: CourseGroup[] = [];
+  const seen = new Set<string>();
+  for (let parent = parentOf(layout, item); parent; parent = parentOf(layout, { type: 'group', id: parent })) {
+    const group = findGroup(layout, parent);
+    if (!group || seen.has(parent)) break;
+    seen.add(parent);
+    path.unshift(group);
+  }
+  return path;
+}
+
+/** Whether `groupId` is `ancestorId` or inside it (at any depth): it cannot be moved into it. */
+export function isWithin(layout: LibraryLayout, groupId: string, ancestorId: string): boolean {
+  return groupId === ancestorId || groupPath(layout, { type: 'group', id: groupId }).some((g) => g.id === ancestorId);
+}
+
+/** The courses inside a group, at any depth. */
+export function coursesInside(layout: LibraryLayout, groupId: string): string[] {
+  const seen = new Set<string>();
+  const walk = (id: string): string[] => {
+    if (seen.has(id)) return [];
+    seen.add(id);
+    return (findGroup(layout, id)?.items ?? []).flatMap((item) => (item.type === 'course' ? [item.id] : walk(item.id)));
+  };
+  return walk(groupId);
+}
+
+export type LayoutRow =
+  | { type: 'group'; group: CourseGroup; children: LayoutRow[]; parentId: string | null }
+  | { type: 'course'; course: Course; parentId: string | null };
+
+/** The rows to render, in layout order: groups (with what they hold, nested) and the courses outside groups. */
 export function layoutRows(layout: LibraryLayout, courses: readonly Course[]): LayoutRow[] {
   const byId = new Map(courses.map((c) => [c.id, c]));
-  const rows: LayoutRow[] = [];
-  for (const item of layout.order) {
-    if (item.type === 'course') {
-      const course = byId.get(item.id);
-      if (course) rows.push({ type: 'course', course });
-      continue;
-    }
-    const group = findGroup(layout, item.id);
-    if (!group) continue;
-    const inGroup = group.courseIds.map((id) => byId.get(id)).filter((c): c is Course => c !== undefined);
-    rows.push({ type: 'group', group, courses: inGroup });
-  }
-  return rows;
+  const seen = new Set<string>();
+  const rows = (items: readonly LayoutItem[], parentId: string | null): LayoutRow[] =>
+    items.flatMap((item): LayoutRow[] => {
+      if (item.type === 'course') {
+        const course = byId.get(item.id);
+        return course ? [{ type: 'course', course, parentId }] : [];
+      }
+      const group = findGroup(layout, item.id);
+      if (!group || seen.has(group.id)) return [];
+      seen.add(group.id);
+      return [{ type: 'group', group, children: rows(group.items, group.id), parentId }];
+    });
+  return rows(layout.order, null);
 }
 
 export interface LayoutEntry {
   course: Course;
   /** The group the course is in (null = top level). */
   group: CourseGroup | null;
+  /** The groups it is in, outermost first (the last one is `group`). */
+  path: CourseGroup[];
 }
 
-/** Every course in display order with its group (pickers, "과목으로 이동"). */
+/** Every course in display order with its groups (pickers, "과목으로 이동"). */
 export function layoutEntries(layout: LibraryLayout, courses: readonly Course[]): LayoutEntry[] {
-  return layoutRows(layout, courses).flatMap((row): LayoutEntry[] =>
-    row.type === 'course' ? [{ course: row.course, group: null }] : row.courses.map((course) => ({ course, group: row.group })),
-  );
+  const walk = (rows: readonly LayoutRow[], path: CourseGroup[]): LayoutEntry[] =>
+    rows.flatMap((row): LayoutEntry[] =>
+      row.type === 'course'
+        ? [{ course: row.course, group: path.at(-1) ?? null, path }]
+        : walk(row.children, [...path, row.group]),
+    );
+  return walk(layoutRows(layout, courses), []);
 }
 
-/** "그룹 › 과목" for a grouped course, else the course title. */
+/** "그룹 › 과목" ("학기 › 전공 › 과목") for a grouped course, else the course title. */
 export function courseLabel(entry: LayoutEntry): string {
-  return entry.group ? `${entry.group.title} › ${entry.course.title}` : entry.course.title;
+  return [...entry.path.map((g) => g.title), entry.course.title].join(' › ');
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -134,7 +181,7 @@ export interface LectureMove {
   beforeDocId: string | null;
 }
 
-/** Move a course into a group (before one of its courses) or to the top level (before a top-level item). */
+/** Move a course into a group or to the top level (groupId null), before an item there (null = at the end). */
 export interface CourseMove {
   kind: 'course';
   courseId: string;
@@ -142,10 +189,11 @@ export interface CourseMove {
   before: LayoutItem | null;
 }
 
-/** Move a group within the top level. */
+/** Move a group into another group or to the top level (parentId null), before an item there (null = at the end). */
 export interface GroupMove {
   kind: 'group';
   groupId: string;
+  parentId: string | null;
   before: LayoutItem | null;
 }
 
@@ -210,10 +258,40 @@ export function lectureMovePatch(courses: readonly Course[], move: LectureMove):
 /** The layout without these courses (wherever they are). */
 export function withoutCourses(layout: LibraryLayout, courseIds: Iterable<string>): LibraryLayout {
   const removed = new Set(courseIds);
+  const keep = (item: LayoutItem) => item.type === 'group' || !removed.has(item.id);
   return {
-    groups: layout.groups.map((g) => ({ ...g, courseIds: g.courseIds.filter((id) => !removed.has(id)) })),
-    order: layout.order.filter((item) => item.type === 'group' || !removed.has(item.id)),
+    groups: layout.groups.map((g) => ({ ...g, items: g.items.filter(keep) })),
+    order: layout.order.filter(keep),
   };
+}
+
+/** Keep `groups` in display order (a group before what it holds), like the server does. */
+function inDisplayOrder(layout: LibraryLayout): LibraryLayout {
+  const byId = new Map(layout.groups.map((g) => [g.id, g]));
+  const groups: CourseGroup[] = [];
+  const walk = (items: readonly LayoutItem[]): void => {
+    for (const item of items) {
+      const group = item.type === 'group' ? byId.get(item.id) : undefined;
+      if (!group) continue;
+      byId.delete(item.id);
+      groups.push(group);
+      walk(group.items);
+    }
+  };
+  walk(layout.order);
+  return { groups, order: layout.order };
+}
+
+/** `item` taken out of wherever it is and put into `parentId`'s items (null: the top level) before `before`. */
+function withItemAt(layout: LibraryLayout, item: LayoutItem, parentId: string | null, before: LayoutItem | null): LibraryLayout {
+  const keep = (x: LayoutItem) => !sameItem(x, item);
+  const groups = layout.groups.map((g) => ({ ...g, items: g.items.filter(keep) }));
+  const order = layout.order.filter(keep);
+  const put = (items: LayoutItem[]) => insertBefore(items, item, (x) => sameItem(x, before));
+  return inDisplayOrder({
+    groups: parentId === null ? groups : groups.map((g) => (g.id === parentId ? { ...g, items: put(g.items) } : g)),
+    order: parentId === null ? put(order) : order,
+  });
 }
 
 /** The layout after a course move (unchanged when the target group does not exist). */
@@ -221,82 +299,65 @@ export function applyCourseMove(layout: LibraryLayout, move: CourseMove): Librar
   const self: LayoutItem = { type: 'course', id: move.courseId };
   if (sameItem(move.before, self)) return layout;
   if (move.groupId !== null && !findGroup(layout, move.groupId)) return layout;
-  const rest = withoutCourses(layout, [move.courseId]);
-  if (move.groupId === null) {
-    return { ...rest, order: insertBefore(rest.order, self, (item) => sameItem(item, move.before)) };
-  }
-  const anchor = move.before?.type === 'course' ? move.before.id : null;
-  return {
-    ...rest,
-    groups: rest.groups.map((g) =>
-      g.id === move.groupId ? { ...g, courseIds: insertBefore(g.courseIds, move.courseId, (id) => id === anchor) } : g,
-    ),
-  };
+  return withItemAt(layout, self, move.groupId, move.before);
 }
 
-/** Keep `groups` in top-level order (like the server does). */
-function sortGroups(layout: LibraryLayout): LibraryLayout {
-  const position = new Map(layout.order.filter((i) => i.type === 'group').map((item, i) => [item.id, i]));
-  const groups = layout.groups.slice().sort((a, b) => (position.get(a.id) ?? 1e9) - (position.get(b.id) ?? 1e9));
-  return { ...layout, groups };
-}
-
-/** The layout after a group move. */
+/** The layout after a group move (unchanged when the group or the target is gone, or the target is inside it). */
 export function applyGroupMove(layout: LibraryLayout, move: GroupMove): LibraryLayout {
   const self: LayoutItem = { type: 'group', id: move.groupId };
   if (sameItem(move.before, self) || !findGroup(layout, move.groupId)) return layout;
-  const rest = layout.order.filter((item) => !sameItem(item, self));
-  return sortGroups({ ...layout, order: insertBefore(rest, self, (item) => sameItem(item, move.before)) });
+  if (move.parentId !== null && (!findGroup(layout, move.parentId) || isWithin(layout, move.parentId, move.groupId))) return layout;
+  return withItemAt(layout, self, move.parentId, move.before);
 }
 
 /** A new course at the end of a group (or of the top level), as POST /api/courses places it. */
 export function withCourseAdded(layout: LibraryLayout, courseId: string, groupId: string | null): LibraryLayout {
-  const rest = withoutCourses(layout, [courseId]);
-  if (groupId !== null && findGroup(rest, groupId)) {
-    return { ...rest, groups: rest.groups.map((g) => (g.id === groupId ? { ...g, courseIds: [...g.courseIds, courseId] } : g)) };
-  }
-  return { ...rest, order: [...rest.order, { type: 'course', id: courseId }] };
-}
-
-/** A new group appended to the top level; its courses move into it from wherever they were (POST /api/groups). */
-export function withGroupAppended(layout: LibraryLayout, group: CourseGroup): LibraryLayout {
-  const rest = withoutCourses(layout, group.courseIds);
-  const groups = rest.groups.filter((g) => g.id !== group.id);
-  const order = rest.order.filter((item) => !(item.type === 'group' && item.id === group.id));
-  return { groups: [...groups, { ...group, courseIds: [...group.courseIds] }], order: [...order, { type: 'group', id: group.id }] };
-}
-
-/** Deleting a group moves its courses to the top level at the group's position (DELETE /api/groups/:id). */
-export function withoutGroup(layout: LibraryLayout, groupId: string): LibraryLayout {
-  const group = findGroup(layout, groupId);
-  if (!group) return layout;
-  const courses: LayoutItem[] = group.courseIds.map((id) => ({ type: 'course', id }));
-  return {
-    groups: layout.groups.filter((g) => g.id !== groupId),
-    order: layout.order.flatMap((item) => (item.type === 'group' && item.id === groupId ? courses : [item])),
-  };
+  const parent = groupId !== null && findGroup(layout, groupId) ? groupId : null;
+  return withItemAt(layout, { type: 'course', id: courseId }, parent, null);
 }
 
 /**
- * Where keyboard focus goes when `item` is deleted and its card disappears: for a group, its first course (it
- * stays where the group was); otherwise the next item of the same list, else the previous one, else — for the
- * last course of a group — the group. null when nothing is left nearby.
+ * A new group at the end of `parentId` (null: of the top level); its courses move into it from wherever they were
+ * (POST /api/groups).
+ */
+export function withGroupAppended(layout: LibraryLayout, group: CourseGroup, parentId: string | null = null): LibraryLayout {
+  const moving = group.items.filter((item) => item.type === 'course').map((item) => item.id);
+  const rest = withoutCourses(layout, moving);
+  const others = { groups: rest.groups.filter((g) => g.id !== group.id), order: rest.order };
+  const parent = parentId !== null && findGroup(others, parentId) ? parentId : null;
+  const added = { ...others, groups: [...others.groups, { ...group, items: [...group.items] }] };
+  return withItemAt(added, { type: 'group', id: group.id }, parent, null);
+}
+
+/** Deleting a group moves what it held (courses and groups) to its place (DELETE /api/groups/:id). */
+export function withoutGroup(layout: LibraryLayout, groupId: string): LibraryLayout {
+  const group = findGroup(layout, groupId);
+  if (!group) return layout;
+  const replace = (items: readonly LayoutItem[]): LayoutItem[] =>
+    items.flatMap((item) => (item.type === 'group' && item.id === groupId ? group.items : [item]));
+  return inDisplayOrder({
+    groups: layout.groups.filter((g) => g.id !== groupId).map((g) => ({ ...g, items: replace(g.items) })),
+    order: replace(layout.order),
+  });
+}
+
+/**
+ * Where keyboard focus goes when `item` is deleted and its card disappears: for a group, the first thing it held
+ * (it stays where the group was); otherwise the next item of the same list, else the previous one, else — the
+ * last item of a group — the group. null when nothing is left nearby.
  */
 export function neighbourAfterDelete(layout: LibraryLayout, item: LayoutItem): LayoutItem | null {
   if (item.type === 'group') {
-    const first = findGroup(layout, item.id)?.courseIds[0];
-    if (first !== undefined) return { type: 'course', id: first };
-  } else {
-    const group = groupOfCourse(layout, item.id);
-    if (group) {
-      const i = group.courseIds.indexOf(item.id);
-      const near = group.courseIds[i + 1] ?? group.courseIds[i - 1];
-      return near !== undefined ? { type: 'course', id: near } : { type: 'group', id: group.id };
-    }
+    const first = findGroup(layout, item.id)?.items[0];
+    if (first !== undefined) return first;
   }
-  const i = layout.order.findIndex((x) => sameItem(x, item));
-  if (i === -1) return null;
-  return layout.order[i + 1] ?? layout.order[i - 1] ?? null;
+  const parent = parentOf(layout, item);
+  if (parent === undefined) return null;
+  const list = childrenOf(layout, parent);
+  const i = list.findIndex((x) => sameItem(x, item));
+  const near = list[i + 1] ?? list[i - 1];
+  if (near !== undefined) return near;
+  return parent === null ? null : { type: 'group', id: parent };
 }
 
 export function withGroupTitle(layout: LibraryLayout, groupId: string, title: string): LibraryLayout {

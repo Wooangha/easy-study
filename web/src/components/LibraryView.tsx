@@ -1,5 +1,5 @@
 import { useDroppable } from '@dnd-kit/core';
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react';
 import { ArrowLeft, FileText, Folder, Folders, GripVertical, Hourglass, RefreshCw, TriangleAlert } from 'lucide-react';
 import type { Course, DocMeta, LayoutItem, LibraryLayout } from '../../../shared/types.ts';
 import type { CoursesState } from '../hooks/useCourses.ts';
@@ -10,10 +10,12 @@ import { dndId, type DragItem, type DropData } from '../lib/libraryDnd.ts';
 import {
   allCollapseKeys,
   collapseKey,
-  groupOfCourse,
+  coursesInside,
+  groupPath,
   layoutEntries,
   layoutRows,
   neighbourAfterDelete,
+  type LayoutRow,
 } from '../lib/libraryLayout.ts';
 import { CourseCard, CourseGhost } from './organize/CourseCard.tsx';
 import { DocCard } from './organize/DocCard.tsx';
@@ -123,11 +125,11 @@ export function LibraryView(props: LibraryViewProps) {
     focusOrgItem(focusAfter);
   }, [focusAfter]);
   const moveLecture = (docId: string, courseId: string | null) => {
-    const group = courseId ? groupOfCourse(layout, courseId) : null;
+    const groups = courseId ? groupPath(layout, { type: 'course', id: courseId }) : [];
     setFocusAfter([
       dndId.lecture(docId),
       ...(courseId ? [dndId.course(courseId)] : []), // a collapsed course
-      ...(group ? [dndId.group(group.id)] : []), // …in a collapsed group
+      ...groups.reverse().map((g) => dndId.group(g.id)), // …in a collapsed group (in a collapsed group…)
       HEADING_KEY,
     ]);
     void org.moveLecture(docId, courseId);
@@ -198,8 +200,15 @@ export function LibraryView(props: LibraryViewProps) {
       return course ? <CourseGhost course={course} lectures={lecturesOf(course).length} /> : null;
     }
     const group = layout.groups.find((g) => g.id === item.groupId);
-    return group ? <GroupGhost group={group} /> : null;
+    return group ? <GroupGhost group={group} contents={contentsOf(group.id)} /> : null;
   };
+
+  /** "그룹 2개 · 과목 7개": the groups in a group and the courses in it at any depth. */
+  const contentsOf = (groupId: string) =>
+    msg().shell.group.contents(
+      layout.groups.find((g) => g.id === groupId)?.items.filter((item) => item.type === 'group').length ?? 0,
+      coursesInside(layout, groupId).length,
+    );
 
   const renderCourse = (c: Course, groupId: string | null) => (
     <CourseCard
@@ -228,6 +237,40 @@ export function LibraryView(props: LibraryViewProps) {
       onDigestLectures={props.onDigestLectures}
     />
   );
+
+  /** A course card, or a group card with what it holds (groups inside groups, 0.6.15). */
+  const renderRow = (row: LayoutRow): ReactNode =>
+    row.type === 'course' ? (
+      renderCourse(row.course, row.parentId)
+    ) : (
+      <GroupCard
+        key={row.group.id}
+        group={row.group}
+        parentId={row.parentId}
+        rows={row.children}
+        contents={contentsOf(row.group.id)}
+        collapsed={collapsed.has(collapseKey.group(row.group.id))}
+        onToggle={() => toggle(collapseKey.group(row.group.id))}
+        onExpand={() => setOne(collapseKey.group(row.group.id), false)}
+        canDrag={canDragCourses}
+        renderRow={renderRow}
+        onRename={(title) => void org.renameGroup(row.group.id, title)}
+        onDelete={() => {
+          focusAfterDelete({ type: 'group', id: row.group.id });
+          void org.removeGroup(row.group.id);
+        }}
+        onCreateCourse={async (title) => {
+          const course = await org.create(title, row.group.id);
+          if (course) setReveal(dndId.course(course.id));
+          return course;
+        }}
+        onCreateGroup={async (title) => {
+          const group = await org.createGroup(title, [], row.group.id);
+          if (group) setReveal(dndId.group(group.id));
+          return group;
+        }}
+      />
+    );
 
   const m = msg().shell.library;
   return (
@@ -381,32 +424,7 @@ export function LibraryView(props: LibraryViewProps) {
               <p className="course-hint muted small">{m.courseHint}</p>
             )}
 
-            {rows.map((row) =>
-              row.type === 'group' ? (
-                <GroupCard
-                  key={row.group.id}
-                  group={row.group}
-                  courses={row.courses}
-                  collapsed={collapsed.has(collapseKey.group(row.group.id))}
-                  onToggle={() => toggle(collapseKey.group(row.group.id))}
-                  onExpand={() => setOne(collapseKey.group(row.group.id), false)}
-                  canDrag={canDragCourses}
-                  renderCourse={(c) => renderCourse(c, row.group.id)}
-                  onRename={(title) => void org.renameGroup(row.group.id, title)}
-                  onDelete={() => {
-                    focusAfterDelete({ type: 'group', id: row.group.id });
-                    void org.removeGroup(row.group.id);
-                  }}
-                  onCreateCourse={async (title) => {
-                    const course = await org.create(title, row.group.id);
-                    if (course) setReveal(dndId.course(course.id));
-                    return course;
-                  }}
-                />
-              ) : (
-                renderCourse(row.course, null)
-              ),
-            )}
+            {rows.map(renderRow)}
             <TopEndZone />
 
             {/* ---- Uncategorized ------------------------------------------------------------------- */}

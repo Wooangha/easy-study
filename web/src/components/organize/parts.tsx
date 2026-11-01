@@ -2,11 +2,11 @@
 import type { DraggableAttributes, DraggableSyntheticListeners } from '@dnd-kit/core';
 import { useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { Check, ChevronRight, GripVertical, Hourglass, RefreshCw, TriangleAlert, type LucideIcon } from 'lucide-react';
-import type { Course, DigestStatus, DocMeta, LibraryLayout } from '../../../../shared/types.ts';
+import type { Course, CourseGroup, DigestStatus, DocMeta, LibraryLayout } from '../../../../shared/types.ts';
 import type { UploadItem } from '../../hooks/useDocs.ts';
 import { msg } from '../../i18n/index.ts';
 import { formatBytes } from '../../lib/format.ts';
-import { layoutRows } from '../../lib/libraryLayout.ts';
+import { layoutEntries } from '../../lib/libraryLayout.ts';
 
 /** Drag handle, a grip icon (mouse: drag; touch: press and hold, then drag; keyboard: Space/Enter, arrows, Space/Enter). */
 export function DragHandle({
@@ -265,8 +265,9 @@ export function NewTitleForm({
 }
 
 /**
- * <option>s of every course in layout order: grouped courses inside an <optgroup> per group, courses outside
- * groups as plain options. `exclude` leaves one course out (the lecture's own).
+ * <option>s of every course in layout order: grouped courses inside an <optgroup> per group ("학기 › 전공" for a group
+ * inside a group: optgroups do not nest), courses outside groups as plain options. `exclude` leaves one course out
+ * (the lecture's own).
  */
 export function CourseOptions({
   courses,
@@ -277,24 +278,24 @@ export function CourseOptions({
   layout: LibraryLayout;
   exclude?: string | null;
 }) {
-  return layoutRows(layout, courses).map((row) => {
-    if (row.type === 'course') {
-      if (row.course.id === exclude) return null;
-      return (
-        <option key={row.course.id} value={row.course.id}>
-          {row.course.title}
-        </option>
-      );
-    }
-    const inGroup = row.courses.filter((c) => c.id !== exclude);
-    if (inGroup.length === 0) return null;
+  // Consecutive courses of the same group make one optgroup (a group's courses around a group inside it make two).
+  const runs: Array<{ key: string; path: CourseGroup[]; courses: Course[] }> = [];
+  for (const entry of layoutEntries(layout, courses)) {
+    if (entry.course.id === exclude) continue;
+    const last = runs.at(-1);
+    if (last && last.path.at(-1)?.id === entry.group?.id) last.courses.push(entry.course);
+    else runs.push({ key: `${entry.group?.id ?? '-'}:${entry.course.id}`, path: entry.path, courses: [entry.course] });
+  }
+  return runs.map((run) => {
+    const options = run.courses.map((c) => (
+      <option key={c.id} value={c.id}>
+        {c.title}
+      </option>
+    ));
+    if (run.path.length === 0) return options;
     return (
-      <optgroup key={row.group.id} label={row.group.title}>
-        {inGroup.map((c) => (
-          <option key={c.id} value={c.id}>
-            {c.title}
-          </option>
-        ))}
+      <optgroup key={run.key} label={run.path.map((g) => g.title).join(' › ')}>
+        {options}
       </optgroup>
     );
   });

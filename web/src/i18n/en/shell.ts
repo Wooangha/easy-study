@@ -317,6 +317,8 @@ export const shell = {
         n === 1
           ? "The course in it and its lectures aren't deleted; they stay where the group was."
           : `The ${n} courses in it and their lectures aren't deleted; they stay where the group was.`,
+      itemsKept: (groups, courses) =>
+        `The ${plural(groups, 'group', 'groups')}${courses > 0 ? ` and ${plural(courses, 'course', 'courses')}` : ''} in it aren't deleted; they stay where the group was.`,
       empty: 'This group is empty.',
       confirmLabel: 'Delete group',
     },
@@ -326,15 +328,19 @@ export const shell = {
     rename: 'Rename group',
     renameLabel: (title) => `Rename the group ‘${title}’`,
     courseCount: (n) => plural(n, 'course', 'courses'),
+    contents: (groups, courses) => (groups > 0 ? `${plural(groups, 'group', 'groups')} · ${plural(courses, 'course', 'courses')}` : plural(courses, 'course', 'courses')),
     opensSoon: 'Opens in a moment',
     dropAtEnd: 'Drop to add at the end of this group',
     newCourseTitle: 'Create a new course in this group',
     newCourse: '＋ Course',
-    deleteTitle: 'Delete group (the courses and lectures are kept)',
+    deleteTitle: 'Delete group (the groups, courses and lectures in it are kept)',
     deleteLabel: (title) => `Delete the group ‘${title}’`,
     newCourseName: (title) => `Name of the new course in the group ‘${title}’`,
+    newGroupTitle: 'Create a group in this group',
+    newGroup: '＋ Group',
+    newGroupName: (title) => `Name of the new group in the group ‘${title}’`,
     dropToJoin: 'Drop here to put it in this group',
-    empty: (grip) => rich('This group is empty — drag a course here by its ', grip, ' handle or create one with ‘＋ Course’'),
+    empty: (grip) => rich('This group is empty — drag a course or group here by its ', grip, ' handle or create one with ‘＋ Course’ · ‘＋ Group’'),
   },
 
   lecture: {
@@ -372,7 +378,6 @@ export const shell = {
       'You can drag this to move it. Pick it up with Space or Enter, move it with the up and down arrow keys, then drop it with Space or Enter. Press Esc to cancel. On a touch screen, press and hold the handle, then drag.',
     moved: (name, place, total) => `Moved ${name} to ${place}` + (total === null ? '.' : ` (of ${total}).`),
     droppedBack: (name) => `Put ${name} back in its place.`,
-    toBottom: 'Move to the bottom',
     toBottomOutsideGroups: 'Move to the bottom, outside groups',
     place: {
       overCollapsedGroup: (title) => `over the collapsed group ‘${title}’ — it opens in a moment`,

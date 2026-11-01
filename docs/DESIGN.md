@@ -930,22 +930,28 @@ Contracts:
 ## 18. Library organization — collapsible courses, drag & drop, course groups
 
 User request: course folders can be collapsed; lectures are reordered by dragging a `≡` handle instead of ▲▼ buttons ("알잘딱");
-courses can themselves be grouped (e.g. a semester group containing several courses).
+courses can themselves be grouped (e.g. a semester group containing several courses). Since 0.6.15 groups also hold groups (the
+user: "그룹안에 그룹 넣을 수 있게 해줄수있음?"), at any depth: a group's `items` are courses and groups in one order, like the top
+level.
 
 ### Data (contracts in shared/types.ts: CourseGroup, LayoutItem, LibraryLayout, PutLayoutRequest, CreateGroupRequest, UpdateGroupRequest,
 CreateCourseRequest.groupId)
-- `library/layout.json` = `{ version: 1, groups: CourseGroup[], order: LayoutItem[] }`, atomic writes, serialized with course mutations.
+- `library/layout.json` = `{ version: 2, groups: CourseGroup[], order: LayoutItem[] }` (`CourseGroup.items: LayoutItem[]`; version 1,
+  before 0.6.15, had `courseIds: string[]` — courses only — and still reads), atomic writes, serialized with course mutations.
 - Lecture membership/order stays in the course files (§12). Groups/ordering of courses live only in layout.json.
-- Normalisation on read: unknown/deleted course or group ids are dropped; a course listed twice keeps its first position; courses that
-  exist but are not mentioned are appended to the top level in createdAt order; groups missing from `order` are appended. A missing
-  layout.json = all courses top-level by createdAt (today's behaviour). Deleting a course removes it from the layout; deleting a group
-  moves its courses to the top level at the group's position (courses and lectures are never deleted by deleting a group).
+- Normalisation on read, from the top level down in display order: unknown/deleted course or group ids are dropped; a course or group
+  listed twice keeps its first place (so a group is never inside itself: a loop is cut where it closes); groups that are nowhere (not
+  in `order`, not in a group that is) are appended to the top level with what they hold; courses that exist but are not mentioned are
+  appended to the top level in createdAt order. `LibraryLayout.groups` lists every group in display order (a group before what it
+  holds). A missing layout.json = all courses top-level by createdAt. Deleting a course removes it from the layout; deleting a group
+  moves what it held (courses and groups) to the group's place, in its order (courses and lectures are never deleted by deleting a
+  group).
 - Group ids: slug(title) + '-' + 6 hex (COURSE_ID_RE); titles 1–120 chars after trim (same rule as course titles).
 
 ### HTTP (remote-mode auth applies like every /api route)
 | GET `/api/layout` | – | `LibraryLayout` |
-| PUT `/api/layout` | `PutLayoutRequest` | `LibraryLayout` (400 when an id is unknown, duplicated, or an existing course/group is missing; 409 when `baseRevision` is not the current arrangement's) |
-| POST `/api/groups` | `CreateGroupRequest` | 201 `CourseGroup` (appended to the top level; listed courses move into it) |
+| PUT `/api/layout` | `PutLayoutRequest` (`groups: [{id, items}]`; a pre-0.6.15 client's `courseIds` is read as course items) | `LibraryLayout` (400 when an id is unknown, duplicated, an existing course/group is missing — named: the outermost group that is not reached from the top level — or a group is inside itself (`groupInsideItself`); 409 when `baseRevision` is not the current arrangement's) |
+| POST `/api/groups` | `CreateGroupRequest` (+ optional `parentId`) | 201 `CourseGroup` (appended to the top level, or to the end of `parentId` — 400 for an unknown one; listed courses move into it) |
 | PATCH `/api/groups/:groupId` | `UpdateGroupRequest` | `CourseGroup` |
 | DELETE `/api/groups/:groupId` | – | 204 |
 | POST `/api/courses` | `CreateCourseRequest` (+ optional `groupId`) | as before; placed at the end of that group when given (400 unknown group) |
@@ -954,7 +960,7 @@ CreateCourseRequest.groupId)
 Other tabs and devices (remote mode) change the same library, so a change made from stale data must not silently undo theirs
 (lost update). Both requests a drag sends carry what they were computed from:
 - `PutLayoutRequest.baseRevision` = `layoutRevision(layout)` (shared/layoutRevision.ts: a hash of the normalised top-level order
-  and the courses of each group; titles are not part of it). Server and client compute it from the normalised layout, so no
+  with what each group holds, nested; titles are not part of it). Server and client compute it from the normalised layout, so no
   response carries it.
 - `UpdateCourseRequest.baseDocIds` = the course's lecture list the new `docIds` were computed from (as GET /api/courses shows it).
 When given and not current, the answer is 409 and nothing is written (both are optional for other clients). The client then loads
@@ -962,8 +968,10 @@ courses and layout again and makes the same (anchored) move once more on top of 
 that no longer exists, rolls the move back with a toast. The client also reloads both when its tab becomes visible or focused.
 
 ### Web
-- Library view renders the layout: groups (collapsible header: `≡` handle, title with inline rename, course count, delete with an in-page
-  confirmation, "＋ 과목" to create a course inside the group) containing course cards; top-level course cards; then 미분류 lectures.
+- Library view renders the layout: groups (collapsible header: `≡` handle, title with inline rename, what it holds — "그룹 2개 · 과목
+  7개": its groups and the courses at any depth —, delete with an in-page confirmation, "＋ 과목" / "＋ 그룹" to create a course or a
+  group inside it) containing course cards and group cards (GroupCard renders its rows with LibraryView's `renderRow`, so a group
+  inside is a GroupCard again); top-level course cards; then 미분류 lectures.
 - Course cards are collapsible (header click / chevron / Enter): when collapsed show title, lecture count and digest summary badges only.
   Collapse state is per device (localStorage `easy-study:collapsed`), plus "모두 접기 / 모두 펼치기". It is the same in every tab
   of the device: each toggle is applied to what is stored at that moment and other tabs follow `storage` events; keys of deleted
@@ -974,7 +982,10 @@ that no longer exists, rolls the move back with a toast. The client also reloads
   - Lectures (`≡` handle): reorder inside a course, move to another course (single PATCH of the target course — the server removes it
     from the old one), drop into 미분류 (PATCH of the source course without it).
   - Courses (`≡` handle on the card header): reorder at the top level, move into/out of groups and between groups (PUT /api/layout).
-  - Groups (`≡` handle): reorder at the top level (PUT /api/layout).
+  - Groups (`≡` handle): the same places as courses since 0.6.15 — before / after a course or group anywhere, into a group (its header
+    below the top third, or its body), the bottom (PUT /api/layout); never into itself or a group it holds (those drop zones take no
+    group: `accepts` checks `isWithin`). While a course or a group is dragged, course cards show only their header; the dragged group
+    shows only its header too (before 0.6.15 every group collapsed while a group was dragged).
   - Dragging over a collapsed course/group for ~600 ms expands it (for a lecture a collapsed group's header is only that: releasing
     there moves nothing); screen readers then hear that it opened and the item's new place. A clear insertion indicator shows
     where the item will land (the ghost follows just below-right of the pointer, inside the window); optimistic update with
@@ -984,6 +995,8 @@ that no longer exists, rolls the move back with a toast. The client also reloads
   - Native file drops (uploading PDFs onto a course card) keep working alongside (they use HTML5 file drag events, not pointer drags).
 - The ▲▼ buttons are removed; "과목에서 빼기" moves into a small per-lecture "⋯" menu (together with "과목으로 이동 ▸" for keyboard-free
   alternatives). Uncategorised lectures keep a "과목으로 이동" control.
+- Course selects (CourseOptions): an optgroup per run of courses of one group, labelled with its path ("2026-2학기 › 전공": optgroups do
+  not nest); "과목으로 이동" hints and the lecture picker's course labels show the path too.
 - Top-bar document picker: optgroup label "📁 <group> › <course>" for grouped courses, in layout order. Replaced in 0.6.14 by the
   **lecture picker** (components/LecturePicker.tsx, lib/lecturePicker.ts; the user chose it from three mock-ups — "2번 ㄱㄱ.
   깔쌈하게 뽑아보셈"): a button `‹ [course  i/n  title ⌄] ›` (‹ › open the course's previous / next lecture, disabled at its

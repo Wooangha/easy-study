@@ -374,13 +374,17 @@ async function currentLayout(): Promise<LibraryLayout> {
 
 async function writeLayout(layout: LibraryLayout): Promise<void> {
   await mkdirWithRetry(libraryDir());
-  await writeJsonAtomic(layoutFile(), { version: 1, groups: layout.groups, order: layout.order } satisfies LayoutRecord);
+  await writeJsonAtomic(layoutFile(), { version: 2, groups: layout.groups, order: layout.order } satisfies LayoutRecord);
 }
 
-/** CreateCourseRequest.groupId: absent (undefined, null, '') = top level; otherwise a group id (400 when malformed). */
-function cleanGroupId(value: unknown): string | null {
+/**
+ * CreateCourseRequest.groupId / CreateGroupRequest.parentId: absent (undefined, null, '') = top level; otherwise a
+ * group id (400 when malformed).
+ */
+function cleanGroupId(value: unknown, field: 'groupId' | 'parentId' = 'groupId'): string | null {
   if (value === undefined || value === null || value === '') return null;
-  if (typeof value !== 'string') throw new HttpError(400, smsg().library.courses.groupIdInvalid);
+  const m = smsg().library.courses;
+  if (typeof value !== 'string') throw new HttpError(400, field === 'groupId' ? m.groupIdInvalid : m.parentIdInvalid);
   if (!COURSE_ID_RE.test(value)) throw new HttpError(400, smsg().common.notFound.group);
   return value;
 }
@@ -407,16 +411,26 @@ export function putLayout(body: unknown): Promise<LibraryLayout> {
 }
 
 /**
- * Creates a group (CreateGroupRequest) at the end of the top level. Listed courses move into it, in the given
- * order, from wherever they were. Id = slug(title) + '-' + 6 hex (COURSE_ID_RE), never the id of another group
- * or of a course. 400 for a bad title, unknown or duplicated course ids.
+ * Creates a group (CreateGroupRequest) at the end of the top level, or with `parentId` at the end of that group.
+ * Listed courses move into it, in the given order, from wherever they were. Id = slug(title) + '-' + 6 hex
+ * (COURSE_ID_RE), never the id of another group or of a course. 400 for a bad title, unknown or duplicated course
+ * ids, or an unknown parent group.
  */
-export async function createGroup(title: unknown, courseIds: unknown = undefined, now: Date = new Date()): Promise<CourseGroup> {
+export async function createGroup(
+  title: unknown,
+  courseIds: unknown = undefined,
+  now: Date = new Date(),
+  parentId: unknown = undefined,
+): Promise<CourseGroup> {
   const cleaned = cleanTitle(title, 'group');
+  const parent = cleanGroupId(parentId, 'parentId');
   return mutationQueue(MUTATIONS, async () => {
     const [stored, existing] = await Promise.all([readStoredLayout(), courseIdsOldestFirst()]);
     const moving = validateGroupCourseIds(courseIds, existing);
     const layout = normalizeLayout(stored, existing);
+    if (parent !== null && !layout.groups.some((group) => group.id === parent)) {
+      throw new HttpError(400, smsg().library.courses.groupNotFoundId(parent));
+    }
     const taken = new Set([...existing, ...layout.groups.map((group) => group.id)]);
     const slug = slugify(cleaned, 'group');
     let id = '';
@@ -425,8 +439,8 @@ export async function createGroup(title: unknown, courseIds: unknown = undefined
       if (!taken.has(candidate)) id = candidate;
       else if (attempt >= 10) throw new Error('could not find a free group id');
     }
-    const group: CourseGroup = { id, title: cleaned, createdAt: now.toISOString(), courseIds: moving };
-    await writeLayout(withGroupAppended(layout, group));
+    const group: CourseGroup = { id, title: cleaned, createdAt: now.toISOString(), items: moving.map((courseId) => ({ type: 'course', id: courseId })) };
+    await writeLayout(withGroupAppended(layout, group, parent));
     return group;
   });
 }

@@ -334,6 +334,9 @@ export const shell = {
     deleteConfirm: {
       title: (title: string) => `그룹 ${withParticle(`‘${title}’`, '을', '를')} 삭제할까요?`,
       coursesKept: (n: number) => `안에 있는 과목 ${n}개와 강의는 지워지지 않고, 그룹이 있던 자리에 그대로 남아요.`,
+      /** A group that holds groups: what moves to its place. */
+      itemsKept: (groups: number, courses: number) =>
+        `안에 있는 그룹 ${groups}개${courses > 0 ? `와 과목 ${courses}개` : ''}는 지워지지 않고, 그룹이 있던 자리에 그대로 남아요.`,
       empty: '비어 있는 그룹이에요.',
       confirmLabel: '그룹 삭제',
     },
@@ -343,15 +346,20 @@ export const shell = {
     rename: '그룹 이름 바꾸기',
     renameLabel: (title: string) => `‘${title}’ 그룹 이름 바꾸기`,
     courseCount: (n: number) => `과목 ${n}개`,
+    /** What a group holds: its groups (when any) and the courses in it at any depth. */
+    contents: (groups: number, courses: number) => (groups > 0 ? `그룹 ${groups}개 · 과목 ${courses}개` : `과목 ${courses}개`),
     opensSoon: '잠시 기다리면 열려요',
     dropAtEnd: '놓으면 이 그룹 끝에 추가',
     newCourseTitle: '이 그룹 안에 새 과목 만들기',
     newCourse: '＋ 과목',
-    deleteTitle: '그룹 삭제 (과목과 강의는 남아요)',
+    deleteTitle: '그룹 삭제 (안의 그룹·과목과 강의는 남아요)',
     deleteLabel: (title: string) => `‘${title}’ 그룹 삭제`,
     newCourseName: (title: string) => `‘${title}’ 그룹에 만들 과목 이름`,
+    newGroupTitle: '이 그룹 안에 그룹 만들기',
+    newGroup: '＋ 그룹',
+    newGroupName: (title: string) => `‘${title}’ 그룹 안에 만들 그룹 이름`,
     dropToJoin: '여기에 놓으면 이 그룹에 들어가요',
-    empty: (grip: ReactNode) => rich('비어 있는 그룹이에요 — 과목의 ', grip, ' 손잡이를 끌어다 놓거나 ‘＋ 과목’으로 만드세요'),
+    empty: (grip: ReactNode) => rich('비어 있는 그룹이에요 — 과목이나 그룹의 ', grip, ' 손잡이를 끌어다 놓거나 ‘＋ 과목’ · ‘＋ 그룹’으로 만드세요'),
   },
 
   /** A lecture in a course (organize/LectureRow.tsx) or uncategorized (organize/DocCard.tsx). */
@@ -394,7 +402,6 @@ export const shell = {
     moved: (name: string, place: string, total: number | null) =>
       `${withParticle(name, '을', '를')} ${place}로 옮겼어요` + (total === null ? '.' : ` (${total}개 중).`),
     droppedBack: (name: string) => `${withParticle(name, '을', '를')} 원래 자리에 놓았어요.`,
-    toBottom: '맨 아래로 옮기기',
     toBottomOutsideGroups: '그룹 밖 맨 아래로 옮기기',
     /** Where a drop puts the item. Every Korean place ends in a vowel ("…로 옮겼어요"). */
     place: {

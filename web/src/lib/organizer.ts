@@ -87,7 +87,7 @@ type Op =
   | { type: 'deleteCourse'; courseId: string }
   | { type: 'deleteGroup'; groupId: string }
   | { type: 'createCourse'; title: string; groupId: string | null }
-  | { type: 'createGroup'; title: string; courseIds: string[] }
+  | { type: 'createGroup'; title: string; courseIds: string[]; parentId: string | null }
   | { type: 'refresh' };
 
 interface State {
@@ -260,9 +260,11 @@ export function createOrganizer(deps: OrganizerDeps) {
         return course;
       }
       case 'createGroup': {
-        const body: CreateGroupRequest = op.courseIds.length > 0 ? { title: op.title, courseIds: op.courseIds } : { title: op.title };
+        const body: CreateGroupRequest = { title: op.title };
+        if (op.courseIds.length > 0) body.courseIds = op.courseIds;
+        if (op.parentId !== null) body.parentId = op.parentId;
         const group = await api.createGroup(body);
-        rawLayout = withGroupAppended(state.layout, group);
+        rawLayout = withGroupAppended(state.layout, group, op.parentId);
         return group;
       }
     }
@@ -277,8 +279,9 @@ export function createOrganizer(deps: OrganizerDeps) {
     } else if (move.kind === 'course') {
       if (!hasCourse(move.courseId)) throw new Error(gone.course);
       if (move.groupId !== null && !findGroup(state.layout, move.groupId)) throw new Error(gone.targetGroup);
-    } else if (!findGroup(state.layout, move.groupId)) {
-      throw new Error(gone.group);
+    } else {
+      if (!findGroup(state.layout, move.groupId)) throw new Error(gone.group);
+      if (move.parentId !== null && !findGroup(state.layout, move.parentId)) throw new Error(gone.targetGroup);
     }
   }
 
@@ -356,17 +359,20 @@ export function createOrganizer(deps: OrganizerDeps) {
     /** Move a course into a group (or the top level, groupId null) before `before` (null = at the end). */
     moveCourse: (courseId: string, groupId: string | null, before: LayoutItem | null = null) =>
       move({ kind: 'course', courseId, groupId, before }),
-    moveGroup: (groupId: string, before: LayoutItem | null = null) => move({ kind: 'group', groupId, before }),
+    /** Move a group into another group (or the top level, parentId null) before `before` (null = at the end). */
+    moveGroup: (groupId: string, parentId: string | null = null, before: LayoutItem | null = null) =>
+      move({ kind: 'group', groupId, parentId, before }),
     renameCourse: (courseId: string, title: string) => enqueue({ type: 'renameCourse', courseId, title }).then((r) => r.ok),
     renameGroup: (groupId: string, title: string) => enqueue({ type: 'renameGroup', groupId, title }).then((r) => r.ok),
     /** Delete a course (its lectures become uncategorized). */
     deleteCourse: (courseId: string) => enqueue({ type: 'deleteCourse', courseId }).then((r) => r.ok),
-    /** Delete a group (its courses move to the top level where the group was). */
+    /** Delete a group (what it holds moves to where the group was). */
     deleteGroup: (groupId: string) => enqueue({ type: 'deleteGroup', groupId }).then((r) => r.ok),
     createCourse: (title: string, groupId: string | null = null) =>
       enqueue<Course>({ type: 'createCourse', title, groupId }).then((r) => r.value),
-    createGroup: (title: string, courseIds: string[] = []) =>
-      enqueue<CourseGroup>({ type: 'createGroup', title, courseIds }).then((r) => r.value),
+    /** A new group at the end of the top level, or of `parentId`; `courseIds` move into it. */
+    createGroup: (title: string, courseIds: string[] = [], parentId: string | null = null) =>
+      enqueue<CourseGroup>({ type: 'createGroup', title, courseIds, parentId }).then((r) => r.value),
     /** Show a lecture the server just added to a course (upload with X-Course-Id) until the next refresh. */
     addLectureLocally(courseId: string, docId: string) {
       const course = courses?.find((c) => c.id === courseId);

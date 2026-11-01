@@ -259,23 +259,28 @@ export interface CreateCourseRequest {
 }
 
 /**
- * A group of courses (e.g. a semester "2026-2학기" containing Compiler, OS, …). Purely organisational: it does not change
- * what the LLM sees. Persisted in library/layout.json together with the top-level order.
+ * A group of courses (e.g. a semester "2026-2학기" containing Compiler, OS, …), which can also hold groups (since
+ * 0.6.15, e.g. 전공 and 교양 inside the semester). Purely organisational: it does not change what the LLM sees.
+ * Persisted in library/layout.json together with the top-level order.
  */
 export interface CourseGroup {
   /** Same format as COURSE_ID_RE. */
   id: string;
   title: string;
   createdAt: string;
-  /** Courses in this group, in display order. A course is either in exactly one group or at the top level. */
-  courseIds: string[];
+  /**
+   * Courses and groups in this group, in display order. Every course and every group is in exactly one group or at
+   * the top level, and no group is inside itself (layout.json before 0.6.15 had `courseIds` instead: courses only).
+   */
+  items: LayoutItem[];
 }
 
-/** One entry of the top-level library order. */
+/** One entry of the library order (the top level or a group's items). */
 export type LayoutItem = { type: 'group'; id: string } | { type: 'course'; id: string };
 
-/** GET /api/layout — normalised: every existing course appears exactly once (in a group or as a top-level item). */
+/** GET /api/layout — normalised: every existing course and every group appears exactly once. */
 export interface LibraryLayout {
+  /** Every group, nested ones too, in display order (a group before what it holds). */
   groups: CourseGroup[];
   /** Top-level order of groups and ungrouped courses. */
   order: LayoutItem[];
@@ -283,7 +288,7 @@ export interface LibraryLayout {
 
 /** PUT /api/layout — the full arrangement; must mention every existing course and group exactly once. */
 export interface PutLayoutRequest {
-  groups: Array<{ id: string; courseIds: string[] }>;
+  groups: Array<{ id: string; items: LayoutItem[] }>;
   order: LayoutItem[];
   /**
    * layoutRevision() (shared/layoutRevision.ts) of the arrangement this one was made from. When given and the
@@ -297,6 +302,8 @@ export interface CreateGroupRequest {
   title: string;
   /** Courses to move into the new group (removed from wherever they were). */
   courseIds?: string[];
+  /** Put the new group at the end of this group (otherwise at the end of the top level). */
+  parentId?: string;
 }
 
 export interface UpdateGroupRequest {

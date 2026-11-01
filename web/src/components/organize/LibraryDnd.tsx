@@ -4,8 +4,8 @@
 // container) shows where the item will land. Where that is comes from lib/libraryDnd.ts: the droppable under
 // the pointer (keyboard: under the dragged item's center) and the position in it. Keyboard dragging moves
 // between the distinct places the item can go ("stops"). Hovering over a collapsed course/group for 600 ms
-// opens it until the drop (and says so to screen readers, with the place the item is at now). While a course
-// (group) is dragged, course (group) cards show only their header.
+// opens it until the drop (and says so to screen readers, with the place the item is at now). While a course or
+// a group is dragged, course cards show only their header (the dragged group too: nothing goes inside itself).
 import {
   DndContext,
   DragOverlay,
@@ -124,7 +124,7 @@ const sameTarget = (a: DropTarget | null, b: DropTarget | null) =>
 function destinationKey(move: Move): string | null {
   if (move.kind === 'lecture') return move.courseId ? dndId.course(move.courseId) : null;
   if (move.kind === 'course') return move.groupId ? dndId.group(move.groupId) : null;
-  return null;
+  return move.parentId ? dndId.group(move.parentId) : null;
 }
 
 interface LibraryDndProps {
@@ -488,7 +488,7 @@ export function TopEndZone() {
   if (!active || active.kind === 'lecture') return null;
   return (
     <div ref={setNodeRef} className={`top-end-zone${mark === 'into' ? ' drop-into' : ''}`} aria-hidden>
-      {active.kind === 'group' ? msg().shell.dnd.toBottom : msg().shell.dnd.toBottomOutsideGroups}
+      {msg().shell.dnd.toBottomOutsideGroups}
     </div>
   );
 }

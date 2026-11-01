@@ -32,7 +32,7 @@ const codeWhere = () => {
 const course = (id: string, docIds: string[]): Course => ({ id, title: id.toUpperCase(), createdAt: '2026-09-01T00:00:00Z', docIds });
 const courses = [course('c1', ['a', 'b', 'c']), course('c2', ['d', 'e']), course('c3', [])];
 const layout: LibraryLayout = {
-  groups: [{ id: 'g1', title: 'Fall 2026', createdAt: '2026-09-04T00:00:00Z', courseIds: ['c2', 'c3'] }],
+  groups: [{ id: 'g1', title: 'Fall 2026', createdAt: '2026-09-04T00:00:00Z', items: [{ type: 'course', id: 'c2' }, { type: 'course', id: 'c3' }] }],
   order: [
     { type: 'course', id: 'c1' },
     { type: 'group', id: 'g1' },

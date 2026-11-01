@@ -48,6 +48,7 @@ export const library = {
     groupNotFoundId: (groupId) => `Group not found: ${groupId}`,
     courseNotFoundId: (courseId) => `Course not found: ${courseId}`,
     groupIdInvalid: 'groupId must be a group id',
+    parentIdInvalid: 'parentId must be a group id',
     lecturesChanged: "This course's lecture list was changed elsewhere. Reload and try again",
   },
   courseMd: {
@@ -65,6 +66,7 @@ export const library = {
     duplicateCourses: (ids) => `The same course is listed twice: ${ids}`,
     missingGroups: (ids) => `The layout is missing a group (it may have changed elsewhere, so reload and try again): ${ids}`,
     missingCourses: (ids) => `The layout is missing a course (it may have changed elsewhere, so reload and try again): ${ids}`,
+    groupInsideItself: (ids) => `A group can't go inside itself (or inside a group it holds): ${ids}`,
     courseIdsInvalid: 'courseIds must be a list of course ids',
   },
   attachments: {

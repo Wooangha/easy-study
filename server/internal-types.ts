@@ -274,7 +274,8 @@ export interface CourseRecord {
  * plus a version. Normalised on read (server/layout.ts); lecture membership stays in the course files.
  */
 export interface LayoutRecord {
-  version: 1;
+  /** 2 since 0.6.15 (groups hold `items`); version 1 groups had `courseIds` and still read. */
+  version: 1 | 2;
   groups: CourseGroup[];
   order: LayoutItem[];
 }

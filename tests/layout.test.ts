@@ -81,6 +81,10 @@ function isHttpError(status: number, message?: RegExp) {
 
 const course = (id: string): LayoutItem => ({ type: 'course', id });
 const group = (id: string): LayoutItem => ({ type: 'group', id });
+/** Course items of a group (`items: cs(a, b)`). */
+const cs = (...ids: string[]): LayoutItem[] => ids.map(course);
+/** The courses directly in a group. */
+const coursesIn = (g: Pick<CourseGroup, 'items'>): string[] => g.items.filter((item) => item.type === 'course').map((item) => item.id);
 
 /** Several courses, oldest first. */
 async function makeCourses(...titles: string[]): Promise<string[]> {
@@ -102,7 +106,7 @@ async function layoutFileExists(): Promise<boolean> {
 
 /** The request that reproduces a layout (what a client sends after a drag). */
 function asRequest(layout: LibraryLayout): PutLayoutRequest {
-  return { groups: layout.groups.map(({ id, courseIds }) => ({ id, courseIds })), order: layout.order };
+  return { groups: layout.groups.map(({ id, items }) => ({ id, items })), order: layout.order };
 }
 
 // ---------------------------------------------------------------------------
@@ -115,7 +119,7 @@ describe('normalizeLayout', () => {
   const C = 'c-cccccc';
   const D = 'd-dddddd';
   const courses = [A, B, C, D]; // oldest first
-  const g = (id: string, courseIds: string[], title = `Group ${id}`): CourseGroup => ({ id, title, createdAt: '2026-06-01T00:00:00.000Z', courseIds });
+  const g = (id: string, courseIds: string[], title = `Group ${id}`): CourseGroup => ({ id, title, createdAt: '2026-06-01T00:00:00.000Z', items: courseIds.map(course) });
 
   test('no layout.json (or garbage): every course at the top level, oldest first', () => {
     const expected: LibraryLayout = { groups: [], order: courses.map(course) };
@@ -127,7 +131,7 @@ describe('normalizeLayout', () => {
 
   test('a normalised layout stays as it is', () => {
     const layout: LibraryLayout = { groups: [g('sem-111111', [C, A]), g('empty-222222', [])], order: [course(D), group('sem-111111'), course(B), group('empty-222222')] };
-    assert.deepEqual(normalizeLayout({ version: 1, ...layout }, courses), layout);
+    assert.deepEqual(normalizeLayout({ version: 2, ...layout }, courses), layout);
   });
 
   test('unknown or deleted ids and malformed entries are dropped', () => {
@@ -183,9 +187,50 @@ describe('normalizeLayout', () => {
     });
   });
 
+  test('groups inside groups (0.6.15): read from the top down, a group before what it holds', () => {
+    const outer: CourseGroup = { ...g('outer-111111', []), items: [course(A), group('inner-222222'), course(B)] };
+    const inner = g('inner-222222', [C]);
+    const layout: LibraryLayout = { groups: [outer, inner], order: [group('outer-111111'), course(D)] };
+    assert.deepEqual(normalizeLayout({ version: 2, ...layout }, courses), layout);
+    // Stored in another order: `groups` follows the display order.
+    assert.deepEqual(normalizeLayout({ version: 2, groups: [inner, outer], order: layout.order }, courses), layout);
+    // A group nowhere but inside another group that is nowhere comes along with it.
+    assert.deepEqual(normalizeLayout({ groups: [outer, inner], order: [course(D)] }, courses), {
+      groups: [outer, inner],
+      order: [course(D), group('outer-111111')],
+    });
+  });
+
+  test('a group inside itself (or in a loop) keeps its first place; a group in two groups too', () => {
+    const a = { ...g('a-111111', [A]), items: [course(A), group('b-222222')] };
+    const b = { ...g('b-222222', [B]), items: [course(B), group('a-111111'), group('b-222222')] };
+    assert.deepEqual(normalizeLayout({ groups: [a, b], order: [group('a-111111')] }, courses), {
+      groups: [a, { ...b, items: [course(B)] }],
+      order: [group('a-111111'), course(C), course(D)],
+    });
+    // Only in the loop (not on the top level): appended once, the loop cut where it closes.
+    assert.deepEqual(normalizeLayout({ groups: [a, b], order: [] }, courses), {
+      groups: [a, { ...b, items: [course(B)] }],
+      order: [group('a-111111'), course(C), course(D)],
+    });
+    const c = { ...g('c-333333', []), items: [group('a-111111')] };
+    assert.deepEqual(normalizeLayout({ groups: [c, { ...a, items: [course(A)] }], order: [group('c-333333'), group('a-111111')] }, courses), {
+      groups: [c, { ...a, items: [course(A)] }],
+      order: [group('c-333333'), course(B), course(C), course(D)],
+    });
+  });
+
+  test('a group saved before 0.6.15 (courseIds) reads as its courses', () => {
+    const legacy = { id: 'sem-111111', title: 'Sem', createdAt: '2026-03-01T00:00:00.000Z', courseIds: [B, 'gone-000000', A] };
+    assert.deepEqual(normalizeLayout({ version: 1, groups: [legacy], order: [course(C), group('sem-111111')] }, courses), {
+      groups: [{ id: 'sem-111111', title: 'Sem', createdAt: '2026-03-01T00:00:00.000Z', items: cs(B, A) }],
+      order: [course(C), group('sem-111111'), course(D)],
+    });
+  });
+
   test('missing createdAt / courseIds of a stored group are tolerated', () => {
     assert.deepEqual(normalizeLayout({ groups: [{ id: 'g1-111111', title: 'T' }], order: [] }, [A]), {
-      groups: [{ id: 'g1-111111', title: 'T', createdAt: '', courseIds: [] }],
+      groups: [{ id: 'g1-111111', title: 'T', createdAt: '', items: cs() }],
       order: [group('g1-111111'), course(A)],
     });
   });
@@ -205,15 +250,15 @@ describe('validateLayoutRequest', () => {
   const G2 = 'g2-222222';
   const current: LibraryLayout = {
     groups: [
-      { id: G1, title: '2026-1학기', createdAt: '2026-03-01T00:00:00.000Z', courseIds: [A, B] },
-      { id: G2, title: '2026-2학기', createdAt: '2026-09-01T00:00:00.000Z', courseIds: [] },
+      { id: G1, title: '2026-1학기', createdAt: '2026-03-01T00:00:00.000Z', items: cs(A, B) },
+      { id: G2, title: '2026-2학기', createdAt: '2026-09-01T00:00:00.000Z', items: cs() },
     ],
     order: [group(G1), course(C), group(G2), course(D)],
   };
   const valid = (): PutLayoutRequest => ({
     groups: [
-      { id: G2, courseIds: [C, A] },
-      { id: G1, courseIds: [] },
+      { id: G2, items: cs(C, A) },
+      { id: G1, items: cs() },
     ],
     order: [course(D), group(G2), course(B), group(G1)],
   });
@@ -223,8 +268,8 @@ describe('validateLayoutRequest', () => {
   test('a full arrangement is accepted; titles and creation times are kept, groups follow the new order', () => {
     assert.deepEqual(validateLayoutRequest(valid(), current, courses), {
       groups: [
-        { ...current.groups[1], courseIds: [C, A] },
-        { ...current.groups[0], courseIds: [] },
+        { ...current.groups[1], items: cs(C, A) },
+        { ...current.groups[0], items: cs() },
       ],
       order: [course(D), group(G2), course(B), group(G1)],
     });
@@ -233,6 +278,34 @@ describe('validateLayoutRequest', () => {
     assert.equal(validateLayoutRequest(withTitle, current, courses).groups[0].title, '2026-2학기');
     // Re-sending the current layout is a no-op.
     assert.deepEqual(validateLayoutRequest(asRequest(current), current, courses), current);
+  });
+
+  test('groups inside groups: accepted; a group inside itself or a group left out is refused', () => {
+    const nested: PutLayoutRequest = {
+      groups: [
+        { id: G1, items: [course(A), group(G2)] },
+        { id: G2, items: cs(B, C) },
+      ],
+      order: [group(G1), course(D)],
+    };
+    assert.deepEqual(validateLayoutRequest(nested, current, courses), {
+      groups: [
+        { ...current.groups[0], items: [course(A), group(G2)] },
+        { ...current.groups[1], items: cs(B, C) },
+      ],
+      order: [group(G1), course(D)],
+    });
+    reject({ groups: [{ id: G1, items: [course(A), group(G2)] }, { id: G2, items: [course(B), group(G1)] }], order: [course(C), course(D)] }, /자기 안.*g1-111111, g2-222222/);
+    reject({ groups: [{ id: G1, items: [course(A), group(G1)] }, { id: G2, items: cs(B) }], order: [group(G2), course(C), course(D)] }, /자기 안.*g1-111111/);
+    // Left out (with what it holds): only the outer group is named, not the courses or groups inside it.
+    reject({ groups: [{ id: G1, items: [course(A), group(G2)] }, { id: G2, items: cs(B, C) }], order: [course(D)] }, /빠진 그룹.*: g1-111111$/);
+    // A group in two places.
+    reject({ groups: [{ id: G1, items: [course(A), group(G2)] }, { id: G2, items: cs(B, C) }], order: [group(G1), group(G2), course(D)] }, /같은 그룹이 두 번.*g2-222222/);
+  });
+
+  test('a client from before 0.6.15 (courseIds) is understood', () => {
+    const legacy = { groups: [{ id: G2, courseIds: [C, A] }, { id: G1, courseIds: [] }], order: valid().order };
+    assert.deepEqual(validateLayoutRequest(legacy, current, courses), validateLayoutRequest(valid(), current, courses));
   });
 
   test('malformed bodies', () => {
@@ -258,10 +331,10 @@ describe('validateLayoutRequest', () => {
   });
 
   test('unknown ids', () => {
-    reject({ ...valid(), groups: [...valid().groups, { id: 'nope-000000', courseIds: [] }] }, /알 수 없는 그룹.*nope-000000/);
+    reject({ ...valid(), groups: [...valid().groups, { id: 'nope-000000', items: cs() }] }, /알 수 없는 그룹.*nope-000000/);
     reject({ ...valid(), order: [...valid().order, group('nope-000000')] }, /알 수 없는 그룹.*nope-000000/);
     reject({ ...valid(), order: [...valid().order, course('nope-000000')] }, /알 수 없는 과목.*nope-000000/);
-    reject({ ...valid(), groups: [{ id: G2, courseIds: [C, A, '../etc'] }, { id: G1, courseIds: [] }] }, /알 수 없는 과목/);
+    reject({ ...valid(), groups: [{ id: G2, items: cs(C, A, '../etc') }, { id: G1, items: cs() }] }, /알 수 없는 과목/);
     // A very long unknown id is not echoed back whole.
     const long = 'x'.repeat(5000);
     assert.throws(
@@ -272,17 +345,17 @@ describe('validateLayoutRequest', () => {
 
   test('duplicated ids', () => {
     // Twice in one group, in a group and at the top level, in two groups, twice at the top level.
-    reject({ ...valid(), groups: [{ id: G2, courseIds: [C, A, C] }, { id: G1, courseIds: [] }] }, /같은 과목이 두 번.*c-cccccc/);
-    reject({ ...valid(), groups: [{ id: G2, courseIds: [C, A, B] }, { id: G1, courseIds: [] }] }, /같은 과목이 두 번.*b-bbbbbb/);
-    reject({ ...valid(), groups: [{ id: G2, courseIds: [C, A] }, { id: G1, courseIds: [A] }] }, /같은 과목이 두 번.*a-aaaaaa/);
+    reject({ ...valid(), groups: [{ id: G2, items: cs(C, A, C) }, { id: G1, items: cs() }] }, /같은 과목이 두 번.*c-cccccc/);
+    reject({ ...valid(), groups: [{ id: G2, items: cs(C, A, B) }, { id: G1, items: cs() }] }, /같은 과목이 두 번.*b-bbbbbb/);
+    reject({ ...valid(), groups: [{ id: G2, items: cs(C, A) }, { id: G1, items: cs(A) }] }, /같은 과목이 두 번.*a-aaaaaa/);
     reject({ ...valid(), order: [...valid().order, course(D)] }, /같은 과목이 두 번.*d-dddddd/);
     // A group twice in `groups` or in `order`.
-    reject({ ...valid(), groups: [...valid().groups, { id: G1, courseIds: [] }] }, /같은 그룹이 두 번.*g1-111111/);
+    reject({ ...valid(), groups: [...valid().groups, { id: G1, items: cs() }] }, /같은 그룹이 두 번.*g1-111111/);
     reject({ ...valid(), order: [...valid().order, group(G2)] }, /같은 그룹이 두 번.*g2-222222/);
   });
 
   test('an unknown group found in both `groups` and `order` is named once', () => {
-    const stale = { groups: [...valid().groups, { id: 'gone-000000', courseIds: [] }], order: [...valid().order, group('gone-000000')] };
+    const stale = { groups: [...valid().groups, { id: 'gone-000000', items: cs() }], order: [...valid().order, group('gone-000000')] };
     assert.throws(
       () => validateLayoutRequest(stale, current, courses),
       (err: unknown) =>
@@ -303,7 +376,7 @@ describe('validateLayoutRequest', () => {
     assert.equal(layoutRevision({ ...current, groups: current.groups.map((g) => ({ ...g, title: 'x' })) }), revision);
     // … the order and the courses of a group are.
     const moved: LibraryLayout = { ...current, order: [course(C), group(G1), group(G2), course(D)] };
-    const regrouped: LibraryLayout = { ...current, groups: [{ ...current.groups[0], courseIds: [B, A] }, current.groups[1]] };
+    const regrouped: LibraryLayout = { ...current, groups: [{ ...current.groups[0], items: cs(B, A) }, current.groups[1]] };
     for (const other of [moved, regrouped]) {
       assert.notEqual(layoutRevision(other), revision);
       assert.throws(
@@ -316,9 +389,9 @@ describe('validateLayoutRequest', () => {
 
   test('missing courses or groups (e.g. created elsewhere in the meantime)', () => {
     reject({ ...valid(), order: [group(G2), course(B), group(G1)] }, /빠진 과목.*d-dddddd/);
-    reject({ ...valid(), groups: [{ id: G2, courseIds: [C] }, { id: G1, courseIds: [] }] }, /빠진 과목.*a-aaaaaa/);
+    reject({ ...valid(), groups: [{ id: G2, items: cs(C) }, { id: G1, items: cs() }] }, /빠진 과목.*a-aaaaaa/);
     // A group left out of `groups` (but in `order`), or out of `order` (but in `groups`).
-    reject({ groups: [{ id: G2, courseIds: [C, A] }], order: valid().order }, /빠진 그룹.*g1-111111/);
+    reject({ groups: [{ id: G2, items: cs(C, A) }], order: valid().order }, /빠진 그룹.*g1-111111/);
     reject({ groups: valid().groups, order: [course(D), group(G2), course(B)] }, /빠진 그룹.*g1-111111/);
     // Everything gone: both kinds are missing, the groups are reported first.
     reject({ groups: [], order: [] }, /빠진 그룹/);
@@ -361,7 +434,7 @@ describe('layout storage', () => {
     assert.match(spring.id, /^2026-1-[0-9a-f]{6}$/);
     assert.match(spring.id, COURSE_ID_RE);
     assert.equal(spring.title, '2026-1학기');
-    assert.deepEqual(spring.courseIds, [db]);
+    assert.deepEqual(coursesIn(spring), [db]);
     assert.deepEqual(await getLayout(), { groups: [spring], order: [course(os1), course(net), course(pl), group(spring.id)] });
 
     // Moving from another group and from the top level, in the given order.
@@ -369,21 +442,54 @@ describe('layout storage', () => {
     assert.match(fall.id, /^group-[0-9a-f]{6}$/, 'unicode titles get the fallback slug');
     const layout = await getLayout();
     assert.deepEqual(layout, {
-      groups: [{ ...spring, courseIds: [] }, fall],
+      groups: [{ ...spring, items: cs() }, fall],
       order: [course(os1), course(net), group(spring.id), group(fall.id)],
     });
 
     // On disk: pretty JSON with a version, the same arrangement, no temp files.
     const raw = await fs.readFile(layoutFile(), 'utf8');
     assert.ok(raw.endsWith('\n') && raw.includes('\n  "groups"'));
-    assert.deepEqual(await readLayoutFile(), { version: 1, ...layout });
+    assert.deepEqual(await readLayoutFile(), { version: 2, ...layout });
     const leftovers = (await fs.readdir(path.dirname(layoutFile()))).filter((name) => name.endsWith('.tmp'));
     assert.deepEqual(leftovers, []);
 
     // An empty group is fine.
     const empty = await createGroup('Empty', undefined, tick());
-    assert.deepEqual(empty.courseIds, []);
+    assert.deepEqual(coursesIn(empty), []);
     assert.deepEqual((await getLayout()).order.at(-1), group(empty.id));
+  });
+
+  test('createGroup with parentId: at the end of that group; an unknown parent creates nothing', async () => {
+    await useLibrary();
+    const [a, b] = await makeCourses('A', 'B');
+    const sem = await createGroup('Semester', [a], tick());
+    const major = await createGroup('전공', [b], tick(), sem.id);
+    assert.deepEqual(await getLayout(), {
+      groups: [{ ...sem, items: [course(a), group(major.id)] }, major],
+      order: [group(sem.id)],
+    });
+    const deeper = await createGroup('Deeper', [], tick(), major.id);
+    assert.deepEqual((await getLayout()).groups.map((g) => g.id), [sem.id, major.id, deeper.id]);
+    const before = await readLayoutFile();
+    await assert.rejects(createGroup('Orphan', [], tick(), 'missing-000000'), isHttpError(400, /그룹을 찾을 수 없습니다/));
+    await assert.rejects(createGroup('Orphan', [], tick(), 42), isHttpError(400, /parentId/));
+    assert.deepEqual(await readLayoutFile(), before);
+  });
+
+  test('deleting a group inside a group: what it held takes its place in the outer group', async () => {
+    await useLibrary();
+    const [a, b, c] = await makeCourses('A', 'B', 'C');
+    const sem = await createGroup('Semester', [a], tick());
+    const major = await createGroup('전공', [b, c], tick(), sem.id);
+    const inner = await createGroup('Inner', [], tick(), major.id);
+    await createCourse('D', tick(), sem.id);
+    assert.equal(await deleteGroup(major.id), true);
+    const layout = await getLayout();
+    assert.deepEqual(
+      layout.groups.find((g) => g.id === sem.id)?.items.slice(0, 4),
+      [course(a), course(b), course(c), group(inner.id)],
+    );
+    assert.deepEqual(layout.groups.map((g) => g.id), [sem.id, inner.id]);
   });
 
   test('createGroup validation writes nothing', async () => {
@@ -407,7 +513,7 @@ describe('layout storage', () => {
     const sem = await createGroup('Semester', [b], tick());
     const created = await createCourse('Compiler', tick(), sem.id);
     assert.deepEqual(created.docIds, []);
-    assert.deepEqual(await getLayout(), { groups: [{ ...sem, courseIds: [b, created.id] }], order: [course(a), group(sem.id)] });
+    assert.deepEqual(await getLayout(), { groups: [{ ...sem, items: cs(b, created.id) }], order: [course(a), group(sem.id)] });
     // COURSE.md is written as for any course.
     assert.match(await fs.readFile(coursePaths(created.id).courseMd, 'utf8'), /^# Compiler — 과목 정리/);
 
@@ -447,8 +553,8 @@ describe('layout storage', () => {
     const other = await createGroup('Other', [d], tick());
     await putLayout({
       groups: [
-        { id: sem.id, courseIds: [c, b] },
-        { id: other.id, courseIds: [d] },
+        { id: sem.id, items: cs(c, b) },
+        { id: other.id, items: cs(d) },
       ],
       order: [group(other.id), group(sem.id), course(a)],
     });
@@ -465,9 +571,9 @@ describe('layout storage', () => {
     const [a, b, c] = await makeCourses('A', 'B', 'C');
     const sem = await createGroup('Semester', [a, b], tick());
     assert.equal(await deleteCourse(b), true);
-    const expected: LibraryLayout = { groups: [{ ...sem, courseIds: [a] }], order: [course(c), group(sem.id)] };
+    const expected: LibraryLayout = { groups: [{ ...sem, items: cs(a) }], order: [course(c), group(sem.id)] };
     assert.deepEqual(await getLayout(), expected);
-    assert.deepEqual(await readLayoutFile(), { version: 1, ...expected });
+    assert.deepEqual(await readLayoutFile(), { version: 2, ...expected });
     assert.doesNotMatch(await fs.readFile(layoutFile(), 'utf8'), new RegExp(b));
 
     // A top-level course too.
@@ -487,7 +593,7 @@ describe('layout storage', () => {
     const [a, b] = await makeCourses('A', 'B');
     const sem = await createGroup('Semester', [a], tick());
     await fs.rm(coursePaths(a).dir, { recursive: true });
-    assert.deepEqual(await getLayout(), { groups: [{ ...sem, courseIds: [] }], order: [course(b), group(sem.id)] });
+    assert.deepEqual(await getLayout(), { groups: [{ ...sem, items: cs() }], order: [course(b), group(sem.id)] });
 
     const warn = console.warn;
     const warnings: string[] = [];
@@ -498,7 +604,7 @@ describe('layout storage', () => {
       assert.match(warnings.join('\n'), /layout\.json/);
       // The next arrangement replaces it.
       const fresh = await createGroup('Fresh', [b], tick());
-      assert.deepEqual(await readLayoutFile(), { version: 1, groups: [fresh], order: [group(fresh.id)] });
+      assert.deepEqual(await readLayoutFile(), { version: 2, groups: [fresh], order: [group(fresh.id)] });
     } finally {
       console.warn = warn;
     }
@@ -511,12 +617,12 @@ describe('layout storage', () => {
     const g2 = await createGroup('G2', [], tick());
     const request: PutLayoutRequest = {
       groups: [
-        { id: g1.id, courseIds: [c] },
-        { id: g2.id, courseIds: [a, b] },
+        { id: g1.id, items: cs(c) },
+        { id: g2.id, items: cs(a, b) },
       ],
       order: [group(g2.id), group(g1.id)],
     };
-    const expected: LibraryLayout = { groups: [{ ...g2, courseIds: [a, b] }, { ...g1, courseIds: [c] }], order: [group(g2.id), group(g1.id)] };
+    const expected: LibraryLayout = { groups: [{ ...g2, items: cs(a, b) }, { ...g1, items: cs(c) }], order: [group(g2.id), group(g1.id)] };
     assert.deepEqual(await putLayout(request), expected);
     assert.deepEqual(await getLayout(), expected);
     const onDisk = await fs.readFile(layoutFile(), 'utf8');
@@ -542,8 +648,8 @@ describe('layout storage', () => {
     );
     assert.equal(await fs.readFile(layoutFile(), 'utf8'), onDisk, 'nothing was written');
     const now = await getLayout();
-    const next: PutLayoutRequest = { groups: [{ id: sem.id, courseIds: [a, b] }], order: [group(sem.id)], baseRevision: layoutRevision(now) };
-    assert.deepEqual((await putLayout(next)).groups[0].courseIds, [a, b]);
+    const next: PutLayoutRequest = { groups: [{ id: sem.id, items: cs(a, b) }], order: [group(sem.id)], baseRevision: layoutRevision(now) };
+    assert.deepEqual(coursesIn((await putLayout(next)).groups[0]), [a, b]);
 
     // Lectures: another tab moved L3 into A; a PATCH made from the old list [L1, L2] would drop it.
     await updateCourse(a, { docIds: [l1, l2, l3], baseDocIds: [l1, l2] });
@@ -567,7 +673,7 @@ describe('layout storage', () => {
 
     const sem = await createGroup('Semester', [b, a], tick());
     await updateGroup(sem.id, { title: 'Renamed' });
-    await putLayout({ groups: [{ id: sem.id, courseIds: [a] }], order: [course(b), group(sem.id)] });
+    await putLayout({ groups: [{ id: sem.id, items: cs(a) }], order: [course(b), group(sem.id)] });
     await deleteGroup(sem.id);
     assert.deepEqual(await snapshot(), before);
     assert.equal((await getDoc(lecture))?.courseId, a);
@@ -602,11 +708,11 @@ describe('serialized with the course mutations', () => {
     groups.forEach((g, i) => {
       const stored = layout.groups.find((candidate) => candidate.id === g.id);
       assert.equal(stored?.title, `Renamed ${i}`);
-      assert.deepEqual(stored?.courseIds, [newCourses[i].id]);
+      assert.deepEqual(stored && coursesIn(stored), [newCourses[i].id]);
     });
-    assert.deepEqual(layout.groups.find((g) => g.id === mover.id)?.courseIds, [a, b, c]);
+    assert.deepEqual(coursesIn(layout.groups.find((g) => g.id === mover.id) ?? { items: [] }), [a, b, c]);
     assert.deepEqual(layout.order.slice(0, 3), [d, e, f].map(course));
-    assert.deepEqual(await readLayoutFile(), { version: 1, ...layout });
+    assert.deepEqual(await readLayoutFile(), { version: 2, ...layout });
   });
 
   test('parallel PUTs apply one after another: the last one wins whole, never a mix', async () => {
@@ -614,11 +720,11 @@ describe('serialized with the course mutations', () => {
     const [a, b, c] = await makeCourses('A', 'B', 'C');
     const g1 = await createGroup('G1', [], tick());
     const g2 = await createGroup('G2', [], tick());
-    const x: PutLayoutRequest = { groups: [{ id: g1.id, courseIds: [a, b] }, { id: g2.id, courseIds: [c] }], order: [group(g1.id), group(g2.id)] };
-    const y: PutLayoutRequest = { groups: [{ id: g2.id, courseIds: [b] }, { id: g1.id, courseIds: [] }], order: [course(c), group(g2.id), course(a), group(g1.id)] };
+    const x: PutLayoutRequest = { groups: [{ id: g1.id, items: cs(a, b) }, { id: g2.id, items: cs(c) }], order: [group(g1.id), group(g2.id)] };
+    const y: PutLayoutRequest = { groups: [{ id: g2.id, items: cs(b) }, { id: g1.id, items: cs() }], order: [course(c), group(g2.id), course(a), group(g1.id)] };
     const requests = [x, y, x, y, x, y, x, y];
     const results = await Promise.all(requests.map((request) => putLayout(request)));
-    const membership = (groups: Array<{ id: string; courseIds: string[] }>) => Object.fromEntries(groups.map((g) => [g.id, g.courseIds]));
+    const membership = (groups: Array<{ id: string; items: LayoutItem[] }>) => Object.fromEntries(groups.map((g) => [g.id, g.items]));
     results.forEach((result, i) => {
       // Each answer is exactly its own request (applied on top of the previous one, not merged with it).
       assert.deepEqual(result.order, requests[i].order);
@@ -626,9 +732,9 @@ describe('serialized with the course mutations', () => {
     });
     const final = await getLayout();
     assert.deepEqual(final.order, y.order);
-    assert.deepEqual(final.groups.map(({ id, courseIds }) => ({ id, courseIds })), [
-      { id: g2.id, courseIds: [b] },
-      { id: g1.id, courseIds: [] },
+    assert.deepEqual(final.groups.map(({ id, items }) => ({ id, items })), [
+      { id: g2.id, items: cs(b) },
+      { id: g1.id, items: cs() },
     ]);
     assert.deepEqual(final.groups.map((g) => g.title), ['G2', 'G1']);
   });
@@ -637,7 +743,7 @@ describe('serialized with the course mutations', () => {
     await useLibrary();
     const [a, b] = await makeCourses('A', 'B');
     const sem = await createGroup('Sem', [], tick());
-    const arrangement: PutLayoutRequest = { groups: [{ id: sem.id, courseIds: [b, a] }], order: [group(sem.id)] };
+    const arrangement: PutLayoutRequest = { groups: [{ id: sem.id, items: cs(b, a) }], order: [group(sem.id)] };
 
     const [created, refused] = await Promise.allSettled([createCourse('Late', tick()), putLayout(arrangement)]);
     assert.equal(created.status, 'fulfilled');
@@ -646,11 +752,11 @@ describe('serialized with the course mutations', () => {
     const late = (created as PromiseFulfilledResult<Course>).value;
 
     const [applied, second] = await Promise.all([
-      putLayout({ groups: [{ id: sem.id, courseIds: [b, a] }], order: [group(sem.id), course(late.id)] }),
+      putLayout({ groups: [{ id: sem.id, items: cs(b, a) }], order: [group(sem.id), course(late.id)] }),
       createCourse('Later', tick(), sem.id),
     ]);
     assert.deepEqual(applied.order, [group(sem.id), course(late.id)]);
-    assert.deepEqual(await getLayout(), { groups: [{ ...sem, courseIds: [b, a, second.id] }], order: [group(sem.id), course(late.id)] });
+    assert.deepEqual(await getLayout(), { groups: [{ ...sem, items: cs(b, a, second.id) }], order: [group(sem.id), course(late.id)] });
   });
 
   test('course PATCHes, group changes and PUTs at the same time', async () => {
@@ -660,7 +766,7 @@ describe('serialized with the course mutations', () => {
     const sem = await createGroup('Sem', [a], tick());
     await Promise.all([
       updateCourse(a, { docIds: [docs[0], docs[1]] }),
-      putLayout({ groups: [{ id: sem.id, courseIds: [b, a] }], order: [group(sem.id)] }),
+      putLayout({ groups: [{ id: sem.id, items: cs(b, a) }], order: [group(sem.id)] }),
       updateCourse(b, { title: 'B2', docIds: [docs[2]] }),
       updateGroup(sem.id, { title: 'Sem 2' }),
       updateCourse(a, { docIds: [docs[1], docs[0], docs[3]] }),
@@ -668,7 +774,7 @@ describe('serialized with the course mutations', () => {
     const courses = await listCourses();
     assert.deepEqual(courses.find((x) => x.id === a)?.docIds, [docs[1], docs[0], docs[3]]);
     assert.deepEqual(courses.find((x) => x.id === b), { id: b, title: 'B2', createdAt: courses[1].createdAt, docIds: [docs[2]] });
-    assert.deepEqual(await getLayout(), { groups: [{ ...sem, title: 'Sem 2', courseIds: [b, a] }], order: [group(sem.id)] });
+    assert.deepEqual(await getLayout(), { groups: [{ ...sem, title: 'Sem 2', items: cs(b, a) }], order: [group(sem.id)] });
   });
 });
 
@@ -725,14 +831,14 @@ describe('HTTP routes', () => {
     assert.equal(created.status, 201);
     const sem = (await created.json()) as CourseGroup;
     assert.equal(sem.title, '2026-2학기');
-    assert.deepEqual(sem.courseIds, [db.id]);
+    assert.deepEqual(coursesIn(sem), [db.id]);
     assert.deepEqual(await layout(), { groups: [sem], order: [course(os1.id), group(sem.id)] });
 
     // A course created inside the group lands at its end.
     const compiler = await postCourse('Compiler', sem.id);
     await expectError(await sendJson('POST', '/courses', { title: 'X', groupId: 'missing-000000' }), 400, /그룹을 찾을 수 없습니다/);
     let current = await layout();
-    assert.deepEqual(current.groups[0].courseIds, [db.id, compiler.id]);
+    assert.deepEqual(coursesIn(current.groups[0]), [db.id, compiler.id]);
     // GET /api/courses keeps the createdAt order.
     assert.deepEqual(((await (await api('/courses')).json()) as Course[]).map((c) => c.id), [os1.id, db.id, compiler.id]);
 
@@ -745,15 +851,15 @@ describe('HTTP routes', () => {
     await expectError(await sendJson('PATCH', '/groups/BAD%20ID', { title: 'x' }), 404);
 
     // Rearrange: the OS course into the group, first.
-    const put = await sendJson('PUT', '/layout', { groups: [{ id: sem.id, courseIds: [os1.id, compiler.id, db.id] }], order: [group(sem.id)] });
+    const put = await sendJson('PUT', '/layout', { groups: [{ id: sem.id, items: cs(os1.id, compiler.id, db.id) }], order: [group(sem.id)] });
     assert.equal(put.status, 200);
     current = (await put.json()) as LibraryLayout;
-    assert.deepEqual(current, { groups: [{ ...sem, title: '2026 가을', courseIds: [os1.id, compiler.id, db.id] }], order: [group(sem.id)] });
+    assert.deepEqual(current, { groups: [{ ...sem, title: '2026 가을', items: cs(os1.id, compiler.id, db.id) }], order: [group(sem.id)] });
     assert.deepEqual(await layout(), current);
 
     // Deleting a course takes it out of the layout.
     assert.equal((await api(`/courses/${compiler.id}`, { method: 'DELETE' })).status, 204);
-    assert.deepEqual((await layout()).groups[0].courseIds, [os1.id, db.id]);
+    assert.deepEqual(coursesIn((await layout()).groups[0]), [os1.id, db.id]);
 
     // Deleting the group keeps its courses at its place.
     assert.equal((await api(`/groups/${sem.id}`, { method: 'DELETE' })).status, 204);
@@ -775,7 +881,7 @@ describe('HTTP routes', () => {
     await expectError(await sendJson('PUT', '/layout', { ...full, order: [...full.order, group(g.id)] }), 400, /같은 그룹이 두 번/);
     await expectError(await sendJson('PUT', '/layout', { ...full, order: full.order.filter((item) => item.id !== g.id) }), 400, /빠진 그룹/);
     await expectError(
-      await sendJson('PUT', '/layout', { ...full, groups: full.groups.map((entry) => ({ ...entry, courseIds: [] })) }),
+      await sendJson('PUT', '/layout', { ...full, groups: full.groups.map((entry) => ({ ...entry, items: cs() })) }),
       400,
       /빠진 과목/,
     );
@@ -815,7 +921,7 @@ describe('HTTP routes', () => {
     created.forEach((g, i) => {
       const stored = current.groups.find((candidate) => candidate.id === g.id);
       assert.equal(stored?.title, `P${i} renamed`);
-      assert.deepEqual(stored?.courseIds, [courses[i].id]);
+      assert.deepEqual(stored && coursesIn(stored), [courses[i].id]);
     });
 
     // Parallel PUTs: each one answers with its own arrangement, the last one stays.

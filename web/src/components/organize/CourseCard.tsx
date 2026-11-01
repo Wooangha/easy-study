@@ -74,8 +74,8 @@ export function CourseCard(props: CourseCardProps) {
   const m = msg().shell.course;
   const drag = useDragState();
   const key = collapseKey.course(course.id);
-  // While a course is dragged every course shows only its header, so that the list is short.
-  const compact = drag.active?.kind === 'course';
+  // While a course or a group is dragged every course shows only its header, so that the list is short.
+  const compact = drag.active?.kind === 'course' || drag.active?.kind === 'group';
   const shownCollapsed = compact || (collapsed && !drag.springOpen.has(key));
 
   const data: DropData = { role: 'course', courseId: course.id, groupId };
