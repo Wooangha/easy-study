@@ -972,10 +972,11 @@ that no longer exists, rolls the move back with a toast. The client also reloads
 - **Two columns since 0.6.15** (the user found the old page cluttered — a big drop zone, cards inside cards, every action on
   every card — and chose among mock-ups: "B가 제일 나은데", then "B-2가 좋은데 … 이어서 보기나 어디까지 봄이나 이런 거 뺄 수
   있음?": no reading progress, no continue buttons, no card grid). LibraryView.tsx:
-  - Left (organize/LibraryTree.tsx, 264 px, its own scroll): "PDF 올리기" (into the chosen course, else 미분류), the "과목" heading,
-    the tree — groups (chevron + name; ⋯: 안에 과목 만들기 / 안에 그룹 만들기 / 이름 바꾸기 / 그룹 삭제; "비어 있음" when empty) and
+  - Left (organize/LibraryTree.tsx, 264 px, its own scroll): the "과목" heading (lined up with the tree's chevrons; no upload
+    button since the user asked about the column's top — the pane's ＋ 강의 추가 did the same), the tree — groups (chevron + name; ⋯: 안에 과목 만들기 / 안에 그룹 만들기 / 이름 바꾸기 / 그룹 삭제; "비어 있음" when empty) and
     courses (name + lecture count) indented by depth —, 미분류 (count; "내 문서" when there are no courses), and "＋ 새 과목 / ＋ 새
-    그룹" at the bottom. ≡ handles and ⋯ show on hover (always on touch screens).
+    그룹" right under it (not at the bottom of the column: "아래가 너무 동떨어져있음"). ≡ handles and ⋯ show on hover (always
+    on touch screens).
   - Right (organize/LibraryPanes.tsx): the chosen course — its path ("2026-2학기 › 전공"), name (⋯ › 이름 바꾸기 turns it into an
     input), COURSE.md, "＋ 강의 추가", ⋯ (정리본 N개 만들기 for the lectures without one, 과목 삭제), "강의 N개" with the summary badges
     — and its lectures in one bordered list (LectureRow: ≡ on hover, the first slide as a 72×45 picture, "3. title" over "41장 ·

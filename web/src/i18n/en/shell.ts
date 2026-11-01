@@ -275,8 +275,6 @@ export const shell = {
     analyzingPdf: 'Analyzing the PDF…',
     create: 'Create',
     uploadPdf: 'Upload PDF',
-    uploadTo: (course) => `Upload lecture PDFs to ‘${course}’`,
-    uploadToUncategorized: 'Upload lecture PDFs to Uncategorized',
     uploadedOn: (date) => `uploaded ${date}`,
     treeLabel: 'Courses',
     courseHintShort: 'Put lectures in a course and the LLM knows the earlier ones when it explains the next.',

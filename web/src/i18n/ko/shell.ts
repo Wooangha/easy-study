@@ -296,8 +296,6 @@ export const shell = {
     create: '만들기',
     /** The library's two columns (0.6.15): the tree on the left, the chosen course's lectures on the right. */
     uploadPdf: 'PDF 올리기',
-    uploadTo: (course: string) => `‘${course}’에 강의 PDF 올리기`,
-    uploadToUncategorized: '미분류에 강의 PDF 올리기',
     /** A lecture's upload date after its slide count. */
     uploadedOn: (date: string) => `${date} 올림`,
     treeLabel: '과목 목록',
