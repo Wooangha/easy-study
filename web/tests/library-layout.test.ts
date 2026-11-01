@@ -495,6 +495,24 @@ describe('geometry and keyboard stops', () => {
     assert.equal(pickDroppable({ kind: 'course', courseId: 'c1' }, { x: 100, y: 300 }, boxes, view())?.box.id, 'course:c2');
   });
 
+  test('two columns (the tree beside the lecture list): a gap is filled from the pointer\'s own column', () => {
+    // The tree on the left (0–260): course rows c1 (0–32) and c2 (40–72); c1's lectures on the right (300–900).
+    const cols: DroppableBox[] = [
+      box('course:c1', { role: 'course', courseId: 'c1', groupId: null }, 0, 32, 0, 260),
+      box('course-head:c1', { role: 'course-head', courseId: 'c1' }, 0, 32, 0, 260),
+      box('course:c2', { role: 'course', courseId: 'c2', groupId: null }, 40, 32, 0, 260),
+      box('course-head:c2', { role: 'course-head', courseId: 'c2' }, 40, 32, 0, 260),
+      box('lecture:a', { role: 'lecture', docId: 'a', courseId: 'c1' }, 100, 60, 300, 600),
+      box('lecture:b', { role: 'lecture', docId: 'b', courseId: 'c1' }, 160, 60, 300, 600),
+    ];
+    // Below the tree's rows, in the list's column: the nearest lecture, not a course row of the tree.
+    assert.equal(pickDroppable(lecture, { x: 500, y: 60 }, cols, view())?.box.id, 'lecture:a');
+    // In the tree's column, between its rows: the nearer row there.
+    assert.equal(pickDroppable(lecture, { x: 100, y: 36 }, cols, view())?.box.id, 'course-head:c1');
+    // On a course row of the tree: that course.
+    assert.equal(pickDroppable(lecture, { x: 100, y: 50 }, cols, view())?.box.id, 'course-head:c2');
+  });
+
   test('beside the list: as if the pointer were inside it; in a gap or outside: the nearest one', () => {
     assert.equal(pickDroppable(lecture, { x: 900, y: 120 }, boxes, view())?.box.id, 'lecture:b');
     assert.equal(pickDroppable(lecture, { x: -40, y: 120 }, boxes, view())?.box.id, 'lecture:b');

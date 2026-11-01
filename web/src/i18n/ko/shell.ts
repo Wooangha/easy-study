@@ -96,7 +96,7 @@ export const shell = {
     dropPdfToCourse: (fileIcon: ReactNode, folderIcon: ReactNode, course: string) =>
       rich(fileIcon, ' PDF를 놓으면 ', folderIcon, ' ', course, '에 강의로 추가해요'),
     dropPdf: (fileIcon: ReactNode) => rich(fileIcon, ' PDF를 놓으면 업로드해요'),
-    dropOnCourseCard: '과목 카드 위에 놓으면 그 과목에 추가돼요',
+    dropOnCourseCard: '왼쪽 목록의 과목 위에 놓으면 그 과목에 추가돼요',
   },
 
   /** The login check, the login screen, the local-only screen (AuthGate, LoginScreen, LocalOnlyScreen). */
@@ -294,9 +294,20 @@ export const shell = {
     convertingSlides: (done: number, total: number) => `슬라이드 변환 중 ${done} / ${total}`,
     analyzingPdf: 'PDF 분석 중…',
     create: '만들기',
+    /** The library's two columns (0.6.15): the tree on the left, the chosen course's lectures on the right. */
+    uploadPdf: 'PDF 올리기',
+    uploadTo: (course: string) => `‘${course}’에 강의 PDF 올리기`,
+    uploadToUncategorized: '미분류에 강의 PDF 올리기',
+    /** A lecture's upload date after its slide count. */
+    uploadedOn: (date: string) => `${date} 올림`,
+    treeLabel: '과목 목록',
+    courseHintShort: '과목을 만들어 강의를 묶으면, 다음 강의를 공부할 때 LLM이 이전 강의들을 알고 설명해요.',
+    uncategorizedTipShort: '왼쪽 과목에 끌어다 놓거나 ⋯ › 과목으로 이동으로 정리해요',
+    uncategorizedEmpty: '미분류 강의가 없어요 — PDF를 끌어다 놓거나 눌러서 올려요',
+    dropHere: (place: string) => `놓으면 ‘${place}’에 올려요`,
   },
 
-  /** A course card (organize/CourseCard.tsx). */
+  /** A course: its row in the tree and its pane (organize/LibraryTree.tsx, LibraryPanes.tsx). */
   course: {
     roleDescription: '옮길 수 있는 과목',
     deleteConfirm: {
@@ -321,14 +332,19 @@ export const shell = {
     summaryTitle: '과목 정리 파일(COURSE.md) 열기 — 강의별 요약과 정리본 링크',
     addLectureTitle: '이 과목에 강의 PDF 추가',
     addLecture: '＋ 강의 추가',
+    addLectureShort: '강의 추가',
+    menu: (title: string) => `‘${title}’ 과목 메뉴`,
+    makeDigestsItem: (n: number) => `정리본 ${n}개 만들기`,
+    makeDigestsHint: '없는 강의',
+    deleteItem: '과목 삭제',
     deleteTitle: '과목 삭제 (강의는 남아요)',
     deleteLabel: (title: string) => `‘${title}’ 과목 삭제`,
     dropToJoin: '여기에 놓으면 이 과목의 강의가 돼요',
-    empty: '아직 강의가 없어요 — PDF를 이 카드에 끌어다 놓거나 클릭해서 추가하세요',
+    empty: '아직 강의가 없어요 — PDF를 여기에 끌어다 놓거나 눌러서 추가하세요',
     dropPdf: (title: string) => `놓으면 ‘${title}’에 강의로 추가해요`,
   },
 
-  /** A group card (organize/GroupCard.tsx). */
+  /** A group: its row in the tree (organize/LibraryTree.tsx). */
   group: {
     roleDescription: '옮길 수 있는 그룹',
     deleteConfirm: {
@@ -358,11 +374,16 @@ export const shell = {
     newGroupTitle: '이 그룹 안에 그룹 만들기',
     newGroup: '＋ 그룹',
     newGroupName: (title: string) => `‘${title}’ 그룹 안에 만들 그룹 이름`,
+    menu: (title: string) => `‘${title}’ 그룹 메뉴`,
+    addCourse: '안에 과목 만들기',
+    addGroup: '안에 그룹 만들기',
+    deleteItem: '그룹 삭제',
+    emptyShort: '비어 있음',
     dropToJoin: '여기에 놓으면 이 그룹에 들어가요',
     empty: (grip: ReactNode) => rich('비어 있는 그룹이에요 — 과목이나 그룹의 ', grip, ' 손잡이를 끌어다 놓거나 ‘＋ 과목’ · ‘＋ 그룹’으로 만드세요'),
   },
 
-  /** A lecture in a course (organize/LectureRow.tsx) or uncategorized (organize/DocCard.tsx). */
+  /** A lecture in a course or in 미분류 (organize/LectureRow.tsx). */
   lecture: {
     roleDescription: '옮길 수 있는 강의',
     uploadRecording: '녹음 파일 올리기',

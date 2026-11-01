@@ -356,9 +356,10 @@ const contains = (r: Box, p: Point) => p.x >= r.left && p.x <= r.right && p.y >=
 
 /**
  * The droppable a point is on while `item` is dragged: the innermost accepting droppable that contains it
- * (e.g. a lecture row rather than the course around it); when the point is beside the list, the same at the
- * list's horizontal center; otherwise the vertically nearest one (above/below everything,
- * or in a gap between cards). `relY` is the point's position in it (0 = top, 1 = bottom; outside = <0 / >1).
+ * (e.g. a lecture row rather than the course around it); when the point is beside everything, the same at the
+ * horizontal center; otherwise the vertically nearest one (above/below everything, or in a gap between rows) —
+ * of those in the point's column when there are any (the library's tree and its lecture list side by side,
+ * 0.6.15). `relY` is the point's position in it (0 = top, 1 = bottom; outside = <0 / >1).
  */
 export function pickDroppable(
   item: DragItem,
@@ -383,8 +384,9 @@ export function pickDroppable(
   }
   if (!box) {
     const area = (b: DroppableBox) => b.rect.width * b.rect.height;
+    const column = candidates.filter((b) => point.x >= b.rect.left && point.x <= b.rect.right);
     let bestGap = Infinity;
-    for (const b of candidates) {
+    for (const b of column.length > 0 ? column : candidates) {
       const gap = point.y < b.rect.top ? b.rect.top - point.y : point.y > b.rect.bottom ? point.y - b.rect.bottom : 0;
       if (!box || gap < bestGap - 0.5) {
         box = b;

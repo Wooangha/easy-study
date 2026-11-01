@@ -1,28 +1,17 @@
-import { useDroppable } from '@dnd-kit/core';
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react';
-import { ArrowLeft, FileText, Folder, Folders, GripVertical, Hourglass, RefreshCw, TriangleAlert } from 'lucide-react';
-import type { Course, DocMeta, LayoutItem, LibraryLayout } from '../../../shared/types.ts';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ArrowLeft, ChevronDown, Hourglass, RefreshCw, TriangleAlert } from 'lucide-react';
+import type { Course, DocMeta, LayoutItem } from '../../../shared/types.ts';
 import type { CoursesState } from '../hooks/useCourses.ts';
 import { useCollapsed } from '../hooks/useCollapsed.ts';
 import type { UploadItem } from '../hooks/useDocs.ts';
 import { msg } from '../i18n/index.ts';
-import { dndId, type DragItem, type DropData } from '../lib/libraryDnd.ts';
-import {
-  allCollapseKeys,
-  collapseKey,
-  coursesInside,
-  groupPath,
-  layoutEntries,
-  layoutRows,
-  neighbourAfterDelete,
-  type LayoutRow,
-} from '../lib/libraryLayout.ts';
-import { CourseCard, CourseGhost } from './organize/CourseCard.tsx';
-import { DocCard } from './organize/DocCard.tsx';
-import { GroupCard, GroupGhost } from './organize/GroupCard.tsx';
+import { dndId, type DragItem } from '../lib/libraryDnd.ts';
+import { allCollapseKeys, collapseKey, coursesInside, groupPath, layoutEntries, layoutRows, neighbourAfterDelete } from '../lib/libraryLayout.ts';
 import { LectureGhost } from './organize/LectureRow.tsx';
-import { LibraryDnd, TopEndZone, useDragState, useDropMark } from './organize/LibraryDnd.tsx';
-import { CourseOptions, DocProgress, NewTitleForm, UploadCard } from './organize/parts.tsx';
+import { LibraryDnd, TopEndZone } from './organize/LibraryDnd.tsx';
+import { CoursePane, UncategorizedPane } from './organize/LibraryPanes.tsx';
+import { CourseGhost, GroupGhost, LibraryTree, type TreeActions } from './organize/LibraryTree.tsx';
+import { DocProgress } from './organize/parts.tsx';
 
 export { DigestBadge, DocProgress } from './organize/parts.tsx';
 
@@ -33,7 +22,7 @@ interface LibraryViewProps {
   org: CoursesState;
   uploads: UploadItem[];
   libraryDir: string | null;
-  /** Course that the big drop zone uploads into (null = uncategorized). */
+  /** The course chosen in the tree: shown on the right, and where new PDFs go (null = 미분류). */
   uploadCourseId: string | null;
   onUploadCourseChange: (courseId: string | null) => void;
   onOpen: (docId: string) => void;
@@ -54,12 +43,12 @@ interface LibraryViewProps {
   onDigestLectures: (docs: DocMeta[]) => void;
 }
 
-/** The "과목" heading: where focus goes when nothing closer is left. */
+/** The "과목" heading of the tree: where focus goes when nothing closer is left. */
 const HEADING_KEY = 'heading:courses';
 
 /**
- * Focuses the first of these library items that is shown (`data-org-key`): a lecture's ⋯ menu (in a course)
- * or its "과목으로 이동" select (미분류), a course's or group's collapse toggle, or the heading.
+ * Focuses the first of these library items that is shown (`data-org-key`): a lecture's ⋯ menu, a course or group of
+ * the tree (its button), or the heading.
  */
 function focusOrgItem(keys: readonly string[]): void {
   for (const key of keys) {
@@ -69,8 +58,8 @@ function focusOrgItem(keys: readonly string[]): void {
       key === HEADING_KEY
         ? el
         : key.startsWith('lecture:')
-          ? (el.querySelector<HTMLElement>('.menu-btn') ?? el.querySelector<HTMLElement>('select') ?? el.querySelector<HTMLElement>('.drag-handle'))
-          : (el.querySelector<HTMLElement>(':scope > header .collapse-toggle') ?? el.querySelector<HTMLElement>(':scope > header .drag-handle'));
+          ? (el.querySelector<HTMLElement>('.menu-btn') ?? el.querySelector<HTMLElement>('.drag-handle'))
+          : el.querySelector<HTMLElement>(':scope > .tree-row .tree-select, :scope > .tree-row .tree-toggle');
     if (target) {
       target.focus();
       return;
@@ -95,13 +84,14 @@ function useDelayedFlag(value: boolean, ms: number): boolean {
 }
 
 /**
- * Library: drop zone, then the arrangement of groups and course folders (collapsible, reordered by dragging
- * their ≡ handles), then uncategorized documents (DESIGN §12, §13, §18).
+ * Library (DESIGN §12, §13, §18; two columns since 0.6.15): on the left the groups and courses as a tree (≡ drags
+ * them) and 미분류, on the right the chosen course's lectures — or 미분류's. The chosen course is the upload course
+ * (App: it follows the lecture that was open), so the library opens where one was studying. On a phone the tree is
+ * folded above the list behind a button with the course's name.
  */
 export function LibraryView(props: LibraryViewProps) {
   const { docs, loadError, org, uploads, libraryDir, uploadCourseId } = props;
-  const [over, setOver] = useState(false);
-  const [creating, setCreating] = useState<'course' | 'group' | null>(null);
+  const [treeOpen, setTreeOpen] = useState(false);
 
   const courseList = useMemo(() => org.courses ?? [], [org.courses]);
   const layout = org.layout;
@@ -110,14 +100,16 @@ export function LibraryView(props: LibraryViewProps) {
     () => (coursesKnown && !org.layoutError ? allCollapseKeys(layout, courseList) : null),
     [coursesKnown, org.layoutError, layout, courseList],
   );
-  const { collapsed, setOne, toggle, setAll } = useCollapsed(existingKeys);
-  const allKeys = useMemo(() => allCollapseKeys(layout, courseList), [layout, courseList]);
-  const allCollapsed = allKeys.length > 0 && allKeys.every((k) => collapsed.has(k));
-  const anyCollapsed = allKeys.some((k) => collapsed.has(k));
+  const { collapsed, setOne, toggle } = useCollapsed(existingKeys);
   const saving = useDelayedFlag(org.pending > 0, 400);
+  const selected = courseList.find((c) => c.id === uploadCourseId) ?? null;
+  const select = (courseId: string | null) => {
+    props.onUploadCourseChange(courseId);
+    setTreeOpen(false);
+  };
 
-  // Moving a lecture with its ⋯ menu or select, or deleting a course or group, removes the control that has the
-  // keyboard focus: move it to the same lecture in its new place (or what is nearest) instead of <body>.
+  // Moving a lecture with its ⋯ menu, or deleting a course or group, removes the control that has the keyboard
+  // focus: move it to the same lecture in its new place (or what is nearest) instead of <body>.
   const [focusAfter, setFocusAfter] = useState<string[] | null>(null);
   useEffect(() => {
     if (!focusAfter) return;
@@ -128,7 +120,7 @@ export function LibraryView(props: LibraryViewProps) {
     const groups = courseId ? groupPath(layout, { type: 'course', id: courseId }) : [];
     setFocusAfter([
       dndId.lecture(docId),
-      ...(courseId ? [dndId.course(courseId)] : []), // a collapsed course
+      ...(courseId ? [dndId.course(courseId)] : [dndId.uncategorized]), // its new place in the tree
       ...groups.reverse().map((g) => dndId.group(g.id)), // …in a collapsed group (in a collapsed group…)
       HEADING_KEY,
     ]);
@@ -139,7 +131,7 @@ export function LibraryView(props: LibraryViewProps) {
     setFocusAfter(near ? [itemKey(near), HEADING_KEY] : [HEADING_KEY]);
   };
 
-  // A group or course just created goes to the end of its list: bring it into view.
+  // A course or group just created: bring it into view; a course is chosen too.
   const [reveal, setReveal] = useState<string | null>(null);
   useEffect(() => {
     if (!reveal) return;
@@ -150,19 +142,12 @@ export function LibraryView(props: LibraryViewProps) {
     setReveal(null);
   }, [reveal, layout]);
 
-  // One hidden file input shared by every course card's "＋ 강의 추가" button.
+  // One hidden file input for the course pane's "＋ 강의 추가".
   const courseFileInput = useRef<HTMLInputElement>(null);
   const pickForCourse = useRef<string | null>(null);
   const pickFilesFor = (courseId: string) => {
     pickForCourse.current = courseId;
     courseFileInput.current?.click();
-  };
-
-  const onDrop = (e: DragEvent<HTMLButtonElement>) => {
-    // preventDefault marks the drop as handled; the window-level listener then only hides its overlay.
-    e.preventDefault();
-    setOver(false);
-    props.onDropFiles(Array.from(e.dataTransfer.files));
   };
 
   const byId = useMemo(() => new Map((docs ?? []).map((d) => [d.id, d])), [docs]);
@@ -177,11 +162,18 @@ export function LibraryView(props: LibraryViewProps) {
     [byId, membership],
   );
   const uncategorized = (docs ?? []).filter((d) => !membership.has(d.id));
-  const uploadTarget = courseList.find((c) => c.id === uploadCourseId) ?? null;
   const looseUploads = uploads.filter((u) => !u.courseId || !courseList.some((c) => c.id === u.courseId));
   const rows = layoutRows(layout, courseList);
   const entries = layoutEntries(layout, courseList);
   const canDragCourses = !org.layoutError;
+  const m = msg().shell.library;
+
+  /** "그룹 2개 · 과목 7개": the groups in a group and the courses in it at any depth. */
+  const contentsOf = (groupId: string) =>
+    msg().shell.group.contents(
+      layout.groups.find((g) => g.id === groupId)?.items.filter((item) => item.type === 'group').length ?? 0,
+      coursesInside(layout, groupId).length,
+    );
 
   const nameOf = (item: DragItem): string => {
     const d = msg().shell.dnd;
@@ -203,252 +195,153 @@ export function LibraryView(props: LibraryViewProps) {
     return group ? <GroupGhost group={group} contents={contentsOf(group.id)} /> : null;
   };
 
-  /** "그룹 2개 · 과목 7개": the groups in a group and the courses in it at any depth. */
-  const contentsOf = (groupId: string) =>
-    msg().shell.group.contents(
-      layout.groups.find((g) => g.id === groupId)?.items.filter((item) => item.type === 'group').length ?? 0,
-      coursesInside(layout, groupId).length,
-    );
+  // For dragging: the tree shows no lectures, so every course but the chosen one is "collapsed" there (a lecture
+  // dropped on it goes to its end), and hovering opens groups only.
+  const dndCollapsed = useMemo(() => {
+    const keys = new Set(collapsed);
+    for (const c of courseList) if (c.id !== selected?.id) keys.add(collapseKey.course(c.id));
+    for (const c of courseList) if (c.id === selected?.id) keys.delete(collapseKey.course(c.id));
+    return keys;
+  }, [collapsed, courseList, selected]);
 
-  const renderCourse = (c: Course, groupId: string | null) => (
-    <CourseCard
-      key={c.id}
-      course={c}
-      groupId={groupId}
-      lectures={lecturesOf(c)}
-      uploads={uploads.filter((u) => u.courseId === c.id)}
-      entries={entries}
-      collapsed={collapsed.has(collapseKey.course(c.id))}
-      onToggle={() => toggle(collapseKey.course(c.id))}
-      canDrag={canDragCourses}
-      onOpen={props.onOpen}
-      onPickFiles={() => pickFilesFor(c.id)}
-      onDropFiles={(files) => props.onUploadToCourse(c.id, files)}
-      onRename={(title) => void org.rename(c.id, title)}
-      onDelete={() => {
-        focusAfterDelete({ type: 'course', id: c.id });
-        void org.remove(c.id);
-      }}
-      onMoveLecture={moveLecture}
-      onRetryDoc={props.onRetryDoc}
-      onRenameDoc={props.onRenameDoc}
-      onDeleteDoc={props.onDeleteDoc}
-      canDigest={props.canDigest}
-      onDigestLectures={props.onDigestLectures}
-    />
+  const treeActions: TreeActions = {
+    selected: selected?.id ?? null,
+    onSelect: select,
+    lectureCount: (courseId) => {
+      const c = courseList.find((x) => x.id === courseId);
+      return c ? lecturesOf(c).length : 0;
+    },
+    contentsOf,
+    collapsed,
+    onToggle: toggle,
+    onExpand: (key) => setOne(key, false),
+    canDrag: canDragCourses,
+    onUploadToCourse: props.onUploadToCourse,
+    onCreateCourse: async (title, groupId) => {
+      const course = await org.create(title, groupId);
+      if (course) {
+        select(course.id);
+        setReveal(dndId.course(course.id));
+      }
+      return course;
+    },
+    onCreateGroup: async (title, parentId) => {
+      const group = await org.createGroup(title, [], parentId);
+      if (group) setReveal(dndId.group(group.id));
+      return group;
+    },
+    onRenameGroup: (groupId, title) => void org.renameGroup(groupId, title),
+    onDeleteGroup: (groupId) => {
+      focusAfterDelete({ type: 'group', id: groupId });
+      void org.removeGroup(groupId);
+    },
+  };
+
+  const handlers = {
+    entries,
+    onOpen: props.onOpen,
+    onMoveLecture: moveLecture,
+    onRetryDoc: props.onRetryDoc,
+    onRenameDoc: props.onRenameDoc,
+    onDeleteDoc: props.onDeleteDoc,
+  };
+
+  const treeToggle = (
+    <button type="button" className="lib-tree-toggle" aria-expanded={treeOpen} onClick={() => setTreeOpen((o) => !o)}>
+      {selected ? selected.title : courseList.length > 0 ? m.uncategorized : m.myDocs}
+      <ChevronDown />
+    </button>
   );
 
-  /** A course card, or a group card with what it holds (groups inside groups, 0.6.15). */
-  const renderRow = (row: LayoutRow): ReactNode =>
-    row.type === 'course' ? (
-      renderCourse(row.course, row.parentId)
-    ) : (
-      <GroupCard
-        key={row.group.id}
-        group={row.group}
-        parentId={row.parentId}
-        rows={row.children}
-        contents={contentsOf(row.group.id)}
-        collapsed={collapsed.has(collapseKey.group(row.group.id))}
-        onToggle={() => toggle(collapseKey.group(row.group.id))}
-        onExpand={() => setOne(collapseKey.group(row.group.id), false)}
-        canDrag={canDragCourses}
-        renderRow={renderRow}
-        onRename={(title) => void org.renameGroup(row.group.id, title)}
-        onDelete={() => {
-          focusAfterDelete({ type: 'group', id: row.group.id });
-          void org.removeGroup(row.group.id);
-        }}
-        onCreateCourse={async (title) => {
-          const course = await org.create(title, row.group.id);
-          if (course) setReveal(dndId.course(course.id));
-          return course;
-        }}
-        onCreateGroup={async (title) => {
-          const group = await org.createGroup(title, [], row.group.id);
-          if (group) setReveal(dndId.group(group.id));
-          return group;
-        }}
-      />
-    );
-
-  const m = msg().shell.library;
-  return (
-    <div className="library">
-      <div className="library-inner">
-        <div className="dropzone-wrap">
-          <button
-            type="button"
-            className={over ? 'dropzone is-over' : 'dropzone'}
-            onClick={props.onPickFiles}
-            onDragOver={(e) => {
-              e.preventDefault();
-              setOver(true);
-            }}
-            onDragLeave={() => setOver(false)}
-            onDrop={onDrop}
-          >
-            <FileText className="dropzone-icon" strokeWidth={1.5} />
-            <span className="dropzone-title">{m.dropzoneTitle}</span>
-            <span className="dropzone-sub">
-              {uploadTarget
-                ? m.dropzoneToCourse(
-                    <b>
-                      <Folder /> {uploadTarget.title}
-                    </b>,
-                  )
-                : m.dropzoneSub}
-            </span>
-          </button>
-          {courseList.length > 0 && (
-            <label className="upload-target">
-              <span className="muted">{m.uploadTarget}</span>
-              <select
-                className="picker"
-                value={uploadTarget?.id ?? ''}
-                onChange={(e) => props.onUploadCourseChange(e.target.value || null)}
-              >
-                <option value="">{m.uncategorized}</option>
-                <CourseOptions courses={courseList} layout={layout} />
-              </select>
-            </label>
-          )}
+  const notices = (
+    <>
+      {org.loadError && (
+        <div className="inline-error small">
+          <TriangleAlert /> {m.coursesLoadFailed(org.loadError)}
         </div>
+      )}
+      {!org.loadError && org.layoutError && (
+        <div className="inline-error small">
+          <TriangleAlert /> {m.layoutLoadFailed(org.layoutError)}{' '}
+          <button type="button" className="ghost-btn small" onClick={() => void org.refresh()}>
+            {msg().common.retry}
+          </button>
+        </div>
+      )}
+    </>
+  );
 
-        {looseUploads.map((u) => (
-          <UploadCard key={u.id} upload={u} />
-        ))}
-
-        {loadError && (
-          <div className="inline-error">
-            <TriangleAlert /> {m.docsLoadFailed(loadError)}{' '}
-            <button type="button" className="ghost-btn small" onClick={props.onRetryLoad}>
-              {msg().common.retry}
-            </button>
-          </div>
-        )}
-
-        {docs === null && !loadError && <p className="muted center">{msg().common.loading}</p>}
-
-        {/* ---- Courses (rendered once the documents are known, so lectures don't flash as missing) --- */}
-        {docs !== null && (
-          <LibraryDnd
-            courses={courseList}
-            layout={layout}
-            collapsed={collapsed}
-            nameOf={nameOf}
-            renderOverlay={renderOverlay}
-            onMove={(move) => void org.move(move)}
-            onKeepOpen={(key) => setOne(key, false)}
-          >
-            <div className="library-section-head">
-              <h2 className="library-heading" tabIndex={-1} data-org-key={HEADING_KEY}>
-                {m.courses}
-              </h2>
-              {courseList.length > 1 && !saving && <span className="muted small section-tip">{m.dragTip(<GripVertical />)}</span>}
-              {saving && (
-                <span className="muted small section-tip" role="status">
-                  {m.saving}
-                </span>
-              )}
-              <span className="spacer" />
-              {allKeys.length > 0 && (
-                <span className="section-tools">
-                  <button type="button" className="ghost-btn small" onClick={() => setAll(allKeys, true)} disabled={allCollapsed}>
-                    {m.collapseAll}
-                  </button>
-                  <button type="button" className="ghost-btn small" onClick={() => setAll(allKeys, false)} disabled={!anyCollapsed}>
-                    {m.expandAll}
-                  </button>
-                </span>
-              )}
-              <span className="section-tools">
-                <button
-                  type="button"
-                  className="ghost-btn small"
-                  onClick={() => setCreating('group')}
-                  disabled={!coursesKnown || !!org.layoutError}
-                  title={m.newGroupTitle}
-                >
-                  {m.newGroup}
-                </button>
-                <button type="button" className="ghost-btn small" onClick={() => setCreating('course')} disabled={!coursesKnown}>
-                  {m.newCourse}
-                </button>
-              </span>
+  return (
+    <div className={`library lib2${treeOpen ? ' is-tree-open' : ''}`}>
+      <LibraryDnd
+        courses={courseList}
+        layout={layout}
+        collapsed={dndCollapsed}
+        nameOf={nameOf}
+        renderOverlay={renderOverlay}
+        onMove={(move) => void org.move(move)}
+        onKeepOpen={(key) => setOne(key, false)}
+        canSpringOpen={(key) => key.startsWith('group:')}
+      >
+        <LibraryTree
+          rows={rows}
+          actions={treeActions}
+          uncategorizedCount={uncategorized.length}
+          hasCourses={courseList.length > 0}
+          canCreate={coursesKnown}
+          canCreateGroup={coursesKnown && !org.layoutError}
+          saving={saving}
+          headingRef={HEADING_KEY}
+          uploadTitle={selected ? m.uploadTo(selected.title) : m.uploadToUncategorized}
+          onPickFiles={props.onPickFiles}
+          notices={notices}
+          footer={<TopEndZone />}
+        />
+        <div className="lib-main">
+          {loadError && (
+            <div className="inline-error">
+              <TriangleAlert /> {m.docsLoadFailed(loadError)}{' '}
+              <button type="button" className="ghost-btn small" onClick={props.onRetryLoad}>
+                {msg().common.retry}
+              </button>
             </div>
-            {org.loadError && (
-              <div className="inline-error">
-                <TriangleAlert /> {m.coursesLoadFailed(org.loadError)}
-              </div>
-            )}
-            {!org.loadError && org.layoutError && (
-              <div className="inline-error">
-                <TriangleAlert /> {m.layoutLoadFailed(org.layoutError)}{' '}
-                <button type="button" className="ghost-btn small" onClick={() => void org.refresh()}>
-                  {msg().common.retry}
-                </button>
-              </div>
-            )}
-            {creating === 'group' && (
-              <NewTitleForm
-                icon={Folders}
-                placeholder={m.groupPlaceholder}
-                label={m.newGroupName}
-                onCancel={() => setCreating(null)}
-                onCreate={async (title) => {
-                  const group = await org.createGroup(title);
-                  if (group) {
-                    setCreating(null);
-                    setReveal(dndId.group(group.id));
-                  }
-                }}
-              />
-            )}
-            {creating === 'course' && (
-              <NewTitleForm
-                icon={Folder}
-                placeholder={m.coursePlaceholder}
-                label={m.newCourseName}
-                onCancel={() => setCreating(null)}
-                onCreate={async (title) => {
-                  const course = await org.create(title);
-                  if (course) {
-                    setCreating(null);
-                    setReveal(dndId.course(course.id));
-                  }
-                }}
-              />
-            )}
-            {org.courses !== null && courseList.length === 0 && layout.groups.length === 0 && !creating && !org.loadError && (
-              <p className="course-hint muted small">{m.courseHint}</p>
-            )}
-
-            {rows.map(renderRow)}
-            <TopEndZone />
-
-            {/* ---- Uncategorized ------------------------------------------------------------------- */}
-            <UncategorizedSection
-              docs={uncategorized}
-              courses={courseList}
-              layout={layout}
-              onOpen={props.onOpen}
-              onMove={moveLecture}
-              onRetry={props.onRetryDoc}
-              onRename={props.onRenameDoc}
-              onDelete={props.onDeleteDoc}
+          )}
+          {docs === null && !loadError ? (
+            <p className="muted center">{msg().common.loading}</p>
+          ) : selected ? (
+            <CoursePane
+              key={selected.id}
+              course={selected}
+              path={groupPath(layout, { type: 'course', id: selected.id })}
+              lectures={lecturesOf(selected)}
+              uploads={uploads.filter((u) => u.courseId === selected.id)}
+              handlers={handlers}
+              onPickFiles={() => pickFilesFor(selected.id)}
+              onDropFiles={(files) => props.onUploadToCourse(selected.id, files)}
+              onRename={(title) => void org.rename(selected.id, title)}
+              onDelete={() => {
+                focusAfterDelete({ type: 'course', id: selected.id });
+                void org.remove(selected.id);
+              }}
+              canDigest={props.canDigest}
+              onDigestLectures={props.onDigestLectures}
+              treeToggle={treeToggle}
             />
-          </LibraryDnd>
-        )}
-
-        {docs && docs.length === 0 && uploads.length === 0 && !loadError && (
-          <p className="muted center">{m.noDocsYet}</p>
-        )}
-
-        {libraryDir && (
-          <p className="library-path muted small">{m.storedAt(<code>{libraryDir}</code>)}</p>
-        )}
-      </div>
+          ) : (
+            <UncategorizedPane
+              docs={uncategorized}
+              uploads={looseUploads}
+              hasCourses={courseList.length > 0}
+              handlers={handlers}
+              onPickFiles={props.onPickFiles}
+              onDropFiles={props.onDropFiles}
+              treeToggle={treeToggle}
+              libraryEmpty={(docs ?? []).length === 0 && uploads.length === 0}
+            />
+          )}
+          {libraryDir && <p className="library-path muted small">{m.storedAt(<code>{libraryDir}</code>)}</p>}
+        </div>
+      </LibraryDnd>
 
       <input
         ref={courseFileInput}
@@ -465,70 +358,6 @@ export function LibraryView(props: LibraryViewProps) {
         }}
       />
     </div>
-  );
-}
-
-/** "미분류": documents in no course. While a lecture is dragged it is also the drop zone for "과목에서 빼기". */
-function UncategorizedSection({
-  docs,
-  courses,
-  layout,
-  onOpen,
-  onMove,
-  onRetry,
-  onRename,
-  onDelete,
-}: {
-  docs: DocMeta[];
-  courses: readonly Course[];
-  layout: LibraryLayout;
-  onOpen: (docId: string) => void;
-  onMove: (docId: string, courseId: string | null) => void;
-  onRetry: (docId: string) => void;
-  onRename: (docId: string, title: string) => void;
-  onDelete: (doc: DocMeta) => void;
-}) {
-  const { active } = useDragState();
-  const data: DropData = { role: 'uncategorized' };
-  const { setNodeRef } = useDroppable({ id: dndId.uncategorized, data });
-  const mark = useDropMark(dndId.uncategorized);
-  const hasCourses = courses.length > 0;
-  /** A lecture of a course is being dragged (dropping it here takes it out of its course). */
-  const draggingFromCourse = active?.kind === 'lecture' && !docs.some((d) => d.id === active.docId);
-  if (docs.length === 0 && !(draggingFromCourse && hasCourses)) return null;
-  const m = msg().shell.library;
-  return (
-    <section
-      ref={setNodeRef}
-      className={`uncategorized${mark === 'into' ? ' drop-into' : ''}`}
-      aria-label={hasCourses ? m.uncategorizedLabel : m.myDocs}
-    >
-      <div className="library-section-head">
-        <h2 className="library-heading">{hasCourses ? m.uncategorized : m.myDocs}</h2>
-        {hasCourses && (
-          <span className="muted small">{draggingFromCourse ? m.dropToUncategorize : m.uncategorizedTip(<GripVertical />)}</span>
-        )}
-      </div>
-      {docs.length > 0 ? (
-        <div className="doc-list">
-          {docs.map((d) => (
-            <DocCard
-              key={d.id}
-              doc={d}
-              courses={courses}
-              layout={layout}
-              onOpen={onOpen}
-              onMove={onMove}
-              onRetry={onRetry}
-              onRename={onRename}
-              onDelete={onDelete}
-            />
-          ))}
-        </div>
-      ) : (
-        <div className="uncategorized-empty">{m.dropToUncategorize}</div>
-      )}
-    </section>
   );
 }
 

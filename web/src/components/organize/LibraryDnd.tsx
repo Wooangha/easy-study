@@ -138,10 +138,24 @@ interface LibraryDndProps {
   onMove: (move: Move) => void;
   /** Keep a container that was opened by hovering open (the item was dropped into it). */
   onKeepOpen: (key: string) => void;
+  /** Which collapsed containers hovering opens (all by default; the library's tree: groups, its courses show no lectures). */
+  canSpringOpen?: (key: string) => boolean;
   children: ReactNode;
 }
 
-export function LibraryDnd({ courses, layout, collapsed, nameOf, renderOverlay, onMove, onKeepOpen, children }: LibraryDndProps) {
+const ANY_CONTAINER = () => true;
+
+export function LibraryDnd({
+  courses,
+  layout,
+  collapsed,
+  nameOf,
+  renderOverlay,
+  onMove,
+  onKeepOpen,
+  canSpringOpen = ANY_CONTAINER,
+  children,
+}: LibraryDndProps) {
   const [active, setActive] = useState<DragItem | null>(null);
   const [target, setTarget] = useState<DropTarget | null>(null);
   const [springOpen, setSpringOpen] = useState<ReadonlySet<string>>(NOTHING_OPEN);
@@ -155,6 +169,8 @@ export function LibraryDnd({ courses, layout, collapsed, nameOf, renderOverlay, 
   viewRef.current = view;
   const nameRef = useRef(nameOf);
   nameRef.current = nameOf;
+  const canSpringOpenRef = useRef(canSpringOpen);
+  canSpringOpenRef.current = canSpringOpen;
 
   /** Where the item would land now (written by the collision detection on every drag render). */
   const targetRef = useRef<DropTarget | null>(null);
@@ -256,7 +272,7 @@ export function LibraryDnd({ courses, layout, collapsed, nameOf, renderOverlay, 
     setTarget((prev) => (sameTarget(prev, next) ? prev : next));
 
     const into = next?.indicator?.type === 'into' ? next.indicator.key : null;
-    const spring = into && viewRef.current.isCollapsed(into) ? into : null;
+    const spring = into && viewRef.current.isCollapsed(into) && canSpringOpenRef.current(into) ? into : null;
     if (spring !== (springTimer.current?.key ?? null)) {
       stopSpringTimer();
       if (spring) {

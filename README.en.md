@@ -31,7 +31,7 @@ The app updates itself: when a new version is out, a dot appears on the gear and
 1. Choose **Run on this computer** in the connection screen (or connect to another computer running easy-study).
 2. Drop a lecture PDF into the library. Group lectures into courses; a lecture studied later gets the summaries of the earlier ones.
 3. Open a lecture and ask. The tutor gets the whole deck once, then the slide you are on and its neighbors with every question.
-4. Optional: **Make digest** writes a per-slide summary (`DIGEST.md`) that later sessions reuse; every Q&A is kept in `STUDY_NOTES.md`.
+4. Optional: **Make digest** writes a per-slide summary (`DIGEST.md`) that later chats reuse; every Q&A is kept in `STUDY_NOTES.md`.
 
 When the professor posts an updated deck, use the lecture's **⋯ › Upload new version** (0.6.8). The new slides are
 matched to the old ones (same, changed, new, removed); after **Switch to the new version**, annotations and memos,

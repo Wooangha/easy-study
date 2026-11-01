@@ -3,7 +3,7 @@
 import { withParticle } from '../../lib/korean.ts';
 
 export const versions = {
-  /** The lecture menus (LectureRow, DocCard). */
+  /** The lecture menus (LectureRow). */
   menu: '새 버전 올리기',
   menuHint: 'PDF',
 

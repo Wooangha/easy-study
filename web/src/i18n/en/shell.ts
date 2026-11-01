@@ -85,7 +85,7 @@ export const shell = {
     dropPdfToCourse: (fileIcon, folderIcon, course) =>
       rich(fileIcon, ' Drop PDFs to add them as lectures to ', folderIcon, ' ', course),
     dropPdf: (fileIcon) => rich(fileIcon, ' Drop PDFs to upload them'),
-    dropOnCourseCard: 'Drop them on a course card to add them to that course',
+    dropOnCourseCard: 'Drop them on a course in the list on the left to add them to that course',
   },
 
   auth: {
@@ -274,6 +274,15 @@ export const shell = {
     convertingSlides: (done, total) => `Converting slides ${done} / ${total}`,
     analyzingPdf: 'Analyzing the PDF…',
     create: 'Create',
+    uploadPdf: 'Upload PDF',
+    uploadTo: (course) => `Upload lecture PDFs to ‘${course}’`,
+    uploadToUncategorized: 'Upload lecture PDFs to Uncategorized',
+    uploadedOn: (date) => `uploaded ${date}`,
+    treeLabel: 'Courses',
+    courseHintShort: 'Put lectures in a course and the LLM knows the earlier ones when it explains the next.',
+    uncategorizedTipShort: 'Drag them onto a course on the left, or use ⋯ › Move to course',
+    uncategorizedEmpty: 'No uncategorized lectures — drop PDFs here or click to upload',
+    dropHere: (place) => `Drop to upload to ‘${place}’`,
   },
 
   course: {
@@ -302,10 +311,15 @@ export const shell = {
     summaryTitle: 'Open the course summary file (COURSE.md) — a summary of each lecture and links to the digests',
     addLectureTitle: 'Add lecture PDFs to this course',
     addLecture: '＋ Add lecture',
+    addLectureShort: 'Add lecture',
+    menu: (title) => `Menu of the course ‘${title}’`,
+    makeDigestsItem: (n) => (n === 1 ? 'Make 1 digest' : `Make ${n} digests`),
+    makeDigestsHint: 'missing ones',
+    deleteItem: 'Delete course',
     deleteTitle: 'Delete course (the lectures are kept)',
     deleteLabel: (title) => `Delete the course ‘${title}’`,
     dropToJoin: 'Drop here to make it a lecture of this course',
-    empty: 'No lectures yet — drag PDFs onto this card or click to add them',
+    empty: 'No lectures yet — drop PDFs here or click to add them',
     dropPdf: (title) => `Drop to add as lectures to ‘${title}’`,
   },
 
@@ -339,6 +353,11 @@ export const shell = {
     newGroupTitle: 'Create a group in this group',
     newGroup: '＋ Group',
     newGroupName: (title) => `Name of the new group in the group ‘${title}’`,
+    menu: (title) => `Menu of the group ‘${title}’`,
+    addCourse: 'New course inside',
+    addGroup: 'New group inside',
+    deleteItem: 'Delete group',
+    emptyShort: 'Empty',
     dropToJoin: 'Drop here to put it in this group',
     empty: (grip) => rich('This group is empty — drag a course or group here by its ', grip, ' handle or create one with ‘＋ Course’ · ‘＋ Group’'),
   },

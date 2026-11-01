@@ -1,12 +1,18 @@
 // Small building blocks of the library view.
 import type { DraggableAttributes, DraggableSyntheticListeners } from '@dnd-kit/core';
-import { useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
+import { useRef, useState, type FormEvent, type KeyboardEvent, type MouseEvent } from 'react';
 import { Check, ChevronRight, GripVertical, Hourglass, RefreshCw, TriangleAlert, type LucideIcon } from 'lucide-react';
-import type { Course, CourseGroup, DigestStatus, DocMeta, LibraryLayout } from '../../../../shared/types.ts';
-import type { UploadItem } from '../../hooks/useDocs.ts';
+import type { DigestStatus, DocMeta } from '../../../../shared/types.ts';
 import { msg } from '../../i18n/index.ts';
-import { formatBytes } from '../../lib/format.ts';
-import { layoutEntries } from '../../lib/libraryLayout.ts';
+import { wasJustDragging } from './LibraryDnd.tsx';
+
+/**
+ * A click that toggles a group: not right after a drag, and a double-click counts once (its second click would fold
+ * it back, and a list folding under the pointer moves what the second click hits).
+ */
+export function isToggleClick(e: MouseEvent<HTMLElement>): boolean {
+  return !wasJustDragging() && e.detail <= 1;
+}
 
 /** Drag handle, a grip icon (mouse: drag; touch: press and hold, then drag; keyboard: Space/Enter, arrows, Space/Enter). */
 export function DragHandle({
@@ -131,18 +137,6 @@ export function DocProgress({ doc, compact = false }: { doc: DocMeta; compact?: 
   );
 }
 
-export function UploadCard({ upload: u }: { upload: UploadItem }) {
-  return (
-    <div className="doc-card is-uploading">
-      <div className="doc-card-body">
-        <div className="doc-title">{u.name}</div>
-        <div className="doc-sub">{msg().shell.library.uploading(Math.round(u.fraction * 100), formatBytes(u.size))}</div>
-        <ProgressBar fraction={u.fraction} />
-      </div>
-    </div>
-  );
-}
-
 /** "다시 변환" / "삭제" for a document whose conversion failed (the PDF is kept, so it can be re-run). */
 export function FailedDocActions({
   doc,
@@ -262,41 +256,4 @@ export function NewTitleForm({
       </button>
     </form>
   );
-}
-
-/**
- * <option>s of every course in layout order: grouped courses inside an <optgroup> per group ("학기 › 전공" for a group
- * inside a group: optgroups do not nest), courses outside groups as plain options. `exclude` leaves one course out
- * (the lecture's own).
- */
-export function CourseOptions({
-  courses,
-  layout,
-  exclude,
-}: {
-  courses: readonly Course[];
-  layout: LibraryLayout;
-  exclude?: string | null;
-}) {
-  // Consecutive courses of the same group make one optgroup (a group's courses around a group inside it make two).
-  const runs: Array<{ key: string; path: CourseGroup[]; courses: Course[] }> = [];
-  for (const entry of layoutEntries(layout, courses)) {
-    if (entry.course.id === exclude) continue;
-    const last = runs.at(-1);
-    if (last && last.path.at(-1)?.id === entry.group?.id) last.courses.push(entry.course);
-    else runs.push({ key: `${entry.group?.id ?? '-'}:${entry.course.id}`, path: entry.path, courses: [entry.course] });
-  }
-  return runs.map((run) => {
-    const options = run.courses.map((c) => (
-      <option key={c.id} value={c.id}>
-        {c.title}
-      </option>
-    ));
-    if (run.path.length === 0) return options;
-    return (
-      <optgroup key={run.key} label={run.path.map((g) => g.title).join(' › ')}>
-        {options}
-      </optgroup>
-    );
-  });
 }

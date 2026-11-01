@@ -15,9 +15,10 @@ import { PopoverMenu, type MenuSection } from './PopoverMenu.tsx';
 
 interface LectureRowProps {
   doc: DocMeta;
-  /** 1-based position in the course. */
-  index: number;
-  courseId: string;
+  /** 1-based position in the course (none in 미분류). */
+  index?: number;
+  /** Its course; null in 미분류 (no "과목에서 빼기"; dragged only when there is a course to go to). */
+  courseId: string | null;
   /** Every course in layout order (the "과목으로 이동" entries). */
   entries: LayoutEntry[];
   onOpen: (docId: string) => void;
@@ -29,7 +30,10 @@ interface LectureRowProps {
   onDelete: (doc: DocMeta) => void;
 }
 
-/** One lecture of a course: ≡ handle, number, thumbnail + title (opens it; an input while it is renamed), "⋯" menu. */
+/**
+ * One lecture of the library's list (a course's, or 미분류): ≡ handle, the first slide, "3. title" over its slide count
+ * and upload date (opens it; an input while it is renamed), its 정리본 state, "⋯" menu.
+ */
 export function LectureRow({ doc, index, courseId, entries, onOpen, onMove, onRetry, onRename, onDelete }: LectureRowProps) {
   const [renaming, setRenaming] = useState(false);
   const m = msg().shell.lecture;
@@ -39,6 +43,7 @@ export function LectureRow({ doc, index, courseId, entries, onOpen, onMove, onRe
     id: dndId.lecture(doc.id),
     data,
     roleDescription: m.roleDescription,
+    canDrag: courseId !== null || entries.length > 0,
   });
   const mark = useDropMark(dndId.lecture(doc.id));
   const ready = doc.status === 'ready';
@@ -78,16 +83,20 @@ export function LectureRow({ doc, index, courseId, entries, onOpen, onMove, onRe
           : []),
       ],
     },
-    {
-      items: [
-        {
-          key: 'remove',
-          label: m.removeFromCourse,
-          hint: m.removeFromCourseHint,
-          onSelect: () => onMove(null),
-        },
-      ],
-    },
+    ...(courseId === null
+      ? []
+      : [
+          {
+            items: [
+              {
+                key: 'remove',
+                label: m.removeFromCourse,
+                hint: m.removeFromCourseHint,
+                onSelect: () => onMove(null),
+              },
+            ],
+          },
+        ]),
     {
       heading: m.moveToCourse,
       items: entries
@@ -111,8 +120,13 @@ export function LectureRow({ doc, index, courseId, entries, onOpen, onMove, onRe
       data-org-key={dndId.lecture(doc.id)}
       className={`lecture-row status-${doc.status}${isDragging ? ' is-drag-source' : ''}${dropMarkClass(mark)}`}
     >
-      <DragHandle label={m.move(doc.title)} setRef={setActivatorNodeRef} listeners={listeners} attributes={attributes} />
-      <span className="lecture-index">{index}</span>
+      <DragHandle
+        label={courseId === null ? m.moveToACourse(doc.title) : m.move(doc.title)}
+        setRef={setActivatorNodeRef}
+        listeners={listeners}
+        attributes={attributes}
+        disabled={courseId === null && entries.length === 0}
+      />
       {renaming ? (
         // Not inside the opening button (an input cannot sit in a button): the same look, nothing opens.
         <div className="lecture-open is-renaming">
@@ -135,14 +149,19 @@ export function LectureRow({ doc, index, courseId, entries, onOpen, onMove, onRe
         <button type="button" className="lecture-open" onClick={() => onOpen(doc.id)} title={m.open}>
           <LectureThumb doc={doc} />
           <span className="lecture-main">
-            <span className="doc-title">{doc.title}</span>
+            <span className="doc-title">
+              {index !== undefined && <span className="lecture-index">{index}.</span>}
+              {doc.title}
+            </span>
             <span className="doc-sub">
-              {ready ? lib.slideCount(doc.pageCount) : doc.status === 'error' ? m.failed : m.converting} · {formatDate(doc.createdAt)}
-              <DigestBadge status={doc.digestStatus} />
-              <RecordingUploadBadge docId={doc.id} />
+              {ready ? lib.slideCount(doc.pageCount) : doc.status === 'error' ? m.failed : m.converting} · {lib.uploadedOn(formatDate(doc.createdAt))}
             </span>
             {doc.status === 'processing' && <DocProgress doc={doc} compact />}
             {doc.status === 'error' && <span className="doc-error">{doc.error ?? lib.processingError}</span>}
+          </span>
+          <span className="lecture-status">
+            <RecordingUploadBadge docId={doc.id} />
+            <DigestBadge status={doc.digestStatus} />
           </span>
         </button>
       )}

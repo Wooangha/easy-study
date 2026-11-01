@@ -355,7 +355,8 @@ session's when there is no answer; a session whose LLM changed (§5 "LLM switch"
   추가"), the record button, link to open `notes.md`, ⚙. Until 0.6.15 also a session picker for the doc (dropdown: title ·
   provider · #messages, "＋ 새 세션") with a delete button and the LLM for new sessions; now the chat tab's 대화 기록 / 새
   대화 (§13 "Chats").
-- **Empty state / library**: big drop zone ("PDF를 끌어다 놓거나 클릭해서 업로드") + list of docs.
+- **Empty state / library**: big drop zone ("PDF를 끌어다 놓거나 클릭해서 업로드") + list of docs (since 0.6.15 two columns, §18;
+  the drop zone shows only in an empty library).
   While a doc is processing show a progress bar (`progress / pageCount`, poll `GET /api/docs/:id` every 800 ms).
 - **Split view** with a draggable divider (default 58% / 42%, persisted in localStorage). Since 0.6.9 (§29): on
   coarse pointers the divider has a 25 px grab area and a small grip; the stacked layout (≤ 800 px, `.split.is-stacked` from
@@ -968,35 +969,49 @@ courses and layout again and makes the same (anchored) move once more on top of 
 that no longer exists, rolls the move back with a toast. The client also reloads both when its tab becomes visible or focused.
 
 ### Web
-- Library view renders the layout: groups (collapsible header: `≡` handle, title with inline rename, what it holds — "그룹 2개 · 과목
-  7개": its groups and the courses at any depth —, delete with an in-page confirmation, "＋ 과목" / "＋ 그룹" to create a course or a
-  group inside it) containing course cards and group cards (GroupCard renders its rows with LibraryView's `renderRow`, so a group
-  inside is a GroupCard again); top-level course cards; then 미분류 lectures.
-- Course cards are collapsible (header click / chevron / Enter): when collapsed show title, lecture count and digest summary badges only.
-  Collapse state is per device (localStorage `easy-study:collapsed`), plus "모두 접기 / 모두 펼치기". It is the same in every tab
-  of the device: each toggle is applied to what is stored at that moment and other tabs follow `storage` events; keys of deleted
-  courses/groups are forgotten (on the first load all unknown keys, later only keys the tab saw disappear). Renaming is the ✎
-  button only; a double-click on a header counts as one toggle.
+- **Two columns since 0.6.15** (the user found the old page cluttered — a big drop zone, cards inside cards, every action on
+  every card — and chose among mock-ups: "B가 제일 나은데", then "B-2가 좋은데 … 이어서 보기나 어디까지 봄이나 이런 거 뺄 수
+  있음?": no reading progress, no continue buttons, no card grid). LibraryView.tsx:
+  - Left (organize/LibraryTree.tsx, 264 px, its own scroll): "PDF 올리기" (into the chosen course, else 미분류), the "과목" heading,
+    the tree — groups (chevron + name; ⋯: 안에 과목 만들기 / 안에 그룹 만들기 / 이름 바꾸기 / 그룹 삭제; "비어 있음" when empty) and
+    courses (name + lecture count) indented by depth —, 미분류 (count; "내 문서" when there are no courses), and "＋ 새 과목 / ＋ 새
+    그룹" at the bottom. ≡ handles and ⋯ show on hover (always on touch screens).
+  - Right (organize/LibraryPanes.tsx): the chosen course — its path ("2026-2학기 › 전공"), name (⋯ › 이름 바꾸기 turns it into an
+    input), COURSE.md, "＋ 강의 추가", ⋯ (정리본 N개 만들기 for the lectures without one, 과목 삭제), "강의 N개" with the summary badges
+    — and its lectures in one bordered list (LectureRow: ≡ on hover, the first slide as a 72×45 picture, "3. title" over "41장 ·
+    2026.9.26 올림", the 정리본 badge, ⋯). Or 미분류 with the same rows (no number; ⋯ › 과목으로 이동). An empty library shows the
+    first-run drop zone there. PDFs dropped from the file manager on the pane or on a course row of the tree go into that course.
+  - The chosen course is the upload course (App's `uploadCourse`, stored per device, following the course of the lecture that was
+    open), so the library opens where one was studying; a new course is chosen when it is made.
+  - ≤ 800 px: one column; the tree is folded above the list behind a pill with the chosen course's name (opened, it pushes the
+    list down; choosing closes it). The lecture rows drop the 정리본 badge.
+  - Collapse state of groups is per device (localStorage `easy-study:collapsed`), the same in every tab of the device: each toggle
+    is applied to what is stored at that moment and other tabs follow `storage` events; keys of deleted courses/groups are
+    forgotten. A double-click on a group counts as one toggle. Before 0.6.15 course cards were collapsible too, with "모두 접기 /
+    모두 펼치기"; GroupCard / CourseCard / DocCard (미분류 as cards) are gone.
 - Drag & drop with an accessible library (@dnd-kit/core): pointer, touch (press-and-hold ~200 ms so scrolling still
   works) and keyboard sensors (Space/Enter pick up, arrows move, Space/Enter drop, Esc cancel) with screen-reader announcements in Korean.
   - Lectures (`≡` handle): reorder inside a course, move to another course (single PATCH of the target course — the server removes it
     from the old one), drop into 미분류 (PATCH of the source course without it).
-  - Courses (`≡` handle on the card header): reorder at the top level, move into/out of groups and between groups (PUT /api/layout).
+  - In the two columns (0.6.15): lectures are reordered in the list on the right and dropped on a course row of the tree to go to
+    its end (the tree shows no lectures: for dragging, every course but the chosen one counts as collapsed, and hovering opens groups
+    only — LibraryDnd's `canSpringOpen`), or on 미분류 to leave their course. `pickDroppable` fills a gap from the pointer's own
+    column, so a lecture between rows of the list never lands on a course row of the tree.
+  - Courses (`≡` handle on the tree row): reorder at the top level, move into/out of groups and between groups (PUT /api/layout).
   - Groups (`≡` handle): the same places as courses since 0.6.15 — before / after a course or group anywhere, into a group (its header
     below the top third, or its body), the bottom (PUT /api/layout); never into itself or a group it holds (those drop zones take no
-    group: `accepts` checks `isWithin`). While a course or a group is dragged, course cards show only their header; the dragged group
-    shows only its header too (before 0.6.15 every group collapsed while a group was dragged).
+    group: `accepts` checks `isWithin`). The dragged group shows only its row (before 0.6.15 every group collapsed while a group
+    was dragged).
   - Dragging over a collapsed course/group for ~600 ms expands it (for a lecture a collapsed group's header is only that: releasing
     there moves nothing); screen readers then hear that it opened and the item's new place. A clear insertion indicator shows
     where the item will land (the ghost follows just below-right of the pointer, inside the window); optimistic update with
     rollback + toast on server error; while a request is in flight further drops queue in order.
-  - Keyboard focus never falls back to the page: after a "⋯"/select move it goes to the lecture in its new place (or its
-    collapsed course/group), after deleting a course/group to the nearest card (or the "과목" heading).
-  - Native file drops (uploading PDFs onto a course card) keep working alongside (they use HTML5 file drag events, not pointer drags).
+  - Keyboard focus never falls back to the page: after a "⋯" move it goes to the lecture in its new place (or its course or
+    collapsed group in the tree), after deleting a course/group to the nearest row (or the "과목" heading).
+  - Native file drops (uploading PDFs onto a course) keep working alongside (they use HTML5 file drag events, not pointer drags).
 - The ▲▼ buttons are removed; "과목에서 빼기" moves into a small per-lecture "⋯" menu (together with "과목으로 이동 ▸" for keyboard-free
-  alternatives). Uncategorised lectures keep a "과목으로 이동" control.
-- Course selects (CourseOptions): an optgroup per run of courses of one group, labelled with its path ("2026-2학기 › 전공": optgroups do
-  not nest); "과목으로 이동" hints and the lecture picker's course labels show the path too.
+  alternatives), in 미분류 too (before 0.6.15 a select there).
+- "과목으로 이동" hints and the lecture picker's course labels show a course's group path ("2026-2학기 › 전공 › os").
 - Top-bar document picker: optgroup label "📁 <group> › <course>" for grouped courses, in layout order. Replaced in 0.6.14 by the
   **lecture picker** (components/LecturePicker.tsx, lib/lecturePicker.ts; the user chose it from three mock-ups — "2번 ㄱㄱ.
   깔쌈하게 뽑아보셈"): a button `‹ [course  i/n  title ⌄] ›` (‹ › open the course's previous / next lecture, disabled at its
