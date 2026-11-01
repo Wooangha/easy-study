@@ -985,6 +985,9 @@ that no longer exists, rolls the move back with a toast. The client also reloads
     open), so the library opens where one was studying; a new course is chosen when it is made.
   - ≤ 800 px: one column; the tree is folded above the list behind a pill with the chosen course's name (opened, it pushes the
     list down; choosing closes it). The lecture rows drop the 정리본 badge.
+  - Big screens (the user, on a 2560 px monitor: "큰 화면에서는 이제 알잘딱"): the list is a column centred in the right side (980 px,
+    1200 px from a 1600 px window, 1400 px from 2200 px) with the storage path under it; from 1600 px the tree is 296 px (320 px from
+    2200 px) and the pictures and titles grow (96×60 / 112×70).
   - Collapse state of groups is per device (localStorage `easy-study:collapsed`), the same in every tab of the device: each toggle
     is applied to what is stored at that moment and other tabs follow `storage` events; keys of deleted courses/groups are
     forgotten. A double-click on a group counts as one toggle. Before 0.6.15 course cards were collapsible too, with "모두 접기 /

@@ -3983,6 +3983,7 @@ details[open] > summary::before {
 .lib-pane {
   position: relative;
   max-width: 980px;
+  margin: 0 auto;
 }
 
 .pane-crumb {
@@ -4144,7 +4145,79 @@ details[open] > summary::before {
 }
 
 .lib-main .library-path {
-  margin-top: 28px;
+  max-width: 980px;
+  margin: 28px auto 0;
+}
+
+/* Big screens: the list stays a centred column that grows, with larger pictures and text, and a wider tree. */
+@media (min-width: 1600px) {
+  .library.lib2 {
+    grid-template-columns: 296px minmax(0, 1fr);
+  }
+
+  .lib-main {
+    padding: 32px 48px 48px;
+  }
+
+  .lib-pane,
+  .lib-main .library-path {
+    max-width: 1200px;
+  }
+
+  .pane-title {
+    font-size: 27px;
+  }
+
+  .lib-pane .lecture-row {
+    padding: 8px 14px 8px 4px;
+  }
+
+  .lib-pane .lecture-thumb {
+    width: 96px;
+    height: 60px;
+  }
+
+  .lib-pane .lecture-row .doc-title {
+    font-size: 15.5px;
+  }
+
+  .lib-pane .lecture-row .doc-sub {
+    font-size: 13px;
+  }
+
+  .tree-toggle,
+  .tree-select {
+    font-size: 14px;
+    height: 34px;
+  }
+}
+
+@media (min-width: 2200px) {
+  .library.lib2 {
+    grid-template-columns: 320px minmax(0, 1fr);
+  }
+
+  .lib-pane,
+  .lib-main .library-path {
+    max-width: 1400px;
+  }
+
+  .pane-title {
+    font-size: 30px;
+  }
+
+  .lib-pane .lecture-thumb {
+    width: 112px;
+    height: 70px;
+  }
+
+  .lib-pane .lecture-row .doc-title {
+    font-size: 16.5px;
+  }
+
+  .lib-pane .lecture-row .doc-sub {
+    font-size: 13.5px;
+  }
 }
 
 /* Phones and narrow windows: one column; the tree folds above the list behind the course's name. */
