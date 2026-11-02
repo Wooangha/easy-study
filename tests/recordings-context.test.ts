@@ -145,7 +145,7 @@ describe('lecture speech in the context (context.ts)', () => {
 
   test('the system prompt tells the tutor how to use lecture speech', () => {
     assert.match(TUTOR_SYSTEM_PROMPT, /what the professor said in the recorded lecture/);
-    assert.match(TUTOR_SYSTEM_PROMPT, /trust the slides for definitions, formulas and notation/);
+    assert.match(TUTOR_SYSTEM_PROMPT, /trusts the slides for definitions, formulas and notation/);
   });
 });
 

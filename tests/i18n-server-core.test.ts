@@ -233,7 +233,7 @@ describe('the tutor answers in the request language', () => {
 
   test('the system prompt and the deck overview: English when the language is unclear', () => {
     const en = tutorSystemPrompt('en');
-    assert.match(en, /Answer in the language of the student's question\. If the language is unclear, answer in English\./);
+    assert.match(en, /answers in the language of the student's question\. If the language is unclear, it answers in English\./);
     assert.doesNotMatch(en, /answer in Korean|Korean explanation|첨부 1|슬라이드 밖 보충|Parsing II의/);
     assert.match(en, /\(e\.g\. "Attachment 1"\)/);
     assert.equal(tutorSystemPrompt('ko'), TUTOR_SYSTEM_PROMPT);

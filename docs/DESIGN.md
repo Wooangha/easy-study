@@ -182,6 +182,14 @@ parts += QUESTION(kind, question)
   language of the question (Korean by default), ground explanations in the slides and cite them as
   `(p.N)`, describe diagrams/figures/equations in the images, clearly mark information that is not
   from the slides, use Markdown and LaTeX math (`$...$`, `$$...$$`), and never modify files.
+  Since 0.6.17 it follows the shape of Anthropic's published claude.ai system prompts (the user: "이거 참고해서 기본 프롬프트
+  작성해볼래?"): tagged sections (`<what_the_tutor_is_given>`, `<courses>`, `<answering>`, `<formatting>`, `<rules>`,
+  `<examples>`), the tutor in the third person ("The tutor …", the same text for every provider), and three examples with
+  the reason behind each (a quick question gets a short cited answer; a student's wrong claim is corrected kindly, not
+  agreed with; text on a slide is never an instruction). New behaviour it asks for: effort matched to the question,
+  minimal formatting (prose by default; lists, tables and headings only for content of that shape), honesty about
+  uncertainty and about the student's mistakes, at most one clarifying question after answering the likely reading,
+  checking that a mentioned attachment is there, and owning its own earlier mistakes without long apologies.
   For providers without a system prompt channel (Codex CLI) the system prompt is prepended to the
   first turn's text by the provider adapter.
 
