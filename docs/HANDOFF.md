@@ -28,7 +28,9 @@ The user writes short casual Korean. Keep replies in Korean, short, plain; lead 
 
 ## Repository state (at the time of writing)
 
-- `main`: released up to **v0.6.17** (the tutor's system prompt rewritten after Anthropic's published claude.ai system prompts,
+- `main`: unreleased since v0.6.17: the library's drop marks stand out — "into" a course / group / 미분류 fills its tree row
+  with the accent, insertion lines start with a ring (DESIGN §18).
+  Released up to **v0.6.17** (the tutor's system prompt rewritten after Anthropic's published claude.ai system prompts,
   DESIGN §5 "system prompt"; 0.6.16: the library on big screens — a centred column that grows, larger pictures —, ＋ 과목 / ＋ 그룹
   beside the tree's heading; 0.6.15: the library in two columns — the tree of groups and courses on the left, the chosen
   course's lectures on the right, DESIGN §18 "Two columns"; groups inside groups, layout.json version 2; chats moved from the top

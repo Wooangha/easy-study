@@ -3968,18 +3968,21 @@ details[open] > summary::before {
   opacity: 0.45;
 }
 
-/* Insertion lines between rows; "into" a course, a group or 미분류 highlights its row. */
-.tree-item.drop-before::before {
-  top: -2px;
-}
-
-.tree-item.drop-after::after {
-  bottom: -2px;
-}
-
+/*
+ * "Into" a course, a group or 미분류 fills its row with the accent: the selected course is tinted the soft accent,
+ * so a softer mark would look like the selection.
+ */
 .tree-item.drop-into > .tree-row {
-  background: var(--accent-soft);
-  box-shadow: inset 0 0 0 1.5px var(--accent);
+  background: var(--accent);
+}
+
+.tree-item.drop-into > .tree-row .tree-select,
+.tree-item.drop-into > .tree-row .tree-icon,
+.tree-item.drop-into > .tree-row .tree-count,
+.tree-item.drop-into > .tree-row .tree-toggle,
+.tree-item.drop-into > .tree-row .tree-chevron,
+.tree-item.drop-into > .tree-row .drag-handle {
+  color: var(--accent-contrast);
 }
 
 .lib-side .top-end-zone {
@@ -4366,35 +4369,27 @@ details[open] > summary::before {
   position: relative;
 }
 
+/* A ring at the start, then the line: the spot stands out on any row, selected or not. */
 .drop-before::before,
 .drop-after::after {
   content: '';
   position: absolute;
-  left: 4px;
+  left: 2px;
   right: 4px;
-  height: 3px;
-  border-radius: 3px;
-  background: var(--accent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
+  height: 10px;
+  background:
+    radial-gradient(circle at 5px 50%, transparent 2px, var(--accent) 2.5px 4.5px, transparent 5px),
+    linear-gradient(var(--accent), var(--accent)) 9px 50% / calc(100% - 9px) 3px no-repeat;
   pointer-events: none;
   z-index: 3;
 }
 
 .drop-before::before {
-  top: -2px;
+  top: -5px;
 }
 
 .drop-after::after {
-  bottom: -2px;
-}
-
-/* Cards are separated by a gap: draw the line in the middle of it. */
-.library-inner > .drop-before::before {
-  top: -8.5px;
-}
-
-.library-inner > .drop-after::after {
-  bottom: -8.5px;
+  bottom: -5px;
 }
 
 /* "Into" this course / group / 미분류. */

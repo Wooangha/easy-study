@@ -1017,7 +1017,9 @@ that no longer exists, rolls the move back with a toast. The client also reloads
     was dragged).
   - Dragging over a collapsed course/group for ~600 ms expands it (for a lecture a collapsed group's header is only that: releasing
     there moves nothing); screen readers then hear that it opened and the item's new place. A clear insertion indicator shows
-    where the item will land (the ghost follows just below-right of the pointer, inside the window); optimistic update with
+    where the item will land: a line that starts with a ring between rows, or, for "into" a course / group / 미분류 in the tree,
+    the row filled with the accent (the selected course is tinted the soft accent, so a softer mark read as the selection); the
+    ghost follows just below-right of the pointer, inside the window; optimistic update with
     rollback + toast on server error; while a request is in flight further drops queue in order.
   - Keyboard focus never falls back to the page: after a "⋯" move it goes to the lecture in its new place (or its course or
     collapsed group in the tree), after deleting a course/group to the nearest row (or the "과목" heading).
