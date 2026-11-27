@@ -4075,18 +4075,24 @@ details[open] > summary::before {
 }
 
 /*
- * The grip always shows, faint, so it is clear what can be picked up (the whole row can, rowGrab); it was hidden here
- * even on hover (this rule came after the hover one).
+ * The grip shows on hover (the whole row can be picked up, rowGrab); it used to stay hidden here even then, this rule
+ * coming after the hover one. Without hover (touch) it always shows.
  */
 .lib-pane .lecture-row .drag-handle {
   width: 22px;
   margin-left: 0;
-  opacity: 0.55;
+  opacity: 0;
 }
 
 .lib-pane .lecture-row:hover .drag-handle,
 .lib-pane .lecture-row:focus-within .drag-handle {
   opacity: 1;
+}
+
+@media (hover: none) {
+  .lib-pane .lecture-row .drag-handle {
+    opacity: 0.7;
+  }
 }
 
 .lib-pane .lecture-open {
