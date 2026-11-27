@@ -100,6 +100,9 @@ macOS has no `timeout` command.
   `arch-x64` (AppImage + pacman package on Arch) → draft release in the PRIVATE repo with all installers,
   `easy-study-bin-*.pkg.tar.zst`, a PKGBUILD and the FFmpeg source. Manual run: `gh workflow run desktop.yml --ref main`.
   CI never signs anything for the updater and never sees the updater key.
+  CI pins Rust (`RUST_TOOLCHAIN` in desktop.yml, 1.99.1 since 2026-11-27): Rust 1.100's Cargo moved build-script output
+  one folder deeper and tauri-build 2.6 then copied the resources away from the exe (v0.6.18's first tag run failed the
+  Windows smoke test on it). Unpin together with tauri-build >= 2.7.
   From 0.6.6 the Linux jobs also build and smoke-test the headless server tarballs
   (`easy-study-server-<v>-linux-<x64|arm64>.tar.gz`, DESIGN §26); publish-release checks their contents, signs them and
   puts them in latest.json (`linux-*-server`) like the other updater artifacts, so `easy-study update` finds them. The

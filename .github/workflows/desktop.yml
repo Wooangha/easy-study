@@ -38,6 +38,11 @@ concurrency:
 env:
   # `secrets` cannot be used in `if:`; expose "is it configured" as plain env instead.
   HAS_APPLE_CERT: ${{ secrets.APPLE_CERTIFICATE != '' }}
+  # Rust pinned: 1.100's Cargo puts build-script output one folder deeper (target/<profile>/build/<pkg>/<hash>/out),
+  # and tauri-build 2.6 then copies the resources (node/, server/, whisper/, ffmpeg/) next to build/ instead of next
+  # to the exe, so the Windows smoke test, which runs the exe from target/, found no Node.js (v0.6.18's first run).
+  # Unpin together with tauri-build >= 2.7, which finds the profile folder in both layouts.
+  RUST_TOOLCHAIN: '1.99.1'
 
 jobs:
   test:
@@ -61,8 +66,8 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
       - name: Rust toolchain
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install ${{ env.RUST_TOOLCHAIN }} --profile minimal
+          rustup default ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: desktop/src-tauri -> target
@@ -176,8 +181,8 @@ jobs:
       # APPLE_* secrets once they are configured). Every action is pinned by commit.
       - name: Rust toolchain
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install ${{ env.RUST_TOOLCHAIN }} --profile minimal
+          rustup default ${{ env.RUST_TOOLCHAIN }}
           rustup target add ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
