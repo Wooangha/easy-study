@@ -1213,7 +1213,8 @@ added now and runs once a repository exists.)
   stays blank. `desktop/scripts/appimage.mjs` (run by build.mjs on Linux) unpacks the AppImage's squashfs, removes that library and
   repacks it after the original runtime; CI checks the result with `--check`.
 - `packaging/arch/PKGBUILD` (`easy-study-bin`) repackages the release .deb with Arch dependencies (webkit2gtk-4.1, gtk3, gcc-libs,
-  openssl; optdepends noto-fonts-cjk, xdg-utils). CI job `arch-x64` (container archlinux:latest) smoke-tests the x86_64 AppImage, builds
+  openssl-3 — OpenSSL 3's libssl.so.3, `openssl` is a newer major on current Arch; optdepends noto-fonts-cjk, xdg-utils).
+  CI job `arch-x64` (container archlinux:latest) smoke-tests the x86_64 AppImage, builds
   the package from the fresh .deb, installs it, runs namcap and the smoke tests, removes it, and attaches the `.pkg.tar.zst` + PKGBUILD
   to releases. Arch Linux ARM (aarch64) is listed but untested.
 

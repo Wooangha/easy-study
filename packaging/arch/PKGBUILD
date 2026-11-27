@@ -21,10 +21,11 @@ arch=('x86_64' 'aarch64')
 url='https://github.com/Wooangha/easy-study-releases'
 # The bundled Node.js and third-party (PDFium…) notices are linked into /usr/share/licenses below.
 license=('MIT')
-# What the app (WebKitGTK shell, native-tls → libssl) and the bundled Node (libatomic, libstdc++) link against.
+# What the app (WebKitGTK shell, native-tls → libssl.so.3) and the bundled Node (libatomic, libstdc++) link against.
+# openssl-3: OpenSSL 3's libssl.so.3 (the app is built against it); on current Arch `openssl` is a newer major.
 # gcc-libs: libatomic/libgcc/libstdc++ (split out of it on current Arch, where it pulls them in).
 # gst-plugins-base/-good: WebKitGTK's microphone capture (lecture recording) and WAV/Opus playback.
-depends=('cairo' 'dbus' 'gcc-libs' 'gdk-pixbuf2' 'glib2' 'glibc' 'gtk3' 'hicolor-icon-theme' 'libsoup3' 'openssl'
+depends=('cairo' 'dbus' 'gcc-libs' 'gdk-pixbuf2' 'glib2' 'glibc' 'gtk3' 'hicolor-icon-theme' 'libsoup3' 'openssl-3'
          'webkit2gtk-4.1' 'gst-plugins-base' 'gst-plugins-good')
 optdepends=('noto-fonts-cjk: Korean (CJK) text in the app window'
             'gst-libav: play uploaded lecture recordings (AAC/m4a) in the app'
