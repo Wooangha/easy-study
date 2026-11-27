@@ -28,7 +28,7 @@ The user writes short casual Korean. Keep replies in Korean, short, plain; lead 
 
 ## Repository state (at the time of writing)
 
-- `main`: unreleased since v0.6.17: library rows are dragged from anywhere, not only by the ≡ handle; the library's drop marks stand out — "into" a course / group / 미분류 fills its tree row
+- `main`: unreleased since v0.6.17: library rows are dragged from anywhere, not only by the ≡ handle, and the lecture rows' grip always shows; the library's drop marks stand out — "into" a course / group / 미분류 fills its tree row
   with the accent, insertion lines start with a ring (DESIGN §18).
   Released up to **v0.6.17** (the tutor's system prompt rewritten after Anthropic's published claude.ai system prompts,
   DESIGN §5 "system prompt"; 0.6.16: the library on big screens — a centred column that grows, larger pictures —, ＋ 과목 / ＋ 그룹

@@ -1008,6 +1008,8 @@ that no longer exists, rolls the move back with a toast. The client also reloads
     and touch activators on the lecture row and the tree row (a click still opens / selects — the mouse must move 4 px, a finger
     rest 200 ms —, the click that ends a drag over the row is swallowed, text fields and the ⋯ menu start nothing). The handle
     keeps the keyboard drag and the accessible name; a press on it is captured first (@dnd-kit ignores an event already captured).
+    In the course pane the lecture rows' grip always shows, faint (stronger on hover), so it is clear what can be picked up; it
+    used to stay hidden there even on hover (`.lib-pane .lecture-row .drag-handle` came after the hover rule).
   - Lectures (`≡` handle): reorder inside a course, move to another course (single PATCH of the target course — the server removes it
     from the old one), drop into 미분류 (PATCH of the source course without it).
   - In the two columns (0.6.15): lectures are reordered in the list on the right and dropped on a course row of the tree to go to

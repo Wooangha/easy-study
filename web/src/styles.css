@@ -4074,10 +4074,19 @@ details[open] > summary::before {
   padding: 6px 10px 6px 2px;
 }
 
+/*
+ * The grip always shows, faint, so it is clear what can be picked up (the whole row can, rowGrab); it was hidden here
+ * even on hover (this rule came after the hover one).
+ */
 .lib-pane .lecture-row .drag-handle {
-  width: 18px;
+  width: 22px;
   margin-left: 0;
-  opacity: 0;
+  opacity: 0.55;
+}
+
+.lib-pane .lecture-row:hover .drag-handle,
+.lib-pane .lecture-row:focus-within .drag-handle {
+  opacity: 1;
 }
 
 .lib-pane .lecture-open {
