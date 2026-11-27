@@ -1,4 +1,4 @@
-// Library organization (DESIGN §18): course groups, the top-level order, units (단원) of a course and moves of
+// Library organization (DESIGN §18): course groups, the top-level order, units (섹션) of a course and moves of
 // lectures, units, courses and groups. Pure functions on the shared contract types, used by the organizer store
 // (optimistic updates), the library view (rendering, drag & drop) and the pickers. Lecture membership/order and
 // units live in the courses (Course.docIds, Course.units); groups and the order of courses live in the layout.
@@ -311,7 +311,7 @@ export function lectureMovePatch(courses: readonly Course[], move: LectureMove):
 }
 
 // ---------------------------------------------------------------------------------------------------------
-// Units (단원) of a course
+// Units (섹션) of a course
 // ---------------------------------------------------------------------------------------------------------
 
 /** The courses after a unit move (unchanged when the course or the unit is gone). */

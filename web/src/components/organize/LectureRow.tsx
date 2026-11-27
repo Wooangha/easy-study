@@ -21,7 +21,7 @@ interface LectureRowProps {
   courseId: string | null;
   /** Its unit (null: none). */
   unitId?: string | null;
-  /** The units of its course (the "단원으로 이동" entries) and moving it to one (null: out of its unit). */
+  /** The units of its course (the "섹션으로 이동" entries) and moving it to one (null: out of its unit). */
   units?: readonly CourseUnit[];
   onMoveToUnit?: (unitId: string | null) => void;
   /** Every course in layout order (the "과목으로 이동" entries). */

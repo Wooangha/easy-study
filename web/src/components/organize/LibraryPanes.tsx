@@ -1,5 +1,5 @@
 // The library's right column (DESIGN §18, 0.6.15): the chosen course — where it is, its name, COURSE.md, ＋ 강의 추가,
-// ＋ 단원 추가 and its ⋯ menu, then its lectures (LectureRow: the first slide, "3. title", slide count and upload date,
+// ＋ 섹션 추가 and its ⋯ menu, then its lectures (LectureRow: the first slide, "3. title", slide count and upload date,
 // 정리본, ⋯), in its units when it has some (CourseUnits.tsx) — or 미분류. A PDF dropped on it is added there.
 import { useDroppable } from '@dnd-kit/core';
 import { useState, type DragEvent, type ReactNode } from 'react';
@@ -34,7 +34,7 @@ interface LectureHandlers {
   onDeleteDoc: (doc: DocMeta) => void;
 }
 
-/** The units (단원) of the shown course. */
+/** The units (섹션) of the shown course. */
 export interface UnitHandlers {
   /** Collapsed keys (collapseKey.unit among them). */
   collapsed: ReadonlySet<string>;

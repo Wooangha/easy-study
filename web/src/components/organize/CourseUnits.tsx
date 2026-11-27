@@ -1,4 +1,4 @@
-// Units (단원) of a course in the library's course pane (DESIGN §18): a header — grip (on hover), chevron, name,
+// Units (섹션) of a course in the library's course pane (DESIGN §18): a header — grip (on hover), chevron, name,
 // lecture count, a rule, ⋯ — over the unit's lectures, or a dashed "drag lectures here" box when it has none. The
 // header collapses the unit (per device). A unit is dragged by its header; lectures drop into it.
 import { useDroppable } from '@dnd-kit/core';

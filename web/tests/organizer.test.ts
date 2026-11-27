@@ -407,7 +407,7 @@ describe('organizer store', () => {
   });
 });
 
-describe('units (단원)', () => {
+describe('units (섹션)', () => {
   const unitsOf = (org: ReturnType<typeof setup>['org'], courseId: string) =>
     (org.getSnapshot().courses?.find((c) => c.id === courseId)?.units ?? []).map((u) => `${u.title}[${u.docIds.join('')}]`).join(' ');
 

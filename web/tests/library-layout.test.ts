@@ -598,7 +598,7 @@ describe('geometry and keyboard stops', () => {
 });
 
 // ---------------------------------------------------------------------------------------------------------
-// Units (단원)
+// Units (섹션)
 // ---------------------------------------------------------------------------------------------------------
 
 describe('units', () => {
@@ -684,7 +684,7 @@ describe('units', () => {
     const top = resolveDrop(lecture('c'), head('u1'), 0.1, lone);
     assert.deepEqual(top?.indicator, { type: 'line', key: 'unit:c1/u1', side: 'before' });
     assert.equal(describePlace(top!, lone), '‘C1’ 과목의 1번째 자리 (3개 중)');
-    assert.equal(describePlace(start!, unitView()), '‘중간’ 단원의 1번째 자리 (3개 중)');
+    assert.equal(describePlace(start!, unitView()), '‘중간’ 섹션의 1번째 자리 (3개 중)');
   });
 
   test('a unit dragged among the units of its course: upper half = before, lower half = after; its own place = noop', () => {
@@ -692,7 +692,7 @@ describe('units', () => {
     const before = resolveDrop(dragged, section('u1'), 0.3, unitView());
     assert.deepEqual(before?.move, { kind: 'unit', courseId: 'c1', unitId: 'u3', beforeUnitId: 'u1' });
     assert.deepEqual(before?.indicator, { type: 'line', key: 'unit:c1/u1', side: 'before' });
-    assert.equal(describePlace(before!, unitView()), '‘C1’ 과목 단원 중 1번째 자리 (3개 중)');
+    assert.equal(describePlace(before!, unitView()), '‘C1’ 과목 섹션 중 1번째 자리 (3개 중)');
     assert.equal(resolveDrop(dragged, section('u2'), 0.8, unitView())?.key, 'noop', 'after 기말 = where it is');
     assert.equal(resolveDrop(dragged, section('u3'), 0.2, unitView())?.key, 'noop');
     const end = resolveDrop({ kind: 'unit', courseId: 'c1', unitId: 'u1' }, { role: 'course-body', courseId: 'c1' }, 0.5, unitView());

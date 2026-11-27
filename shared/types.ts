@@ -253,12 +253,12 @@ export interface Course {
    * unit's lectures in unit order (shared/courseUnits.ts normalizeUnits).
    */
   docIds: string[];
-  /** Its units (단원, since 0.6.18), in display order; [] = a plain list. */
+  /** Its units (섹션, since 0.6.18), in display order; [] = a plain list. */
   units: CourseUnit[];
 }
 
 /**
- * A unit (단원) of a course: a named, collapsible section of its lecture list (e.g. "중간고사 범위"). Purely
+ * A unit (섹션) of a course: a named, collapsible section of its lecture list (e.g. "중간고사 범위"). Purely
  * organisational: the lecture order (Course.docIds) is what the LLM and COURSE.md follow.
  */
 export interface CourseUnit {

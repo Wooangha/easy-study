@@ -1056,9 +1056,10 @@ that no longer exists, rolls the move back with a toast. The client also reloads
   lecture, as before). Tests: web/tests/lecture-picker.test.ts.
 - Replace window.confirm() in the library view with an in-page confirmation dialog (it does not work inside the upcoming desktop app).
 
-### Units (단원) of a course (0.6.18)
+### Sections (섹션) of a course — `units` in the code (0.6.18)
 User request: "칸막이" inside a course's lecture list — named, reorderable, each collapsible (the user picked mock-up B of two,
-"B가 좋은데?? … 좀만 더 잘 다듬어볼래?"; "칸막이 추가 << 이름이 좀 그렇다" → 단원; grips "올려놨을 때만 보여도 될듯").
+"B가 좋은데?? … 좀만 더 잘 다듬어볼래?"; "칸막이 추가 << 이름이 좀 그렇다" → 단원, then
+"단원말고 다른 용도로 쓸 수도 있잖아" → 섹션, the generic name; grips "올려놨을 때만 보여도 될듯").
 - Data: `Course.units: CourseUnit[]` (`{ id, title, docIds }`, ids UNIT_ID_RE made by the client, titles like course titles, at
   most MAX_UNITS = 100). `course.json` keeps `units` only when there are some. Normal form (shared/courseUnits.ts, used by the
   server and the client alike): a lecture is in at most one unit, units list only lectures of the course, and `docIds` = the
@@ -1074,11 +1075,11 @@ User request: "칸막이" inside a course's lecture list — named, reorderable,
   says _(아직 강의가 없습니다)_).
 - Web (organize/CourseUnits.tsx, LibraryPanes.tsx `UnitList`): the lectures in no unit first in their own bordered list, without a
   header; then per unit a header — grip (on hover, like the lecture rows'), chevron + name + count pill (the toggle; collapsed: the
-  name muted), a rule, ⋯ (이름 바꾸기, 단원 삭제) — over its lectures in a bordered list, or a dashed "강의를 여기로 끌어다
-  놓으세요" box. "＋ 단원 추가" in the pane's header opens a name form where the unit will be: the first unit of a course takes its
+  name muted), a rule, ⋯ (이름 바꾸기, 섹션 삭제) — over its lectures in a bordered list, or a dashed "강의를 여기로 끌어다
+  놓으세요" box. "＋ 섹션 추가" in the pane's header opens a name form where the unit will be: the first unit of a course takes its
   lectures (a plain list gets a heading), later ones start empty at the end. Deleting a unit asks first when it has lectures; they
-  join the unit above (the first unit's: no unit), so nothing moves on screen. A lecture's ⋯ gets "단원으로 이동" (the other units,
-  "단원에서 빼기"). Collapse state per device with the other keys (`unit:<courseId>/<unitId>`).
+  join the unit above (the first unit's: no unit), so nothing moves on screen. A lecture's ⋯ gets "섹션으로 이동" (the other units,
+  "섹션에서 빼기"). Collapse state per device with the other keys (`unit:<courseId>/<unitId>`).
 - Drag & drop: a unit is dragged by its header (anywhere on it, rowGrab) among the units of its course — the upper half of a unit
   = before it, the lower half = after it, the list's free space = the end; its lectures go with it. A lecture over a unit header:
   its top third (the gap above the name belongs to the header, so nothing between two units falls through to the end of the

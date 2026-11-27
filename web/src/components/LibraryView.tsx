@@ -129,7 +129,7 @@ export function LibraryView(props: LibraryViewProps) {
     ]);
     void org.moveLecture(docId, courseId);
   };
-  /** "단원으로 이동": the lecture keeps the focus in its new place, or its unit when that is collapsed. */
+  /** "섹션으로 이동": the lecture keeps the focus in its new place, or its unit when that is collapsed. */
   const moveLectureToUnit = (docId: string, courseId: string, unitId: string | null) => {
     setFocusAfter([dndId.lecture(docId), ...(unitId ? [dndId.unit(courseId, unitId)] : []), HEADING_KEY]);
     void org.moveLecture(docId, courseId, null, unitId);

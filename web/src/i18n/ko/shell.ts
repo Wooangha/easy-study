@@ -379,32 +379,32 @@ export const shell = {
     empty: (grip: ReactNode) => rich('비어 있는 그룹이에요 — 과목이나 그룹의 ', grip, ' 손잡이를 끌어다 놓거나 ‘＋ 과목’ · ‘＋ 그룹’으로 만드세요'),
   },
 
-  /** A unit (단원) of a course: a named, collapsible section of its lecture list (organize/CourseUnits.tsx). */
+  /** A unit (섹션) of a course: a named, collapsible section of its lecture list (organize/CourseUnits.tsx). */
   unit: {
-    roleDescription: '옮길 수 있는 단원',
-    add: '단원 추가',
-    addTitle: '단원 추가 — 강의 목록을 이름 붙인 묶음으로 나눠요',
+    roleDescription: '옮길 수 있는 섹션',
+    add: '섹션 추가',
+    addTitle: '섹션 추가 — 강의 목록을 이름 붙인 묶음으로 나눠요',
     /** The name input of a new unit; the first unit of a course takes its lectures. */
-    newName: '새 단원 이름',
-    nameLabel: '단원 이름',
-    label: (title: string) => `단원 ${title}`,
-    move: (title: string) => `‘${title}’ 단원 옮기기`,
-    menu: (title: string) => `‘${title}’ 단원 메뉴`,
+    newName: '새 섹션 이름',
+    nameLabel: '섹션 이름',
+    label: (title: string) => `섹션 ${title}`,
+    move: (title: string) => `‘${title}’ 섹션 옮기기`,
+    menu: (title: string) => `‘${title}’ 섹션 메뉴`,
     lectureCount: (n: number) => `강의 ${n}개`,
-    deleteItem: '단원 삭제',
+    deleteItem: '섹션 삭제',
     deleteConfirm: {
-      title: (title: string) => `단원 ${withParticle(`‘${title}’`, '을', '를')} 삭제할까요?`,
+      title: (title: string) => `섹션 ${withParticle(`‘${title}’`, '을', '를')} 삭제할까요?`,
       /** `into`: the unit above it (null: it is the first unit). */
       lecturesKept: (n: number, into: string | null) =>
         into === null
-          ? `강의 ${n}개는 지워지지 않고 단원 밖(과목 맨 위)으로 옮겨져요.`
-          : `강의 ${n}개는 지워지지 않고 바로 위 ‘${into}’ 단원으로 합쳐져요.`,
-      confirmLabel: '단원 삭제',
+          ? `강의 ${n}개는 지워지지 않고 섹션 밖(과목 맨 위)으로 옮겨져요.`
+          : `강의 ${n}개는 지워지지 않고 바로 위 ‘${into}’ 섹션으로 합쳐져요.`,
+      confirmLabel: '섹션 삭제',
     },
     empty: '강의를 여기로 끌어다 놓으세요',
     /** A lecture's ⋯ menu in a course with units. */
-    moveToUnit: '단원으로 이동',
-    removeFromUnit: '단원에서 빼기',
+    moveToUnit: '섹션으로 이동',
+    removeFromUnit: '섹션에서 빼기',
     removeFromUnitHint: '과목 맨 위로',
   },
 
@@ -434,11 +434,11 @@ export const shell = {
     lectureName: (title: string) => `‘${title}’ 강의`,
     courseName: (title: string) => `‘${title}’ 과목`,
     groupName: (title: string) => `‘${title}’ 그룹`,
-    unitName: (title: string) => `‘${title}’ 단원`,
+    unitName: (title: string) => `‘${title}’ 섹션`,
     lectureFallback: '강의',
     courseFallback: '과목',
     groupFallback: '그룹',
-    unitFallback: '단원',
+    unitFallback: '섹션',
     opened: (name: string) => `${withParticle(name, '을', '를')} 열었어요.`,
     openedPlain: '열었어요.',
     pickedUp: (name: string) => `${withParticle(name, '을', '를')} 집었어요. 위아래 화살표로 옮기고 스페이스나 엔터로 놓으세요.`,
@@ -459,9 +459,9 @@ export const shell = {
       uncategorized: '미분류',
       course: '과목',
       inCourse: (title: string, position: number) => `‘${title}’ 과목의 ${position}번째 자리`,
-      inUnit: (title: string, position: number) => `‘${title}’ 단원의 ${position}번째 자리`,
+      inUnit: (title: string, position: number) => `‘${title}’ 섹션의 ${position}번째 자리`,
       /** A unit's place among the units of its course. */
-      unitOrder: (course: string, position: number) => `‘${course}’ 과목 단원 중 ${position}번째 자리`,
+      unitOrder: (course: string, position: number) => `‘${course}’ 과목 섹션 중 ${position}번째 자리`,
       group: '그룹',
       inGroup: (title: string, position: number) => `‘${title}’ 그룹의 ${position}번째 자리`,
       outsideGroups: (position: number) => `그룹 밖 목록의 ${position}번째 자리`,
@@ -485,10 +485,10 @@ export const shell = {
       deleteGroup: '그룹을 삭제하지 못했어요',
       createCourse: '과목을 만들지 못했어요',
       createGroup: '그룹을 만들지 못했어요',
-      moveUnit: '단원을 옮기지 못해 원래대로 되돌렸어요',
-      createUnit: '단원을 만들지 못했어요',
-      renameUnit: '단원 이름을 바꾸지 못했어요',
-      deleteUnit: '단원을 삭제하지 못했어요',
+      moveUnit: '섹션을 옮기지 못해 원래대로 되돌렸어요',
+      createUnit: '섹션을 만들지 못했어요',
+      renameUnit: '섹션 이름을 바꾸지 못했어요',
+      deleteUnit: '섹션을 삭제하지 못했어요',
       refresh: '과목 목록을 불러오지 못했어요',
     },
     gone: {
@@ -496,7 +496,7 @@ export const shell = {
       course: '이 과목은 다른 곳에서 삭제됐어요',
       targetGroup: '옮길 그룹이 다른 곳에서 삭제됐어요',
       group: '이 그룹은 다른 곳에서 삭제됐어요',
-      unit: '이 단원은 다른 곳에서 삭제됐어요',
+      unit: '이 섹션은 다른 곳에서 삭제됐어요',
     },
   },
 };

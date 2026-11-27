@@ -1,4 +1,4 @@
-// Units (단원) of a course (DESIGN §18): named, collapsible sections of its lecture list. Shared by the server (what
+// Units (섹션) of a course (DESIGN §18): named, collapsible sections of its lecture list. Shared by the server (what
 // it stores and checks) and the web client (optimistic changes, drag & drop), so both put lectures in the same place.
 //
 // A course keeps its full lecture order in Course.docIds; its units list parts of it. In normal form a lecture is in

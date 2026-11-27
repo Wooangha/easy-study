@@ -44,12 +44,12 @@ export const library = {
     nameRequired: {
       course: '과목 이름을 입력해 주세요',
       group: '그룹 이름을 입력해 주세요',
-      unit: '단원 이름을 입력해 주세요',
+      unit: '섹션 이름을 입력해 주세요',
     },
     nameTooLong: {
       course: (max: number) => `과목 이름이 너무 깁니다 (최대 ${max}자)`,
       group: (max: number) => `그룹 이름이 너무 깁니다 (최대 ${max}자)`,
-      unit: (max: number) => `단원 이름이 너무 깁니다 (최대 ${max}자)`,
+      unit: (max: number) => `섹션 이름이 너무 깁니다 (최대 ${max}자)`,
     },
     docIdsInvalid: 'docIds는 문서 id 목록이어야 합니다',
     baseDocIdsInvalid: 'baseDocIds는 문서 id 목록이어야 합니다',
@@ -61,12 +61,12 @@ export const library = {
     groupIdInvalid: 'groupId는 그룹 id여야 합니다',
     parentIdInvalid: 'parentId는 그룹 id여야 합니다',
     lecturesChanged: '다른 곳에서 이 과목의 강의 목록이 바뀌었습니다. 새로 불러온 뒤 다시 시도해 주세요',
-    /** UpdateCourseRequest.units (단원). */
-    unitsInvalid: 'units는 단원(id, title, docIds) 목록이어야 합니다',
-    baseUnitsInvalid: 'baseUnits는 단원(id, title, docIds) 목록이어야 합니다',
-    tooManyUnits: (max: number) => `단원이 너무 많습니다 (최대 ${max}개)`,
-    duplicateUnit: (unitId: string) => `같은 단원이 두 번 들어 있습니다: ${unitId}`,
-    unitDocNotInCourse: (docId: string) => `이 과목에 없는 강의가 단원에 들어 있습니다: ${docId}`,
+    /** UpdateCourseRequest.units (섹션). */
+    unitsInvalid: 'units는 섹션(id, title, docIds) 목록이어야 합니다',
+    baseUnitsInvalid: 'baseUnits는 섹션(id, title, docIds) 목록이어야 합니다',
+    tooManyUnits: (max: number) => `섹션이 너무 많습니다 (최대 ${max}개)`,
+    duplicateUnit: (unitId: string) => `같은 섹션이 두 번 들어 있습니다: ${unitId}`,
+    unitDocNotInCourse: (docId: string) => `이 과목에 없는 강의가 섹션에 들어 있습니다: ${docId}`,
   },
   /** COURSE.md (server/courses.ts courseMarkdown), written in the language of the request that changed the course. */
   courseMd: {
