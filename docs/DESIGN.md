@@ -1056,6 +1056,38 @@ that no longer exists, rolls the move back with a toast. The client also reloads
   lecture, as before). Tests: web/tests/lecture-picker.test.ts.
 - Replace window.confirm() in the library view with an in-page confirmation dialog (it does not work inside the upcoming desktop app).
 
+### Units (단원) of a course (0.6.18)
+User request: "칸막이" inside a course's lecture list — named, reorderable, each collapsible (the user picked mock-up B of two,
+"B가 좋은데?? … 좀만 더 잘 다듬어볼래?"; "칸막이 추가 << 이름이 좀 그렇다" → 단원; grips "올려놨을 때만 보여도 될듯").
+- Data: `Course.units: CourseUnit[]` (`{ id, title, docIds }`, ids UNIT_ID_RE made by the client, titles like course titles, at
+  most MAX_UNITS = 100). `course.json` keeps `units` only when there are some. Normal form (shared/courseUnits.ts, used by the
+  server and the client alike): a lecture is in at most one unit, units list only lectures of the course, and `docIds` = the
+  lectures in no unit, then each unit's in unit order — so the lecture order the LLM, COURSE.md and the numbering follow is the
+  order on screen. Purely organisational otherwise.
+- HTTP: `PATCH /api/courses/:id` takes `units` (replaces them all, checked against the course's `docIds` after the request:
+  400 for a lecture not in the course, one listed twice, a bad or repeated id or title) and `baseUnits` (409 when the units are
+  not those any more, like `baseDocIds`). Without `units`, a new `docIds` keeps each unit's lectures that stay, in the new order.
+  A lecture leaving for another course (or deleted) leaves its unit; an empty unit stays. An uploaded lecture (natural-sort
+  place, §12) joins the unit of the lecture before it; at the end of the course the last unit (an empty one too), at the start
+  the unit of the lecture after it.
+- COURSE.md: with units, `## <unit>` before its lectures, which become `### k. title` (numbered through the course; an empty unit
+  says _(아직 강의가 없습니다)_).
+- Web (organize/CourseUnits.tsx, LibraryPanes.tsx `UnitList`): the lectures in no unit first in their own bordered list, without a
+  header; then per unit a header — grip (on hover, like the lecture rows'), chevron + name + count pill (the toggle; collapsed: the
+  name muted), a rule, ⋯ (이름 바꾸기, 단원 삭제) — over its lectures in a bordered list, or a dashed "강의를 여기로 끌어다
+  놓으세요" box. "＋ 단원 추가" in the pane's header opens a name form where the unit will be: the first unit of a course takes its
+  lectures (a plain list gets a heading), later ones start empty at the end. Deleting a unit asks first when it has lectures; they
+  join the unit above (the first unit's: no unit), so nothing moves on screen. A lecture's ⋯ gets "단원으로 이동" (the other units,
+  "단원에서 빼기"). Collapse state per device with the other keys (`unit:<courseId>/<unitId>`).
+- Drag & drop: a unit is dragged by its header (anywhere on it, rowGrab) among the units of its course — the upper half of a unit
+  = before it, the lower half = after it, the list's free space = the end; its lectures go with it. A lecture over a unit header:
+  its top third (the gap above the name belongs to the header, so nothing between two units falls through to the end of the
+  course) = the end of the part above, the rest = the unit's start (collapsed: its end, the name row filled with the accent);
+  over a unit's free space or its empty box = its end (the box turns accent). `LectureMove.unitId` says the unit (absent: the
+  unit of the lecture it goes before; at the end of a course the last unit, e.g. a drop on a course row of the tree).
+  Organizer ops (`unit` create / rename / delete, `move` of kind `unit`) are one PATCH each with both bases, retried once
+  after a 409 like moves. Tests: tests/courses.test.ts (units), web/tests/library-layout.test.ts (units), organizer.test.ts.
+
 ## 19. Round 8 — desktop app (Tauri 2) for macOS, Windows and Linux
 
 User decision: a real installable app (no browser) for macOS, Windows and Linux that keeps the server architecture: the app either

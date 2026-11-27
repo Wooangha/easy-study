@@ -1013,7 +1013,15 @@ export function createApiRouter(options: AppOptions = {}, gate: AuthGate = creat
 
   api.patch('/courses/:courseId', async (req, res) => {
     const body = jsonBody(req);
-    res.json(await updateCourse(req.params.courseId, { title: body.title, docIds: body.docIds, baseDocIds: body.baseDocIds }));
+    res.json(
+      await updateCourse(req.params.courseId, {
+        title: body.title,
+        docIds: body.docIds,
+        baseDocIds: body.baseDocIds,
+        units: body.units,
+        baseUnits: body.baseUnits,
+      }),
+    );
   });
 
   api.delete('/courses/:courseId', async (req, res) => {

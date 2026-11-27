@@ -17,12 +17,15 @@ import {
   type OrgView,
 } from '../src/lib/libraryDnd.ts';
 import { withParticle } from '../src/lib/korean.ts';
+import { normalizeUnits, unitsByMembership } from '../../shared/courseUnits.ts';
 import {
   allCollapseKeys,
   applyCourseMove,
   applyCourseUpdate,
   applyGroupMove,
   applyLectureMove,
+  applyUnitChange,
+  applyUnitMove,
   courseLabel,
   coursesInside,
   groupPath,
@@ -30,6 +33,7 @@ import {
   layoutEntries,
   layoutRows,
   lectureMovePatch,
+  newUnitId,
   neighbourAfterDelete,
   normalizeLayout,
   sameLayout,
@@ -49,6 +53,7 @@ const course = (id: string, docIds: string[], createdAt = '2026-09-01T00:00:00Z'
   title: id.toUpperCase(),
   createdAt,
   docIds,
+  units: [],
 });
 
 // c1 (a, b, c) at the top level, then group g1 with c2 (d, e) and c3 (empty).
@@ -142,10 +147,12 @@ describe('moves', () => {
     assert.deepEqual(lectureMovePatch(courses, { kind: 'lecture', docId: 'b', courseId: 'c2', beforeDocId: null }), {
       courseId: 'c2',
       docIds: ['d', 'e', 'b'],
+      units: [],
     });
     assert.deepEqual(lectureMovePatch(courses, { kind: 'lecture', docId: 'b', courseId: null, beforeDocId: null }), {
       courseId: 'c1',
       docIds: ['a', 'c'],
+      units: [],
     });
     assert.equal(lectureMovePatch(courses, { kind: 'lecture', docId: 'b', courseId: 'c1', beforeDocId: 'c' }), null);
     assert.equal(lectureMovePatch(courses, { kind: 'lecture', docId: 'x', courseId: null, beforeDocId: null }), null);
@@ -154,6 +161,7 @@ describe('moves', () => {
     assert.deepEqual(lectureMovePatch(courses, { kind: 'lecture', docId: 'x', courseId: 'c3', beforeDocId: null }), {
       courseId: 'c3',
       docIds: ['x'],
+      units: [],
     });
   });
 
@@ -357,15 +365,15 @@ describe('collapse state (per device, shared by its tabs)', () => {
 
 describe('resolveDrop', () => {
   const lecture = (docId: string) => ({ kind: 'lecture' as const, docId });
-  const row = (docId: string, courseId: string | null): DropData => ({ role: 'lecture', docId, courseId });
+  const row = (docId: string, courseId: string | null): DropData => ({ role: 'lecture', docId, courseId, unitId: null });
 
   test('lecture over a row: upper half = before it, lower half = after it (skipping itself)', () => {
     const before = resolveDrop(lecture('c'), row('b', 'c1'), 0.2, view());
-    assert.deepEqual(before?.move, { kind: 'lecture', docId: 'c', courseId: 'c1', beforeDocId: 'b' });
+    assert.deepEqual(before?.move, { kind: 'lecture', docId: 'c', courseId: 'c1', beforeDocId: 'b', unitId: null });
     assert.deepEqual(before?.indicator, { type: 'line', key: 'lecture:b', side: 'before' });
     // a over the lower half of b → before c.
     const after = resolveDrop(lecture('a'), row('b', 'c1'), 0.8, view());
-    assert.deepEqual(after?.move, { kind: 'lecture', docId: 'a', courseId: 'c1', beforeDocId: 'c' });
+    assert.deepEqual(after?.move, { kind: 'lecture', docId: 'a', courseId: 'c1', beforeDocId: 'c', unitId: null });
     // The lower half of the last row = the end: the line is drawn after it.
     const end = resolveDrop(lecture('a'), row('c', 'c1'), 0.9, view());
     assert.deepEqual(end?.indicator, { type: 'line', key: 'lecture:c', side: 'after' });
@@ -478,9 +486,9 @@ describe('geometry and keyboard stops', () => {
     box('course:c1', { role: 'course', courseId: 'c1', groupId: null }, 0, 224),
     box('course-head:c1', { role: 'course-head', courseId: 'c1' }, 0, 40),
     box('course-body:c1', { role: 'course-body', courseId: 'c1' }, 40, 184),
-    box('lecture:a', { role: 'lecture', docId: 'a', courseId: 'c1' }, 40, 60, 10, 580),
-    box('lecture:b', { role: 'lecture', docId: 'b', courseId: 'c1' }, 100, 60, 10, 580),
-    box('lecture:c', { role: 'lecture', docId: 'c', courseId: 'c1' }, 160, 60, 10, 580),
+    box('lecture:a', { role: 'lecture', docId: 'a', courseId: 'c1', unitId: null }, 40, 60, 10, 580),
+    box('lecture:b', { role: 'lecture', docId: 'b', courseId: 'c1', unitId: null }, 100, 60, 10, 580),
+    box('lecture:c', { role: 'lecture', docId: 'c', courseId: 'c1', unitId: null }, 160, 60, 10, 580),
     box('group:g1', { role: 'group', groupId: 'g1', parentId: null }, 240, 120),
     box('group-head:g1', { role: 'group-head', groupId: 'g1' }, 240, 40),
     box('course:c2', { role: 'course', courseId: 'c2', groupId: 'g1' }, 290, 30, 10, 580),
@@ -502,8 +510,8 @@ describe('geometry and keyboard stops', () => {
       box('course-head:c1', { role: 'course-head', courseId: 'c1' }, 0, 32, 0, 260),
       box('course:c2', { role: 'course', courseId: 'c2', groupId: null }, 40, 32, 0, 260),
       box('course-head:c2', { role: 'course-head', courseId: 'c2' }, 40, 32, 0, 260),
-      box('lecture:a', { role: 'lecture', docId: 'a', courseId: 'c1' }, 100, 60, 300, 600),
-      box('lecture:b', { role: 'lecture', docId: 'b', courseId: 'c1' }, 160, 60, 300, 600),
+      box('lecture:a', { role: 'lecture', docId: 'a', courseId: 'c1', unitId: null }, 100, 60, 300, 600),
+      box('lecture:b', { role: 'lecture', docId: 'b', courseId: 'c1', unitId: null }, 160, 60, 300, 600),
     ];
     // Below the tree's rows, in the list's column: the nearest lecture, not a course row of the tree.
     assert.equal(pickDroppable(lecture, { x: 500, y: 60 }, cols, view())?.box.id, 'lecture:a');
@@ -567,8 +575,8 @@ describe('geometry and keyboard stops', () => {
     const opened = [
       ...boxes,
       box('course-body:c2', { role: 'course-body', courseId: 'c2' }, 320, 124, 10, 580),
-      box('lecture:d', { role: 'lecture', docId: 'd', courseId: 'c2' }, 320, 60, 20, 560),
-      box('lecture:e', { role: 'lecture', docId: 'e', courseId: 'c2' }, 380, 60, 20, 560),
+      box('lecture:d', { role: 'lecture', docId: 'd', courseId: 'c2', unitId: null }, 320, 60, 20, 560),
+      box('lecture:e', { role: 'lecture', docId: 'e', courseId: 'c2', unitId: null }, 380, 60, 20, 560),
     ];
     const now = targetAt(lecture, { x: 300, y: onHead.y }, opened, view());
     assert.equal(now?.key, 'lecture>c2>0');
@@ -586,5 +594,112 @@ describe('geometry and keyboard stops', () => {
     const last = stops[stops.length - 1];
     assert.equal(nextStop(stops, last.y, last.target.key, 1), null);
     assert.equal(nextStop(stops, first.y, 'noop', -1), null);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// Units (단원)
+// ---------------------------------------------------------------------------------------------------------
+
+describe('units', () => {
+  const unit = (id: string, title: string, docIds: string[]) => ({ id, title, docIds });
+  // c1: x (in no unit), then 중간 (a, b), 기말 (c), 빈 (empty); c2: d, e without units.
+  const withUnits: Course = { ...course('c1', ['x', 'a', 'b', 'c']), units: [unit('u1', '중간', ['a', 'b']), unit('u2', '기말', ['c']), unit('u3', '빈', [])] };
+  const all = [withUnits, course('c2', ['d', 'e'], '2026-09-02T00:00:00Z')];
+  const sections = (c: Course | undefined) => (c ? `${c.docIds.join('')} | ${c.units.map((u) => `${u.title}:${u.docIds.join('')}`).join(' ')}` : '');
+  const after = (move: Parameters<typeof applyLectureMove>[1]) => sections(applyLectureMove(all, move).find((c) => c.id === 'c1'));
+
+  test('normal form: lectures in no unit first, a lecture in one unit, units list only lectures of the course', () => {
+    assert.deepEqual(normalizeUnits(['a', 'b', 'c', 'd'], [unit('u1', 'A', ['c', 'zz', 'a']), unit('u2', 'B', ['a', 'b'])]), {
+      docIds: ['d', 'c', 'a', 'b'],
+      units: [unit('u1', 'A', ['c', 'a']), unit('u2', 'B', ['b'])],
+    });
+    // A new list without saying where: each unit keeps its lectures, in the new order; new ones are in none.
+    assert.deepEqual(unitsByMembership(['c', 'n', 'a'], [unit('u1', 'A', ['a', 'b', 'c'])]), { docIds: ['n', 'c', 'a'], units: [unit('u1', 'A', ['c', 'a'])] });
+  });
+
+  test('lecture moves: into a unit, before a lecture (its unit), at the end (the last unit), out of every unit', () => {
+    assert.equal(after({ kind: 'lecture', docId: 'x', courseId: 'c1', beforeDocId: null, unitId: 'u3' }), 'abcx | 중간:ab 기말:c 빈:x');
+    assert.equal(after({ kind: 'lecture', docId: 'c', courseId: 'c1', beforeDocId: 'b' }), 'xacb | 중간:acb 기말: 빈:');
+    assert.equal(after({ kind: 'lecture', docId: 'a', courseId: 'c1', beforeDocId: null }), 'xbca | 중간:b 기말:c 빈:a');
+    assert.equal(after({ kind: 'lecture', docId: 'b', courseId: 'c1', beforeDocId: null, unitId: null }), 'xbac | 중간:a 기말:c 빈:');
+    assert.equal(after({ kind: 'lecture', docId: 'b', courseId: 'c1', beforeDocId: 'x', unitId: null }), 'bxac | 중간:a 기말:c 빈:');
+    // From another course, into a unit; a unit that is gone: by position.
+    assert.equal(after({ kind: 'lecture', docId: 'd', courseId: 'c1', beforeDocId: 'c', unitId: 'u2' }), 'xabdc | 중간:ab 기말:dc 빈:');
+    assert.equal(after({ kind: 'lecture', docId: 'd', courseId: 'c1', beforeDocId: 'a', unitId: 'gone' }), 'xdabc | 중간:dab 기말:c 빈:');
+    // Out of the course: out of its unit too; the PATCH carries the units.
+    assert.equal(sections(applyLectureMove(all, { kind: 'lecture', docId: 'a', courseId: 'c2', beforeDocId: null })[0]), 'xbc | 중간:b 기말:c 빈:');
+    assert.deepEqual(lectureMovePatch(all, { kind: 'lecture', docId: 'c', courseId: null, beforeDocId: null })?.units, [
+      unit('u1', '중간', ['a', 'b']),
+      unit('u2', '기말', []),
+      unit('u3', '빈', []),
+    ]);
+    // Only the unit changes: still a PATCH; the same place: none.
+    assert.ok(lectureMovePatch(all, { kind: 'lecture', docId: 'c', courseId: 'c1', beforeDocId: null, unitId: 'u3' }));
+    assert.equal(lectureMovePatch(all, { kind: 'lecture', docId: 'c', courseId: 'c1', beforeDocId: null, unitId: 'u2' }), null);
+  });
+
+  test('unit changes: the first unit takes the lectures; a deleted unit\'s lectures join the one above; moves', () => {
+    const plain = course('p', ['a', 'b']);
+    const first = applyUnitChange(plain, { kind: 'create', unitId: 'u1', title: 'A' });
+    assert.equal(sections(first), 'ab | A:ab');
+    assert.equal(sections(applyUnitChange(first, { kind: 'create', unitId: 'u2', title: 'B' })), 'ab | A:ab B:');
+    assert.equal(sections(applyUnitChange(withUnits, { kind: 'create', unitId: 'u1', title: 'dup' })), sections(withUnits));
+    assert.equal(sections(applyUnitChange(withUnits, { kind: 'rename', unitId: 'u2', title: '기말고사' })), 'xabc | 중간:ab 기말고사:c 빈:');
+    assert.equal(sections(applyUnitChange(withUnits, { kind: 'delete', unitId: 'u2' })), 'xabc | 중간:abc 빈:');
+    assert.equal(sections(applyUnitChange(withUnits, { kind: 'delete', unitId: 'u1' })), 'xabc | 기말:c 빈:', 'the first: in no unit');
+    const moved = applyUnitMove(all, { kind: 'unit', courseId: 'c1', unitId: 'u2', beforeUnitId: 'u1' });
+    assert.equal(sections(moved[0]), 'xcab | 기말:c 중간:ab 빈:', 'its lectures go with it');
+    assert.equal(sections(applyUnitMove(all, { kind: 'unit', courseId: 'c1', unitId: 'u1', beforeUnitId: null })[0]), 'xcab | 기말:c 빈: 중간:ab');
+    assert.equal(sections(applyUnitMove(all, { kind: 'unit', courseId: 'c1', unitId: 'nope', beforeUnitId: null })[0]), sections(withUnits));
+    // Fresh ids; collapse keys of units.
+    // A fresh id: never one the course has (the first draw is taken, the second is not).
+    const draws = [0, 0.5];
+    const taken: Course = { ...withUnits, units: [...withUnits.units, unit('u00000000', 'Z', [])] };
+    const id = newUnitId(taken, () => draws.shift() ?? 0.9);
+    assert.match(id, /^u[a-z0-9]{8}$/);
+    assert.notEqual(id, 'u00000000');
+    assert.deepEqual(allCollapseKeys({ groups: [], order: [] }, [withUnits]), ['course:c1', 'unit:c1/u1', 'unit:c1/u2', 'unit:c1/u3']);
+  });
+
+  const unitView = (collapsed: string[] = []): OrgView => ({ courses: all, layout: normalizeLayout(null, all), isCollapsed: (k) => collapsed.includes(k) });
+  const lecture = (docId: string) => ({ kind: 'lecture' as const, docId });
+  const head = (unitId: string): DropData => ({ role: 'unit-head', courseId: 'c1', unitId });
+  const section = (unitId: string): DropData => ({ role: 'unit', courseId: 'c1', unitId });
+
+  test('a lecture over a unit header: top third = the end of the part above, the rest = its start (collapsed: its end)', () => {
+    const above = resolveDrop(lecture('x'), head('u2'), 0.1, unitView());
+    assert.deepEqual(above?.move, { kind: 'lecture', docId: 'x', courseId: 'c1', beforeDocId: null, unitId: 'u1' });
+    assert.deepEqual(above?.indicator, { type: 'line', key: 'lecture:b', side: 'after' });
+    const start = resolveDrop(lecture('x'), head('u1'), 0.7, unitView());
+    assert.deepEqual(start?.move, { kind: 'lecture', docId: 'x', courseId: 'c1', beforeDocId: 'a', unitId: 'u1' });
+    assert.deepEqual(start?.indicator, { type: 'line', key: 'lecture:a', side: 'before' });
+    const collapsed = resolveDrop(lecture('x'), head('u1'), 0.7, unitView(['unit:c1/u1']));
+    assert.deepEqual(collapsed?.indicator, { type: 'into', key: 'unit:c1/u1' });
+    assert.equal(collapsed?.move?.kind === 'lecture' && collapsed.move.beforeDocId, null);
+    // An empty unit: into it (its dashed box).
+    assert.deepEqual(resolveDrop(lecture('x'), section('u3'), 0.5, unitView())?.indicator, { type: 'into', key: 'unit:c1/u3' });
+    // No lecture in no unit (but this one): before the first unit is a line above it.
+    const lone: OrgView = { ...unitView(), courses: [{ ...withUnits, docIds: ['a', 'b', 'c'], units: withUnits.units }] };
+    const top = resolveDrop(lecture('c'), head('u1'), 0.1, lone);
+    assert.deepEqual(top?.indicator, { type: 'line', key: 'unit:c1/u1', side: 'before' });
+    assert.equal(describePlace(top!, lone), '‘C1’ 과목의 1번째 자리 (3개 중)');
+    assert.equal(describePlace(start!, unitView()), '‘중간’ 단원의 1번째 자리 (3개 중)');
+  });
+
+  test('a unit dragged among the units of its course: upper half = before, lower half = after; its own place = noop', () => {
+    const dragged = { kind: 'unit' as const, courseId: 'c1', unitId: 'u3' };
+    const before = resolveDrop(dragged, section('u1'), 0.3, unitView());
+    assert.deepEqual(before?.move, { kind: 'unit', courseId: 'c1', unitId: 'u3', beforeUnitId: 'u1' });
+    assert.deepEqual(before?.indicator, { type: 'line', key: 'unit:c1/u1', side: 'before' });
+    assert.equal(describePlace(before!, unitView()), '‘C1’ 과목 단원 중 1번째 자리 (3개 중)');
+    assert.equal(resolveDrop(dragged, section('u2'), 0.8, unitView())?.key, 'noop', 'after 기말 = where it is');
+    assert.equal(resolveDrop(dragged, section('u3'), 0.2, unitView())?.key, 'noop');
+    const end = resolveDrop({ kind: 'unit', courseId: 'c1', unitId: 'u1' }, { role: 'course-body', courseId: 'c1' }, 0.5, unitView());
+    assert.deepEqual(end?.indicator, { type: 'line', key: 'unit:c1/u3', side: 'after' });
+    // Not into another course, nor on lectures or groups.
+    assert.equal(resolveDrop(dragged, { role: 'unit', courseId: 'c2', unitId: 'u1' }, 0.5, unitView()), null);
+    assert.equal(resolveDrop(dragged, { role: 'lecture', docId: 'a', courseId: 'c1', unitId: 'u1' }, 0.5, unitView()), null);
+    assert.equal(resolveDrop(dragged, { role: 'top-end' }, 0.5, unitView()), null);
   });
 });

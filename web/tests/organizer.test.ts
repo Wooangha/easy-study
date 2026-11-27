@@ -2,6 +2,7 @@
 // Run: node --test web/tests/*.test.ts
 import assert from 'node:assert/strict';
 import { beforeEach, describe, test } from 'node:test';
+import { normalizeUnits, sameUnits, unitsByMembership } from '../../shared/courseUnits.ts';
 import { layoutRevision } from '../../shared/layoutRevision.ts';
 import type { Course, CourseGroup, LayoutItem, LibraryLayout } from '../../shared/types.ts';
 import { answerConfirm, cancelAllConfirms, confirmDialog, getConfirmRequest, subscribeConfirm } from '../src/lib/confirm.ts';
@@ -12,9 +13,9 @@ const clone = <T>(v: T): T => structuredClone(v);
 const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 const initialCourses = (): Course[] => [
-  { id: 'c1', title: 'Compiler', createdAt: '2026-09-01T00:00:00Z', docIds: ['a', 'b', 'c'] },
-  { id: 'c2', title: 'OS', createdAt: '2026-09-02T00:00:00Z', docIds: ['d', 'e'] },
-  { id: 'c3', title: 'DB', createdAt: '2026-09-03T00:00:00Z', docIds: [] },
+  { id: 'c1', title: 'Compiler', createdAt: '2026-09-01T00:00:00Z', docIds: ['a', 'b', 'c'], units: [] },
+  { id: 'c2', title: 'OS', createdAt: '2026-09-02T00:00:00Z', docIds: ['d', 'e'], units: [] },
+  { id: 'c3', title: 'DB', createdAt: '2026-09-03T00:00:00Z', docIds: [], units: [] },
 ];
 const initialLayout = (): LibraryLayout => ({
   groups: [{ id: 'g1', title: '2026-2학기', createdAt: '2026-09-04T00:00:00Z', items: [{ type: 'course', id: 'c2' }, { type: 'course', id: 'c3' }] }],
@@ -61,24 +62,33 @@ function fakeServer() {
     },
     async createCourse(body) {
       await enter('createCourse', `POST /api/courses ${JSON.stringify(body)}`);
-      const course: Course = { id: `n${++seq}`, title: body.title, createdAt: `2026-09-1${seq}T00:00:00Z`, docIds: [] };
+      const course: Course = { id: `n${++seq}`, title: body.title, createdAt: `2026-09-1${seq}T00:00:00Z`, docIds: [], units: [] };
       courses = [...courses, course];
       if (body.groupId) layout.groups.find((g) => g.id === body.groupId)?.items.push({ type: 'course', id: course.id });
       else layout.order.push({ type: 'course', id: course.id });
       return clone(course);
     },
     async updateCourse(courseId, body) {
-      const { baseDocIds, ...rest } = body;
-      await enter('updateCourse', `PATCH ${courseId} ${JSON.stringify(rest)}`);
+      const { baseDocIds, baseUnits, ...rest } = body;
+      // Units only in the log when there are some (the lines of the tests from before units stay as they were).
+      const shown = rest.units?.length === 0 ? { ...rest, units: undefined } : rest;
+      await enter('updateCourse', `PATCH ${courseId} ${JSON.stringify(shown)}`);
       const current = courses.find((c) => c.id === courseId);
-      if (baseDocIds && current && current.docIds.join() !== baseDocIds.join()) {
+      if (
+        current &&
+        ((baseDocIds && current.docIds.join() !== baseDocIds.join()) || (baseUnits && !sameUnits(current.units, baseUnits)))
+      ) {
         calls.push('→ 409');
         throw conflict();
       }
       const docIds = body.docIds;
       courses = courses.map((c) => {
-        if (c.id === courseId) return { ...c, ...(body.title ? { title: body.title } : {}), ...(docIds ? { docIds } : {}) };
-        return docIds ? { ...c, docIds: c.docIds.filter((id) => !docIds.includes(id)) } : c;
+        if (c.id === courseId) {
+          const list = docIds ?? c.docIds;
+          const shape = body.units ? normalizeUnits(list, body.units) : unitsByMembership(list, c.units);
+          return { ...c, ...(body.title ? { title: body.title } : {}), ...shape };
+        }
+        return docIds ? { ...c, ...unitsByMembership(c.docIds.filter((id) => !docIds.includes(id)), c.units) } : c;
       });
       return clone(courses.find((c) => c.id === courseId) as Course);
     },
@@ -394,6 +404,57 @@ describe('organizer store', () => {
     org.addLectureLocally('c3', 'x');
     org.addLectureLocally('nope', 'y');
     assert.deepEqual(docsOf(), { c1: 'abc', c2: 'de', c3: 'x' });
+  });
+});
+
+describe('units (단원)', () => {
+  const unitsOf = (org: ReturnType<typeof setup>['org'], courseId: string) =>
+    (org.getSnapshot().courses?.find((c) => c.id === courseId)?.units ?? []).map((u) => `${u.title}[${u.docIds.join('')}]`).join(' ');
+
+  test('create (the first takes the lectures), rename, move a lecture and a unit, delete: each one PATCH with the bases', async () => {
+    const { server, org, errors } = setup();
+    await org.refresh();
+    const first = await org.createUnit('c1', '중간');
+    assert.match(first ?? '', /^u[a-z0-9]{8}$/);
+    assert.equal(unitsOf(org, 'c1'), '중간[abc]');
+    const second = await org.createUnit('c1', '기말');
+    assert.equal(unitsOf(org, 'c1'), '중간[abc] 기말[]');
+    assert.equal(await org.moveLecture('c', 'c1', null, second), true);
+    assert.equal(unitsOf(org, 'c1'), '중간[ab] 기말[c]');
+    assert.equal(await org.moveUnit('c1', second!, first), true);
+    assert.equal(unitsOf(org, 'c1'), '기말[c] 중간[ab]');
+    assert.deepEqual(org.getSnapshot().courses?.[0].docIds, ['c', 'a', 'b'], 'the lecture order follows the units');
+    assert.equal(await org.renameUnit('c1', first!, '중간고사'), true);
+    assert.equal(await org.deleteUnit('c1', second!), true);
+    assert.equal(unitsOf(org, 'c1'), '중간고사[ab]', 'the first unit was deleted: its lecture (c) is in no unit now, still first');
+    assert.equal(server.state().courses[0].units.map((u) => u.title).join(), '중간고사');
+    assert.deepEqual(server.state().courses[0].units[0].docIds, ['a', 'b']);
+    assert.deepEqual(org.getSnapshot().courses?.[0].docIds, ['c', 'a', 'b']);
+    assert.equal(server.calls.filter((c) => c.startsWith('PATCH c1')).length, 6);
+    assert.deepEqual(errors, []);
+  });
+
+  test('a lecture moved into another course leaves its unit; a unit change made from stale units is made again', async () => {
+    const { server, org, errors } = setup();
+    await org.refresh();
+    const unit = await org.createUnit('c1', 'A');
+    await org.moveLecture('a', 'c2', null);
+    assert.equal(unitsOf(org, 'c1'), 'A[bc]');
+    // Another tab renames the unit: the next change is refused (409), the lists are loaded again, it is made again.
+    server.edit((state) => {
+      state.courses = state.courses.map((c) => (c.id === 'c1' ? { ...c, units: c.units.map((u) => ({ ...u, title: 'A (renamed)' })) } : c));
+    });
+    assert.ok(await org.createUnit('c1', 'B'));
+    assert.equal(unitsOf(org, 'c1'), 'A (renamed)[bc] B[]');
+    assert.ok(server.calls.includes('→ 409'));
+    assert.deepEqual(errors, []);
+    // A unit deleted elsewhere cannot be renamed: rolled back with a message.
+    server.edit((state) => {
+      state.courses = state.courses.map((c) => (c.id === 'c1' ? { ...c, units: c.units.filter((u) => u.id !== unit) } : c));
+    });
+    await org.refresh();
+    assert.equal(await org.renameUnit('c1', unit!, 'X'), false);
+    assert.equal(errors.length, 1);
   });
 });
 

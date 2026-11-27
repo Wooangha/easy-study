@@ -18,7 +18,7 @@ const doc = (id: string, title: string): DocMeta => ({
   courseId: null,
   digestStatus: 'none',
 });
-const course = (id: string, title: string, docIds: string[]): Course => ({ id, title, createdAt: '2026-10-01T00:00:00.000Z', docIds });
+const course = (id: string, title: string, docIds: string[]): Course => ({ id, title, createdAt: '2026-10-01T00:00:00.000Z', docIds, units: [] });
 
 const DOCS = [doc('db1', 'POSTECH_DBLAB_Introduction'), doc('db2', 'Relational Model'), doc('os1', '01-Introduction'), doc('p5', 'L5-Parsing-1'), doc('p6', 'L6-Parsing-2'), doc('loose', '그냥 PDF')];
 const COURSES = [course('c-os', '운영체제', ['os1']), course('c-db', '데이터베이스', ['db1', 'db2']), course('c-cc', '컴파일러', ['p5', 'p6'])];

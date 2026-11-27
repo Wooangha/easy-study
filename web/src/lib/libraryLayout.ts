@@ -1,8 +1,9 @@
-// Library organization (DESIGN §18): course groups, the top-level order and moves of lectures, courses and
-// groups. Pure functions on the shared contract types, used by the organizer store (optimistic updates), the
-// library view (rendering, drag & drop) and the pickers. Lecture membership/order lives in the courses
-// (Course.docIds); groups and the order of courses live in the layout.
-import type { Course, CourseGroup, LayoutItem, LibraryLayout, PutLayoutRequest } from '../../../shared/types.ts';
+// Library organization (DESIGN §18): course groups, the top-level order, units (단원) of a course and moves of
+// lectures, units, courses and groups. Pure functions on the shared contract types, used by the organizer store
+// (optimistic updates), the library view (rendering, drag & drop) and the pickers. Lecture membership/order and
+// units live in the courses (Course.docIds, Course.units); groups and the order of courses live in the layout.
+import { looseDocIds, normalizeUnits, sameUnits, unitOf } from '../../../shared/courseUnits.ts';
+import type { Course, CourseGroup, CourseUnit, LayoutItem, LibraryLayout, PutLayoutRequest } from '../../../shared/types.ts';
 
 export const EMPTY_LAYOUT: LibraryLayout = { groups: [], order: [] };
 
@@ -173,12 +174,28 @@ export function courseLabel(entry: LayoutEntry): string {
 // so that a move queued behind another one still means the same place when it is sent.
 // ---------------------------------------------------------------------------------------------------------
 
-/** Move a lecture into a course before `beforeDocId` (null = at the end), or out of every course (courseId null). */
+/**
+ * Move a lecture into a course before `beforeDocId` (null = at the end of its unit), or out of every course (courseId
+ * null).
+ */
 export interface LectureMove {
   kind: 'lecture';
   docId: string;
   courseId: string | null;
   beforeDocId: string | null;
+  /**
+   * The unit it goes into (null: none — the lectures above the first unit). Absent: the unit of `beforeDocId`, and at
+   * the end of the course the last unit (targetUnitId).
+   */
+  unitId?: string | null;
+}
+
+/** Move a unit within its course, before another unit (null = at the end); its lectures go with it. */
+export interface UnitMove {
+  kind: 'unit';
+  courseId: string;
+  unitId: string;
+  beforeUnitId: string | null;
 }
 
 /** Move a course into a group or to the top level (groupId null), before an item there (null = at the end). */
@@ -197,7 +214,7 @@ export interface GroupMove {
   before: LayoutItem | null;
 }
 
-export type Move = LectureMove | CourseMove | GroupMove;
+export type Move = LectureMove | CourseMove | GroupMove | UnitMove;
 
 function insertBefore<T>(list: readonly T[], value: T, isAnchor: (x: T) => boolean): T[] {
   const at = list.findIndex(isAnchor);
@@ -205,6 +222,16 @@ function insertBefore<T>(list: readonly T[], value: T, isAnchor: (x: T) => boole
   if (at === -1) next.push(value);
   else next.splice(at, 0, value);
   return next;
+}
+
+/** A course without these lectures (in its list and its units). */
+function withoutLectures(course: Course, docIds: ReadonlySet<string>): Course {
+  if (!course.docIds.some((id) => docIds.has(id))) return course;
+  return {
+    ...course,
+    docIds: course.docIds.filter((id) => !docIds.has(id)),
+    units: course.units.map((u) => (u.docIds.some((id) => docIds.has(id)) ? { ...u, docIds: u.docIds.filter((id) => !docIds.has(id)) } : u)),
+  };
 }
 
 /** Replace one course and drop its lectures from every other course (a lecture is in at most one course). */
@@ -216,43 +243,127 @@ export function applyCourseUpdate(courses: readonly Course[], updated: Course): 
       known = true;
       return updated;
     }
-    return c.docIds.some((id) => taken.has(id)) ? { ...c, docIds: c.docIds.filter((id) => !taken.has(id)) } : c;
+    return withoutLectures(c, taken);
   });
   return known ? next : [...next, updated];
+}
+
+/**
+ * The unit a lecture move puts the lecture into (null: none), in `course` as it is without the lecture: the move's
+ * unit when it exists, else the unit of the lecture it goes before, else — at the end of the course — the last unit.
+ */
+export function targetUnitId(course: Course, move: LectureMove): string | null {
+  if (move.unitId === null) return null;
+  if (move.unitId !== undefined && course.units.some((u) => u.id === move.unitId)) return move.unitId;
+  if (move.beforeDocId !== null && course.docIds.includes(move.beforeDocId)) return unitOf(course.units, move.beforeDocId)?.id ?? null;
+  return course.units.at(-1)?.id ?? null;
+}
+
+/** `course` (without the lecture) with the lecture put where the move says: in its unit, before `beforeDocId`. */
+function withLecturePlaced(course: Course, move: LectureMove): Course {
+  const unitId = targetUnitId(course, move);
+  const put = (list: readonly string[]) => insertBefore(list, move.docId, (id) => id === move.beforeDocId);
+  if (unitId === null) {
+    const loose = looseDocIds(course);
+    return { ...course, ...normalizeUnits([...put(loose), ...course.docIds.filter((id) => !loose.includes(id))], course.units) };
+  }
+  const units = course.units.map((u) => (u.id === unitId ? { ...u, docIds: put(u.docIds) } : u));
+  return { ...course, ...normalizeUnits([...course.docIds, move.docId], units) };
 }
 
 /** The courses after a lecture move (unchanged when the target course does not exist). */
 export function applyLectureMove(courses: readonly Course[], move: LectureMove): Course[] {
   if (move.beforeDocId === move.docId) return courses.slice();
-  if (move.courseId === null) {
-    return courses.map((c) => (c.docIds.includes(move.docId) ? { ...c, docIds: c.docIds.filter((id) => id !== move.docId) } : c));
-  }
+  const moving = new Set([move.docId]);
+  if (move.courseId === null) return courses.map((c) => withoutLectures(c, moving));
   const target = courses.find((c) => c.id === move.courseId);
   if (!target) return courses.slice();
-  const rest = target.docIds.filter((id) => id !== move.docId);
-  const docIds = insertBefore(rest, move.docId, (id) => id === move.beforeDocId);
-  return applyCourseUpdate(courses, { ...target, docIds });
+  return applyCourseUpdate(courses, withLecturePlaced(withoutLectures(target, moving), move));
+}
+
+/** PATCH /api/courses/:id of a change to a course's lectures or units: its new lecture list and units. */
+export interface CoursePatch {
+  courseId: string;
+  docIds: string[];
+  units: CourseUnit[];
 }
 
 /**
- * The single PATCH that performs a lecture move (DESIGN §18): the target course with its new lecture list (the
- * server removes the lecture from its old course), or — for "미분류" — the course the lecture leaves.
+ * The single PATCH that performs a lecture move (DESIGN §18): the target course with its new lecture list and units
+ * (the server removes the lecture from its old course), or — for "미분류" — the course the lecture leaves.
  * null when nothing changes.
  */
-export function lectureMovePatch(courses: readonly Course[], move: LectureMove): { courseId: string; docIds: string[] } | null {
-  const next = applyLectureMove(courses, move);
+export function lectureMovePatch(courses: readonly Course[], move: LectureMove): CoursePatch | null {
   if (move.courseId === null) {
     // The course the lecture belongs to (the oldest one if it is listed twice, like on the server).
     const from = courses.find((c) => c.docIds.includes(move.docId));
     if (!from) return null;
-    return { courseId: from.id, docIds: from.docIds.filter((id) => id !== move.docId) };
+    const left = withoutLectures(from, new Set([move.docId]));
+    return { courseId: from.id, docIds: left.docIds, units: left.units };
   }
+  const next = applyLectureMove(courses, move);
   const before = courses.find((c) => c.id === move.courseId);
   const after = next.find((c) => c.id === move.courseId);
   if (!before || !after) return null;
   const elsewhere = courses.some((c) => c.id !== move.courseId && c.docIds.includes(move.docId));
-  if (!elsewhere && sameList(before.docIds, after.docIds)) return null;
-  return { courseId: after.id, docIds: after.docIds };
+  if (!elsewhere && sameList(before.docIds, after.docIds) && sameUnits(before.units, after.units)) return null;
+  return { courseId: after.id, docIds: after.docIds, units: after.units };
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Units (단원) of a course
+// ---------------------------------------------------------------------------------------------------------
+
+/** The courses after a unit move (unchanged when the course or the unit is gone). */
+export function applyUnitMove(courses: readonly Course[], move: UnitMove): Course[] {
+  const course = courses.find((c) => c.id === move.courseId);
+  const unit = course?.units.find((u) => u.id === move.unitId);
+  if (!course || !unit || move.beforeUnitId === move.unitId) return courses.slice();
+  const units = insertBefore(
+    course.units.filter((u) => u.id !== move.unitId),
+    unit,
+    (u) => u.id === move.beforeUnitId,
+  );
+  return courses.map((c) => (c === course ? { ...c, ...normalizeUnits(c.docIds, units) } : c));
+}
+
+/** Creating, renaming or deleting a unit of a course. */
+export type UnitChange =
+  | { kind: 'create'; unitId: string; title: string }
+  | { kind: 'rename'; unitId: string; title: string }
+  | { kind: 'delete'; unitId: string };
+
+/**
+ * A course after a unit change. A new unit goes to the end; the first unit of a course takes its lectures (a plain
+ * list gets a heading), later ones start empty. A deleted unit's lectures join the unit above it (the first unit's
+ * become lectures in no unit), so nothing moves on screen.
+ */
+export function applyUnitChange(course: Course, change: UnitChange): Course {
+  const at = course.units.findIndex((u) => u.id === change.unitId);
+  switch (change.kind) {
+    case 'create': {
+      if (at !== -1) return course;
+      const unit: CourseUnit = { id: change.unitId, title: change.title, docIds: course.units.length === 0 ? course.docIds : [] };
+      return { ...course, ...normalizeUnits(course.docIds, [...course.units, unit]) };
+    }
+    case 'rename':
+      if (at === -1) return course;
+      return { ...course, units: course.units.map((u, i) => (i === at ? { ...u, title: change.title } : u)) };
+    case 'delete': {
+      if (at === -1) return course;
+      const gone = course.units[at];
+      const units = course.units.flatMap((u, i) => (i === at ? [] : i === at - 1 ? [{ ...u, docIds: [...u.docIds, ...gone.docIds] }] : [u]));
+      return { ...course, ...normalizeUnits(course.docIds, units) };
+    }
+  }
+}
+
+/** A fresh unit id (UNIT_ID_RE) that no unit of the course has. */
+export function newUnitId(course: Course, random: () => number = Math.random): string {
+  for (;;) {
+    const id = `u${Math.floor(random() * 36 ** 8).toString(36).padStart(8, '0')}`;
+    if (!course.units.some((u) => u.id === id)) return id;
+  }
 }
 
 /** The layout without these courses (wherever they are). */
@@ -371,11 +482,16 @@ export function withGroupTitle(layout: LibraryLayout, groupId: string, title: st
 export const collapseKey = {
   course: (courseId: string) => `course:${courseId}`,
   group: (groupId: string) => `group:${groupId}`,
+  unit: (courseId: string, unitId: string) => `unit:${courseId}/${unitId}`,
 };
 
 export const isStringArray = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === 'string');
 
-/** Every collapsible key of the library (courses and groups). */
+/** Every collapsible key of the library (courses, groups and units). */
 export function allCollapseKeys(layout: LibraryLayout, courses: readonly Course[]): string[] {
-  return [...layout.groups.map((g) => collapseKey.group(g.id)), ...courses.map((c) => collapseKey.course(c.id))];
+  return [
+    ...layout.groups.map((g) => collapseKey.group(g.id)),
+    ...courses.map((c) => collapseKey.course(c.id)),
+    ...courses.flatMap((c) => c.units.map((u) => collapseKey.unit(c.id, u.id))),
+  ];
 }

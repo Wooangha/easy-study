@@ -248,7 +248,24 @@ export interface Course {
   id: string;
   title: string;
   createdAt: string;
-  /** Lecture order. A document belongs to at most one course. */
+  /**
+   * Lecture order. A document belongs to at most one course. With units: the lectures in no unit first, then each
+   * unit's lectures in unit order (shared/courseUnits.ts normalizeUnits).
+   */
+  docIds: string[];
+  /** Its units (단원, since 0.6.18), in display order; [] = a plain list. */
+  units: CourseUnit[];
+}
+
+/**
+ * A unit (단원) of a course: a named, collapsible section of its lecture list (e.g. "중간고사 범위"). Purely
+ * organisational: the lecture order (Course.docIds) is what the LLM and COURSE.md follow.
+ */
+export interface CourseUnit {
+  /** UNIT_ID_RE, unique within its course; made by the client that creates the unit. */
+  id: string;
+  title: string;
+  /** Its lectures, in order (lectures of the course; a lecture is in at most one unit). */
   docIds: string[];
 }
 
@@ -323,6 +340,14 @@ export interface UpdateCourseRequest {
    * nothing is written.
    */
   baseDocIds?: string[];
+  /**
+   * New full list of units (replaces them). Every lecture listed must be in the course (its `docIds` after this
+   * request); the server puts `docIds` in unit order (lectures in no unit first). Without it, the units keep their
+   * lectures that stay in the course, in the order of `docIds`.
+   */
+  units?: CourseUnit[];
+  /** The units `units` was made from (as GET /api/courses showed them): 409 when they are different now. */
+  baseUnits?: CourseUnit[];
 }
 
 // ---------------------------------------------------------------------------
@@ -652,6 +677,8 @@ export const MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:/@[\]-]{0,127}$/;
 export const EFFORT_ID_RE = /^[a-z][a-z0-9_-]{0,31}$/;
 export const DOC_ID_RE = /^[a-z0-9][a-z0-9-]{0,80}$/;
 export const COURSE_ID_RE = /^[a-z0-9][a-z0-9-]{0,80}$/;
+/** CourseUnit.id: 'u' and 1–40 lowercase letters, digits or '-'. */
+export const UNIT_ID_RE = /^u[a-z0-9-]{1,40}$/;
 export const SESSION_ID_RE = /^[a-z0-9][a-z0-9-]{0,80}$/;
 
 // ---------------------------------------------------------------------------

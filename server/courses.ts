@@ -9,8 +9,9 @@
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import type { Course, CourseGroup, LibraryLayout } from '../shared/types.ts';
-import { COURSE_ID_RE } from '../shared/types.ts';
+import { MAX_UNITS, normalizeUnits, sameUnits, unitsByMembership } from '../shared/courseUnits.ts';
+import type { Course, CourseGroup, CourseUnit, LibraryLayout } from '../shared/types.ts';
+import { COURSE_ID_RE, UNIT_ID_RE } from '../shared/types.ts';
 import { HttpError, libraryDir } from './config.ts';
 import { slang, smsg } from './i18n.ts';
 import type { Lang } from './i18n.ts';
@@ -69,8 +70,8 @@ export function compareTitles(a: string, b: string): number {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** A course or group title: one line, trimmed, 1–MAX_TITLE_CHARS characters (400 otherwise). */
-function cleanTitle(value: unknown, kind: 'course' | 'group' = 'course'): string {
+/** A course, group or unit title: one line, trimmed, 1–MAX_TITLE_CHARS characters (400 otherwise). */
+function cleanTitle(value: unknown, kind: 'course' | 'group' | 'unit' = 'course'): string {
   const m = smsg().library.courses;
   if (typeof value !== 'string') throw new HttpError(400, m.nameRequired[kind]);
   const title = value
@@ -85,8 +86,10 @@ function cleanTitle(value: unknown, kind: 'course' | 'group' = 'course'): string
 }
 
 function writeRecord(record: CourseRecord): Promise<void> {
-  const { id, title, createdAt, docIds } = record;
-  return writeJsonAtomic(coursePaths(id).courseJson, { version: 1, id, title, createdAt, docIds } satisfies CourseRecord);
+  const { id, title, createdAt, docIds, units } = record;
+  // `units` only when there are some: the files of courses without units stay as they were before units.
+  const file = { version: 1, id, title, createdAt, docIds, ...(units.length > 0 ? { units } : {}) };
+  return writeJsonAtomic(coursePaths(id).courseJson, file);
 }
 
 /**
@@ -97,11 +100,13 @@ async function toCourse(record: CourseRecord, owners: Map<string, string>): Prom
   const present = await Promise.all(
     record.docIds.map(async (docId) => owners.get(docId) === record.id && (await readStoredDoc(docId)) !== null),
   );
+  const shown = new Set(record.docIds.filter((_, i) => present[i]));
   return {
     id: record.id,
     title: record.title,
     createdAt: record.createdAt,
-    docIds: record.docIds.filter((_, i) => present[i]),
+    docIds: record.docIds.filter((docId) => shown.has(docId)),
+    units: record.units.map((unit) => ({ ...unit, docIds: unit.docIds.filter((docId) => shown.has(docId)) })),
   };
 }
 
@@ -124,7 +129,37 @@ async function validateDocIds(value: unknown): Promise<string[]> {
   return docIds;
 }
 
-/** Removes `docIds` from every course except `keepId`. Returns the ids of the courses that changed. */
+/**
+ * Validates UpdateCourseRequest.units against the course's lectures `docIds`: at most MAX_UNITS units with distinct
+ * ids (UNIT_ID_RE) and titles, listing lectures of the course, each at most once. Returns them in normal form with
+ * the lecture list (shared/courseUnits.ts).
+ */
+function validateUnits(value: unknown, docIds: readonly string[]): { docIds: string[]; units: CourseUnit[] } {
+  const m = smsg().library.courses;
+  if (!Array.isArray(value)) throw new HttpError(400, m.unitsInvalid);
+  if (value.length > MAX_UNITS) throw new HttpError(400, m.tooManyUnits(MAX_UNITS));
+  const inCourse = new Set(docIds);
+  const ids = new Set<string>();
+  const listed = new Set<string>();
+  const units = value.map((item: unknown): CourseUnit => {
+    if (typeof item !== 'object' || item === null) throw new HttpError(400, m.unitsInvalid);
+    const raw = item as Partial<Record<keyof CourseUnit, unknown>>;
+    if (typeof raw.id !== 'string' || !UNIT_ID_RE.test(raw.id)) throw new HttpError(400, m.unitsInvalid);
+    if (ids.has(raw.id)) throw new HttpError(400, m.duplicateUnit(raw.id));
+    ids.add(raw.id);
+    const title = cleanTitle(raw.title, 'unit');
+    if (!Array.isArray(raw.docIds) || raw.docIds.some((id) => typeof id !== 'string')) throw new HttpError(400, m.unitsInvalid);
+    for (const docId of raw.docIds as string[]) {
+      if (!inCourse.has(docId)) throw new HttpError(400, m.unitDocNotInCourse(docId));
+      if (listed.has(docId)) throw new HttpError(400, m.duplicateDoc(docId));
+      listed.add(docId);
+    }
+    return { id: raw.id, title, docIds: raw.docIds as string[] };
+  });
+  return normalizeUnits(docIds, units);
+}
+
+/** Removes `docIds` from every course except `keepId` (and from its units). Returns the ids of the courses that changed. */
 async function removeFromOtherCourses(docIds: Iterable<string>, keepId: string): Promise<string[]> {
   const moving = new Set(docIds);
   const changed: string[] = [];
@@ -132,7 +167,7 @@ async function removeFromOtherCourses(docIds: Iterable<string>, keepId: string):
     if (other.id === keepId) continue;
     const kept = other.docIds.filter((docId) => !moving.has(docId));
     if (kept.length === other.docIds.length) continue;
-    await writeRecord({ ...other, docIds: kept });
+    await writeRecord({ ...other, ...unitsByMembership(kept, other.units) });
     changed.push(other.id);
   }
   return changed;
@@ -217,7 +252,7 @@ export async function createCourse(title: unknown, now: Date = new Date(), group
         if ((err as NodeJS.ErrnoException).code !== 'EEXIST' || attempt >= 10) throw err;
       }
     }
-    const created: CourseRecord = { version: 1, id: courseId, title: cleaned, createdAt: now.toISOString(), docIds: [] };
+    const created: CourseRecord = { version: 1, id: courseId, title: cleaned, createdAt: now.toISOString(), docIds: [], units: [] };
     try {
       await writeRecord(created);
       if (layout && targetGroup !== null) await writeLayout(withCourseInGroup(layout, courseId, targetGroup));
@@ -229,13 +264,15 @@ export async function createCourse(title: unknown, now: Date = new Date(), group
     return created;
   });
   await refreshMarkdown([record.id]);
-  return { id: record.id, title: record.title, createdAt: record.createdAt, docIds: [] };
+  return { id: record.id, title: record.title, createdAt: record.createdAt, docIds: [], units: [] };
 }
 
 export interface CoursePatch {
   title?: unknown;
   docIds?: unknown;
   baseDocIds?: unknown;
+  units?: unknown;
+  baseUnits?: unknown;
 }
 
 /** UpdateCourseRequest.baseDocIds: absent (undefined) = no precondition, otherwise a list of ids (400 else). */
@@ -247,33 +284,51 @@ function cleanBaseDocIds(value: unknown): string[] | null {
   return value as string[];
 }
 
+/** UpdateCourseRequest.baseUnits: absent = no precondition, otherwise units (400 when malformed). */
+function cleanBaseUnits(value: unknown): CourseUnit[] | null {
+  if (value === undefined) return null;
+  const bad = () => new HttpError(400, smsg().library.courses.baseUnitsInvalid);
+  if (!Array.isArray(value)) throw bad();
+  return value.map((item: unknown) => {
+    if (typeof item !== 'object' || item === null) throw bad();
+    const raw = item as Partial<Record<keyof CourseUnit, unknown>>;
+    if (typeof raw.id !== 'string' || typeof raw.title !== 'string') throw bad();
+    if (!Array.isArray(raw.docIds) || raw.docIds.some((id) => typeof id !== 'string')) throw bad();
+    return { id: raw.id, title: raw.title, docIds: raw.docIds as string[] };
+  });
+}
+
 const sameIds = (a: readonly string[], b: readonly string[]): boolean =>
   a.length === b.length && a.every((id, i) => id === b[i]);
 
 /**
- * Renames a course and/or replaces its ordered lecture list (UpdateCourseRequest). Documents
+ * Renames a course and/or replaces its ordered lecture list and/or its units (UpdateCourseRequest). Documents
  * newly listed are removed from any other course; documents left out become uncategorized.
- * With `baseDocIds` the course's lecture list (as the API shows it) must still be that list: 409 otherwise
- * (it was changed in another tab or on another device, and this request would silently undo that).
- * Throws 404 for an unknown course, 400 for invalid titles, unknown doc ids or duplicates.
+ * With `baseDocIds` (`baseUnits`) the course's lecture list (units) as the API shows it must still be that: 409
+ * otherwise (it was changed in another tab or on another device, and this request would silently undo that).
+ * Throws 404 for an unknown course, 400 for invalid titles, unknown doc ids, duplicates or invalid units.
  */
 export async function updateCourse(courseId: string, patch: CoursePatch): Promise<Course> {
   const title = patch.title === undefined ? undefined : cleanTitle(patch.title);
   const base = cleanBaseDocIds(patch.baseDocIds);
+  const baseUnits = cleanBaseUnits(patch.baseUnits);
   const touched = await mutationQueue(MUTATIONS, async () => {
     const records = await readCourseRecords();
     const record = records.find((candidate) => candidate.id === courseId);
     if (!record) throw new HttpError(404, smsg().common.notFound.course);
-    if (base && !sameIds((await toCourse(record, courseIdIndex(records))).docIds, base)) {
-      throw new HttpError(409, smsg().library.courses.lecturesChanged);
+    if (base || baseUnits) {
+      const shown = await toCourse(record, courseIdIndex(records));
+      if ((base && !sameIds(shown.docIds, base)) || (baseUnits && !sameUnits(shown.units, baseUnits))) {
+        throw new HttpError(409, smsg().library.courses.lecturesChanged);
+      }
     }
     const next: CourseRecord = { ...record };
     if (title !== undefined) next.title = title;
     let others: string[] = [];
-    if (patch.docIds !== undefined) {
-      next.docIds = await validateDocIds(patch.docIds);
-      others = await removeFromOtherCourses(next.docIds, courseId);
-    }
+    if (patch.docIds !== undefined) next.docIds = await validateDocIds(patch.docIds);
+    if (patch.units !== undefined) Object.assign(next, validateUnits(patch.units, next.docIds));
+    else if (patch.docIds !== undefined) Object.assign(next, unitsByMembership(next.docIds, record.units));
+    if (patch.docIds !== undefined) others = await removeFromOtherCourses(next.docIds, courseId);
     await writeRecord(next);
     return [courseId, ...others];
   });
@@ -322,21 +377,37 @@ export async function addDocToCourse(courseId: string, docId: string): Promise<C
       (lecture) => lecture.meta !== null,
     );
     const docIds = lectures.map((lecture) => lecture.id);
-    docIds.splice(
-      insertionIndex(
-        lectures.map((lecture) => lecture.meta?.title ?? ''),
-        doc.title,
-      ),
-      0,
-      docId,
+    const at = insertionIndex(
+      lectures.map((lecture) => lecture.meta?.title ?? ''),
+      doc.title,
     );
-    await writeRecord({ ...record, docIds });
+    docIds.splice(at, 0, docId);
+    await writeRecord({ ...record, ...withLectureInUnit(docIds, unitsByMembership(docIds, record.units).units, at) });
     return [courseId, ...others];
   });
   await refreshMarkdown(touched);
   const course = await getCourse(courseId);
   if (!course) throw new HttpError(400, smsg().common.notFound.course);
   return course;
+}
+
+/**
+ * The units after a lecture was inserted at `docIds[at]`: it joins the unit of the lecture before it (none: loose), at
+ * the end of the list the last unit (an empty one too: "the end of the course"), at the start the unit of the lecture
+ * after it.
+ */
+export function withLectureInUnit(docIds: readonly string[], units: readonly CourseUnit[], at: number): { docIds: string[]; units: CourseUnit[] } {
+  const docId = docIds[at];
+  const unitOfDoc = (id: string | undefined) => (id === undefined ? undefined : units.find((unit) => unit.docIds.includes(id)));
+  const target = at === docIds.length - 1 ? units.at(-1) : at > 0 ? unitOfDoc(docIds[at - 1]) : unitOfDoc(docIds[at + 1]);
+  if (!target) return normalizeUnits(docIds, units);
+  const position = new Map(docIds.map((id, i) => [id, i]));
+  const placed = units.map((unit) =>
+    unit.id === target.id
+      ? { ...unit, docIds: [...unit.docIds, docId].sort((a, b) => (position.get(a) ?? 0) - (position.get(b) ?? 0)) }
+      : unit,
+  );
+  return normalizeUnits(docIds, placed);
 }
 
 /**
@@ -486,23 +557,39 @@ export interface CourseMarkdownLecture {
 }
 
 /**
- * `# <course title> — 과목 정리`, then per lecture `## k. <title>`, its summary and links (DESIGN §12). The headings
- * are in `lang`: the language of the request that changed the course (DESIGN §27).
+ * `# <course title> — 과목 정리`, then per lecture `## k. <title>`, its summary and links (DESIGN §12). With units
+ * (in normal form with `lectures`), each unit is a `## <unit title>` before its lectures, which become `### k. …`
+ * (numbered through the course). The headings are in `lang`: the language of the request that changed the course
+ * (DESIGN §27).
  */
-export function courseMarkdown(title: string, lectures: CourseMarkdownLecture[], lang: Lang = slang()): string {
+export function courseMarkdown(
+  title: string,
+  lectures: CourseMarkdownLecture[],
+  lang: Lang = slang(),
+  units: readonly Pick<CourseUnit, 'title' | 'docIds'>[] = [],
+): string {
   const m = smsg(lang).library.courseMd;
   const lines: string[] = [`# ${m.title(title)}`, ''];
-  if (lectures.length === 0) lines.push(`_(${m.noLectures})_`, '');
-  lectures.forEach((lecture, i) => {
+  if (lectures.length === 0 && units.length === 0) lines.push(`_(${m.noLectures})_`, '');
+  const level = units.length > 0 ? 3 : 2;
+  const write = (lecture: CourseMarkdownLecture) => {
     lines.push(
-      `## ${i + 1}. ${lecture.title}`,
+      `${'#'.repeat(level)} ${lectures.indexOf(lecture) + 1}. ${lecture.title}`,
       '',
-      lecture.summary?.trim() ? demoteHeadings(lecture.summary.trim(), 2) : `_(${m.noDigest})_`,
+      lecture.summary?.trim() ? demoteHeadings(lecture.summary.trim(), level) : `_(${m.noDigest})_`,
       '',
       `[DIGEST.md](../../${lecture.docId}/DIGEST.md) · [STUDY_NOTES.md](../../${lecture.docId}/STUDY_NOTES.md)`,
       '',
     );
-  });
+  };
+  const inUnits = new Set(units.flatMap((unit) => unit.docIds));
+  lectures.filter((lecture) => !inUnits.has(lecture.docId)).forEach(write);
+  for (const unit of units) {
+    lines.push(`## ${unit.title}`, '');
+    const own = lectures.filter((lecture) => unit.docIds.includes(lecture.docId));
+    if (own.length === 0) lines.push(`_(${m.noLectures})_`, '');
+    own.forEach(write);
+  }
   return `${lines.join('\n').trimEnd()}\n`;
 }
 
@@ -519,6 +606,6 @@ export function writeCourseMarkdown(courseId: string): Promise<void> {
         return { docId, title: doc?.title ?? docId, summary: digest?.summary ?? null };
       }),
     );
-    await writeFileAtomic(coursePaths(courseId).courseMd, courseMarkdown(course.title, lectures));
+    await writeFileAtomic(coursePaths(courseId).courseMd, courseMarkdown(course.title, lectures, slang(), course.units));
   });
 }

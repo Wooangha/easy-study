@@ -112,9 +112,11 @@ describe('course storage', () => {
     assert.match(course.id, COURSE_ID_RE);
     assert.equal(course.title, 'Compiler Design');
     assert.deepEqual(course.docIds, []);
+    const { units, ...stored } = course;
+    assert.deepEqual(units, []);
 
     const onDisk = JSON.parse(await fs.readFile(coursePaths(course.id).courseJson, 'utf8'));
-    assert.deepEqual(onDisk, { version: 1, ...course });
+    assert.deepEqual(onDisk, { version: 1, ...stored }, 'no `units` in the file of a course without units');
     assert.equal(
       await fs.readFile(coursePaths(course.id).courseMd, 'utf8'),
       '# Compiler Design — 과목 정리\n\n_(아직 강의가 없습니다)_\n',
@@ -273,6 +275,137 @@ describe('adding a new lecture', () => {
   test('unknown course is a 400', async () => {
     const doc = await makeDoc('Orphan');
     await assert.rejects(addDocToCourse('missing-000000', doc), isHttpError(400));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Units (단원)
+// ---------------------------------------------------------------------------
+
+describe('units', () => {
+  const unit = (id: string, title: string, docIds: string[]) => ({ id, title, docIds });
+
+  test('set with the lectures: docIds follow unit order, loose lectures first; the file keeps them', async () => {
+    const [a, b, c, d] = await Promise.all(['U-A', 'U-B', 'U-C', 'U-D'].map((title) => makeDoc(title)));
+    const course = await createCourse('With units', tick());
+    assert.deepEqual(course.units, []);
+    await updateCourse(course.id, { docIds: [a, b, c, d] });
+    const updated = await updateCourse(course.id, { units: [unit('u-mid', '  중간 ', [c, a]), unit('u-fin', '기말', [])] });
+    assert.deepEqual(updated.docIds, [b, d, c, a], 'loose (b, d), then 중간 (c, a)');
+    assert.deepEqual(updated.units, [unit('u-mid', '중간', [c, a]), unit('u-fin', '기말', [])], 'titles are cleaned');
+    const file = JSON.parse(await fs.readFile(coursePaths(course.id).courseJson, 'utf8'));
+    assert.deepEqual(file.units, updated.units);
+    assert.deepEqual(file.docIds, updated.docIds);
+    assert.deepEqual(await getCourse(course.id), updated);
+
+    // Without units: no `units` in the file (as before units).
+    await updateCourse(course.id, { units: [] });
+    const plain = JSON.parse(await fs.readFile(coursePaths(course.id).courseJson, 'utf8'));
+    assert.equal('units' in plain, false);
+  });
+
+  test('a new lecture list without units keeps each unit\'s lectures, in the new order', async () => {
+    const [a, b, c, d] = await Promise.all(['K-A', 'K-B', 'K-C', 'K-D'].map((title) => makeDoc(title)));
+    const course = await createCourse('Membership', tick());
+    await updateCourse(course.id, { docIds: [a, b, c], units: [unit('u-one', 'One', [a, b, c])] });
+    const updated = await updateCourse(course.id, { docIds: [d, c, a] });
+    assert.deepEqual(updated.units, [unit('u-one', 'One', [c, a])], 'b left the course; c before a now');
+    assert.deepEqual(updated.docIds, [d, c, a], 'd is new: loose, first');
+  });
+
+  test('a lecture listed by another course leaves that course\'s unit too', async () => {
+    const [a, b] = await Promise.all(['M-A', 'M-B'].map((title) => makeDoc(title)));
+    const from = await createCourse('Unit source', tick());
+    const to = await createCourse('Unit target', tick());
+    await updateCourse(from.id, { docIds: [a, b], units: [unit('u-x', 'X', [a, b])] });
+    await updateCourse(to.id, { docIds: [a] });
+    assert.deepEqual((await getCourse(from.id))?.units, [unit('u-x', 'X', [b])]);
+    await removeDocFromCourses(b);
+    assert.deepEqual((await getCourse(from.id))?.units, [unit('u-x', 'X', [])], 'the unit stays, empty');
+  });
+
+  test('validation: 400 for bad units, nothing written', async () => {
+    const [a, b] = await Promise.all(['V-A', 'V-B'].map((title) => makeDoc(title)));
+    const outside = await makeDoc('V-Outside');
+    const course = await createCourse('Unit validation', tick());
+    await updateCourse(course.id, { docIds: [a, b] });
+    const bad: unknown[] = [
+      'x',
+      [1],
+      [{ id: 'nope', title: 'T', docIds: [] }],
+      [{ id: 'U-UPPER', title: 'T', docIds: [] }],
+      [unit('u-a', 'T', []), unit('u-a', 'T2', [])],
+      [unit('u-a', '   ', [])],
+      [unit('u-a', 'T', [outside])],
+      [unit('u-a', 'T', [a]), unit('u-b', 'T2', [a])],
+      [{ id: 'u-a', title: 'T', docIds: 'x' }],
+      Array.from({ length: 101 }, (_, i) => unit(`u-${i}`, `T${i}`, [])),
+    ];
+    for (const units of bad) await assert.rejects(updateCourse(course.id, { units }), isHttpError(400), JSON.stringify(units).slice(0, 80));
+    await assert.rejects(updateCourse(course.id, { units: [], baseUnits: 'x' }), isHttpError(400));
+    assert.deepEqual((await getCourse(course.id))?.units, []);
+    // Lectures and units in one request: the units are checked against the new list.
+    const both = await updateCourse(course.id, { docIds: [a, b, outside], units: [unit('u-a', 'A', [outside])] });
+    assert.deepEqual(both.docIds, [a, b, outside]);
+  });
+
+  test('baseUnits: 409 when the units changed elsewhere', async () => {
+    const a = await makeDoc('B-A');
+    const course = await createCourse('Unit conflicts', tick());
+    await updateCourse(course.id, { docIds: [a], units: [unit('u-a', 'A', [a])] });
+    const shown = (await getCourse(course.id))!;
+    await updateCourse(course.id, { units: [unit('u-a', 'Renamed', [a])] }); // another tab
+    await assert.rejects(
+      updateCourse(course.id, { units: [unit('u-a', 'A', []), unit('u-b', 'B', [a])], baseUnits: shown.units }),
+      isHttpError(409),
+    );
+    const now = (await getCourse(course.id))!;
+    const ok = await updateCourse(course.id, { units: [unit('u-a', 'Renamed', []), unit('u-b', 'B', [a])], baseUnits: now.units, baseDocIds: now.docIds });
+    assert.deepEqual(ok.units.map((u) => u.id), ['u-a', 'u-b']);
+  });
+
+  test('a new lecture joins the unit of the lecture before it; at the end, the last unit', async () => {
+    const [l1, l2, l4] = await Promise.all(['N1 Intro', 'N2 Sched', 'N4 Disk'].map((title) => makeDoc(title)));
+    const course = await createCourse('Natural units', tick());
+    await updateCourse(course.id, { docIds: [l1, l2, l4], units: [unit('u-a', 'A', [l1, l2]), unit('u-b', 'B', [l4]), unit('u-c', 'C', [])] });
+    const l3 = await makeDoc('N3 Memory');
+    let updated = await addDocToCourse(course.id, l3);
+    assert.deepEqual(updated.units.map((u) => u.docIds), [[l1, l2, l3], [l4], []], 'after N2: in A');
+    const l5 = await makeDoc('N5 Files');
+    updated = await addDocToCourse(course.id, l5);
+    assert.deepEqual(updated.units.map((u) => u.docIds), [[l1, l2, l3], [l4], [l5]], 'the end: the last unit, empty or not');
+    const l0 = await makeDoc('N0 Syllabus');
+    updated = await addDocToCourse(course.id, l0);
+    assert.deepEqual(updated.units[0].docIds, [l0, l1, l2, l3], 'the start: the unit of the lecture after it');
+    assert.deepEqual(updated.docIds, [l0, l1, l2, l3, l4, l5]);
+  });
+
+  test('COURSE.md: a heading per unit, lectures numbered through the course', async () => {
+    const [a, b] = await Promise.all(['W-A', 'W-B'].map((title) => makeDoc(title)));
+    await writeSummary(b, '## 핵심\n내용');
+    const course = await createCourse('Unit markdown', tick());
+    await updateCourse(course.id, { docIds: [a, b], units: [unit('u-one', '중간', [b]), unit('u-two', '기말', [])] });
+    const md = await fs.readFile(coursePaths(course.id).courseMd, 'utf8');
+    const headings = md.split('\n').filter((line) => line.startsWith('#'));
+    assert.deepEqual(headings, ['# Unit markdown — 과목 정리', '### 1. W-A', '## 중간', '### 2. W-B', '##### 핵심', '## 기말']);
+    assert.match(md, /## 기말\n\n_\(아직 강의가 없습니다\)_\n$/);
+  });
+
+  test('a course file with malformed units is read without them', async () => {
+    const a = await makeDoc('R-A');
+    const course = await createCourse('Hand edited', tick());
+    await fs.writeFile(
+      coursePaths(course.id).courseJson,
+      JSON.stringify({
+        version: 1,
+        id: course.id,
+        title: 'Hand edited',
+        createdAt: course.createdAt,
+        docIds: [a],
+        units: [{ id: 'bad id', title: 'x', docIds: [] }, { id: 'u-ok', title: 'OK', docIds: [a, a, 'gone-000000'] }, 'junk'],
+      }),
+    );
+    assert.deepEqual((await getCourse(course.id))?.units, [unit('u-ok', 'OK', [a])]);
   });
 });
 

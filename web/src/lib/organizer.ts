@@ -25,14 +25,18 @@ import type {
   UpdateCourseRequest,
   UpdateGroupRequest,
 } from '../../../shared/types.ts';
+import { sameUnits } from '../../../shared/courseUnits.ts';
 import {
   applyCourseMove,
   applyCourseUpdate,
   applyGroupMove,
   applyLectureMove,
+  applyUnitChange,
+  applyUnitMove,
   EMPTY_LAYOUT,
   findGroup,
   lectureMovePatch,
+  newUnitId,
   normalizeLayout,
   sameLayout,
   toPutLayout,
@@ -41,7 +45,9 @@ import {
   withGroupTitle,
   withoutCourses,
   withoutGroup,
+  type CoursePatch,
   type Move,
+  type UnitChange,
 } from './libraryLayout.ts';
 import { msg } from '../i18n/index.ts';
 
@@ -88,6 +94,7 @@ type Op =
   | { type: 'deleteGroup'; groupId: string }
   | { type: 'createCourse'; title: string; groupId: string | null }
   | { type: 'createGroup'; title: string; courseIds: string[]; parentId: string | null }
+  | { type: 'unit'; courseId: string; change: UnitChange }
   | { type: 'refresh' };
 
 interface State {
@@ -101,9 +108,12 @@ function applyOp(state: State, op: Op): State {
     case 'move': {
       const m = op.move;
       if (m.kind === 'lecture') return { ...state, courses: applyLectureMove(state.courses, m) };
+      if (m.kind === 'unit') return { ...state, courses: applyUnitMove(state.courses, m) };
       if (m.kind === 'course') return { ...state, layout: applyCourseMove(state.layout, m) };
       return { ...state, layout: applyGroupMove(state.layout, m) };
     }
+    case 'unit':
+      return { ...state, courses: state.courses.map((c) => (c.id === op.courseId ? applyUnitChange(c, op.change) : c)) };
     case 'renameCourse':
       return { ...state, courses: state.courses.map((c) => (c.id === op.courseId ? { ...c, title: op.title } : c)) };
     case 'renameGroup':
@@ -125,7 +135,10 @@ function failMessage(op: Op): string {
   switch (op.type) {
     case 'move':
       if (op.move.kind === 'lecture') return op.move.courseId === null ? m.uncategorizeLecture : m.moveLecture;
+      if (op.move.kind === 'unit') return m.moveUnit;
       return op.move.kind === 'course' ? m.moveCourse : m.moveGroup;
+    case 'unit':
+      return op.change.kind === 'create' ? m.createUnit : op.change.kind === 'rename' ? m.renameUnit : m.deleteUnit;
     case 'renameCourse':
       return m.renameCourse;
     case 'renameGroup':
@@ -218,14 +231,8 @@ export function createOrganizer(deps: OrganizerDeps) {
       case 'move': {
         const move = op.move;
         checkStillThere(move, state);
-        if (move.kind === 'lecture') {
-          const patch = lectureMovePatch(state.courses, move);
-          if (!patch) return null;
-          const baseDocIds = state.courses.find((c) => c.id === patch.courseId)?.docIds ?? [];
-          const saved = await api.updateCourse(patch.courseId, { docIds: patch.docIds, baseDocIds: [...baseDocIds] });
-          courses = applyCourseUpdate(courses ?? [], saved);
-          return null;
-        }
+        if (move.kind === 'lecture') return saveCourse(lectureMovePatch(state.courses, move), state);
+        if (move.kind === 'unit') return saveCourse(changedCourse(applyUnitMove(state.courses, move), move.courseId, state), state);
         const next = move.kind === 'course' ? applyCourseMove(state.layout, move) : applyGroupMove(state.layout, move);
         if (sameLayout(next, state.layout)) return null;
         rawLayout = await api.putLayout({ ...toPutLayout(next), baseRevision: layoutRevision(state.layout) });
@@ -267,7 +274,38 @@ export function createOrganizer(deps: OrganizerDeps) {
         rawLayout = withGroupAppended(state.layout, group, op.parentId);
         return group;
       }
+      case 'unit': {
+        const course = state.courses.find((c) => c.id === op.courseId);
+        const gone = msg().shell.organizer.gone;
+        if (!course) throw new Error(gone.course);
+        if (op.change.kind !== 'create' && !course.units.some((u) => u.id === op.change.unitId)) throw new Error(gone.unit);
+        const next = applyUnitChange(course, op.change);
+        await saveCourse({ courseId: course.id, docIds: next.docIds, units: next.units }, state);
+        return op.change.unitId;
+      }
     }
+  }
+
+  /** The PATCH of a course whose lectures or units changed in `next` (null: it did not change). */
+  function changedCourse(next: readonly Course[], courseId: string, state: State): CoursePatch | null {
+    const before = state.courses.find((c) => c.id === courseId);
+    const after = next.find((c) => c.id === courseId);
+    if (!before || !after || sameUnits(before.units, after.units)) return null;
+    return { courseId, docIds: after.docIds, units: after.units };
+  }
+
+  /** Sends a course's new lectures and units, made from what the confirmed state shows (409 when that is stale). */
+  async function saveCourse(patch: CoursePatch | null, state: State): Promise<null> {
+    if (!patch) return null;
+    const base = state.courses.find((c) => c.id === patch.courseId);
+    const saved = await api.updateCourse(patch.courseId, {
+      docIds: patch.docIds,
+      units: patch.units,
+      baseDocIds: [...(base?.docIds ?? [])],
+      baseUnits: base?.units ?? [],
+    });
+    courses = applyCourseUpdate(courses ?? [], saved);
+    return null;
   }
 
   /** A move into (or of) a course or group that is gone cannot be made: say so instead of doing nothing. */
@@ -276,6 +314,10 @@ export function createOrganizer(deps: OrganizerDeps) {
     const gone = msg().shell.organizer.gone;
     if (move.kind === 'lecture') {
       if (move.courseId !== null && !hasCourse(move.courseId)) throw new Error(gone.targetCourse);
+    } else if (move.kind === 'unit') {
+      const course = state.courses.find((c) => c.id === move.courseId);
+      if (!course) throw new Error(gone.course);
+      if (!course.units.some((u) => u.id === move.unitId)) throw new Error(gone.unit);
     } else if (move.kind === 'course') {
       if (!hasCourse(move.courseId)) throw new Error(gone.course);
       if (move.groupId !== null && !findGroup(state.layout, move.groupId)) throw new Error(gone.targetGroup);
@@ -293,7 +335,7 @@ export function createOrganizer(deps: OrganizerDeps) {
     try {
       return await execute(op);
     } catch (e) {
-      if (op.type !== 'move' || !deps.isConflict(e)) throw e;
+      if ((op.type !== 'move' && op.type !== 'unit') || !deps.isConflict(e)) throw e;
     }
     await execute({ type: 'refresh' });
     emit();
@@ -341,7 +383,8 @@ export function createOrganizer(deps: OrganizerDeps) {
     if (shown.courses === null) return Promise.resolve(false);
     const state: State = { courses: shown.courses, layout: shown.layout };
     if (m.kind === 'lecture' && lectureMovePatch(state.courses, m) === null) return Promise.resolve(true);
-    if (m.kind !== 'lecture') {
+    if (m.kind === 'unit' && changedCourse(applyUnitMove(state.courses, m), m.courseId, state) === null) return Promise.resolve(true);
+    if (m.kind === 'course' || m.kind === 'group') {
       const next = m.kind === 'course' ? applyCourseMove(state.layout, m) : applyGroupMove(state.layout, m);
       if (sameLayout(next, state.layout)) return Promise.resolve(true);
     }
@@ -353,15 +396,36 @@ export function createOrganizer(deps: OrganizerDeps) {
     subscribe,
     refresh,
     move,
-    /** Move a lecture into a course before `beforeDocId` (null = at the end), or out of its course (courseId null). */
-    moveLecture: (docId: string, courseId: string | null, beforeDocId: string | null = null) =>
-      move({ kind: 'lecture', docId, courseId, beforeDocId }),
+    /**
+     * Move a lecture into a course before `beforeDocId` (null = at the end), or out of its course (courseId null). With
+     * `unitId`, into that unit of the course (null: into none); otherwise the unit of `beforeDocId` (the end: the last).
+     */
+    moveLecture: (docId: string, courseId: string | null, beforeDocId: string | null = null, unitId?: string | null) =>
+      move(unitId === undefined ? { kind: 'lecture', docId, courseId, beforeDocId } : { kind: 'lecture', docId, courseId, beforeDocId, unitId }),
     /** Move a course into a group (or the top level, groupId null) before `before` (null = at the end). */
     moveCourse: (courseId: string, groupId: string | null, before: LayoutItem | null = null) =>
       move({ kind: 'course', courseId, groupId, before }),
     /** Move a group into another group (or the top level, parentId null) before `before` (null = at the end). */
     moveGroup: (groupId: string, parentId: string | null = null, before: LayoutItem | null = null) =>
       move({ kind: 'group', groupId, parentId, before }),
+    /** Move a unit of a course before another unit (null = at the end). */
+    moveUnit: (courseId: string, unitId: string, beforeUnitId: string | null = null) =>
+      move({ kind: 'unit', courseId, unitId, beforeUnitId }),
+    /**
+     * A new unit at the end of a course (its first unit takes the course's lectures). Shows at once; resolves with
+     * its id, or null when the server refused it.
+     */
+    createUnit(courseId: string, title: string): Promise<string | null> {
+      const course = getSnapshot().courses?.find((c) => c.id === courseId);
+      if (!course) return Promise.resolve(null);
+      const unitId = newUnitId(course);
+      return enqueue({ type: 'unit', courseId, change: { kind: 'create', unitId, title } }).then((r) => (r.ok ? unitId : null));
+    },
+    renameUnit: (courseId: string, unitId: string, title: string) =>
+      enqueue({ type: 'unit', courseId, change: { kind: 'rename', unitId, title } }).then((r) => r.ok),
+    /** Delete a unit (its lectures join the unit above, or — the first unit — are in no unit). */
+    deleteUnit: (courseId: string, unitId: string) =>
+      enqueue({ type: 'unit', courseId, change: { kind: 'delete', unitId } }).then((r) => r.ok),
     renameCourse: (courseId: string, title: string) => enqueue({ type: 'renameCourse', courseId, title }).then((r) => r.ok),
     renameGroup: (groupId: string, title: string) => enqueue({ type: 'renameGroup', groupId, title }).then((r) => r.ok),
     /** Delete a course (its lectures become uncategorized). */
@@ -377,7 +441,7 @@ export function createOrganizer(deps: OrganizerDeps) {
     addLectureLocally(courseId: string, docId: string) {
       const course = courses?.find((c) => c.id === courseId);
       if (!courses || !course || course.docIds.includes(docId)) return;
-      courses = applyCourseUpdate(courses, { ...course, docIds: [...course.docIds, docId] });
+      courses = applyLectureMove(courses, { kind: 'lecture', docId, courseId, beforeDocId: null });
       emit();
     },
   };

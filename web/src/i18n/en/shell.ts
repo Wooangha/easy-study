@@ -357,6 +357,30 @@ export const shell = {
     empty: (grip) => rich('This group is empty — drag a course or group here by its ', grip, ' handle or create one with ‘＋ Course’ · ‘＋ Group’'),
   },
 
+  unit: {
+    roleDescription: 'movable unit',
+    add: 'Add unit',
+    addTitle: 'Add a unit — split the lecture list into named sections',
+    newName: 'Name of the new unit',
+    nameLabel: 'Unit name',
+    label: (title) => `Unit ${title}`,
+    move: (title) => `Move the unit ‘${title}’`,
+    menu: (title) => `Menu of the unit ‘${title}’`,
+    lectureCount: (n) => plural(n, 'lecture', 'lectures'),
+    deleteItem: 'Delete unit',
+    deleteConfirm: {
+      title: (title) => `Delete the unit ‘${title}’?`,
+      lecturesKept: (n, into) =>
+        into === null
+          ? `Its ${plural(n, 'lecture', 'lectures')} stay, outside any unit (at the top of the course).`
+          : `Its ${plural(n, 'lecture', 'lectures')} stay and join the unit above, ‘${into}’.`,
+      confirmLabel: 'Delete unit',
+    },
+    empty: 'Drag lectures here',
+    moveToUnit: 'Move to unit',
+    removeFromUnit: 'Take out of the unit',
+    removeFromUnitHint: 'to the top of the course',
+  },
   lecture: {
     roleDescription: 'movable lecture',
     uploadRecording: 'Upload recording',
@@ -380,9 +404,11 @@ export const shell = {
     lectureName: (title) => `the lecture ‘${title}’`,
     courseName: (title) => `the course ‘${title}’`,
     groupName: (title) => `the group ‘${title}’`,
+    unitName: (title) => `the unit ‘${title}’`,
     lectureFallback: 'untitled',
     courseFallback: 'untitled',
     groupFallback: 'untitled',
+    unitFallback: 'untitled',
     opened: (name) => `Opened ${name}.`,
     openedPlain: 'Opened.',
     pickedUp: (name) => `Picked up ${name}. Move it with the up and down arrow keys and drop it with Space or Enter.`,
@@ -400,6 +426,8 @@ export const shell = {
       uncategorized: 'Uncategorized',
       course: 'the course',
       inCourse: (title, position) => `position ${position} in the course ‘${title}’`,
+      inUnit: (title, position) => `position ${position} in the unit ‘${title}’`,
+      unitOrder: (course, position) => `position ${position} among the units of ‘${course}’`,
       group: 'the group',
       inGroup: (title, position) => `position ${position} in the group ‘${title}’`,
       outsideGroups: (position) => `position ${position} outside the groups`,
@@ -421,6 +449,10 @@ export const shell = {
       deleteGroup: "Couldn't delete the group",
       createCourse: "Couldn't create the course",
       createGroup: "Couldn't create the group",
+      moveUnit: "Couldn't move the unit, so it was put back",
+      createUnit: "Couldn't create the unit",
+      renameUnit: "Couldn't rename the unit",
+      deleteUnit: "Couldn't delete the unit",
       refresh: "Couldn't load the courses",
     },
     gone: {
@@ -428,6 +460,7 @@ export const shell = {
       course: 'This course was deleted elsewhere',
       targetGroup: 'The group to move it to was deleted elsewhere',
       group: 'This group was deleted elsewhere',
+      unit: 'This unit was deleted elsewhere',
     },
   },
 } satisfies typeof ko;

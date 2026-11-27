@@ -164,7 +164,7 @@ function TreeGroup({ row, depth, actions }: { row: Extract<LayoutRow, { type: 'g
           )}
           {children.length === 0 && !creating && (
             <li className="tree-empty" style={at(depth + 1)}>
-              {drag.active && drag.active.kind !== 'lecture' ? m.dropToJoin : m.emptyShort}
+              {drag.active?.kind === 'course' || drag.active?.kind === 'group' ? m.dropToJoin : m.emptyShort}
             </li>
           )}
         </ul>

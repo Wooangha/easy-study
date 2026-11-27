@@ -100,7 +100,7 @@ function doc(id: string, patch: Partial<DocMeta> = {}): DocMeta {
 }
 
 describe('course context copy', () => {
-  const course: Course = { id: 'c', title: 'Compiler', createdAt: '', docIds: ['l1', 'l2', 'l3', 'l4', 'l5'] };
+  const course: Course = { id: 'c', title: 'Compiler', createdAt: '', docIds: ['l1', 'l2', 'l3', 'l4', 'l5'], units: [] };
   const docs = [
     doc('l1', { digestStatus: 'ready' }),
     doc('l2', { digestStatus: 'running' }),

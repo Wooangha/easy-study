@@ -7,9 +7,10 @@ import type { UploadItem } from '../hooks/useDocs.ts';
 import { msg } from '../i18n/index.ts';
 import { dndId, type DragItem } from '../lib/libraryDnd.ts';
 import { allCollapseKeys, collapseKey, coursesInside, groupPath, layoutEntries, layoutRows, neighbourAfterDelete } from '../lib/libraryLayout.ts';
+import { UnitGhost } from './organize/CourseUnits.tsx';
 import { LectureGhost } from './organize/LectureRow.tsx';
 import { LibraryDnd, TopEndZone } from './organize/LibraryDnd.tsx';
-import { CoursePane, UncategorizedPane } from './organize/LibraryPanes.tsx';
+import { CoursePane, UncategorizedPane, type UnitHandlers } from './organize/LibraryPanes.tsx';
 import { CourseGhost, GroupGhost, LibraryTree, type TreeActions } from './organize/LibraryTree.tsx';
 import { DocProgress } from './organize/parts.tsx';
 
@@ -47,8 +48,8 @@ interface LibraryViewProps {
 const HEADING_KEY = 'heading:courses';
 
 /**
- * Focuses the first of these library items that is shown (`data-org-key`): a lecture's ⋯ menu, a course or group of
- * the tree (its button), or the heading.
+ * Focuses the first of these library items that is shown (`data-org-key`): a lecture's ⋯ menu, a unit's header, a
+ * course or group of the tree (its button), or the heading.
  */
 function focusOrgItem(keys: readonly string[]): void {
   for (const key of keys) {
@@ -59,7 +60,9 @@ function focusOrgItem(keys: readonly string[]): void {
         ? el
         : key.startsWith('lecture:')
           ? (el.querySelector<HTMLElement>('.menu-btn') ?? el.querySelector<HTMLElement>('.drag-handle'))
-          : el.querySelector<HTMLElement>(':scope > .tree-row .tree-select, :scope > .tree-row .tree-toggle');
+          : key.startsWith('unit:')
+            ? el.querySelector<HTMLElement>(':scope > .unit-head .unit-toggle, :scope > .unit-head .drag-handle')
+            : el.querySelector<HTMLElement>(':scope > .tree-row .tree-select, :scope > .tree-row .tree-toggle');
     if (target) {
       target.focus();
       return;
@@ -126,6 +129,11 @@ export function LibraryView(props: LibraryViewProps) {
     ]);
     void org.moveLecture(docId, courseId);
   };
+  /** "단원으로 이동": the lecture keeps the focus in its new place, or its unit when that is collapsed. */
+  const moveLectureToUnit = (docId: string, courseId: string, unitId: string | null) => {
+    setFocusAfter([dndId.lecture(docId), ...(unitId ? [dndId.unit(courseId, unitId)] : []), HEADING_KEY]);
+    void org.moveLecture(docId, courseId, null, unitId);
+  };
   const focusAfterDelete = (item: LayoutItem) => {
     const near = neighbourAfterDelete(layout, item);
     setFocusAfter(near ? [itemKey(near), HEADING_KEY] : [HEADING_KEY]);
@@ -179,8 +187,12 @@ export function LibraryView(props: LibraryViewProps) {
     const d = msg().shell.dnd;
     if (item.kind === 'lecture') return d.lectureName(byId.get(item.docId)?.title ?? d.lectureFallback);
     if (item.kind === 'course') return d.courseName(courseList.find((c) => c.id === item.courseId)?.title ?? d.courseFallback);
+    if (item.kind === 'unit') return d.unitName(unitOf(item.courseId, item.unitId)?.title ?? d.unitFallback);
     return d.groupName(layout.groups.find((g) => g.id === item.groupId)?.title ?? d.groupFallback);
   };
+  function unitOf(courseId: string, unitId: string) {
+    return courseList.find((c) => c.id === courseId)?.units.find((u) => u.id === unitId) ?? null;
+  }
 
   const renderOverlay = (item: DragItem) => {
     if (item.kind === 'lecture') {
@@ -190,6 +202,10 @@ export function LibraryView(props: LibraryViewProps) {
     if (item.kind === 'course') {
       const course = courseList.find((c) => c.id === item.courseId);
       return course ? <CourseGhost course={course} lectures={lecturesOf(course).length} /> : null;
+    }
+    if (item.kind === 'unit') {
+      const unit = unitOf(item.courseId, item.unitId);
+      return unit ? <UnitGhost unit={unit} count={unit.docIds.filter((id) => byId.has(id)).length} /> : null;
     }
     const group = layout.groups.find((g) => g.id === item.groupId);
     return group ? <GroupGhost group={group} contents={contentsOf(group.id)} /> : null;
@@ -236,6 +252,28 @@ export function LibraryView(props: LibraryViewProps) {
       void org.removeGroup(groupId);
     },
   };
+
+  const unitHandlers = (courseId: string): UnitHandlers => ({
+    collapsed,
+    onToggle: toggle,
+    onCreate: (title) => {
+      // The name form is gone: the new unit's header takes the focus (it shows at once, the id comes with the save).
+      void org.createUnit(courseId, title).then((unitId) => {
+        if (!unitId) return;
+        setReveal(dndId.unit(courseId, unitId));
+        setFocusAfter([dndId.unit(courseId, unitId), HEADING_KEY]);
+      });
+    },
+    onRename: (unitId, title) => void org.renameUnit(courseId, unitId, title),
+    onDelete: (unitId) => {
+      const units = courseList.find((c) => c.id === courseId)?.units ?? [];
+      const at = units.findIndex((u) => u.id === unitId);
+      const near = units[at - 1] ?? units[at + 1];
+      setFocusAfter([...(near ? [dndId.unit(courseId, near.id)] : []), HEADING_KEY]);
+      void org.removeUnit(courseId, unitId);
+    },
+    onMoveLecture: (docId, unitId) => moveLectureToUnit(docId, courseId, unitId),
+  });
 
   const handlers = {
     entries,
@@ -316,6 +354,7 @@ export function LibraryView(props: LibraryViewProps) {
               lectures={lecturesOf(selected)}
               uploads={uploads.filter((u) => u.courseId === selected.id)}
               handlers={handlers}
+              units={unitHandlers(selected.id)}
               onPickFiles={() => pickFilesFor(selected.id)}
               onDropFiles={(files) => props.onUploadToCourse(selected.id, files)}
               onRename={(title) => void org.rename(selected.id, title)}

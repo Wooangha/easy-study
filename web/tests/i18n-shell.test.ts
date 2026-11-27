@@ -29,7 +29,7 @@ const codeWhere = () => {
 };
 
 // c1 (a, b, c) at the top level, then the group g1 with c2 (d, e) and c3 (empty).
-const course = (id: string, docIds: string[]): Course => ({ id, title: id.toUpperCase(), createdAt: '2026-09-01T00:00:00Z', docIds });
+const course = (id: string, docIds: string[]): Course => ({ id, title: id.toUpperCase(), createdAt: '2026-09-01T00:00:00Z', docIds, units: [] });
 const courses = [course('c1', ['a', 'b', 'c']), course('c2', ['d', 'e']), course('c3', [])];
 const layout: LibraryLayout = {
   groups: [{ id: 'g1', title: 'Fall 2026', createdAt: '2026-09-04T00:00:00Z', items: [{ type: 'course', id: 'c2' }, { type: 'course', id: 'c3' }] }],

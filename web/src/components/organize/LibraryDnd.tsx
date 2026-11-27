@@ -126,6 +126,7 @@ const sameTarget = (a: DropTarget | null, b: DropTarget | null) =>
 /** The collapse key of the container a move puts the item into (to keep it open after the drop). */
 function destinationKey(move: Move): string | null {
   if (move.kind === 'lecture') return move.courseId ? dndId.course(move.courseId) : null;
+  if (move.kind === 'unit') return null;
   if (move.kind === 'course') return move.groupId ? dndId.group(move.groupId) : null;
   return move.parentId ? dndId.group(move.parentId) : null;
 }
@@ -529,7 +530,7 @@ export function TopEndZone() {
   const data: DropData = { role: 'top-end' };
   const { setNodeRef } = useDroppable({ id: dndId.topEnd, data });
   const mark = useDropMark(dndId.topEnd);
-  if (!active || active.kind === 'lecture') return null;
+  if (!active || active.kind === 'lecture' || active.kind === 'unit') return null;
   return (
     <div ref={setNodeRef} className={`top-end-zone${mark === 'into' ? ' drop-into' : ''}`} aria-hidden>
       {msg().shell.dnd.toBottomOutsideGroups}

@@ -2,12 +2,14 @@
 // on, where the dragged item would land (the move, an insertion indicator, a description for screen readers in
 // the page's language) and the stops of keyboard dragging. The React side (web/src/components/organize/LibraryDnd.tsx)
 // feeds it with @dnd-kit's droppable rects and pointer coordinates.
+import { looseDocIds, unitOf } from '../../../shared/courseUnits.ts';
 import type { Course, LayoutItem, LibraryLayout } from '../../../shared/types.ts';
 import { msg } from '../i18n/index.ts';
 import {
   applyCourseMove,
   applyGroupMove,
   applyLectureMove,
+  applyUnitMove,
   childrenOf,
   collapseKey,
   findGroup,
@@ -16,22 +18,33 @@ import {
   parentOf,
   sameItem,
   sameLayout,
+  targetUnitId,
   type CourseMove,
   type GroupMove,
   type LectureMove,
   type Move,
+  type UnitMove,
 } from './libraryLayout.ts';
 
 export type DragItem =
   | { kind: 'lecture'; docId: string }
   | { kind: 'course'; courseId: string }
-  | { kind: 'group'; groupId: string };
+  | { kind: 'group'; groupId: string }
+  | { kind: 'unit'; courseId: string; unitId: string };
 
 export type DragKind = DragItem['kind'];
 
 /** What a droppable is (its @dnd-kit `data`). Items (lecture/course/group) are also the draggables. */
 export type DropData =
-  | { role: 'lecture'; docId: string; courseId: string | null }
+  /** A lecture row; `unitId`: its unit (null: none, or 미분류). */
+  | { role: 'lecture'; docId: string; courseId: string | null; unitId: string | null }
+  /**
+   * A unit of the shown course: its header and lectures. Lectures dropped on its free space go to its end; for a
+   * dragged unit, its upper half = before it, the lower half = after it.
+   */
+  | { role: 'unit'; courseId: string; unitId: string }
+  /** A unit's header: a lecture over its top third goes before the unit (the end of the part above), else into it. */
+  | { role: 'unit-head'; courseId: string; unitId: string }
   | { role: 'course'; courseId: string; groupId: string | null }
   | { role: 'group'; groupId: string; parentId: string | null }
   /** Header of a course card: a lecture dropped here goes to the start (or, collapsed, the end) of the course. */
@@ -59,6 +72,9 @@ export const dndId = {
   courseBody: (courseId: string) => `course-body:${courseId}`,
   groupHead: (groupId: string) => `group-head:${groupId}`,
   groupBody: (groupId: string) => `group-body:${groupId}`,
+  /** Same as collapseKey.unit. */
+  unit: (courseId: string, unitId: string) => `unit:${courseId}/${unitId}`,
+  unitHead: (courseId: string, unitId: string) => `unit-head:${courseId}/${unitId}`,
   uncategorized: 'uncategorized',
   topEnd: 'top-end',
 };
@@ -67,6 +83,7 @@ const layoutItemKey = (item: LayoutItem): string => (item.type === 'group' ? dnd
 
 export function dragItemKey(item: DragItem): string {
   if (item.kind === 'lecture') return dndId.lecture(item.docId);
+  if (item.kind === 'unit') return dndId.unit(item.courseId, item.unitId);
   return item.kind === 'course' ? dndId.course(item.courseId) : dndId.group(item.groupId);
 }
 
@@ -86,6 +103,8 @@ export function dragItemOf(data: DropData | null | undefined): DragItem | null {
       return { kind: 'course', courseId: data.courseId };
     case 'group':
       return { kind: 'group', groupId: data.groupId };
+    case 'unit':
+      return { kind: 'unit', courseId: data.courseId, unitId: data.unitId };
     default:
       return null;
   }
@@ -97,12 +116,17 @@ export function accepts(item: DragItem, data: DropData, view: OrgView): boolean 
     case 'lecture':
       return (
         data.role === 'lecture' ||
+        data.role === 'unit' ||
+        data.role === 'unit-head' ||
         data.role === 'course-head' ||
         data.role === 'course-body' ||
         data.role === 'uncategorized' ||
         // A collapsed group hides its courses: hovering over its header opens it.
         (data.role === 'group-head' && view.isCollapsed(collapseKey.group(data.groupId)))
       );
+    case 'unit':
+      // Only among the units of its course (its lecture list's free space = the end).
+      return (data.role === 'unit' || data.role === 'course-body') && data.courseId === item.courseId;
     case 'course':
       return (
         data.role === 'course' || data.role === 'group-head' || data.role === 'group-body' || data.role === 'top-end'
@@ -152,8 +176,17 @@ export const NOOP_TARGET: DropTarget = { key: 'noop', move: null, indicator: nul
 
 /** Top third of a group header = before the group (where it is); the rest = into the group. */
 export const GROUP_HEAD_BEFORE = 1 / 3;
+/** Top third of a unit header = before the unit (the end of the part above it); the rest = into the unit. */
+export const UNIT_HEAD_BEFORE = 1 / 3;
 
-const docIdsOf = (view: OrgView, courseId: string): string[] => view.courses.find((c) => c.id === courseId)?.docIds ?? [];
+const courseOf = (view: OrgView, courseId: string): Course | undefined => view.courses.find((c) => c.id === courseId);
+const docIdsOf = (view: OrgView, courseId: string): string[] => courseOf(view, courseId)?.docIds ?? [];
+
+/** The lectures of a unit of a course, or (unitId null) those in no unit. */
+function sectionOf(course: Course | undefined, unitId: string | null): string[] {
+  if (!course) return [];
+  return unitId === null ? looseDocIds(course) : (course.units.find((u) => u.id === unitId)?.docIds ?? []);
+}
 
 /** The first element after position `index` that is not `self`. */
 function nextOther<T>(list: readonly T[], index: number, isSelf: (x: T) => boolean): T | null {
@@ -186,10 +219,23 @@ export function resolveDrop(item: DragItem, over: DropData, relY: number, view: 
         if (over.courseId === null) move = { kind: 'lecture', docId, courseId: null, beforeDocId: null };
         else {
           if (over.docId === docId) return NOOP_TARGET;
-          const list = docIdsOf(view, over.courseId);
+          const list = sectionOf(courseOf(view, over.courseId), over.unitId);
           const before = upper ? over.docId : nextOther(list, list.indexOf(over.docId), isSelf);
-          move = { kind: 'lecture', docId, courseId: over.courseId, beforeDocId: before };
+          move = { kind: 'lecture', docId, courseId: over.courseId, beforeDocId: before, unitId: over.unitId };
         }
+      } else if (over.role === 'unit-head') {
+        const units = courseOf(view, over.courseId)?.units ?? [];
+        const at = units.findIndex((u) => u.id === over.unitId);
+        if (relY < UNIT_HEAD_BEFORE) {
+          // Before the unit: the end of the unit above it, or of the lectures in no unit.
+          move = { kind: 'lecture', docId, courseId: over.courseId, beforeDocId: null, unitId: units[at - 1]?.id ?? null };
+        } else {
+          const collapsed = view.isCollapsed(collapseKey.unit(over.courseId, over.unitId));
+          const first = units[at]?.docIds.find((id) => !isSelf(id)) ?? null;
+          move = { kind: 'lecture', docId, courseId: over.courseId, beforeDocId: collapsed ? null : first, unitId: over.unitId };
+        }
+      } else if (over.role === 'unit') {
+        move = { kind: 'lecture', docId, courseId: over.courseId, beforeDocId: null, unitId: over.unitId };
       } else if (over.role === 'course-head') {
         const collapsed = view.isCollapsed(collapseKey.course(over.courseId));
         const first = docIdsOf(view, over.courseId).find((id) => !isSelf(id)) ?? null;
@@ -200,6 +246,16 @@ export function resolveDrop(item: DragItem, over: DropData, relY: number, view: 
         move = { kind: 'lecture', docId, courseId: null, beforeDocId: null };
       }
       return finish(move, view);
+    }
+    case 'unit': {
+      const ids = courseOf(view, item.courseId)?.units.map((u) => u.id) ?? [];
+      const isSelf = (id: string) => id === item.unitId;
+      let before: string | null = null;
+      if (over.role === 'unit') {
+        if (isSelf(over.unitId)) return NOOP_TARGET;
+        before = upper ? over.unitId : nextOther(ids, ids.indexOf(over.unitId), isSelf);
+      }
+      return finish({ kind: 'unit', courseId: item.courseId, unitId: item.unitId, beforeUnitId: before }, view);
     }
     case 'course':
     case 'group': {
@@ -246,10 +302,14 @@ function finish(move: Move, view: OrgView): DropTarget {
     case 'lecture': {
       if (lectureMovePatch(view.courses, move) === null) return NOOP_TARGET;
       if (move.courseId === null) return { key: 'lecture>-', move, indicator: { type: 'into', key: dndId.uncategorized } };
-      const list = applyLectureMove(view.courses, move).find((c) => c.id === move.courseId)?.docIds ?? [];
-      const key = `lecture>${move.courseId}>${list.indexOf(move.docId)}`;
+      const course = applyLectureMove(view.courses, move).find((c) => c.id === move.courseId);
+      const unit = course ? unitOf(course.units, move.docId)?.id : undefined;
+      const index = course?.docIds.indexOf(move.docId) ?? -1;
+      const key = unit ? `lecture>${move.courseId}>${unit}>${index}` : `lecture>${move.courseId}>${index}`;
       return { key, move, indicator: lectureIndicator(move, move.courseId, view) };
     }
+    case 'unit':
+      return unitTarget(move, view);
     case 'course':
     case 'group': {
       const next = move.kind === 'course' ? applyCourseMove(view.layout, move) : applyGroupMove(view.layout, move);
@@ -265,10 +325,29 @@ function finish(move: Move, view: OrgView): DropTarget {
 
 function lectureIndicator(move: LectureMove, courseId: string, view: OrgView): Indicator {
   const into: Indicator = { type: 'into', key: dndId.course(courseId) };
-  if (view.isCollapsed(collapseKey.course(courseId))) return into;
-  if (move.beforeDocId !== null) return { type: 'line', key: dndId.lecture(move.beforeDocId), side: 'before' };
-  const last = lastOther(docIdsOf(view, courseId), (id) => id === move.docId);
-  return last === null ? into : { type: 'line', key: dndId.lecture(last), side: 'after' };
+  const course = courseOf(view, courseId);
+  if (!course || view.isCollapsed(collapseKey.course(courseId))) return into;
+  const unitId = targetUnitId(course, move);
+  if (unitId !== null && view.isCollapsed(collapseKey.unit(courseId, unitId))) return { type: 'into', key: dndId.unit(courseId, unitId) };
+  const section = sectionOf(course, unitId);
+  if (move.beforeDocId !== null && section.includes(move.beforeDocId)) return { type: 'line', key: dndId.lecture(move.beforeDocId), side: 'before' };
+  // The end of its unit (or of the lectures in no unit).
+  const last = lastOther(section, (id) => id === move.docId);
+  if (last !== null) return { type: 'line', key: dndId.lecture(last), side: 'after' };
+  if (unitId !== null) return { type: 'into', key: dndId.unit(courseId, unitId) }; // an empty unit
+  const first = course.units[0];
+  return first ? { type: 'line', key: dndId.unit(courseId, first.id), side: 'before' } : into;
+}
+
+/** Where a unit move puts the unit: a line before the unit it goes before, or after the last one. */
+function unitTarget(move: UnitMove, view: OrgView): DropTarget {
+  const before = courseOf(view, move.courseId)?.units.map((u) => u.id) ?? [];
+  const after = applyUnitMove(view.courses, move).find((c) => c.id === move.courseId)?.units.map((u) => u.id) ?? [];
+  if (after.join('/') === before.join('/')) return NOOP_TARGET;
+  const key = `unit>${move.courseId}>${after.indexOf(move.unitId)}`;
+  if (move.beforeUnitId !== null) return { key, move, indicator: { type: 'line', key: dndId.unit(move.courseId, move.beforeUnitId), side: 'before' } };
+  const last = lastOther(before, (id) => id === move.unitId);
+  return { key, move, indicator: last === null ? null : { type: 'line', key: dndId.unit(move.courseId, last), side: 'after' } };
 }
 
 /** A course or group going into `parentId` (null: the top level) before `before` (null: at the end). */
@@ -304,7 +383,14 @@ export function describeTarget(target: DropTarget, view: OrgView): { place: stri
       if (move.courseId === null) return { place: m.uncategorized, total: null };
       const course = applyLectureMove(view.courses, move).find((c) => c.id === move.courseId);
       if (!course) return { place: m.course, total: null };
+      const unit = unitOf(course.units, move.docId);
+      if (unit) return { place: m.inUnit(unit.title, unit.docIds.indexOf(move.docId) + 1), total: unit.docIds.length };
       return { place: m.inCourse(course.title, course.docIds.indexOf(move.docId) + 1), total: course.docIds.length };
+    }
+    case 'unit': {
+      const course = applyUnitMove(view.courses, move).find((c) => c.id === move.courseId);
+      if (!course) return { place: m.course, total: null };
+      return { place: m.unitOrder(course.title, course.units.findIndex((u) => u.id === move.unitId) + 1), total: course.units.length };
     }
     case 'course':
     case 'group': {
@@ -418,6 +504,11 @@ function samplePoints(item: DragItem, data: DropData, rect: Box): number[] {
       // A lecture waits low in the header: once the group opens, the nearest place is its first course.
       if (item.kind === 'lecture') return [rect.top + rect.height * 0.7];
       return [rect.top + rect.height * (GROUP_HEAD_BEFORE / 2), rect.top + rect.height * 0.7];
+    case 'unit-head':
+      return [rect.top + rect.height * (UNIT_HEAD_BEFORE / 2), rect.top + rect.height * 0.7];
+    case 'unit':
+      if (item.kind === 'unit') return [rect.top + rect.height * 0.25, rect.top + rect.height * 0.75];
+      return [rect.bottom - Math.min(3, rect.height / 2)];
     case 'course-body':
     case 'group-body':
       return [rect.bottom - Math.min(3, rect.height / 2)];

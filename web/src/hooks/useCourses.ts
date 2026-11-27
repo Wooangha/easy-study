@@ -94,6 +94,9 @@ export function useCourses() {
     createGroup: store.createGroup,
     renameGroup: store.renameGroup,
     removeGroup: store.deleteGroup,
+    createUnit: store.createUnit,
+    renameUnit: store.renameUnit,
+    removeUnit: store.deleteUnit,
     addLocally: store.addLectureLocally,
   };
 }

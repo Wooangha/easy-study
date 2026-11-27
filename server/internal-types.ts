@@ -4,6 +4,7 @@ import type {
   ChatMessage,
   ContextInfo,
   CourseGroup,
+  CourseUnit,
   DigestSlide,
   DigestStatus,
   DocMeta,
@@ -267,6 +268,8 @@ export interface CourseRecord {
   title: string;
   createdAt: string;
   docIds: string[];
+  /** Its units (단원, DESIGN §18), in normal form with `docIds` (shared/courseUnits.ts). Absent in files = none. */
+  units: CourseUnit[];
 }
 
 /**

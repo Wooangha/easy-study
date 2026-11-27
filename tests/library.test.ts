@@ -605,9 +605,10 @@ describe('derived DocMeta fields and DocAssets course/digest', () => {
       createdAt: '2026-02-01T00:00:00.000Z',
       // 'gone-aaa999' was deleted by hand; it must be skipped, not break anything.
       docIds: ['lec-1-aaa001', 'gone-aaa999', 'lec-2-aaa002', 'lec-3-aaa003'],
+      units: [],
     });
     // A newer course listing a lecture again (data error): the older course wins.
-    await writeCourse({ version: 1, id: 'later-c00002', title: 'Later', createdAt: '2026-03-01T00:00:00.000Z', docIds: ['lec-2-aaa002'] });
+    await writeCourse({ version: 1, id: 'later-c00002', title: 'Later', createdAt: '2026-03-01T00:00:00.000Z', docIds: ['lec-2-aaa002'], units: [] });
     await writeDigest('lec-1-aaa001', {
       status: 'ready',
       provider: 'codex',

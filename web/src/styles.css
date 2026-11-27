@@ -4138,6 +4138,186 @@ details[open] > summary::before {
   padding-left: 8px;
 }
 
+/* ---------------------------------------------------------------- units (단원) of a course (§18) */
+
+.unit-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.unit {
+  position: relative;
+}
+
+/*
+ * The gap above a unit's name is part of its header: a lecture over it goes before the unit (UNIT_HEAD_BEFORE), the
+ * name row into the unit, so nothing between two units falls through to the end of the course.
+ */
+.unit-head {
+  padding: 24px 0 8px;
+}
+
+.unit-list > .unit:first-child > .unit-head {
+  padding-top: 4px;
+}
+
+.unit-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  border-radius: 8px;
+}
+
+/* In line with the lectures' grips (the card's border and the rows' padding: 3 px), shown on hover like theirs. */
+.unit-row .drag-handle {
+  width: 22px;
+  margin: 0 -2px 0 3px;
+  opacity: 0;
+}
+
+.unit-head:hover .drag-handle,
+.unit-head:focus-within .drag-handle {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .unit-row .drag-handle {
+    opacity: 0.7;
+  }
+}
+
+.unit-toggle {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 70%;
+  padding: 2px 6px 2px 2px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.unit-toggle:hover {
+  background: var(--surface-2);
+}
+
+.unit-toggle:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+.unit-chevron {
+  flex: none;
+  color: var(--muted);
+  transition: transform 0.15s ease;
+}
+
+.unit-toggle[aria-expanded='true'] .unit-chevron {
+  transform: rotate(90deg);
+}
+
+.unit-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.unit.is-collapsed .unit-name {
+  color: var(--muted);
+}
+
+.unit-count {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.unit-rule {
+  flex: 1;
+  height: 1px;
+  margin-left: 8px;
+  background: var(--border);
+}
+
+.unit-row .menu-btn {
+  margin-right: 8px;
+  border-color: transparent;
+  background: none;
+}
+
+.unit-row .unit-title-input {
+  flex: 0 1 320px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.unit-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 64px;
+  border: 1.5px dashed var(--border);
+  border-radius: 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.unit-create {
+  padding: 4px 0 8px;
+}
+
+.unit-list > .unit-create:not(:first-child) {
+  padding-top: 24px;
+}
+
+/* Into a collapsed unit fills its name row with the accent (like the tree's rows); into an empty one, its box. */
+.unit.is-collapsed.drop-into > .unit-head .unit-row {
+  background: var(--accent);
+}
+
+.unit.is-collapsed.drop-into > .unit-head :is(.unit-toggle, .unit-name, .unit-chevron, .drag-handle, .menu-btn) {
+  color: var(--accent-contrast);
+}
+
+.unit.is-collapsed.drop-into > .unit-head .unit-count {
+  background: color-mix(in srgb, var(--accent-contrast) 22%, transparent);
+  color: var(--accent-contrast);
+}
+
+.unit.is-collapsed.drop-into > .unit-head .unit-rule {
+  background: color-mix(in srgb, var(--accent-contrast) 45%, transparent);
+}
+
+.unit.drop-into > .unit-empty {
+  border: 2px solid var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.unit-ghost .unit-count {
+  margin-left: 2px;
+}
+
 .pane-empty {
   display: flex;
   align-items: center;

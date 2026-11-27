@@ -773,7 +773,7 @@ describe('serialized with the course mutations', () => {
     ]);
     const courses = await listCourses();
     assert.deepEqual(courses.find((x) => x.id === a)?.docIds, [docs[1], docs[0], docs[3]]);
-    assert.deepEqual(courses.find((x) => x.id === b), { id: b, title: 'B2', createdAt: courses[1].createdAt, docIds: [docs[2]] });
+    assert.deepEqual(courses.find((x) => x.id === b), { id: b, title: 'B2', createdAt: courses[1].createdAt, docIds: [docs[2]], units: [] });
     assert.deepEqual(await getLayout(), { groups: [{ ...sem, title: 'Sem 2', items: cs(b, a) }], order: [group(sem.id)] });
   });
 });

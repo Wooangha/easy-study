@@ -35,10 +35,12 @@ export const library = {
     nameRequired: {
       course: 'Enter a course name',
       group: 'Enter a group name',
+      unit: 'Enter a unit name',
     },
     nameTooLong: {
       course: (max) => `The course name is too long (${max} characters max)`,
       group: (max) => `The group name is too long (${max} characters max)`,
+      unit: (max) => `The unit name is too long (${max} characters max)`,
     },
     docIdsInvalid: 'docIds must be a list of document ids',
     baseDocIdsInvalid: 'baseDocIds must be a list of document ids',
@@ -50,6 +52,11 @@ export const library = {
     groupIdInvalid: 'groupId must be a group id',
     parentIdInvalid: 'parentId must be a group id',
     lecturesChanged: "This course's lecture list was changed elsewhere. Reload and try again",
+    unitsInvalid: 'units must be a list of units (id, title, docIds)',
+    baseUnitsInvalid: 'baseUnits must be a list of units (id, title, docIds)',
+    tooManyUnits: (max) => `Too many units (${max} max)`,
+    duplicateUnit: (unitId) => `The same unit is listed twice: ${unitId}`,
+    unitDocNotInCourse: (docId) => `A unit lists a lecture that isn't in this course: ${docId}`,
   },
   courseMd: {
     title: (course) => `${course} — course summary`,

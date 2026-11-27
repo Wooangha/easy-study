@@ -1,6 +1,6 @@
-import { FileUp, Folder, GripVertical, Hourglass, Mic, Pencil, Trash, TriangleAlert } from 'lucide-react';
+import { FileUp, Folder, GripVertical, Hourglass, ListTree, Mic, Pencil, Trash, TriangleAlert } from 'lucide-react';
 import { useState } from 'react';
-import type { DocMeta } from '../../../../shared/types.ts';
+import type { CourseUnit, DocMeta } from '../../../../shared/types.ts';
 import { thumbUrl } from '../../api.ts';
 import { msg } from '../../i18n/index.ts';
 import { formatDate } from '../../lib/format.ts';
@@ -19,6 +19,11 @@ interface LectureRowProps {
   index?: number;
   /** Its course; null in 미분류 (no "과목에서 빼기"; dragged only when there is a course to go to). */
   courseId: string | null;
+  /** Its unit (null: none). */
+  unitId?: string | null;
+  /** The units of its course (the "단원으로 이동" entries) and moving it to one (null: out of its unit). */
+  units?: readonly CourseUnit[];
+  onMoveToUnit?: (unitId: string | null) => void;
   /** Every course in layout order (the "과목으로 이동" entries). */
   entries: LayoutEntry[];
   onOpen: (docId: string) => void;
@@ -34,11 +39,25 @@ interface LectureRowProps {
  * One lecture of the library's list (a course's, or 미분류): ≡ handle, the first slide, "3. title" over its slide count
  * and upload date (opens it; an input while it is renamed), its 정리본 state, "⋯" menu.
  */
-export function LectureRow({ doc, index, courseId, entries, onOpen, onMove, onRetry, onRename, onDelete }: LectureRowProps) {
+export function LectureRow({
+  doc,
+  index,
+  courseId,
+  unitId = null,
+  units = [],
+  onMoveToUnit,
+  entries,
+  onOpen,
+  onMove,
+  onRetry,
+  onRename,
+  onDelete,
+}: LectureRowProps) {
   const [renaming, setRenaming] = useState(false);
   const m = msg().shell.lecture;
   const lib = msg().shell.library;
-  const data: DropData = { role: 'lecture', docId: doc.id, courseId };
+  const u = msg().shell.unit;
+  const data: DropData = { role: 'lecture', docId: doc.id, courseId, unitId };
   const { setNodeRef, setActivatorNodeRef, listeners, attributes, isDragging } = useOrgItem({
     id: dndId.lecture(doc.id),
     data,
@@ -97,6 +116,22 @@ export function LectureRow({ doc, index, courseId, entries, onOpen, onMove, onRe
             ],
           },
         ]),
+    // In a course with units: to another unit, or out of its unit.
+    ...(onMoveToUnit && units.length > 0
+      ? [
+          {
+            heading: u.moveToUnit,
+            items: [
+              ...units
+                .filter((x) => x.id !== unitId)
+                .map((x) => ({ key: `unit:${x.id}`, label: x.title, icon: ListTree, onSelect: () => onMoveToUnit(x.id) })),
+              ...(unitId === null
+                ? []
+                : [{ key: 'unit:-', label: u.removeFromUnit, hint: u.removeFromUnitHint, onSelect: () => onMoveToUnit(null) }]),
+            ],
+          },
+        ]
+      : []),
     {
       heading: m.moveToCourse,
       items: entries

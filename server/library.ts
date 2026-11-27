@@ -32,8 +32,9 @@ import { readFileSync, unlinkSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { COURSE_ID_RE, DOC_ID_RE, EFFORT_ID_RE } from '../shared/types.ts';
-import type { DigestSlide, DigestStatus, DocMeta, NextVersionInfo, VersionPlan, VersionPlanSlide } from '../shared/types.ts';
+import { MAX_UNITS, normalizeUnits } from '../shared/courseUnits.ts';
+import { COURSE_ID_RE, DOC_ID_RE, EFFORT_ID_RE, UNIT_ID_RE } from '../shared/types.ts';
+import type { CourseUnit, DigestSlide, DigestStatus, DocMeta, NextVersionInfo, VersionPlan, VersionPlanSlide } from '../shared/types.ts';
 import { readTokenUsage } from '../shared/usage.ts';
 import { VIEW_WIDTHS, inlinePathFor, thumbPath, viewPath } from './assets.ts';
 import { HttpError, libraryDir } from './config.ts';
@@ -577,14 +578,32 @@ function normalizeCourseRecord(value: unknown, courseId: string): CourseRecord |
   const raw = value as Partial<Record<keyof CourseRecord, unknown>>;
   if (typeof raw.title !== 'string' || !Array.isArray(raw.docIds)) return null;
   const docIds = raw.docIds.filter((id): id is string => typeof id === 'string' && isDocId(id));
+  const shape = normalizeUnits([...new Set(docIds)], readUnits(raw.units));
   return {
     version: 1,
     // The directory name is authoritative, like for documents.
     id: courseId,
     title: raw.title,
     createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : '',
-    docIds: [...new Set(docIds)],
+    docIds: shape.docIds,
+    units: shape.units,
   };
+}
+
+/** The units of a course file: malformed ones (and repeated ids) are left out. */
+function readUnits(value: unknown): CourseUnit[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const units: CourseUnit[] = [];
+  for (const item of value.slice(0, MAX_UNITS)) {
+    if (typeof item !== 'object' || item === null) continue;
+    const raw = item as Partial<Record<keyof CourseUnit, unknown>>;
+    if (typeof raw.id !== 'string' || !UNIT_ID_RE.test(raw.id) || seen.has(raw.id) || typeof raw.title !== 'string') continue;
+    seen.add(raw.id);
+    const ids = Array.isArray(raw.docIds) ? raw.docIds.filter((id): id is string => typeof id === 'string' && isDocId(id)) : [];
+    units.push({ id: raw.id, title: raw.title, docIds: ids });
+  }
+  return units;
 }
 
 /** A course file, or null when the id is invalid or the course does not exist. */
