@@ -4369,6 +4369,15 @@ details[open] > summary::before {
   position: relative;
 }
 
+/* Rows can be dragged from anywhere (rowGrab): no text selection or long-press callout where they are grabbed. */
+.lecture-open,
+.tree-select,
+.tree-toggle {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
 /* A ring at the start, then the line: the spot stands out on any row, selected or not. */
 .drop-before::before,
 .drop-after::after {

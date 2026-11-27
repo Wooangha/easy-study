@@ -1004,6 +1004,10 @@ that no longer exists, rolls the move back with a toast. The client also reloads
     모두 펼치기"; GroupCard / CourseCard / DocCard (미분류 as cards) are gone.
 - Drag & drop with an accessible library (@dnd-kit/core): pointer, touch (press-and-hold ~200 ms so scrolling still
   works) and keyboard sensors (Space/Enter pick up, arrows move, Space/Enter drop, Esc cancel) with screen-reader announcements in Korean.
+  - A row is grabbed anywhere, not only by its `≡` handle (hidden until hover, it was hard to find): `rowGrab()` puts the mouse
+    and touch activators on the lecture row and the tree row (a click still opens / selects — the mouse must move 4 px, a finger
+    rest 200 ms —, the click that ends a drag over the row is swallowed, text fields and the ⋯ menu start nothing). The handle
+    keeps the keyboard drag and the accessible name; a press on it is captured first (@dnd-kit ignores an event already captured).
   - Lectures (`≡` handle): reorder inside a course, move to another course (single PATCH of the target course — the server removes it
     from the old one), drop into 미분류 (PATCH of the source course without it).
   - In the two columns (0.6.15): lectures are reordered in the list on the right and dropped on a course row of the tree to go to

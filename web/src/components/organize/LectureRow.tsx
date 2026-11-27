@@ -9,7 +9,7 @@ import type { LayoutEntry } from '../../lib/libraryLayout.ts';
 import { useNewVersionPicker } from '../NewVersionDialog.tsx';
 import { RecordingUploadBadge, useRecordingUploadPicker } from '../recording/RecordingUploads.tsx';
 import { SlideImage } from '../SlideImage.tsx';
-import { dropMarkClass, useDropMark, useOrgItem } from './LibraryDnd.tsx';
+import { dropMarkClass, rowGrab, useDropMark, useOrgItem } from './LibraryDnd.tsx';
 import { DigestBadge, DocProgress, DragHandle, FailedDocActions, RenameInput } from './parts.tsx';
 import { PopoverMenu, type MenuSection } from './PopoverMenu.tsx';
 
@@ -119,6 +119,7 @@ export function LectureRow({ doc, index, courseId, entries, onOpen, onMove, onRe
       data-drag-node=""
       data-org-key={dndId.lecture(doc.id)}
       className={`lecture-row status-${doc.status}${isDragging ? ' is-drag-source' : ''}${dropMarkClass(mark)}`}
+      {...rowGrab(listeners)}
     >
       <DragHandle
         label={courseId === null ? m.moveToACourse(doc.title) : m.move(doc.title)}

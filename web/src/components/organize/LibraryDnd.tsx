@@ -21,6 +21,7 @@ import {
   type Announcements,
   type ClientRect,
   type CollisionDetection,
+  type DraggableSyntheticListeners,
   type DroppableContainer,
   type KeyboardCoordinateGetter,
   type UniqueIdentifier,
@@ -33,7 +34,9 @@ import {
   useMemo,
   useRef,
   useState,
+  type DOMAttributes,
   type ReactNode,
+  type SyntheticEvent,
 } from 'react';
 import { getEventCoordinates } from '@dnd-kit/utilities';
 import { createPortal } from 'react-dom';
@@ -463,6 +466,31 @@ export function useOrgItem({
     listeners: draggable.listeners,
     attributes: draggable.attributes,
     isDragging: draggable.isDragging,
+  };
+}
+
+/**
+ * Lets a whole row start a pointer drag, not only its ≡ handle (which was hard to find): the mouse has to move 4 px
+ * and a finger to rest 200 ms first, so a click or a tap still does what it did, and the click that ends a drag over
+ * the row is swallowed. The handle keeps the keyboard drag and the accessible name. A press in a text field (renaming)
+ * or in the row's ⋯ menu (a portal, but React events bubble through it) starts nothing.
+ */
+export function rowGrab(listeners: DraggableSyntheticListeners): DOMAttributes<HTMLElement> {
+  if (!listeners) return {};
+  const ignored = (e: SyntheticEvent) =>
+    e.target instanceof Element && !!e.target.closest('input, textarea, [contenteditable="true"], [role="menu"]');
+  return {
+    onMouseDown: (e) => {
+      if (!ignored(e)) listeners.onMouseDown?.(e);
+    },
+    onTouchStart: (e) => {
+      if (!ignored(e)) listeners.onTouchStart?.(e);
+    },
+    onClickCapture: (e) => {
+      if (!wasJustDragging()) return;
+      e.preventDefault();
+      e.stopPropagation();
+    },
   };
 }
 

@@ -10,7 +10,7 @@ import { msg } from '../../i18n/index.ts';
 import { confirmDialog } from '../../lib/confirm.ts';
 import { dndId, type DropData } from '../../lib/libraryDnd.ts';
 import { collapseKey, type LayoutRow } from '../../lib/libraryLayout.ts';
-import { dropMarkClass, useDragState, useDropMark, useOrgItem } from './LibraryDnd.tsx';
+import { dropMarkClass, rowGrab, useDragState, useDropMark, useOrgItem } from './LibraryDnd.tsx';
 import { Chevron, DragHandle, NewTitleForm, RenameInput, isToggleClick } from './parts.tsx';
 import { PopoverMenu } from './PopoverMenu.tsx';
 
@@ -93,7 +93,7 @@ function TreeGroup({ row, depth, actions }: { row: Extract<LayoutRow, { type: 'g
       data-org-key={dndId.group(group.id)}
       className={`tree-item tree-group${item.isDragging ? ' is-drag-source' : ''}${dropMarkClass(mark)}`}
     >
-      <div ref={head.setNodeRef} className="tree-row is-group" style={at(depth)}>
+      <div ref={head.setNodeRef} className="tree-row is-group" style={at(depth)} {...rowGrab(item.listeners)}>
         <DragHandle
           label={m.move(group.title)}
           setRef={item.setActivatorNodeRef}
@@ -209,6 +209,7 @@ function TreeCourse({ course, parentId, depth, actions }: { course: Course; pare
         ref={head.setNodeRef}
         className={`tree-row is-course${selected ? ' is-selected' : ''}${filesOver ? ' is-files-over' : ''}`}
         style={at(depth)}
+        {...rowGrab(item.listeners)}
       >
         <DragHandle
           label={m.move(course.title)}
